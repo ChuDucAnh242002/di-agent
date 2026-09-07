@@ -92,18 +92,43 @@ def _build_cylinder_sensors(rng: np.random.Generator) -> tuple[CylinderSensor, .
     )
 
 
+# Anomaly mode simulates a single misfiring cylinder plus the knock-on effect on
+# lube oil and vibration: oil overheats and loses pressure, vibration climbs, and
+# one (fixed, per-instance) cylinder runs hot and low-pressure from a bad injector.
+_ANOMALY_OIL_TEMP_BIAS_C = 12.0
+_ANOMALY_OIL_PRESSURE_BIAS_BAR = -1.2
+_ANOMALY_VIBRATION_MULTIPLIER = 2.5
+_ANOMALY_CYLINDER_EXHAUST_TEMP_BIAS_C = 90.0
+_ANOMALY_CYLINDER_PRESSURE_BIAS_BAR = -35.0
+
+
 class SensorSimulator:
     """Samples all Gaussian sensors for one telemetry step."""
 
     def __init__(self, seed: int | None = None) -> None:
         self._rng = np.random.default_rng(seed)
         self._cylinder_sensors = _build_cylinder_sensors(self._rng)
+        # Which cylinder misfires when anomaly mode is enabled, fixed per instance.
+        self._faulty_cylinder_index = int(self._rng.integers(1, NUM_CYLINDERS + 1))
 
-    def simulate(self, load_ratio: float) -> dict[str, float]:
+    def simulate(self, load_ratio: float, anomaly_enabled: bool = False) -> dict[str, float]:
         values = {
             sensor.name: sensor.sample(self._rng, load_ratio) for sensor in SCALAR_SENSORS
         }
+        if anomaly_enabled:
+            values["oil_temp_c"] = max(0.0, values["oil_temp_c"] + _ANOMALY_OIL_TEMP_BIAS_C)
+            values["oil_pressure_bar"] = max(
+                0.0, values["oil_pressure_bar"] + _ANOMALY_OIL_PRESSURE_BIAS_BAR
+            )
+            for axis in ("x", "y", "z"):
+                values[f"vibration_{axis}_mm_s"] *= _ANOMALY_VIBRATION_MULTIPLIER
+
         for sensor in self._cylinder_sensors:
             for index, value in enumerate(sensor.sample(self._rng, load_ratio), start=1):
+                if anomaly_enabled and index == self._faulty_cylinder_index:
+                    if sensor.name == "cylinder_exhaust_temp_c":
+                        value = max(0.0, value + _ANOMALY_CYLINDER_EXHAUST_TEMP_BIAS_C)
+                    elif sensor.name == "cylinder_pressure_bar":
+                        value = max(0.0, value + _ANOMALY_CYLINDER_PRESSURE_BIAS_BAR)
                 values[f"{sensor.name}_{index}"] = float(value)
         return values

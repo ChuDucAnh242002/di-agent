@@ -102,6 +102,7 @@ class PropulsionController:
         self._last_message: dict | None = None
         # (allocated_power_kw, received_at) for this consumer's own id.
         self._allocation: tuple[float, float] | None = None
+        self._anomaly_enabled = False
 
         self._producer: KafkaProducer | None = None
         self._consumer: KafkaConsumer | None = None
@@ -136,6 +137,10 @@ class PropulsionController:
         with self._lock:
             self._target_load_ratio = load_ratio
 
+    def set_anomaly_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._anomaly_enabled = enabled
+
     def get_status(self) -> dict:
         with self._lock:
             return {
@@ -144,6 +149,7 @@ class PropulsionController:
                 "current_load_ratio": self._achieved_load_ratio,
                 "allocated_power_kw": self._get_allocated_power_kw(),
                 "speed_rpm": self._speed_rpm(self._achieved_load_ratio),
+                "anomaly_enabled": self._anomaly_enabled,
                 "last_message": self._last_message,
             }
 
@@ -240,6 +246,7 @@ class PropulsionController:
                 target = self._target_load_ratio
                 current = self._ramped_target_load_ratio
                 allocated_power_kw = self._get_allocated_power_kw()
+                anomaly_enabled = self._anomaly_enabled
 
             delta = max(-max_step, min(max_step, target - current))
             current += delta
@@ -289,6 +296,7 @@ class PropulsionController:
                 load_ratio=float(load_ratio),
                 power_output_kw=float(power_output_kw),
                 speed_rpm=speed_rpm,
+                anomaly_enabled=anomaly_enabled,
             )
             message["payload"].update(sensor_values)
             message.update(sensor_values)

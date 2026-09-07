@@ -28,6 +28,10 @@ class ChargeRequest(BaseModel):
     )
 
 
+class AnomalyRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether anomaly mode is active")
+
+
 @app.get("/health")
 def health(response: Response) -> dict:
     health_data = controller.get_health()
@@ -78,6 +82,17 @@ def set_charge(request: ChargeRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"target_charge_power_kw": request.power_kw}
+
+
+@app.get("/anomaly")
+def get_anomaly() -> dict:
+    return {"anomaly_enabled": controller.get_status()["anomaly_enabled"]}
+
+
+@app.post("/anomaly")
+def set_anomaly(request: AnomalyRequest) -> dict:
+    controller.set_anomaly_enabled(request.enabled)
+    return {"anomaly_enabled": request.enabled}
 
 
 @app.get("/prediction")

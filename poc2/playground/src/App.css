@@ -58,6 +58,10 @@
   background: #ef4444;
 }
 
+.status-dot.anomaly {
+  background: #f59e0b;
+}
+
 .metric-row {
   display: flex;
   justify-content: space-between;

@@ -3,10 +3,15 @@ import {
   fetchHealth,
   fetchStatus,
   fetchSwitchboardStatus,
+  setAnomalyEnabled,
   setLoad,
   SystemName,
   SystemStatus,
 } from "../api";
+
+// Anomaly mode is only wired up for systems whose telemetry simulator
+// applies a fault pattern when enabled (see each service's sensors.py).
+const ANOMALY_CAPABLE_SYSTEMS: SystemName[] = ["battery", "genset", "propulsion"];
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -74,12 +79,32 @@ export default function SystemPanel({ system, id }: Props) {
     }
   };
 
+  const handleToggleAnomaly = async () => {
+    setSubmitting(true);
+    try {
+      await setAnomalyEnabled(system, id, !status?.anomaly_enabled);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const anomalyCapable = ANOMALY_CAPABLE_SYSTEMS.includes(system);
+
   return (
     <div className="panel">
       <h2>
         <span
           className={`status-dot ${
-            healthy === null ? "" : healthy ? "ok" : "error"
+            healthy === null
+              ? ""
+              : !healthy
+              ? "error"
+              : status?.anomaly_enabled
+              ? "anomaly"
+              : "ok"
           }`}
         />
         {id}
@@ -138,6 +163,15 @@ export default function SystemPanel({ system, id }: Props) {
               ? `${status.time_to_full_hr.toFixed(1)} h`
               : "stable"}
           </strong>
+        </div>
+      )}
+
+      {anomalyCapable && (
+        <div className="metric-row">
+          <span>Anomaly mode</span>
+          <button onClick={handleToggleAnomaly} disabled={submitting}>
+            {status?.anomaly_enabled ? "Disable" : "Enable"}
+          </button>
         </div>
       )}
 

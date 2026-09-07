@@ -39,6 +39,13 @@ LEVER_POSITION_SENSOR = NoisySensor("lever_position_pct", std_dev=0.3)
 SHIP_SPEED_SENSOR = NoisySensor("ship_speed_knots", std_dev=0.15)
 PROPELLER_TORQUE_SENSOR = NoisySensor("propeller_torque_kn_m", std_dev=0.5)
 
+# Anomaly mode simulates hull/propeller fouling or cavitation: the same power
+# output yields less thrust (lower ship speed) while the propeller has to work
+# harder against the disturbed flow (higher, noisier torque).
+_ANOMALY_SHIP_SPEED_MULTIPLIER = 0.8
+_ANOMALY_TORQUE_MULTIPLIER = 1.3
+_ANOMALY_TORQUE_NOISE_MULTIPLIER = 4.0
+
 
 class SensorSimulator:
     """Samples propulsion sensors for one telemetry step."""
@@ -53,12 +60,15 @@ class SensorSimulator:
         load_ratio: float,
         power_output_kw: float,
         speed_rpm: float,
+        anomaly_enabled: bool = False,
     ) -> dict[str, float]:
         # Lever position is the commanded throttle input (0-100%), not the
         # power-limited achieved load, read back through a noisy potentiometer.
         lever_position_pct = LEVER_POSITION_SENSOR.sample(self._rng, target_load_ratio * 100.0)
 
         ship_speed_estimate = SHIP_MAX_SPEED_KNOTS * max(load_ratio, 0.0) ** (1.0 / 3.0)
+        if anomaly_enabled:
+            ship_speed_estimate *= _ANOMALY_SHIP_SPEED_MULTIPLIER
         ship_speed_knots = SHIP_SPEED_SENSOR.sample(self._rng, ship_speed_estimate)
 
         if speed_rpm > 0:
@@ -66,7 +76,17 @@ class SensorSimulator:
             torque_estimate_kn_m = power_output_kw / shaft_omega_rad_s
         else:
             torque_estimate_kn_m = 0.0
-        propeller_torque_kn_m = PROPELLER_TORQUE_SENSOR.sample(self._rng, torque_estimate_kn_m)
+        if anomaly_enabled:
+            torque_estimate_kn_m *= _ANOMALY_TORQUE_MULTIPLIER
+            propeller_torque_kn_m = float(
+                self._rng.normal(
+                    torque_estimate_kn_m,
+                    PROPELLER_TORQUE_SENSOR.std_dev * _ANOMALY_TORQUE_NOISE_MULTIPLIER,
+                )
+            )
+            propeller_torque_kn_m = max(0.0, propeller_torque_kn_m)
+        else:
+            propeller_torque_kn_m = PROPELLER_TORQUE_SENSOR.sample(self._rng, torque_estimate_kn_m)
 
         return {
             "lever_position_pct": lever_position_pct,

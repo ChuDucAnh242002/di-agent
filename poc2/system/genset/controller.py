@@ -68,6 +68,7 @@ class GensetController:
         self._target_load_ratio = 0.0
         self._current_load_ratio = 0.0
         self._last_message: dict | None = None
+        self._anomaly_enabled = False
 
         self._producer: KafkaProducer | None = None
         self._stop_event = threading.Event()
@@ -93,6 +94,10 @@ class GensetController:
         with self._lock:
             self._target_load_ratio = load_ratio
 
+    def set_anomaly_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._anomaly_enabled = enabled
+
     def get_status(self) -> dict:
         with self._lock:
             return {
@@ -100,6 +105,7 @@ class GensetController:
                 "target_load_ratio": self._target_load_ratio,
                 "current_load_ratio": self._current_load_ratio,
                 "speed_rpm": self.genset.rated_speed * self._current_load_ratio,
+                "anomaly_enabled": self._anomaly_enabled,
                 "last_message": self._last_message,
             }
 
@@ -129,6 +135,7 @@ class GensetController:
             with self._lock:
                 target = self._target_load_ratio
                 current = self._current_load_ratio
+                anomaly_enabled = self._anomaly_enabled
 
             rate = (
                 RAMP_RATE_DOWN_PER_S
@@ -184,7 +191,7 @@ class GensetController:
             # Gaussian auxiliary sensors (ambient, lube oil, vibration, per-cylinder).
             # Mirrored into the top-level event, matching _make_event's flattening,
             # so the log line below (and any flat-schema consumer) can read them.
-            sensor_values = self._sensors.simulate(load_ratio)
+            sensor_values = self._sensors.simulate(load_ratio, anomaly_enabled=anomaly_enabled)
             message["payload"].update(sensor_values)
             message.update(sensor_values)
 

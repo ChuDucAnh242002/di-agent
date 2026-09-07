@@ -17,6 +17,7 @@ export interface SystemStatus {
   soc_rate_per_hour?: number;
   time_to_empty_hr?: number;
   time_to_full_hr?: number;
+  anomaly_enabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -109,6 +110,17 @@ export function setLoad(
   return apiFetch(`/api/${system}/${id}/load`, {
     method: "POST",
     body: JSON.stringify({ load_ratio: loadRatio }),
+  });
+}
+
+export function setAnomalyEnabled(
+  system: SystemName,
+  id: string,
+  enabled: boolean
+): Promise<{ anomaly_enabled: boolean }> {
+  return apiFetch(`/api/${system}/${id}/anomaly`, {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
   });
 }
 

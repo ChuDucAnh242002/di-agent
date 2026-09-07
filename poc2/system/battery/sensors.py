@@ -42,6 +42,12 @@ _CABLE_RESISTANCE_FRACTION = 0.1
 # cycle boundary (and Time/Capacity reset) can be detected.
 _CYCLE_ACTIVE_POWER_KW = 0.05
 
+# Anomaly mode simulates a degraded/faulty cell group: internal resistance rises
+# (more voltage sag and heating for the same current) and the noise floor widens
+# on every channel, mimicking a loose connection / failing cell group.
+_ANOMALY_RESISTANCE_MULTIPLIER = 4.0
+_ANOMALY_NOISE_MULTIPLIER = 6.0
+
 
 @dataclass(frozen=True)
 class BatteryElectricalModel:
@@ -102,22 +108,34 @@ class BatterySensorSimulator:
         charge_power_kw: float,
         discharge_power_kw: float,
         dt_s: float,
+        anomaly_enabled: bool = False,
     ) -> dict:
         model = self._model
         rng = self._rng
 
+        resistance_ohm = model.internal_resistance_ohm * (
+            _ANOMALY_RESISTANCE_MULTIPLIER if anomaly_enabled else 1.0
+        )
+        noise_multiplier = _ANOMALY_NOISE_MULTIPLIER if anomaly_enabled else 1.0
+
         ocv_v = model.open_circuit_voltage(soc)
         net_current_a = terminal_power_kw * 1000 / ocv_v
-        voltage_v = ocv_v + net_current_a * model.internal_resistance_ohm
-        voltage_measured_v = float(rng.normal(voltage_v, self._voltage_noise_std_v))
+        voltage_v = ocv_v + net_current_a * resistance_ohm
+        voltage_measured_v = float(
+            rng.normal(voltage_v, self._voltage_noise_std_v * noise_multiplier)
+        )
 
         current_a = terminal_power_kw * 1000 / voltage_measured_v
-        current_measured_a = float(rng.normal(current_a, self._current_noise_std_a))
+        current_measured_a = float(
+            rng.normal(current_a, self._current_noise_std_a * noise_multiplier)
+        )
 
-        heat_w = current_measured_a**2 * model.internal_resistance_ohm
+        heat_w = current_measured_a**2 * resistance_ohm
         cooling_w = (self._temperature_c - AMBIENT_TEMP_C) / model.thermal_resistance_k_per_w
         self._temperature_c += (heat_w - cooling_w) / model.thermal_mass_j_per_k * dt_s
-        temperature_measured_c = float(rng.normal(self._temperature_c, self._temperature_noise_std_c))
+        temperature_measured_c = float(
+            rng.normal(self._temperature_c, self._temperature_noise_std_c * noise_multiplier)
+        )
 
         cycle_type = (
             "charge"
@@ -132,7 +150,7 @@ class BatterySensorSimulator:
             self._cycle_time_s += dt_s
         self._cycle_type = cycle_type
 
-        cable_resistance_ohm = model.internal_resistance_ohm * _CABLE_RESISTANCE_FRACTION
+        cable_resistance_ohm = resistance_ohm * _CABLE_RESISTANCE_FRACTION
         if cycle_type == "charge":
             charge_current_a = charge_power_kw * 1000 / voltage_measured_v
             charge_voltage_v = voltage_measured_v + charge_current_a * cable_resistance_ohm
@@ -144,8 +162,12 @@ class BatterySensorSimulator:
             charge_current_a = 0.0
             charge_voltage_v = voltage_measured_v
 
-        current_charge_a = float(rng.normal(charge_current_a, self._current_noise_std_a))
-        voltage_charge_v = float(rng.normal(charge_voltage_v, self._voltage_noise_std_v))
+        current_charge_a = float(
+            rng.normal(charge_current_a, self._current_noise_std_a * noise_multiplier)
+        )
+        voltage_charge_v = float(
+            rng.normal(charge_voltage_v, self._voltage_noise_std_v * noise_multiplier)
+        )
 
         return {
             "voltage_measured_v": voltage_measured_v,

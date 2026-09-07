@@ -22,6 +22,10 @@ class LoadRequest(BaseModel):
     load_ratio: float = Field(..., ge=0.0, le=1.0, description="Target load ratio, 0.0-1.0")
 
 
+class AnomalyRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether anomaly mode is active")
+
+
 @app.get("/health")
 def health(response: Response) -> dict:
     health_data = controller.get_health()
@@ -51,3 +55,14 @@ def set_load(request: LoadRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"target_load_ratio": request.load_ratio}
+
+
+@app.get("/anomaly")
+def get_anomaly() -> dict:
+    return {"anomaly_enabled": controller.get_status()["anomaly_enabled"]}
+
+
+@app.post("/anomaly")
+def set_anomaly(request: AnomalyRequest) -> dict:
+    controller.set_anomaly_enabled(request.enabled)
+    return {"anomaly_enabled": request.enabled}

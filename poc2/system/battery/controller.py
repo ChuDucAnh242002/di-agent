@@ -88,6 +88,7 @@ class BatteryController:
         self._soc = INITIAL_SOC
         self._power_stored_ema_kw = 0.0
         self._last_message: dict | None = None
+        self._anomaly_enabled = False
 
         self._producer: KafkaProducer | None = None
         self._stop_event = threading.Event()
@@ -119,6 +120,10 @@ class BatteryController:
         with self._lock:
             self._target_charge_power_kw = power_kw
 
+    def set_anomaly_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._anomaly_enabled = enabled
+
     def get_status(self) -> dict:
         with self._lock:
             return {
@@ -130,6 +135,7 @@ class BatteryController:
                 "current_charge_power_kw": self._current_charge_power_kw,
                 "max_charging_power_kw": self.battery.max_charging_power_kw,
                 "soc": self._soc,
+                "anomaly_enabled": self._anomaly_enabled,
                 **self._predict_locked(),
                 "last_message": self._last_message,
             }
@@ -177,6 +183,7 @@ class BatteryController:
                 target_charge_kw = self._target_charge_power_kw
                 current_charge_kw = self._current_charge_power_kw
                 soc = self._soc
+                anomaly_enabled = self._anomaly_enabled
 
             # An empty battery can't discharge, regardless of the requested load.
             delta = max(-max_step, min(max_step, target - current)) if soc > 0 else -max_step
@@ -214,6 +221,7 @@ class BatteryController:
                 charge_power_kw=current_charge_kw,
                 discharge_power_kw=discharge_power_kw,
                 dt_s=STEP_INTERVAL_S,
+                anomaly_enabled=anomaly_enabled,
             )
             message = _make_event(
                 self.battery_id,
