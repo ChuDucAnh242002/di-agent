@@ -80,7 +80,15 @@ MESSAGE_SCHEMAS = {
             "soc_rate_per_hour",
             "time_to_empty_hr",
             "time_to_full_hr",
+            "voltage_measured_v",
+            "current_measured_a",
+            "temperature_measured_c",
+            "current_charge_a",
+            "voltage_charge_v",
+            "cycle_time_s",
+            "capacity_ahr",
         ),
+        "tags": ("cycle_type",),
     },
     "shore_power_id": {
         "measurement": "shore_power_telemetry",
@@ -145,6 +153,9 @@ def _to_points(message: dict) -> list[Point]:
     schema = MESSAGE_SCHEMAS[tag_key]
 
     point = Point(schema["measurement"]).tag(tag_key, normalized[tag_key])
+    for tag in schema.get("tags", ()):
+        if tag in normalized:
+            point = point.tag(tag, normalized[tag])
     for field in schema["fields"]:
         if field in normalized:
             point = point.field(field, float(normalized[field]))

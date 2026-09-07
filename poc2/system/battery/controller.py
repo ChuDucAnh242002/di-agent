@@ -8,7 +8,8 @@ import numpy as np
 from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
-from battery import DEFAULT_BATTERY_MODEL, build_battery
+from battery import DEFAULT_BATTERY_MODEL, NOMINAL_VOLTAGE_V, build_battery
+from sensors import BatteryElectricalModel, BatterySensorSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ INITIAL_SOC = float(os.environ.get("INITIAL_SOC", "0.8"))
 PREDICTION_EMA_ALPHA = float(os.environ.get("PREDICTION_EMA_ALPHA", "0.1"))
 # Below this |SoC change per hour| the trend is considered flat (no prediction).
 PREDICTION_MIN_SOC_RATE_PER_HR = float(os.environ.get("PREDICTION_MIN_SOC_RATE_PER_HR", "0.001"))
+# Seed for the Gaussian sensor simulator; unset gives a fresh random sequence per start.
+SENSOR_SEED = os.environ.get("SENSOR_SEED")
 
 
 def _make_producer() -> KafkaProducer:
@@ -70,6 +73,12 @@ class BatteryController:
     def __init__(self) -> None:
         self.battery = build_battery(BATTERY_MODEL)
         self.battery_id = os.environ.get("BATTERY_ID", self.battery.name)
+        electrical_model = BatteryElectricalModel.from_battery(
+            self.battery, NOMINAL_VOLTAGE_V[BATTERY_MODEL]
+        )
+        self._sensors = BatterySensorSimulator(
+            electrical_model, seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None
+        )
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -198,6 +207,14 @@ class BatteryController:
             # Bus-side power: positive when the battery supplies the bus (discharging),
             # negative when it draws from the bus (charging).
             supply_power_kw = -terminal_power_kw
+            discharge_power_kw = self.battery.max_discharging_power_kw * current
+            sensor_values = self._sensors.step(
+                soc=soc,
+                terminal_power_kw=terminal_power_kw,
+                charge_power_kw=current_charge_kw,
+                discharge_power_kw=discharge_power_kw,
+                dt_s=STEP_INTERVAL_S,
+            )
             message = _make_event(
                 self.battery_id,
                 "battery",
@@ -208,6 +225,7 @@ class BatteryController:
                     "power_kw": float(supply_power_kw),
                     "charge_power_kw": float(current_charge_kw),
                     "soc": soc,
+                    **sensor_values,
                 },
             )
 
@@ -238,7 +256,11 @@ class BatteryController:
                 f"power={message['power_kw']:.1f}kW "
                 f"charge={message['charge_power_kw']:.1f}kW "
                 f"soc={message['soc'] * 100:.1f}% "
-                f"{prediction_text}"
+                f"{prediction_text} "
+                f"V={message['voltage_measured_v']:.1f}V "
+                f"I={message['current_measured_a']:.1f}A "
+                f"T={message['temperature_measured_c']:.1f}C "
+                f"cycle={message['cycle_type']}"
             )
 
             self._stop_event.wait(STEP_INTERVAL_S)

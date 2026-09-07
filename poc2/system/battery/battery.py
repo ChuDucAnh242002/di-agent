@@ -40,6 +40,15 @@ BATTERY_MODELS = {
     "leclanche-mrs2": build_leclanche_mrs2_battery,
 }
 
+# Nominal DC bus voltage (V) each battery model is assumed to present at its
+# terminals, used by sensors.py to derive Voltage/Current_measured from FEEMS'
+# energy-only (kWh/SoC) model. Not specified by FEEMS; picked as a typical
+# marine ESS DC bus voltage for a pack of this power class.
+NOMINAL_VOLTAGE_V = {
+    "ayk-lfp": 1000.0,
+    "leclanche-mrs2": 1000.0,
+}
+
 
 def build_battery(model: str | None = None) -> Battery:
     """Builds one of the known battery models, selected by `model` or the
