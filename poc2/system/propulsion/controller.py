@@ -8,6 +8,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from propulsion import build_propulsion_drive
+from sensors import SensorSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ ALLOCATION_STALE_TIMEOUT_S = float(os.environ.get("ALLOCATION_STALE_TIMEOUT_S", 
 # Bisection tolerance (kW) used to find the max power output the drive can
 # take without its power input exceeding the allocated power.
 POWER_INPUT_LIMIT_TOLERANCE_KW = float(os.environ.get("POWER_INPUT_LIMIT_TOLERANCE_KW", "0.1"))
+# Seed for the Gaussian sensor simulator; unset gives a fresh random sequence per start.
+SENSOR_SEED = os.environ.get("SENSOR_SEED")
 
 
 def _make_producer() -> KafkaProducer:
@@ -86,6 +89,7 @@ class PropulsionController:
     def __init__(self) -> None:
         self.propulsion_drive = build_propulsion_drive()
         self.propulsion_id = os.environ.get("PROPULSION_ID", self.propulsion_drive.name)
+        self._sensors = SensorSimulator(seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None)
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -264,6 +268,7 @@ class PropulsionController:
                 power_output_kw
             )
 
+            speed_rpm = self._speed_rpm(float(load_ratio))
             message = _make_event(
                 self.propulsion_id,
                 "propulsion",
@@ -274,9 +279,19 @@ class PropulsionController:
                     "power_output_kw": float(power_output_kw),
                     "power_input_kw": float(power_input_kw),
                     "allocated_power_kw": float(allocated_power_kw),
-                    "speed_rpm": self._speed_rpm(float(load_ratio)),
+                    "speed_rpm": speed_rpm,
                 },
             )
+            # Gaussian/derived sensors (lever position, ship speed, propeller torque).
+            # Mirrored into the top-level event, matching _make_event's flattening.
+            sensor_values = self._sensors.simulate(
+                target_load_ratio=target,
+                load_ratio=float(load_ratio),
+                power_output_kw=float(power_output_kw),
+                speed_rpm=speed_rpm,
+            )
+            message["payload"].update(sensor_values)
+            message.update(sensor_values)
 
             with self._lock:
                 # Keep ramping the internal setpoint regardless of the cap, so the
@@ -292,7 +307,10 @@ class PropulsionController:
                 f"power_output={message['power_output_kw']:.1f}kW "
                 f"power_input={message['power_input_kw']:.1f}kW "
                 f"allocated={message['allocated_power_kw']:.1f}kW "
-                f"speed_rpm={message['speed_rpm']:.1f}rpm"
+                f"speed_rpm={message['speed_rpm']:.1f}rpm "
+                f"lever={message['lever_position_pct']:.1f}% "
+                f"ship_speed={message['ship_speed_knots']:.2f}kn "
+                f"prop_torque={message['propeller_torque_kn_m']:.1f}kNm"
             )
 
             self._stop_event.wait(STEP_INTERVAL_S)
