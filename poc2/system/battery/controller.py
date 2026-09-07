@@ -8,12 +8,14 @@ import numpy as np
 from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
-from battery import build_battery
+from battery import DEFAULT_BATTERY_MODEL, build_battery
 
 logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "battery.telemetry")
+# Which physical battery model this instance simulates (see battery.py).
+BATTERY_MODEL = os.environ.get("BATTERY_MODEL", DEFAULT_BATTERY_MODEL)
 STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 # Max load ratio change allowed per second, so the API can't force an instant jump.
 RAMP_RATE_PER_S = float(os.environ.get("RAMP_RATE_PER_S", "0.05"))
@@ -66,7 +68,7 @@ class BatteryController:
     matching FEEMS' Battery sign convention (positive terminal power = charging)."""
 
     def __init__(self) -> None:
-        self.battery = build_battery()
+        self.battery = build_battery(BATTERY_MODEL)
         self.battery_id = os.environ.get("BATTERY_ID", self.battery.name)
 
         self._lock = threading.Lock()
@@ -112,6 +114,7 @@ class BatteryController:
         with self._lock:
             return {
                 "battery_id": self.battery_id,
+                "name": self.battery.name,
                 "target_load_ratio": self._target_load_ratio,
                 "current_load_ratio": self._current_load_ratio,
                 "target_charge_power_kw": self._target_charge_power_kw,

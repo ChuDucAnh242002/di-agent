@@ -20,11 +20,11 @@ STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 # Ramp rate is piecewise: 0-50% load ramps faster than 50-100%, so that reaching 50%
 # load takes ~50s and reaching 100% load takes ~190s total, matching typical genset
 # loading guidance (fast up to half load, slower beyond).
-RAMP_RATE_LOW_PER_S = float(os.environ.get("RAMP_RATE_LOW_PER_S", str(0.5))) # 0.5 / 50
-RAMP_RATE_HIGH_PER_S = float(os.environ.get("RAMP_RATE_HIGH_PER_S", str(0.178))) # 0.5 / 140
+RAMP_RATE_LOW_PER_S = float(os.environ.get("RAMP_RATE_LOW_PER_S", str(0.5 / 5))) # 0.5 / 50
+RAMP_RATE_HIGH_PER_S = float(os.environ.get("RAMP_RATE_HIGH_PER_S", str(0.178 / 14))) # 0.5 / 140
 RAMP_SWITCH_LOAD_RATIO = float(os.environ.get("RAMP_SWITCH_LOAD_RATIO", "0.5"))
 # Unloading is a single constant rate so that 100% -> 0% always takes ~45s.
-RAMP_RATE_DOWN_PER_S = float(os.environ.get("RAMP_RATE_DOWN_PER_S", str(1.0))) # 1.0 / 45
+RAMP_RATE_DOWN_PER_S = float(os.environ.get("RAMP_RATE_DOWN_PER_S", str(1.0 / 4.5))) # 1.0 / 45
 # Seed for the Gaussian sensor simulator; unset gives a fresh random sequence per start.
 SENSOR_SEED = os.environ.get("SENSOR_SEED")
 

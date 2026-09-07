@@ -84,6 +84,9 @@ export default function SystemPanel({ system, id }: Props) {
         />
         {id}
       </h2>
+      {/* Which physical component the instance simulates (e.g. the battery
+          model), when the service reports one in /status. */}
+      {typeof status?.name === "string" && <p className="model-name">{status.name}</p>}
 
       <div className="metric-row">
         <span>Current load</span>

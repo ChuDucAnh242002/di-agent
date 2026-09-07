@@ -73,8 +73,11 @@ battery:
   image:
     repository: battery
     tag: ""
-  count: 1
+  count: 2
   kafkaTopic: battery.telemetry
+  # One battery model key per instance (see system/battery/battery.py);
+  # recycled round-robin if fewer than `count`.
+  models: [ayk-lfp, leclanche-mrs2]
   nodeSelector: {}
   resources: {}
 
