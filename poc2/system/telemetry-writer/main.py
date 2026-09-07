@@ -45,7 +45,6 @@ MESSAGE_SCHEMAS = {
         "fields": (
             "load_ratio",
             "power_kw",
-            "speed_rpm",
             "fuel_flow_kg_per_s",
             "bsfc_g_per_kwh",
             "co2_kg_per_s",
@@ -67,7 +66,6 @@ MESSAGE_SCHEMAS = {
             "power_output_kw",
             "power_input_kw",
             "allocated_power_kw",
-            "speed_rpm",
             "lever_position_pct",
             "ship_speed_knots",
             "propeller_torque_kn_m",

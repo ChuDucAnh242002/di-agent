@@ -154,10 +154,8 @@ class PropulsionController:
             }
 
     def _speed_rpm(self, load_ratio: float) -> float:
-        """Propeller-law estimate of shaft speed: for a fixed-pitch propeller
-        power varies with the cube of rpm, so speed varies with the cube root
-        of the load ratio."""
-        return self.propulsion_drive.rated_speed * load_ratio
+        """Motor runs at a constant governed speed whenever it's on, regardless of load."""
+        return self.propulsion_drive.rated_speed if load_ratio > 0 else 0.0
 
     def get_health(self) -> dict:
         threads = {

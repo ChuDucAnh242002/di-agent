@@ -104,7 +104,7 @@ class GensetController:
                 "genset_id": self.genset_id,
                 "target_load_ratio": self._target_load_ratio,
                 "current_load_ratio": self._current_load_ratio,
-                "speed_rpm": self.genset.rated_speed * self._current_load_ratio,
+                "speed_rpm": self.genset.rated_speed if self._current_load_ratio > 0 else 0.0,
                 "anomaly_enabled": self._anomaly_enabled,
                 "last_message": self._last_message,
             }
@@ -172,7 +172,8 @@ class GensetController:
                 np.atleast_1d(engine_run_point.emissions_g_per_s.get(EmissionType.NOX, 0.0))[0] / 1000
             )
             load_ratio = float(run_point.genset_load_ratio[0])
-            speed_rpm = self.genset.rated_speed * load_ratio
+            # Engine runs at a governed constant speed whenever it's on, regardless of load.
+            speed_rpm = self.genset.rated_speed if load_ratio > 0 else 0.0
             message = _make_event(
                 self.genset_id,
                 "genset",
