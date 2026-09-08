@@ -1,11 +1,11 @@
 """Modbus TCP polling client mirroring how a real vessel's power management
-system (PMS) supervises genset/battery controllers over a field bus, in
-addition to (not instead of) the existing Kafka telemetry the switchboard
-already consumes for its allocation logic.
+system (PMS) supervises genset/battery controllers over a field bus.
 
-This client is read-only and purely observational: it never feeds into
-allocate_power()/available supply calculations, it only exposes what a PMS
-would see over Modbus next to the Kafka-derived view (see GET /modbus)."""
+This is the switchboard's actual source of genset/battery status for
+allocation: it replaces what used to be a Kafka consumer of genset.telemetry/
+battery.telemetry. Kafka is still used for everything unrelated to this
+status link (consumer requests, published allocations); genset/battery still
+publish to Kafka too, for the telemetry-writer/Grafana pipeline."""
 
 import logging
 import struct
@@ -37,11 +37,11 @@ def _parse_targets(raw: str) -> list[tuple[str, str, int]]:
 
 
 class _GensetPoller:
-    registers = ("current_load_ratio", "power_kw", "speed_rpm")
+    registers = ("current_load_ratio", "power_kw", "speed_rpm", "co2_kg_per_s", "nox_kg_per_s")
 
     @staticmethod
     def read(client: ModbusTcpClient) -> dict:
-        response = client.read_input_registers(address=0, count=6)
+        response = client.read_input_registers(address=0, count=10)
         if response.isError():
             raise ModbusException(str(response))
         regs = response.registers
@@ -49,15 +49,17 @@ class _GensetPoller:
             "current_load_ratio": _decode_float(regs[0:2]),
             "power_kw": _decode_float(regs[2:4]),
             "speed_rpm": _decode_float(regs[4:6]),
+            "co2_kg_per_s": _decode_float(regs[6:8]),
+            "nox_kg_per_s": _decode_float(regs[8:10]),
         }
 
 
 class _BatteryPoller:
-    registers = ("current_load_ratio", "current_charge_power_kw", "soc")
+    registers = ("current_load_ratio", "current_charge_power_kw", "soc", "supply_power_kw")
 
     @staticmethod
     def read(client: ModbusTcpClient) -> dict:
-        response = client.read_input_registers(address=0, count=6)
+        response = client.read_input_registers(address=0, count=8)
         if response.isError():
             raise ModbusException(str(response))
         regs = response.registers
@@ -65,6 +67,7 @@ class _BatteryPoller:
             "current_load_ratio": _decode_float(regs[0:2]),
             "current_charge_power_kw": _decode_float(regs[2:4]),
             "soc": _decode_float(regs[4:6]),
+            "power_kw": _decode_float(regs[6:8]),
         }
 
 

@@ -9,8 +9,6 @@ COPY switchboard.py controller.py main.py modbus_client.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
     KAFKA_TOPIC=switchboard.telemetry \
-    GENSET_KAFKA_TOPIC=genset.telemetry \
-    BATTERY_KAFKA_TOPIC=battery.telemetry \
     REQUEST_KAFKA_TOPIC=switchboard.requests \
     STEP_INTERVAL_S=1 \
     GENSET_MODBUS_TARGETS= \

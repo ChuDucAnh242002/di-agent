@@ -53,8 +53,6 @@ switchboard:
   # Topic the switchboard publishes per-consumer allocations to; must match
   # propulsion.allocationKafkaTopic / auxload.allocationKafkaTopic below.
   kafkaTopic: switchboard.telemetry
-  gensetKafkaTopic: genset.telemetry
-  batteryKafkaTopic: battery.telemetry
   requestKafkaTopic: switchboard.requests
   # Interval (seconds) the switchboard polls each genset/battery Modbus TCP
   # server at, mirroring a PMS's field-bus supervision loop. Read-only:

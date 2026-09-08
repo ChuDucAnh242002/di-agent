@@ -15,20 +15,18 @@ logger = logging.getLogger(__name__)
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 # Topic the switchboard publishes per-consumer allocations to.
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "switchboard.telemetry")
-# Genset telemetry: sums into the power available on the bus.
-GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
-# Battery telemetry: another power source summed into the available supply.
-BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
 # Consumers (propulsion, hotel load, ...) publish their power demand here.
 REQUEST_KAFKA_TOPIC = os.environ.get("REQUEST_KAFKA_TOPIC", "switchboard.requests")
 SWITCHBOARD_ID = os.environ.get("SWITCHBOARD_ID", "switchboard-1")
 STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
-# A genset or consumer is dropped from the allocation if no message was seen
-# within this many seconds (treated as offline).
+# A consumer request or genset/battery Modbus reading is dropped from the
+# allocation if it's not fresh within this many seconds (treated as offline).
 STALE_TIMEOUT_S = float(os.environ.get("STALE_TIMEOUT_S", "5"))
-# "id@host:port" comma lists of genset/battery Modbus TCP servers to poll,
-# mirroring how a real PMS supervises equipment controllers over a field bus.
-# This is purely observational (see GET /modbus) and never feeds allocation.
+# "id@host:port" comma lists of genset/battery Modbus TCP servers to poll.
+# This is the switchboard's actual source of genset/battery status/supply,
+# superseding what used to be a Kafka consumer of genset.telemetry/
+# battery.telemetry (genset/battery still publish those topics for the
+# telemetry-writer/Grafana pipeline, which is unrelated to this).
 GENSET_MODBUS_TARGETS = os.environ.get("GENSET_MODBUS_TARGETS", "")
 BATTERY_MODBUS_TARGETS = os.environ.get("BATTERY_MODBUS_TARGETS", "")
 MODBUS_POLL_INTERVAL_S = float(os.environ.get("MODBUS_POLL_INTERVAL_S", "2"))
@@ -89,21 +87,13 @@ class SwitchboardController:
         self.switchboard_id = SWITCHBOARD_ID
 
         self._lock = threading.Lock()
-        # genset_id -> (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
-        self._genset_power_kw: dict[str, tuple[float, float, float, float]] = {}
-        # battery_id -> (power_kw, received_at)
-        self._battery_power_kw: dict[str, tuple[float, float]] = {}
         # consumer_id -> (requested_power_kw, priority, received_at)
         self._consumer_requests: dict[str, tuple[float, int, float]] = {}
         self._last_allocations: dict[str, float] = {}
 
         self._producer: KafkaProducer | None = None
-        self._genset_consumer: KafkaConsumer | None = None
-        self._battery_consumer: KafkaConsumer | None = None
         self._request_consumer: KafkaConsumer | None = None
         self._stop_event = threading.Event()
-        self._genset_thread: threading.Thread | None = None
-        self._battery_thread: threading.Thread | None = None
         self._request_thread: threading.Thread | None = None
         self._allocation_thread: threading.Thread | None = None
         self._errors: list[str] = []
@@ -115,13 +105,7 @@ class SwitchboardController:
 
     def start(self) -> None:
         self._producer = _make_producer()
-        self._genset_consumer = _make_consumer(GENSET_KAFKA_TOPIC)
-        self._battery_consumer = _make_consumer(BATTERY_KAFKA_TOPIC)
         self._request_consumer = _make_consumer(REQUEST_KAFKA_TOPIC)
-        self._genset_thread = threading.Thread(target=self._consume_genset_telemetry, daemon=True)
-        self._genset_thread.start()
-        self._battery_thread = threading.Thread(target=self._consume_battery_telemetry, daemon=True)
-        self._battery_thread.start()
         self._request_thread = threading.Thread(target=self._consume_requests, daemon=True)
         self._request_thread.start()
         self._allocation_thread = threading.Thread(target=self._run, daemon=True)
@@ -131,18 +115,9 @@ class SwitchboardController:
     def stop(self) -> None:
         self._stop_event.set()
         self._modbus_client.stop()
-        if self._genset_consumer is not None:
-            self._genset_consumer.close()
-        if self._battery_consumer is not None:
-            self._battery_consumer.close()
         if self._request_consumer is not None:
             self._request_consumer.close()
-        for thread in (
-            self._genset_thread,
-            self._battery_thread,
-            self._request_thread,
-            self._allocation_thread,
-        ):
+        for thread in (self._request_thread, self._allocation_thread):
             if thread is not None:
                 thread.join(timeout=STEP_INTERVAL_S * 2)
         if self._producer is not None:
@@ -150,24 +125,8 @@ class SwitchboardController:
             self._producer.close()
 
     def get_status(self) -> dict:
+        gensets, batteries = self._get_modbus_sources()
         with self._lock:
-            gensets = {
-                genset_id: {
-                    "power_kw": power_kw,
-                    "co2_kg_per_s": co2_kg_per_s,
-                    "nox_kg_per_s": nox_kg_per_s,
-                    "stale": self._is_stale(received_at),
-                }
-                for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
-                in self._genset_power_kw.items()
-            }
-            batteries = {
-                battery_id: {
-                    "power_kw": power_kw,
-                    "stale": self._is_stale(received_at),
-                }
-                for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
-            }
             consumers = {
                 consumer_id: {
                     "requested_power_kw": requested_power_kw,
@@ -180,10 +139,10 @@ class SwitchboardController:
             }
             return {
                 "switchboard_id": self.switchboard_id,
-                "available_supply_kw": self._get_available_supply_kw(),
+                "available_supply_kw": self._get_available_supply_kw(gensets, batteries),
                 "total_demand_kw": self._get_total_demand_kw(),
-                "total_co2_kg_per_s": self._get_total_co2_kg_per_s(),
-                "total_nox_kg_per_s": self._get_total_nox_kg_per_s(),
+                "total_co2_kg_per_s": self._get_total_co2_kg_per_s(gensets),
+                "total_nox_kg_per_s": self._get_total_nox_kg_per_s(gensets),
                 "gensets": gensets,
                 "batteries": batteries,
                 "consumers": consumers,
@@ -198,8 +157,6 @@ class SwitchboardController:
 
     def get_health(self) -> dict:
         threads = {
-            "genset_consumer": self._genset_thread,
-            "battery_consumer": self._battery_thread,
             "request_consumer": self._request_thread,
             "allocation": self._allocation_thread,
         }
@@ -212,9 +169,8 @@ class SwitchboardController:
         return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
 
     def get_modbus_status(self) -> dict:
-        """Read-only view of what a PMS would see polling genset/battery
-        controllers over Modbus TCP, alongside (not instead of) the
-        Kafka-derived status returned by get_status()."""
+        """Raw per-target view of the same Modbus polling this controller
+        uses internally for genset/battery status and allocation."""
         return self._modbus_client.get_status()
 
     def _record_error(self, message: str) -> None:
@@ -227,56 +183,29 @@ class SwitchboardController:
     def _is_stale(self, received_at: float) -> bool:
         return time.time() - received_at > STALE_TIMEOUT_S
 
-    def _consume_genset_telemetry(self) -> None:
-        try:
-            for record in self._genset_consumer:
-                if self._stop_event.is_set():
-                    break
-                try:
-                    value = record.value
-                    if value is None:
-                        continue
-                    genset_id = value.get("genset_id", record.key)
-                    power_kw = value.get("power_kw")
-                    if power_kw is None:
-                        continue
-                    co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
-                    nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
-                    with self._lock:
-                        self._genset_power_kw[genset_id] = (
-                            float(power_kw),
-                            co2_kg_per_s,
-                            nox_kg_per_s,
-                            time.time(),
-                        )
-                except Exception as error:
-                    logger.warning("Ignoring malformed genset telemetry: %s", error)
-        except Exception:
-            if not self._stop_event.is_set():
-                logger.exception("Genset consumer stopped unexpectedly")
-                self._record_error("genset_consumer stopped unexpectedly")
-
-    def _consume_battery_telemetry(self) -> None:
-        try:
-            for record in self._battery_consumer:
-                if self._stop_event.is_set():
-                    break
-                try:
-                    value = record.value
-                    if value is None:
-                        continue
-                    battery_id = value.get("battery_id", record.key)
-                    power_kw = value.get("power_kw")
-                    if power_kw is None:
-                        continue
-                    with self._lock:
-                        self._battery_power_kw[battery_id] = (float(power_kw), time.time())
-                except Exception as error:
-                    logger.warning("Ignoring malformed battery telemetry: %s", error)
-        except Exception:
-            if not self._stop_event.is_set():
-                logger.exception("Battery consumer stopped unexpectedly")
-                self._record_error("battery_consumer stopped unexpectedly")
+    def _get_modbus_sources(self) -> tuple[dict, dict]:
+        """Splits the Modbus client's raw per-target readings into the
+        genset/battery status views used for both get_status() and the
+        allocation loop. A target is stale if the poller flagged it stale
+        (connection/read failure) or its last successful read is too old."""
+        gensets: dict[str, dict] = {}
+        batteries: dict[str, dict] = {}
+        for target_id, reading in self._modbus_client.get_status().items():
+            fetched_at = reading.get("fetched_at")
+            stale = reading.get("stale", True) or fetched_at is None or self._is_stale(fetched_at)
+            if reading.get("source_type") == "genset":
+                gensets[target_id] = {
+                    "power_kw": reading.get("power_kw", 0.0),
+                    "co2_kg_per_s": reading.get("co2_kg_per_s", 0.0),
+                    "nox_kg_per_s": reading.get("nox_kg_per_s", 0.0),
+                    "stale": stale,
+                }
+            elif reading.get("source_type") == "battery":
+                batteries[target_id] = {
+                    "power_kw": reading.get("power_kw", 0.0),
+                    "stale": stale,
+                }
+        return gensets, batteries
 
     def _consume_requests(self) -> None:
         try:
@@ -305,38 +234,20 @@ class SwitchboardController:
                 logger.exception("Request consumer stopped unexpectedly")
                 self._record_error("request_consumer stopped unexpectedly")
 
-    def _get_available_supply_kw(self) -> float:
-        """Sum of power output from gensets and batteries whose telemetry
-        isn't stale. Must be called with self._lock held."""
-        genset_power_kw = [
-            power_kw
-            for power_kw, _co2, _nox, received_at in self._genset_power_kw.values()
-            if not self._is_stale(received_at)
-        ]
-        battery_power_kw = [
-            power_kw
-            for power_kw, received_at in self._battery_power_kw.values()
-            if not self._is_stale(received_at)
-        ]
-        return sum(genset_power_kw) + sum(battery_power_kw)
-
-    def _get_total_co2_kg_per_s(self) -> float:
-        """Whole-system CO2 emission rate: sum across all non-stale gensets.
-        Must be called with self._lock held."""
-        return sum(
-            co2_kg_per_s
-            for _power_kw, co2_kg_per_s, _nox, received_at in self._genset_power_kw.values()
-            if not self._is_stale(received_at)
+    def _get_available_supply_kw(self, gensets: dict, batteries: dict) -> float:
+        """Sum of power output from gensets and batteries whose Modbus
+        reading isn't stale."""
+        return sum(g["power_kw"] for g in gensets.values() if not g["stale"]) + sum(
+            b["power_kw"] for b in batteries.values() if not b["stale"]
         )
 
-    def _get_total_nox_kg_per_s(self) -> float:
-        """Whole-system NOx emission rate: sum across all non-stale gensets.
-        Must be called with self._lock held."""
-        return sum(
-            nox_kg_per_s
-            for _power_kw, _co2, nox_kg_per_s, received_at in self._genset_power_kw.values()
-            if not self._is_stale(received_at)
-        )
+    def _get_total_co2_kg_per_s(self, gensets: dict) -> float:
+        """Whole-system CO2 emission rate: sum across all non-stale gensets."""
+        return sum(g["co2_kg_per_s"] for g in gensets.values() if not g["stale"])
+
+    def _get_total_nox_kg_per_s(self, gensets: dict) -> float:
+        """Whole-system NOx emission rate: sum across all non-stale gensets."""
+        return sum(g["nox_kg_per_s"] for g in gensets.values() if not g["stale"])
 
     def _get_total_demand_kw(self) -> float:
         """Must be called with self._lock held."""

@@ -16,6 +16,8 @@ Input registers (function code 4, read-only):
   0-1: current_load_ratio (0.0-1.0)
   2-3: power_kw
   4-5: speed_rpm
+  6-7: co2_kg_per_s
+  8-9: nox_kg_per_s
 """
 
 import logging
@@ -36,6 +38,8 @@ ANOMALY_ENABLED_ADDR = 0
 CURRENT_LOAD_RATIO_ADDR = 0
 POWER_KW_ADDR = 2
 SPEED_RPM_ADDR = 4
+CO2_KG_PER_S_ADDR = 6
+NOX_KG_PER_S_ADDR = 8
 
 
 def _encode_float(value: float) -> list[int]:
@@ -79,7 +83,7 @@ class GensetModbusServer:
 
         self._holding = _CallbackDataBlock([0] * 8, self._on_holding_write)
         self._coils = _CallbackDataBlock([0] * 8, self._on_coil_write)
-        self._input = ModbusSequentialDataBlock(0, [0] * 8)
+        self._input = ModbusSequentialDataBlock(0, [0] * 10)
         context = ModbusServerContext(
             slaves=ModbusSlaveContext(hr=self._holding, co=self._coils, ir=self._input, zero_mode=True),
             single=True,
@@ -105,6 +109,12 @@ class GensetModbusServer:
         self._input.setValues(CURRENT_LOAD_RATIO_ADDR, _encode_float(status["current_load_ratio"]))
         self._input.setValues(POWER_KW_ADDR, _encode_float(float(last_message.get("power_kw", 0.0))))
         self._input.setValues(SPEED_RPM_ADDR, _encode_float(status["speed_rpm"]))
+        self._input.setValues(
+            CO2_KG_PER_S_ADDR, _encode_float(float(last_message.get("co2_kg_per_s", 0.0)))
+        )
+        self._input.setValues(
+            NOX_KG_PER_S_ADDR, _encode_float(float(last_message.get("nox_kg_per_s", 0.0)))
+        )
 
     def _on_holding_write(self, address: int, values: list[int]) -> None:
         if address == TARGET_LOAD_RATIO_ADDR:

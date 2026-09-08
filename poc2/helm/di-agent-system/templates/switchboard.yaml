@@ -34,10 +34,6 @@ spec:
               value: "kafka:{{ .Values.kafka.port }}"
             - name: KAFKA_TOPIC
               value: {{ .Values.switchboard.kafkaTopic | quote }}
-            - name: GENSET_KAFKA_TOPIC
-              value: {{ .Values.switchboard.gensetKafkaTopic | quote }}
-            - name: BATTERY_KAFKA_TOPIC
-              value: {{ .Values.switchboard.batteryKafkaTopic | quote }}
             - name: REQUEST_KAFKA_TOPIC
               value: {{ .Values.switchboard.requestKafkaTopic | quote }}
             - name: GENSET_MODBUS_TARGETS

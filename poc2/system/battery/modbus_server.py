@@ -17,6 +17,7 @@ Input registers (function code 4, read-only):
   0-1: current_load_ratio (0.0-1.0)
   2-3: current_charge_power_kw
   4-5: soc
+  6-7: supply_power_kw (net bus-side power; positive = discharging)
 """
 
 import logging
@@ -38,6 +39,7 @@ ANOMALY_ENABLED_ADDR = 0
 CURRENT_LOAD_RATIO_ADDR = 0
 CURRENT_CHARGE_POWER_KW_ADDR = 2
 SOC_ADDR = 4
+SUPPLY_POWER_KW_ADDR = 6
 
 
 def _encode_float(value: float) -> list[int]:
@@ -112,6 +114,10 @@ class BatteryModbusServer:
             CURRENT_CHARGE_POWER_KW_ADDR, _encode_float(status["current_charge_power_kw"])
         )
         self._input.setValues(SOC_ADDR, _encode_float(status["soc"]))
+        last_message = status.get("last_message") or {}
+        self._input.setValues(
+            SUPPLY_POWER_KW_ADDR, _encode_float(float(last_message.get("power_kw", 0.0)))
+        )
 
     def _on_holding_write(self, address: int, values: list[int]) -> None:
         try:
