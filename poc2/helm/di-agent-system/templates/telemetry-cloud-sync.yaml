@@ -1,0 +1,53 @@
+# Kafka consumer that mirrors telemetry topics to Azure Event Hubs for
+# eventual sync to the cloud. No externally-exposed port (consumer only).
+# Disabled unless .Values.telemetryCloudSync.enabled is true.
+{{- if .Values.telemetryCloudSync.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-cloud-sync
+  labels:
+    app: telemetry-cloud-sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-cloud-sync
+  template:
+    metadata:
+      labels:
+        app: telemetry-cloud-sync
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryCloudSync.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telemetry-cloud-sync
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.telemetryCloudSync.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: SYNC_KAFKA_TOPICS
+              value: {{ printf "%s,%s,%s,%s,%s,%s" .Values.genset.kafkaTopic .Values.propulsion.kafkaTopic .Values.battery.kafkaTopic .Values.auxload.kafkaTopic .Values.shorePower.kafkaTopic .Values.propulsion.allocationKafkaTopic | quote }}
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.telemetryCloudSync.kafkaGroupId | quote }}
+            - name: LOG_EVERY_N_MESSAGES
+              value: {{ .Values.telemetryCloudSync.logEveryNMessages | quote }}
+            - name: RETRY_BACKOFF_S
+              value: {{ .Values.telemetryCloudSync.retryBackoffSeconds | quote }}
+            - name: EVENTHUB_NAMESPACE_FQDN
+              value: {{ .Values.telemetryCloudSync.eventHub.namespaceFqdn | quote }}
+            - name: EVENTHUB_TOPIC_MAP
+              value: {{ .Values.telemetryCloudSync.eventHub.topicMap | quote }}
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.eventHub.existingSecret }}
+                  key: connection-string
+          resources:
+            {{- toYaml .Values.telemetryCloudSync.resources | nindent 12 }}
+{{- end }}

@@ -132,6 +132,31 @@ telemetryWriter:
   nodeSelector: {}
   resources: {}
 
+telemetryCloudSync:
+  # Disabled by default: mirrors the telemetry Kafka topics to Azure Event
+  # Hubs (Kafka-compatible endpoint) for eventual sync to the cloud. Enable
+  # once eventHub.namespaceFqdn and eventHub.existingSecret are set.
+  enabled: false
+  image:
+    repository: telemetry-cloud-sync
+    tag: ""
+  kafkaGroupId: telemetry-cloud-sync
+  logEveryNMessages: 50
+  retryBackoffSeconds: 5
+  eventHub:
+    # e.g. my-namespace.servicebus.windows.net
+    namespaceFqdn: "di-agent-system.servicebus.windows.net"
+    # Pre-create this Secret in the release namespace with a
+    # "connection-string" key (Event Hubs namespace or event-hub-level SAS
+    # connection string).
+    existingSecret: eventhub-credentials
+    # Optional JSON mapping of local Kafka topic name -> Event Hub name, e.g.
+    # '{"genset.telemetry":"genset-telemetry"}'. Defaults to using the local
+    # topic name as the Event Hub name.
+    topicMap: "{}"
+  nodeSelector: {}
+  resources: {}
+
 grafana:
   image:
     repository: grafana/grafana
