@@ -133,16 +133,19 @@ telemetryWriter:
   resources: {}
 
 telemetryCloudSync:
-  # Disabled by default: mirrors the telemetry Kafka topics to Azure Event
-  # Hubs (Kafka-compatible endpoint) for eventual sync to the cloud. Enable
-  # once eventHub.namespaceFqdn and eventHub.existingSecret are set.
-  enabled: false
+  # Disabled by default: mirrors the telemetry Kafka topics to the cloud for
+  # eventual sync. Enable once `target` and its matching secret below are set.
+  enabled: true
   image:
     repository: telemetry-cloud-sync
     tag: ""
   kafkaGroupId: telemetry-cloud-sync
   logEveryNMessages: 50
   retryBackoffSeconds: 5
+  # "eventhub" mirrors to Azure Event Hubs over its Kafka-compatible
+  # endpoint. "iothub" sends each service's telemetry as device-to-cloud
+  # messages through a per-service Azure IoT Hub device identity.
+  target: iothub
   eventHub:
     # e.g. my-namespace.servicebus.windows.net
     namespaceFqdn: "di-agent-system.servicebus.windows.net"
@@ -154,6 +157,18 @@ telemetryCloudSync:
     # '{"genset.telemetry":"genset-telemetry"}'. Defaults to using the local
     # topic name as the Event Hub name.
     topicMap: "{}"
+  iotHub:
+    # Pre-create this Secret in the release namespace with one connection
+    # string key per device below (each pre-registered as its own IoT Hub
+    # device identity, e.g. via `az iot hub device-identity create`).
+    existingSecret: iothub-credentials
+    devices:
+      genset: genset-connection-string
+      propulsion: propulsion-connection-string
+      battery: battery-connection-string
+      auxload: auxload-connection-string
+      shorePower: shore-power-connection-string
+      switchboard: switchboard-connection-string
   nodeSelector: {}
   resources: {}
 
