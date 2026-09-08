@@ -113,6 +113,20 @@ auxload:
   nodeSelector: {}
   resources: {}
 
+navigation:
+  image:
+    repository: navigation
+    tag: ""
+  kafkaTopic: navigation.telemetry
+  # Actisense-ASCII NMEA 2000 gateway TCP port (canboat n2kd convention).
+  n2kGatewayPort: 2597
+  vesselName: vessel-1
+  initialSpeedKnots: "8"
+  # Time acceleration: 60 -> one simulated minute per wall second.
+  timeScale: "60"
+  nodeSelector: {}
+  resources: {}
+
 influxdb:
   image:
     repository: influxdb

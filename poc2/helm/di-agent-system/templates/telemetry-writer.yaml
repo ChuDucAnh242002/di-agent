@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.shorePower.kafkaTopic | quote }}
             - name: SWITCHBOARD_KAFKA_TOPIC
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
+            - name: NAVIGATION_KAFKA_TOPIC
+              value: {{ .Values.navigation.kafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryWriter.kafkaGroupId | quote }}
             - name: LOG_EVERY_N_MESSAGES

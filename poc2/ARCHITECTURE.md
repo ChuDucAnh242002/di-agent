@@ -28,7 +28,7 @@ The system has five layers:
    - Kafka for event transport
    - InfluxDB for time-series storage
    - Grafana for dashboards
-   - switchboard, genset, battery, propulsion, auxload, and telemetry-writer services
+   - switchboard, genset, battery, propulsion, auxload, navigation, and telemetry-writer services
 
 4. Agent layer
    - one `di-agent` pod per worker VM
@@ -55,6 +55,7 @@ The chart under `helm/di-agent-system` manages the shared runtime services:
 - battery
 - propulsion
 - auxload
+- navigation
 - switchboard
 - telemetry-writer
 - playground
@@ -124,6 +125,7 @@ The services in `system/` model power-system components rather than generic appl
 - `propulsion`: power consumer
 - `auxiliary-load`: another power consumer
 - `switchboard`: central allocation authority
+- `navigation`: vessel navigation sensors (GNSS, heading, wind, depth, attitude) broadcasting NMEA 2000 PGNs on a virtual CAN bus, bridged to TCP by an Actisense-ASCII gateway (port 2597)
 
 These components generate and consume telemetry, and the switchboard decides who gets power based on priority and available supply.
 
