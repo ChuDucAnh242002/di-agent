@@ -30,3 +30,10 @@ def health(response: Response) -> dict:
 @app.get("/status")
 def status() -> dict:
     return controller.get_status()
+
+
+@app.get("/modbus")
+def modbus_status() -> dict:
+    """Read-only view of genset/battery status polled over Modbus TCP,
+    alongside (not instead of) the Kafka-derived /status view."""
+    return controller.get_modbus_status()

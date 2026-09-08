@@ -63,3 +63,21 @@ annotations:
   {{- end }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Comma-separated "id@id:port" list of a service's per-instance Modbus TCP
+targets (e.g. "genset-1@genset-1:5020,genset-2@genset-2:5020"), for the
+switchboard's Modbus polling client. Called as:
+{{ include "diagent.modbusTargets" (dict "prefix" "genset" "count" .Values.genset.count "port" .Values.genset.modbusPort) }}
+*/}}
+{{- define "diagent.modbusTargets" -}}
+{{- $prefix := .prefix -}}
+{{- $port := .port -}}
+{{- $names := list -}}
+{{- range $i := until (.count | int) }}
+{{- $name := printf "%s-%d" $prefix (add1 $i) -}}
+{{- $names = append $names (printf "%s@%s:%v" $name $name $port) -}}
+{{- end }}
+{{- join "," $names -}}
+{{- end -}}
+

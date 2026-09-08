@@ -36,6 +36,7 @@ spec:
           imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
           ports:
             - containerPort: 8000
+            - containerPort: {{ $.Values.battery.modbusPort }}
           env:
             - name: BATTERY_ID
               value: {{ $name | quote }}
@@ -45,6 +46,8 @@ spec:
               value: "kafka:{{ $.Values.kafka.port }}"
             - name: KAFKA_TOPIC
               value: {{ $.Values.battery.kafkaTopic | quote }}
+            - name: MODBUS_PORT
+              value: {{ $.Values.battery.modbusPort | quote }}
           resources:
             {{- toYaml $.Values.battery.resources | nindent 12 }}
 ---
@@ -59,7 +62,11 @@ spec:
   selector:
     battery-id: {{ $name }}
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
+    - name: modbus
+      port: {{ $.Values.battery.modbusPort }}
+      targetPort: {{ $.Values.battery.modbusPort }}
 ---
 {{- end }}

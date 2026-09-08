@@ -35,6 +35,7 @@ spec:
           imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
           ports:
             - containerPort: 8000
+            - containerPort: {{ $.Values.propulsion.modbusPort }}
           env:
             - name: PROPULSION_ID
               value: {{ $name | quote }}
@@ -48,6 +49,8 @@ spec:
               value: {{ $.Values.propulsion.requestKafkaTopic | quote }}
             - name: ALLOCATION_KAFKA_TOPIC
               value: {{ $.Values.propulsion.allocationKafkaTopic | quote }}
+            - name: MODBUS_PORT
+              value: {{ $.Values.propulsion.modbusPort | quote }}
           resources:
             {{- toYaml $.Values.propulsion.resources | nindent 12 }}
 ---
@@ -62,7 +65,11 @@ spec:
   selector:
     propulsion-id: {{ $name }}
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
+    - name: modbus
+      port: {{ $.Values.propulsion.modbusPort }}
+      targetPort: {{ $.Values.propulsion.modbusPort }}
 ---
 {{- end }}

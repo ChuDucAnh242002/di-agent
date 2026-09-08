@@ -40,6 +40,12 @@ spec:
               value: {{ .Values.switchboard.batteryKafkaTopic | quote }}
             - name: REQUEST_KAFKA_TOPIC
               value: {{ .Values.switchboard.requestKafkaTopic | quote }}
+            - name: GENSET_MODBUS_TARGETS
+              value: {{ include "diagent.modbusTargets" (dict "prefix" "genset" "count" .Values.genset.count "port" .Values.genset.modbusPort) | quote }}
+            - name: BATTERY_MODBUS_TARGETS
+              value: {{ include "diagent.modbusTargets" (dict "prefix" "battery" "count" .Values.battery.count "port" .Values.battery.modbusPort) | quote }}
+            - name: MODBUS_POLL_INTERVAL_S
+              value: {{ .Values.switchboard.modbusPollIntervalS | quote }}
           resources:
             {{- toYaml .Values.switchboard.resources | nindent 12 }}
 ---

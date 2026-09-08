@@ -7,6 +7,7 @@ import time
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
+from modbus_client import ModbusPollingClient
 from switchboard import ConsumerRequest, allocate_power, summarize_source_health
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,12 @@ STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 # A genset or consumer is dropped from the allocation if no message was seen
 # within this many seconds (treated as offline).
 STALE_TIMEOUT_S = float(os.environ.get("STALE_TIMEOUT_S", "5"))
+# "id@host:port" comma lists of genset/battery Modbus TCP servers to poll,
+# mirroring how a real PMS supervises equipment controllers over a field bus.
+# This is purely observational (see GET /modbus) and never feeds allocation.
+GENSET_MODBUS_TARGETS = os.environ.get("GENSET_MODBUS_TARGETS", "")
+BATTERY_MODBUS_TARGETS = os.environ.get("BATTERY_MODBUS_TARGETS", "")
+MODBUS_POLL_INTERVAL_S = float(os.environ.get("MODBUS_POLL_INTERVAL_S", "2"))
 
 
 def _deserialize_value(raw_value: bytes) -> dict | None:
@@ -100,6 +107,11 @@ class SwitchboardController:
         self._request_thread: threading.Thread | None = None
         self._allocation_thread: threading.Thread | None = None
         self._errors: list[str] = []
+        self._modbus_client = ModbusPollingClient(
+            genset_targets=GENSET_MODBUS_TARGETS,
+            battery_targets=BATTERY_MODBUS_TARGETS,
+            poll_interval_s=MODBUS_POLL_INTERVAL_S,
+        )
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -114,9 +126,11 @@ class SwitchboardController:
         self._request_thread.start()
         self._allocation_thread = threading.Thread(target=self._run, daemon=True)
         self._allocation_thread.start()
+        self._modbus_client.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._modbus_client.stop()
         if self._genset_consumer is not None:
             self._genset_consumer.close()
         if self._battery_consumer is not None:
@@ -196,6 +210,12 @@ class SwitchboardController:
         }
         healthy = all(thread_status.values()) and not errors
         return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+
+    def get_modbus_status(self) -> dict:
+        """Read-only view of what a PMS would see polling genset/battery
+        controllers over Modbus TCP, alongside (not instead of) the
+        Kafka-derived status returned by get_status()."""
+        return self._modbus_client.get_status()
 
     def _record_error(self, message: str) -> None:
         with self._lock:

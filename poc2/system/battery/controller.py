@@ -9,12 +9,17 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from battery import DEFAULT_BATTERY_MODEL, NOMINAL_VOLTAGE_V, build_battery
+from modbus_server import BatteryModbusServer
 from sensors import BatteryElectricalModel, BatterySensorSimulator
 
 logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "battery.telemetry")
+# Modbus TCP mirrors the battery/PCS controller's status/setpoints like a
+# real BMS would expose to a vessel's PMS.
+MODBUS_HOST = os.environ.get("MODBUS_HOST", "0.0.0.0")
+MODBUS_PORT = int(os.environ.get("MODBUS_PORT", "5020"))
 # Which physical battery model this instance simulates (see battery.py).
 BATTERY_MODEL = os.environ.get("BATTERY_MODEL", DEFAULT_BATTERY_MODEL)
 STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
@@ -79,6 +84,7 @@ class BatteryController:
         self._sensors = BatterySensorSimulator(
             electrical_model, seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None
         )
+        self._modbus_server = BatteryModbusServer(self, host=MODBUS_HOST, port=MODBUS_PORT)
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -97,6 +103,7 @@ class BatteryController:
 
     def start(self) -> None:
         self._producer = _make_producer()
+        self._modbus_server.start()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -249,6 +256,7 @@ class BatteryController:
                 message.update(prediction)
                 self._last_message = message
 
+            self._modbus_server.sync_from_status(self.get_status())
             self._send(KAFKA_TOPIC, key=self.battery_id, value=message)
             prediction_text = (
                 f"time_to_empty={message['time_to_empty_hr']:.2f}h"
