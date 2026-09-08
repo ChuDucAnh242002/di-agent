@@ -19,4 +19,6 @@ ENV KAFKA_BROKERS=localhost:9092 \
     INFLUXDB_BUCKET=telemetry \
     INFLUXDB_TOKEN=
 
+EXPOSE 8000
+
 CMD ["python", "main.py"]

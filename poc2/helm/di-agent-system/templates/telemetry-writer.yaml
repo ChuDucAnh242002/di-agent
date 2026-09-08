@@ -1,5 +1,6 @@
 # Kafka consumer that writes system telemetry into InfluxDB. No externally-
-# exposed port (consumer only).
+# exposed Service; port 8000 only serves Prometheus /metrics for in-cluster
+# scraping (see the prometheus.io/* pod annotations below).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,7 +16,7 @@ spec:
     metadata:
       labels:
         app: telemetry-writer
-      {{- include "diagent.podAnnotations" . | nindent 6 }}
+      {{- include "diagent.podAnnotations" (dict "root" . "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryWriter.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
@@ -26,6 +27,8 @@ spec:
         - name: telemetry-writer
           image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.telemetryWriter.image) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
           env:
             - name: KAFKA_BROKERS
               value: "kafka:{{ .Values.kafka.port }}"

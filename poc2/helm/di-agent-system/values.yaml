@@ -143,6 +143,20 @@ grafana:
   nodeSelector: {}
   resources: {}
 
+prometheus:
+  image:
+    repository: prom/prometheus
+    tag: latest
+  port: 9090
+  scrapeInterval: 15s
+  retention: 15d
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+  nodeSelector: {}
+  resources: {}
+
 playground:
   image:
     repository: playground
@@ -151,3 +165,10 @@ playground:
   switchboardUpstream: "switchboard:8000"
   nodeSelector: {}
   resources: {}
+  # Sidecar that scrapes nginx's stub_status and re-exposes it as
+  # Prometheus /metrics on port 9113 (see templates/playground.yaml).
+  metricsExporter:
+    image:
+      repository: nginx/nginx-prometheus-exporter
+      tag: latest
+    resources: {}
