@@ -266,10 +266,11 @@ class SwitchboardController:
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
+            gensets, batteries = self._get_modbus_sources()
             with self._lock:
-                available_supply_kw = self._get_available_supply_kw()
-                total_co2_kg_per_s = self._get_total_co2_kg_per_s()
-                total_nox_kg_per_s = self._get_total_nox_kg_per_s()
+                available_supply_kw = self._get_available_supply_kw(gensets, batteries)
+                total_co2_kg_per_s = self._get_total_co2_kg_per_s(gensets)
+                total_nox_kg_per_s = self._get_total_nox_kg_per_s(gensets)
                 active_requests = [
                     ConsumerRequest(consumer_id, requested_power_kw, priority, received_at)
                     for consumer_id, (requested_power_kw, priority, received_at)
