@@ -16,6 +16,17 @@ VITE_PROPULSION_TARGET=http://<propulsion-ip>:8000 \
 npm run dev
 ```
 
+Run the Cypress tests against a local preview server in another terminal:
+
+```bash
+npm run build
+npm run preview
+npm run cy:run
+```
+
+The tests stub the config and simulator APIs, so they do not require a live
+cluster or simulator services.
+
 The dev server proxies `/api/genset/*` and `/api/propulsion/*` to those
 targets (see [vite.config.ts](vite.config.ts)), so the browser only ever
 talks to the same origin (no CORS setup needed).

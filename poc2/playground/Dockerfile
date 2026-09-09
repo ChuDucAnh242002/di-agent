@@ -2,8 +2,11 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
-RUN npm install --save-dev @types/node
+# Cypress is used only by local E2E tests. Keep its npm package available for
+# local development, but do not download its browser binary into the build
+# stage; it is not copied into the final nginx image.
+RUN CYPRESS_INSTALL_BINARY=0 npm install
+RUN CYPRESS_INSTALL_BINARY=0 npm install --save-dev @types/node
 COPY . .
 RUN npm run build
 
