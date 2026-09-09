@@ -8,6 +8,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from propulsion import build_propulsion_drive
+from modbus_server import PropulsionModbusServer
 from sensors import SensorSimulator
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "propulsion.telemetry")
 STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
+# Modbus TCP mirrors the propulsion drive controller's status/setpoint like a
+# real drive would expose to a vessel's PMS.
+MODBUS_HOST = os.environ.get("MODBUS_HOST", "0.0.0.0")
+MODBUS_PORT = int(os.environ.get("MODBUS_PORT", "5020"))
 # Max load ratio change allowed per second, so the API can't force an instant jump.
 RAMP_RATE_PER_S = float(os.environ.get("RAMP_RATE_PER_S", "0.05"))
 
@@ -90,6 +95,7 @@ class PropulsionController:
         self.propulsion_drive = build_propulsion_drive()
         self.propulsion_id = os.environ.get("PROPULSION_ID", self.propulsion_drive.name)
         self._sensors = SensorSimulator(seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None)
+        self._modbus_server = PropulsionModbusServer(self, host=MODBUS_HOST, port=MODBUS_PORT)
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -116,6 +122,7 @@ class PropulsionController:
         self._consumer = _make_consumer()
         self._consumer_thread = threading.Thread(target=self._consume_allocations, daemon=True)
         self._consumer_thread.start()
+        self._modbus_server.start()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -307,6 +314,7 @@ class PropulsionController:
                 self._achieved_load_ratio = float(load_ratio)
                 self._last_message = message
 
+            self._modbus_server.sync_from_status(self.get_status())
             self._send(KAFKA_TOPIC, key=self.propulsion_id, value=message)
             print(
                 f"load={message['load_ratio'] * 100:.1f}% "

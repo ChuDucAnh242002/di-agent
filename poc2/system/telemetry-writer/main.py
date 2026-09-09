@@ -5,6 +5,7 @@ import time
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 from kafka import KafkaConsumer
+from prometheus_client import Counter, start_http_server
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
@@ -13,6 +14,7 @@ BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
 AUXLOAD_KAFKA_TOPIC = os.environ.get("AUXLOAD_KAFKA_TOPIC", "auxload.telemetry")
 SHORE_POWER_KAFKA_TOPIC = os.environ.get("SHORE_POWER_KAFKA_TOPIC", "shore_power.telemetry")
 SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
+NAVIGATION_KAFKA_TOPIC = os.environ.get("NAVIGATION_KAFKA_TOPIC", "navigation.telemetry")
 KAFKA_TOPICS = [
     GENSET_KAFKA_TOPIC,
     PROPULSION_KAFKA_TOPIC,
@@ -20,6 +22,7 @@ KAFKA_TOPICS = [
     AUXLOAD_KAFKA_TOPIC,
     SHORE_POWER_KAFKA_TOPIC,
     SWITCHBOARD_KAFKA_TOPIC,
+    NAVIGATION_KAFKA_TOPIC,
 ]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
 
@@ -29,6 +32,11 @@ INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "telemetry")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 LOG_EVERY_N_MESSAGES = int(os.environ.get("LOG_EVERY_N_MESSAGES", "50"))
 STRICT_VALIDATION = os.environ.get("STRICT_VALIDATION", "true").lower() == "true"
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "8000"))
+
+MESSAGES_SEEN = Counter("telemetry_writer_messages_seen_total", "Kafka messages consumed")
+MESSAGES_WRITTEN = Counter("telemetry_writer_messages_written_total", "Messages written to InfluxDB")
+MESSAGES_DROPPED = Counter("telemetry_writer_messages_dropped_total", "Malformed messages dropped")
 
 NUM_CYLINDERS = 8
 GENSET_CYLINDER_FIELDS = tuple(
@@ -106,6 +114,31 @@ MESSAGE_SCHEMAS = {
             "allocated_power_kw",
         ),
     },
+    "gnss_id": {
+        "measurement": "navigation_gnss",
+        "fields": ("latitude_deg", "longitude_deg", "cog_deg", "sog_knots"),
+        "tags": ("vessel",),
+    },
+    "heading_id": {
+        "measurement": "navigation_heading",
+        "fields": ("heading_deg", "rot_deg_per_min"),
+        "tags": ("vessel",),
+    },
+    "wind_id": {
+        "measurement": "navigation_wind",
+        "fields": ("wind_speed_m_s", "wind_angle_deg"),
+        "tags": ("vessel", "reference"),
+    },
+    "depth_id": {
+        "measurement": "navigation_depth",
+        "fields": ("depth_m", "offset_m"),
+        "tags": ("vessel",),
+    },
+    "attitude_id": {
+        "measurement": "navigation_attitude",
+        "fields": ("yaw_deg", "pitch_deg", "roll_deg"),
+        "tags": ("vessel",),
+    },
 }
 
 SWITCHBOARD_AGGREGATE_FIELDS = (
@@ -179,6 +212,7 @@ def _to_points(message: dict) -> list[Point]:
 
 
 def main() -> None:
+    start_http_server(METRICS_PORT)
     consumer = _make_consumer()
     client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
     write_api = client.write_api(write_options=SYNCHRONOUS)
@@ -191,12 +225,15 @@ def main() -> None:
         for record in consumer:
             message = record.value
             stats["seen"] += 1
+            MESSAGES_SEEN.inc()
             try:
                 points = _to_points(message)
                 write_api.write(bucket=INFLUXDB_BUCKET, record=points)
                 stats["written"] += 1
+                MESSAGES_WRITTEN.inc()
             except (KeyError, ValueError, TypeError) as exc:
                 stats["dropped"] += 1
+                MESSAGES_DROPPED.inc()
                 if STRICT_VALIDATION:
                     print(f"Dropped malformed message {message!r}: {exc}")
                 else:

@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 from controller import GensetController
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Genset Control API", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
 
 
 class LoadRequest(BaseModel):
