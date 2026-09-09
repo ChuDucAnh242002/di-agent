@@ -89,7 +89,6 @@ describe("di-agent playground", () => {
     cy.visit("/");
 
     cy.get("#ocean-state-select").select("storm");
-    cy.get("#people-on-board-input").invoke("val", 500).trigger("input");
     cy.contains("Recommended propulsion load").parent().should("contain", "90%");
     cy.contains("Recommended auxiliary load").parent().should("contain", "20%");
 
