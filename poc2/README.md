@@ -121,6 +121,20 @@ make demo
 make teardown
 ```
 
+The trust-routing acceptance scenarios are in `bdd/features`. They exercise
+the external agent HTTP contract with deterministic in-process peers, so they
+do not require VMs, Kubernetes, or a running semantic-map agent:
+
+```bash
+make bdd
+```
+
+The scenarios cover the PoC's central behavior: selecting a trusted,
+lower-cost peer, excluding a peer below the trust floor, and rejecting a
+recommendation when no peer has sufficient trust. Cypress remains the test
+surface for the playground UI, while these Gherkin scenarios cover the
+cross-agent workflow.
+
 The demo is the proof-of-value. It does the following:
 
 - calls `/cost` on each agent,

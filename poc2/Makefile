@@ -93,6 +93,9 @@ stop-vms:
 deploy: 
 	@bash $(SCRIPTS)/deploy.sh
 
+bdd:
+	@cd bdd && go test ./...
+
 demo:
 	@bash $(SCRIPTS)/coordinator.sh $(VMS)
 
@@ -148,7 +151,7 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
-        workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
+	workload-heavy workload-light workload-stop teardown status list-vms get-ip-% bdd
 
 # Help target
 help:
@@ -168,6 +171,7 @@ help:
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
 	@echo "  agent        - Deploy di-agent (one pod per worker VM; not part of the Helm chart)"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
+	@echo "  bdd          - Run poc2 Gherkin trust-routing scenarios"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"
 	@echo "  get-ip-<vm>  - Get IP address of a specific VM (e.g., make get-ip-ubuntu-vm1)"
