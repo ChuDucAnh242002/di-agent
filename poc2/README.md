@@ -66,6 +66,19 @@ This is required because `helm/di-agent-system/values.yaml` references:
 - `influxdb.existingSecret: influxdb-credentials`
 - `grafana.existingSecret: grafana-credentials`
 
+### Optional: cloud eventual-consistency sync
+
+`telemetryCloudSync` mirrors telemetry Kafka topics to Azure (Event Hubs or IoT Hub), and `telemetryWriterCloud` is a second telemetry-writer that reads them back out of Event Hubs into a cloud-hosted InfluxDB, so the cloud store eventually converges with the edge one. Both are disabled by default. To enable them:
+
+```bash
+kubectl -n default create secret generic eventhub-credentials \
+  --from-literal=connection-string="$EVENTHUB_CONNECTION_STRING"
+kubectl -n default create secret generic influxdb-cloud-credentials \
+  --from-literal=admin-token="$INFLUXDB_CLOUD_ADMIN_TOKEN"
+```
+
+then set `telemetryCloudSync.enabled=true`, `telemetryCloudSync.target=eventhub`, `telemetryWriterCloud.enabled=true`, and `telemetryWriterCloud.influxdb.url` to your cloud InfluxDB endpoint.
+
 You should also set the registry and tag before installing the chart if you are not using the defaults:
 
 ```bash

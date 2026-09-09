@@ -18,7 +18,7 @@ spec:
     metadata:
       labels:
         app: telemetry-cloud-sync
-      {{- include "diagent.podAnnotations" . | nindent 6 }}
+      {{- include "diagent.podAnnotations" (dict "root" .) | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryCloudSync.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}

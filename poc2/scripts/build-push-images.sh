@@ -20,6 +20,10 @@
 #
 # Service names may also be given as a single comma-separated argument,
 # e.g. ./build-push-images.sh genset,battery
+#
+# telemetry-writer-cloud (helm: telemetryWriterCloud) is not listed below:
+# it runs the telemetry-writer image unchanged, just against Event Hubs/a
+# cloud InfluxDB instead of the local broker, so no separate build is needed.
 
 set -euo pipefail
 

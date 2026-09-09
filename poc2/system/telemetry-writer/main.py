@@ -34,6 +34,14 @@ LOG_EVERY_N_MESSAGES = int(os.environ.get("LOG_EVERY_N_MESSAGES", "50"))
 STRICT_VALIDATION = os.environ.get("STRICT_VALIDATION", "true").lower() == "true"
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "8000"))
 
+# Defaults suit the edge's plaintext local broker. Set KAFKA_SECURITY_PROTOCOL
+# to SASL_SSL and KAFKA_SASL_PASSWORD to an Event Hubs connection string to
+# run this same writer against Azure Event Hubs' Kafka-compatible endpoint.
+KAFKA_SECURITY_PROTOCOL = os.environ.get("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+KAFKA_SASL_MECHANISM = os.environ.get("KAFKA_SASL_MECHANISM", "PLAIN")
+KAFKA_SASL_USERNAME = os.environ.get("KAFKA_SASL_USERNAME", "$ConnectionString")
+KAFKA_SASL_PASSWORD = os.environ.get("KAFKA_SASL_PASSWORD", "")
+
 MESSAGES_SEEN = Counter("telemetry_writer_messages_seen_total", "Kafka messages consumed")
 MESSAGES_WRITTEN = Counter("telemetry_writer_messages_written_total", "Messages written to InfluxDB")
 MESSAGES_DROPPED = Counter("telemetry_writer_messages_dropped_total", "Malformed messages dropped")
@@ -150,6 +158,14 @@ SWITCHBOARD_AGGREGATE_FIELDS = (
 
 
 def _make_consumer() -> KafkaConsumer:
+    extra_kwargs = {}
+    if KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        extra_kwargs.update(
+            security_protocol=KAFKA_SECURITY_PROTOCOL,
+            sasl_mechanism=KAFKA_SASL_MECHANISM,
+            sasl_plain_username=KAFKA_SASL_USERNAME,
+            sasl_plain_password=KAFKA_SASL_PASSWORD,
+        )
     while True:
         try:
             return KafkaConsumer(
@@ -159,6 +175,7 @@ def _make_consumer() -> KafkaConsumer:
                 value_deserializer=lambda v: json.loads(v.decode("utf-8")),
                 key_deserializer=lambda k: k.decode("utf-8") if k is not None else None,
                 auto_offset_reset="latest",
+                **extra_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - broker may not be up yet
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet ({exc}), retrying in 5s ...")

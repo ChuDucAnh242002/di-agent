@@ -155,6 +155,28 @@ telemetryWriter:
   nodeSelector: {}
   resources: {}
 
+telemetryWriterCloud:
+  # Disabled by default: a second telemetry-writer instance that reads the
+  # mirrored topics back out of Azure Event Hubs and writes them into a
+  # cloud-hosted InfluxDB, making the cloud store eventually consistent with
+  # the edge one. Only meaningful when telemetryCloudSync.target is
+  # "eventhub" (IoT Hub device messages aren't a Kafka-consumable stream).
+  enabled: false
+  image:
+    repository: telemetry-writer
+    tag: ""
+  kafkaGroupId: telemetry-writer-cloud
+  logEveryNMessages: 50
+  strictValidation: true
+  influxdb:
+    url: ""
+    org: di-agent
+    bucket: telemetry
+    # Pre-create this Secret in the release namespace with an "admin-token" key.
+    existingSecret: influxdb-cloud-credentials
+  nodeSelector: {}
+  resources: {}
+
 telemetryCloudSync:
   # Disabled by default: mirrors the telemetry Kafka topics to the cloud for
   # eventual sync. Enable once `target` and its matching secret below are set.
