@@ -158,7 +158,7 @@ telemetryWriter:
 telemetryCloudSync:
   # Disabled by default: mirrors the telemetry Kafka topics to the cloud for
   # eventual sync. Enable once `target` and its matching secret below are set.
-  enabled: true
+  enabled: false
   image:
     repository: telemetry-cloud-sync
     tag: ""
