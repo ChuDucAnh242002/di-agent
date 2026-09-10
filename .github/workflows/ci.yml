@@ -127,5 +127,8 @@ jobs:
           tags: |
             ghcr.io/chuducanh242002/${{ matrix.service }}:latest
             ghcr.io/chuducanh242002/${{ matrix.service }}:${{ github.sha }}
+          # Links the image to this repo so GITHUB_TOKEN keeps write access to the package.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
