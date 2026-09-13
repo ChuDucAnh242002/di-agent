@@ -21,29 +21,6 @@ KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-cloud-sync")
 # telemetry through a per-service Azure IoT Hub device identity.
 SYNC_TARGET = os.environ.get("SYNC_TARGET", "eventhub").strip().lower()
 
-RETRY_BACKOFF_S = float(os.environ.get("RETRY_BACKOFF_S", "5"))
-LOG_EVERY_N_MESSAGES = int(os.environ.get("LOG_EVERY_N_MESSAGES", "50"))
-
-
-def _make_consumer() -> KafkaConsumer:
-    while True:
-        try:
-            return KafkaConsumer(
-                *KAFKA_TOPICS,
-                bootstrap_servers=KAFKA_BROKERS,
-                group_id=KAFKA_GROUP_ID,
-                # Raw passthrough: mirrored bytes are re-published as-is,
-                # so telemetry-writer's schema stays the single source of truth.
-                value_deserializer=lambda v: v,
-                key_deserializer=lambda k: k,
-                enable_auto_commit=False,
-                auto_offset_reset="earliest",
-            )
-        except Exception as exc:  # noqa: BLE001 - local broker may not be up yet
-            print(f"Kafka brokers {KAFKA_BROKERS} not available yet ({exc}), retrying in 5s ...")
-            time.sleep(5)
-
-
 # --- Event Hubs sink: a second Kafka producer pointed at the Kafka-compatible
 # endpoint, no Azure SDK required. ---
 
