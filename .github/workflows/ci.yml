@@ -99,7 +99,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
+          pip install pytest httpx
           for req in poc2/system/*/requirements.txt; do
             pip install -r "$req"
           done
@@ -186,6 +186,9 @@ jobs:
             --set global.imageRegistry=smoke \
             --set global.imageTag=test \
             --set global.imagePullPolicy=IfNotPresent \
+            --set kafka.persistence.enabled=false \
+            --set influxdb.persistence.enabled=false \
+            --set prometheus.persistence.enabled=false \
             --wait --timeout 6m0s
 
       - name: Smoke-test genset REST endpoint
