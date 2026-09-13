@@ -3,8 +3,11 @@ name: CI
 # Runs on every push to main and every PR targeting main.
 # Validates that the semantic-map Go module builds, vets clean, and that
 # the full test suite (compliance + scenarios + evolution + integration)
-# passes with race detection on. Also runs the poc2/system pytest suite and
-# the poc2/playground Cypress suite (stubbed spec only, no live cluster).
+# passes with race detection on. Also runs the poc2/system pytest suite, the
+# poc2/bdd godog scenarios (fake in-process peers, no live cluster), the
+# poc2/playground Cypress suite (stubbed spec only, no live cluster), and a
+# kind-based Helm smoke test that deploys the full di-agent-system chart to
+# an ephemeral in-runner cluster.
 
 on:
   push:
@@ -103,6 +106,100 @@ jobs:
 
       - name: Run pytest
         run: pytest poc2/system/tests/
+
+  bdd-tests:
+    name: poc2/bdd godog scenarios (no live cluster)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: poc2/bdd
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: poc2/bdd/go.sum
+
+      - name: Run godog scenarios
+        run: go test ./...
+
+  kind-smoke-test:
+    name: kind Helm smoke test (di-agent-system chart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          install_only: false
+          cluster_name: di-agent-smoke
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Build chart-managed images
+        run: |
+          set -euo pipefail
+          declare -A contexts=(
+            [genset]=poc2/system/genset
+            [switchboard]=poc2/system/switchboard
+            [propulsion]=poc2/system/propulsion
+            [battery]=poc2/system/battery
+            [shore-power]=poc2/system/shore-power
+            [auxload]=poc2/system/auxiliary-load
+            [telemetry-writer]=poc2/system/telemetry-writer
+            [navigation]=poc2/system/navigation
+            [playground]=poc2/playground
+          )
+          for service in "${!contexts[@]}"; do
+            docker build -t "smoke/${service}:test" "${contexts[$service]}"
+          done
+
+      - name: Load images into kind
+        run: |
+          set -euo pipefail
+          for service in genset switchboard propulsion battery shore-power auxload telemetry-writer navigation playground; do
+            kind load docker-image "smoke/${service}:test" --name di-agent-smoke
+          done
+
+      - name: Create required secrets
+        run: |
+          kubectl create secret generic influxdb-credentials \
+            --from-literal=admin-user=admin \
+            --from-literal=admin-password=smoke-test-password \
+            --from-literal=admin-token=smoke-test-token
+          kubectl create secret generic grafana-credentials \
+            --from-literal=admin-user=admin \
+            --from-literal=admin-password=smoke-test-password
+
+      - name: Helm install (values pointed at locally-loaded images)
+        run: |
+          helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+            --set global.imageRegistry=smoke \
+            --set global.imageTag=test \
+            --set global.imagePullPolicy=IfNotPresent \
+            --wait --timeout 6m0s
+
+      - name: Smoke-test genset REST endpoint
+        run: |
+          kubectl run smoke-curl --image=curlimages/curl --restart=Never --rm -i \
+            --command -- curl -sf --max-time 10 http://genset-1:8000/cost
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe pods
+          kubectl logs -l app=genset --all-containers --tail=200 || true
 
   playground-tests:
     name: poc2/playground cypress suite (no live cluster)
