@@ -3,7 +3,8 @@ name: CI
 # Runs on every push to main and every PR targeting main.
 # Validates that the semantic-map Go module builds, vets clean, and that
 # the full test suite (compliance + scenarios + evolution + integration)
-# passes with race detection on.
+# passes with race detection on. Also runs the poc2/system pytest suite and
+# the poc2/playground Cypress suite (stubbed spec only, no live cluster).
 
 on:
   push:
@@ -76,6 +77,66 @@ jobs:
 
       - name: Run guided demo in paper mode
         run: ./dev.sh demo --paper
+
+  system-tests:
+    name: poc2/system pytest suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: poc2/system/**/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          for req in poc2/system/*/requirements.txt; do
+            pip install -r "$req"
+          done
+
+      - name: Run pytest
+        run: pytest poc2/system/tests/
+
+  playground-tests:
+    name: poc2/playground cypress suite (no live cluster)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: poc2/playground
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: poc2/playground/package-lock.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Run Cypress tests (stubbed, non-live)
+        uses: cypress-io/github-action@v6
+        with:
+          working-directory: poc2/playground
+          install: false
+          start: npm run preview -- --port 4173
+          wait-on: 'http://localhost:4173'
+          spec: cypress/e2e/playground.cy.ts
 
   build-push-images:
     name: build + push images (${{ matrix.service }})
