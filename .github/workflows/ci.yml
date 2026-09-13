@@ -193,8 +193,20 @@ jobs:
 
       - name: Smoke-test genset REST endpoint
         run: |
-          kubectl run smoke-curl --image=curlimages/curl --restart=Never --rm -i \
-            --command -- curl -sf --max-time 10 http://genset-1:8000/cost
+          set -euo pipefail
+          kubectl run smoke-curl --image=curlimages/curl --restart=Never \
+            --command -- sleep 3600
+          kubectl wait --for=condition=Ready pod/smoke-curl --timeout=60s
+          for i in $(seq 1 12); do
+            if kubectl exec smoke-curl -- curl -sf --max-time 10 http://genset-1:8000/cost; then
+              kubectl delete pod smoke-curl --wait=false
+              exit 0
+            fi
+            echo "genset-1 not reachable yet, retrying (${i}/12)..."
+            sleep 5
+          done
+          echo "::error::genset-1 /cost endpoint never became reachable"
+          exit 1
 
       - name: Dump cluster state on failure
         if: failure()
