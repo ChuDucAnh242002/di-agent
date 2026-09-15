@@ -454,7 +454,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=`         | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |

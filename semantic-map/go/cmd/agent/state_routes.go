@@ -30,10 +30,12 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 	//   ?min-confidence=0.5
 	//   ?related-to=<property>         one-hop neighbourhood
 	//   ?id=<property>                 (repeatable)
+	//   ?subject=<kind>:<identity>     one subject's properties (the census still counts all)
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		q := statemap.Query{
 			IDs:       r.URL.Query()["id"],
 			RelatedTo: r.URL.Query().Get("related-to"),
+			Subject:   r.URL.Query().Get("subject"),
 		}
 		for _, k := range r.URL.Query()["kind"] {
 			q.Kinds = append(q.Kinds, statemap.Kind(k))
