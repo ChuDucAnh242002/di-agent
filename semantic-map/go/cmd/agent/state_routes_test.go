@@ -414,3 +414,25 @@ func TestState_SubjectFilter(t *testing.T) {
 		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filter", v.Counts.Subjects)
 	}
 }
+
+// TestState_UnknownSubjectIsEmptyNotAnError: a subject that names nothing is a valid
+// query that matches nothing — an empty selection with HTTP 200, and a census that
+// still reports the whole map. A regression that 404s an unknown subject, or that
+// counts the census after filtering, is what this guards.
+func TestState_UnknownSubjectIsEmptyNotAnError(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+
+	var v statemap.StateView
+	if code := getState(t, srv.URL+"/state?subject=pod:zzz", &v); code != 200 {
+		t.Fatalf("unknown subject returned %d; want 200 — a filter that matches nothing is not an error", code)
+	}
+	if len(v.Properties) != 0 {
+		t.Errorf("unknown subject returned %d properties; want an empty selection: %+v", len(v.Properties), v.Properties)
+	}
+	if v.Counts.Subjects != 2 {
+		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filtered (empty) selection", v.Counts.Subjects)
+	}
+}
