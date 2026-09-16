@@ -384,3 +384,55 @@ func TestEstimate_RequestShapeErrorsAndIdPassthrough(t *testing.T) {
 		t.Errorf("the decision recorded under the caller's id is not retrievable: %d", code)
 	}
 }
+
+// TestState_SubjectFilter: GET /state?subject= narrows the view to one subject's
+// properties, while the census still reports the whole map. The data-model filter
+// (Query.Subject) existed but the handler did not read the parameter.
+func TestState_SubjectFilter(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+
+	var v statemap.StateView
+	if code := getState(t, srv.URL+"/state?subject=pod:a", &v); code != 200 {
+		t.Fatalf("code=%d", code)
+	}
+	var sawA bool
+	for _, p := range v.Properties {
+		if p.Subject != "pod:a" {
+			t.Errorf("property %s (subject %q) leaked through subject=pod:a; want only pod:a", p.ID, p.Subject)
+		}
+		if p.ID == "cpu@pod:a" {
+			sawA = true
+		}
+	}
+	if !sawA {
+		t.Error("pod:a's property is missing from the filtered view")
+	}
+	if v.Counts.Subjects != 2 {
+		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filter", v.Counts.Subjects)
+	}
+}
+
+// TestState_UnknownSubjectIsEmptyNotAnError: a subject that names nothing is a valid
+// query that matches nothing — an empty selection with HTTP 200, and a census that
+// still reports the whole map. A regression that 404s an unknown subject, or that
+// counts the census after filtering, is what this guards.
+func TestState_UnknownSubjectIsEmptyNotAnError(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+
+	var v statemap.StateView
+	if code := getState(t, srv.URL+"/state?subject=pod:zzz", &v); code != 200 {
+		t.Fatalf("unknown subject returned %d; want 200 — a filter that matches nothing is not an error", code)
+	}
+	if len(v.Properties) != 0 {
+		t.Errorf("unknown subject returned %d properties; want an empty selection: %+v", len(v.Properties), v.Properties)
+	}
+	if v.Counts.Subjects != 2 {
+		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filtered (empty) selection", v.Counts.Subjects)
+	}
+}
