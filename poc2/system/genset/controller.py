@@ -11,6 +11,7 @@ from kafka.errors import KafkaTimeoutError
 
 from genset import build_genset
 from modbus_server import GensetModbusServer
+from opcua_server import GensetOpcuaServer
 from sensors import NUM_CYLINDERS, SensorSimulator
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,9 @@ STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 # controller (DEIF/ComAp) would expose to a vessel's PMS.
 MODBUS_HOST = os.environ.get("MODBUS_HOST", "0.0.0.0")
 MODBUS_PORT = int(os.environ.get("MODBUS_PORT", "5020"))
+# OPC-UA server mirrors the same status/setpoint alongside Modbus, for PMS
+# integrations that prefer OPC-UA's structured address space/security model.
+OPCUA_ENDPOINT = os.environ.get("OPCUA_ENDPOINT", "opc.tcp://0.0.0.0:4840/genset/server/")
 # Ramp rate is piecewise: 0-50% load ramps faster than 50-100%, so that reaching 50%
 # load takes ~50s and reaching 100% load takes ~190s total, matching typical genset
 # loading guidance (fast up to half load, slower beyond).
@@ -69,6 +73,7 @@ class GensetController:
         self.genset_id = os.environ.get("GENSET_ID", self.genset.name)
         self._sensors = SensorSimulator(seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None)
         self._modbus_server = GensetModbusServer(self, host=MODBUS_HOST, port=MODBUS_PORT)
+        self._opcua_server = GensetOpcuaServer(self, endpoint=OPCUA_ENDPOINT)
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -84,6 +89,7 @@ class GensetController:
     def start(self) -> None:
         self._producer = _make_producer()
         self._modbus_server.start()
+        self._opcua_server.start()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -91,6 +97,7 @@ class GensetController:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=STEP_INTERVAL_S * 2)
+        self._opcua_server.stop()
         if self._producer is not None:
             self._producer.flush()
             self._producer.close()
@@ -208,6 +215,7 @@ class GensetController:
                 self._last_message = message
 
             self._modbus_server.sync_from_status(self.get_status())
+            self._opcua_server.sync_from_status(self.get_status())
             self._send(KAFKA_TOPIC, key=self.genset_id, value=message)
             print(
                 f"load={message['load_ratio'] * 100:.1f}% "

@@ -37,3 +37,10 @@ def modbus_status() -> dict:
     """Read-only view of genset/battery status polled over Modbus TCP,
     alongside (not instead of) the Kafka-derived /status view."""
     return controller.get_modbus_status()
+
+
+@app.get("/opcua")
+def opcua_status() -> dict:
+    """Read-only view of genset/battery status subscribed to over OPC-UA,
+    alongside (not instead of) the Kafka-derived /status and Modbus /modbus views."""
+    return controller.get_opcua_status()

@@ -8,6 +8,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from modbus_client import ModbusPollingClient
+from opcua_client import OpcuaSubscribingClient
 from switchboard import ConsumerRequest, allocate_power, summarize_source_health
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,13 @@ STALE_TIMEOUT_S = float(os.environ.get("STALE_TIMEOUT_S", "5"))
 GENSET_MODBUS_TARGETS = os.environ.get("GENSET_MODBUS_TARGETS", "")
 BATTERY_MODBUS_TARGETS = os.environ.get("BATTERY_MODBUS_TARGETS", "")
 MODBUS_POLL_INTERVAL_S = float(os.environ.get("MODBUS_POLL_INTERVAL_S", "2"))
+# "id@opc.tcp://host:port/path/" comma lists of genset/battery OPC-UA servers
+# to subscribe to; a second, protocol-independent source of the same
+# genset/battery status/supply alongside Modbus (targets should be disjoint
+# between the two, each backing genset/battery instance uses one or the other).
+GENSET_OPCUA_TARGETS = os.environ.get("GENSET_OPCUA_TARGETS", "")
+BATTERY_OPCUA_TARGETS = os.environ.get("BATTERY_OPCUA_TARGETS", "")
+OPCUA_RECONNECT_INTERVAL_S = float(os.environ.get("OPCUA_RECONNECT_INTERVAL_S", "5"))
 
 
 def _deserialize_value(raw_value: bytes) -> dict | None:
@@ -102,6 +110,11 @@ class SwitchboardController:
             battery_targets=BATTERY_MODBUS_TARGETS,
             poll_interval_s=MODBUS_POLL_INTERVAL_S,
         )
+        self._opcua_client = OpcuaSubscribingClient(
+            genset_targets=GENSET_OPCUA_TARGETS,
+            battery_targets=BATTERY_OPCUA_TARGETS,
+            reconnect_interval_s=OPCUA_RECONNECT_INTERVAL_S,
+        )
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -111,10 +124,12 @@ class SwitchboardController:
         self._allocation_thread = threading.Thread(target=self._run, daemon=True)
         self._allocation_thread.start()
         self._modbus_client.start()
+        self._opcua_client.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         self._modbus_client.stop()
+        self._opcua_client.stop()
         if self._request_consumer is not None:
             self._request_consumer.close()
         for thread in (self._request_thread, self._allocation_thread):
@@ -173,6 +188,11 @@ class SwitchboardController:
         uses internally for genset/battery status and allocation."""
         return self._modbus_client.get_status()
 
+    def get_opcua_status(self) -> dict:
+        """Raw per-target view of the same OPC-UA subscriptions this
+        controller uses internally for genset/battery status and allocation."""
+        return self._opcua_client.get_status()
+
     def _record_error(self, message: str) -> None:
         with self._lock:
             self._errors.append(message)
@@ -184,13 +204,16 @@ class SwitchboardController:
         return time.time() - received_at > STALE_TIMEOUT_S
 
     def _get_modbus_sources(self) -> tuple[dict, dict]:
-        """Splits the Modbus client's raw per-target readings into the
+        """Splits the combined Modbus + OPC-UA per-target readings into the
         genset/battery status views used for both get_status() and the
-        allocation loop. A target is stale if the poller flagged it stale
-        (connection/read failure) or its last successful read is too old."""
+        allocation loop, so allocation doesn't care which protocol a given
+        target is reached over. A target is stale if its source flagged it
+        stale (connection/read failure, or a dead OPC-UA subscription) or its
+        last successful read is too old."""
         gensets: dict[str, dict] = {}
         batteries: dict[str, dict] = {}
-        for target_id, reading in self._modbus_client.get_status().items():
+        combined = {**self._modbus_client.get_status(), **self._opcua_client.get_status()}
+        for target_id, reading in combined.items():
             fetched_at = reading.get("fetched_at")
             stale = reading.get("stale", True) or fetched_at is None or self._is_stale(fetched_at)
             if reading.get("source_type") == "genset":
