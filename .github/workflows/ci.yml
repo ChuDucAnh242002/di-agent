@@ -297,7 +297,42 @@ jobs:
           context: ${{ matrix.context }}
           push: true
           tags: |
+            ghcr.io/chuducanh242002/${{ matrix.service }}:${{ github.sha }}
             ghcr.io/chuducanh242002/${{ matrix.service }}:latest
+
+  build-push-di-agent:
+    name: build + push di-agent image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tagged with the commit sha (immutable, used by the CD workflows to
+      # deploy exactly what was built and tested here) as well as :latest.
+      - name: Build and push di-agent
+        uses: docker/build-push-action@v6
+        with:
+          context: semantic-map
+          push: true
+          tags: |
+            ghcr.io/chuducanh242002/di-agent:${{ github.sha }}
+            ghcr.io/chuducanh242002/di-agent:latest
             ghcr.io/chuducanh242002/${{ matrix.service }}:${{ github.sha }}
           # Links the image to this repo so GITHUB_TOKEN keeps write access to the package.
           labels: |

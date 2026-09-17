@@ -12,6 +12,9 @@
 # a DaemonSet self-schedule one pod per node.
 #
 # Usage: REGISTRY=ghcr.io/myorg TAG=v1 ./agent-cloud.sh
+#   SKIP_BUILD=1 skips the build+push step entirely and deploys the image
+#   already at REGISTRY/di-agent:TAG as-is — use this in CD pipelines that
+#   built and pushed an immutable, tested image earlier in the same run.
 
 set -euo pipefail
 
@@ -35,6 +38,7 @@ BUILD_GOARCH="${BUILD_GOARCH:-amd64}"
 REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
 TAG="${TAG:-latest}"
 IMAGE="${REGISTRY}/di-agent:${TAG}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
 
 NAMESPACE="${NAMESPACE:-default}"
 KAFKA_NAMESPACE="${KAFKA_NAMESPACE:-default}"
@@ -44,20 +48,24 @@ REGIME="${REGIME:-stable}"
 command -v kubectl >/dev/null 2>&1 || { err "kubectl not found"; exit 1; }
 kubectl cluster-info >/dev/null 2>&1 || { err "kubectl cannot reach a cluster; set KUBECONFIG first"; exit 1; }
 
-# ── build ─────────────────────────────────────────────────────────────────────
-info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
-[ -d "$GO_SRC" ] || { err "Go source directory not found: $GO_SRC"; exit 1; }
-(
-    cd "$GO_SRC"
-    mkdir -p "$(dirname "$BINARY_OUT")"
-    GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
-)
-ok "Binary built"
+if [ "$SKIP_BUILD" = "1" ]; then
+    info "SKIP_BUILD=1: deploying pre-built image ${IMAGE} without rebuilding"
+else
+    # ── build ─────────────────────────────────────────────────────────────────
+    info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
+    [ -d "$GO_SRC" ] || { err "Go source directory not found: $GO_SRC"; exit 1; }
+    (
+        cd "$GO_SRC"
+        mkdir -p "$(dirname "$BINARY_OUT")"
+        GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
+    )
+    ok "Binary built"
 
-# ── build + push image ────────────────────────────────────────────────────────
-info "Building and pushing ${IMAGE} ..."
-( cd "$SEM_DIR" && docker build -t "$IMAGE" . && docker push "$IMAGE" )
-ok "Image pushed: $IMAGE"
+    # ── build + push image ────────────────────────────────────────────────────
+    info "Building and pushing ${IMAGE} ..."
+    ( cd "$SEM_DIR" && docker build -t "$IMAGE" . && docker push "$IMAGE" )
+    ok "Image pushed: $IMAGE"
+fi
 
 # ── deploy ────────────────────────────────────────────────────────────────────
 info "Applying di-agent DaemonSet + headless Service to namespace $NAMESPACE ..."

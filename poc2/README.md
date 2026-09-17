@@ -79,6 +79,71 @@ See `cloud/aks/variables.tf` and `cloud/eks/variables.tf` for what's
 configurable (region/location, node count, VM/instance size); override any
 of them with `TF_VAR_<name>` before running `provision-aks`/`provision-eks`.
 
+## CI/CD for AKS and EKS
+
+Manually running `provision-aks`/`provision-eks` is fine for exploration,
+but a repeatable deployment target should go through a pipeline rather than
+an operator's laptop: it removes "works on my machine" drift, gives every
+change a plan/apply audit trail, and lets you gate production behind
+review instead of `terraform apply -auto-approve` from wherever you happen
+to be. This repo has three GitHub Actions workflows:
+
+- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) — build/vet/test
+  on every push and PR, plus (on `main`) building and pushing every
+  chart-managed image *and* the `di-agent` image to `ghcr.io`, tagged with
+  both `:latest` and the immutable commit sha.
+- [`.github/workflows/cd-aks.yml`](../.github/workflows/cd-aks.yml) /
+  [`cd-eks.yml`](../.github/workflows/cd-eks.yml) — `terraform init/plan/apply`
+  the matching `cloud/aks` or `cloud/eks` module against **remote** state,
+  fetch the kubeconfig, `helm upgrade --install` the chart, deploy the
+  `di-agent` DaemonSet with `SKIP_BUILD=1` (using the exact image sha CI just
+  built — no rebuilding at deploy time), register the peer mesh, and run a
+  smoke test against `/cost`.
+
+The two deployment modes map directly onto the CD/continuous-deployment
+distinction:
+
+- **Continuous deployment to `staging`**: `cd-aks.yml`/`cd-eks.yml` trigger
+  automatically via `workflow_run` whenever `ci.yml` succeeds on `main` —
+  no human in the loop.
+- **Continuous delivery to `production`**: the same workflows can be run
+  manually (`workflow_dispatch`) against the `production` GitHub
+  Environment, which should have required reviewers configured in repo
+  settings, so a person approves before anything touches the production
+  cluster. The image deployed is always one that already passed CI.
+
+To wire this up in a real GitHub repo:
+
+1. **Create two GitHub Environments**, `staging` and `production`. Add a
+   required-reviewers rule to `production` (Settings → Environments).
+2. **Remote Terraform state** (both `cloud/aks/providers.tf` and
+   `cloud/eks/providers.tf` declare empty backend blocks configured via
+   `-backend-config` at `terraform init` time, so state never lives only on
+   an ephemeral runner):
+   - AKS: an Azure Storage account + container to hold `.tfstate` blobs.
+   - EKS: an S3 bucket (versioned) + a DynamoDB table for state locking.
+3. **Cloud auth via OIDC, not static keys** (least-privilege, no secrets to
+   rotate/leak):
+   - Azure: register an app/federated credential trusting
+     `token.actions.githubusercontent.com` for this repo, grant it
+     Contributor on the target subscription/resource group, and set
+     `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as repo
+     (or per-environment) secrets.
+   - AWS: create an IAM role with a trust policy for GitHub's OIDC
+     provider, scoped to this repo, with permissions to manage EKS/VPC/EC2;
+     set `AWS_ROLE_TO_ASSUME` as a secret.
+4. **Telemetry secrets** used by the Helm chart —
+   `INFLUXDB_ADMIN_USER/PASSWORD/TOKEN`, `GRAFANA_ADMIN_USER/PASSWORD` — as
+   GitHub secrets (per-environment, so staging and production don't share
+   credentials).
+5. **State backend secrets** — `TFSTATE_RESOURCE_GROUP`,
+   `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER` (AKS) or `TFSTATE_BUCKET`,
+   `TFSTATE_DYNAMODB_TABLE`, `TFSTATE_REGION` (EKS).
+
+With that in place, merging to `main` automatically ships a new build to
+staging; promoting to production is a manual "Run workflow" click that
+still requires an approver.
+
 ## What this PoC deploys
 
 The deployment consists of two separate layers:
