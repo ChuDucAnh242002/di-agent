@@ -101,6 +101,29 @@ shorePower:
   nodeSelector: {}
   resources: {}
 
+pontosBridge:
+  # Disabled by default: bridges telemetry from the PONTOS datahub
+  # (https://pontos.ri.se) MQTT broker into the local Kafka bus, so it can be
+  # consumed like any other telemetry source (see telemetry-writer,
+  # playground). Enable once subscribeTopic and existingSecret are set.
+  enabled: false
+  image:
+    repository: pontos-bridge
+    tag: ""
+  host: pontos.ri.se
+  port: 443
+  path: /mqtt
+  username: __token__
+  # MQTT topic filter to subscribe to, e.g. one vessel's IMO number.
+  subscribeTopic: "PONTOS_EGRESS/imo_8602713/#"
+  kafkaTopic: pontos.telemetry
+  reconnectBackoffSeconds: 5
+  # Pre-create this Secret in the release namespace with a "token" key
+  # (the PONTOS HUB API token, sent as the MQTT password).
+  existingSecret: pontos-credentials
+  nodeSelector: {}
+  resources: {}
+
 auxload:
   image:
     repository: auxload
