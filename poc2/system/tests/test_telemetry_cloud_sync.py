@@ -56,3 +56,26 @@ def test_make_eventhub_producer_missing_creds(sync_modules, monkeypatch):
 
     with pytest.raises(RuntimeError, match="EVENTHUB_NAMESPACE_FQDN and EVENTHUB_CONNECTION_STRING"):
         sync_mod._make_eventhub_producer()
+
+
+def test_send_to_kinesis(sync_modules, monkeypatch):
+    sync_mod = sync_modules["sync"]
+    client = MagicMock()
+    monkeypatch.setattr(sync_mod, "KINESIS_STREAM_MAP", {"genset.telemetry": "genset-stream"})
+
+    record = Record(topic="genset.telemetry", key=b"g1", value=b'{"power": 100}')
+
+    assert sync_mod._send_to_kinesis(client, record) == "genset-stream"
+    client.put_record.assert_called_once_with(StreamName="genset-stream", Data=record.value, PartitionKey="g1")
+
+
+def test_send_to_iotcore(sync_modules, monkeypatch):
+    sync_mod = sync_modules["sync"]
+    client = MagicMock()
+    monkeypatch.setattr(sync_mod, "IOTCORE_TOPIC_MAP", {"battery.telemetry": "vessels/a/battery"})
+    monkeypatch.setattr(sync_mod, "IOTCORE_QOS", 1)
+
+    record = Record(topic="battery.telemetry", key=b"b1", value=b'{"charge": 75}')
+
+    assert sync_mod._send_to_iotcore(client, record) == "vessels/a/battery"
+    client.publish.assert_called_once_with(topic="vessels/a/battery", qos=1, payload=record.value)

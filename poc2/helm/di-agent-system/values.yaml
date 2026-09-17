@@ -187,9 +187,10 @@ telemetryCloudSync:
   kafkaGroupId: telemetry-cloud-sync
   logEveryNMessages: 50
   retryBackoffSeconds: 5
-  # "eventhub" mirrors to Azure Event Hubs over its Kafka-compatible
-  # endpoint. "iothub" sends each service's telemetry as device-to-cloud
-  # messages through a per-service Azure IoT Hub device identity.
+  # Supported targets: "eventhub", "iothub", "kinesis", and "iotcore".
+  # AWS targets use the standard AWS credential chain. Configure a Kubernetes
+  # workload identity or set aws.existingSecret with access-key-id and
+  # secret-access-key values.
   target: iothub
   eventHub:
     # e.g. my-namespace.servicebus.windows.net
@@ -214,6 +215,23 @@ telemetryCloudSync:
       auxload: auxload-connection-string
       shorePower: shore-power-connection-string
       switchboard: switchboard-connection-string
+  aws:
+    # AWS region used by Kinesis and IoT Core.
+    region: us-east-1
+    # Optional Secret with access-key-id, secret-access-key, and optionally
+    # session-token keys. Prefer a Kubernetes workload identity where possible.
+    existingSecret: ""
+  kinesis:
+    # Optional JSON mapping of local Kafka topic -> Kinesis stream name, e.g.
+    # '{"genset.telemetry":"genset-telemetry"}'. Defaults to local topic name.
+    streamMap: "{}"
+  iotCore:
+    # AWS IoT data-plane endpoint, e.g. https://abc123-ats.iot.us-east-1.amazonaws.com.
+    endpointUrl: ""
+    # Optional JSON mapping of local Kafka topic -> MQTT topic. Defaults to the
+    # local topic name.
+    topicMap: "{}"
+    qos: 0
   nodeSelector: {}
   resources: {}
 

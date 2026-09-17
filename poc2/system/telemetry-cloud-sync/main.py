@@ -17,8 +17,9 @@ KAFKA_TOPICS = [
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-cloud-sync")
 
 # "eventhub" (default) mirrors to Azure Event Hubs over its Kafka-compatible
-# endpoint. "iothub" sends each topic's messages as device-to-cloud
-# telemetry through a per-service Azure IoT Hub device identity.
+# endpoint. "iothub" sends each topic's messages as device-to-cloud telemetry
+# through a per-service Azure IoT Hub device identity. "kinesis" and
+# "iotcore" use the AWS SDK credential provider chain.
 SYNC_TARGET = os.environ.get("SYNC_TARGET", "eventhub").strip().lower()
 
 # --- Event Hubs sink: a second Kafka producer pointed at the Kafka-compatible
@@ -122,6 +123,46 @@ def _send_to_iothub(clients: dict, record) -> str:
     return record.topic
 
 
+# --- AWS sinks: credentials are resolved by boto3, allowing either Kubernetes
+# workload identity or the standard AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+# environment variables. ---
+
+AWS_REGION = os.environ.get("AWS_REGION", "")
+KINESIS_STREAM_MAP = json.loads(os.environ.get("KINESIS_STREAM_MAP", "{}"))
+IOTCORE_ENDPOINT_URL = os.environ.get("IOTCORE_ENDPOINT_URL", "")
+IOTCORE_TOPIC_MAP = json.loads(os.environ.get("IOTCORE_TOPIC_MAP", "{}"))
+IOTCORE_QOS = int(os.environ.get("IOTCORE_QOS", "0"))
+
+
+def _make_kinesis_client():
+    if not AWS_REGION:
+        raise RuntimeError("AWS_REGION is required for Kinesis")
+    import boto3
+
+    return boto3.client("kinesis", region_name=AWS_REGION)
+
+
+def _send_to_kinesis(client, record) -> str:
+    stream_name = KINESIS_STREAM_MAP.get(record.topic, record.topic)
+    partition_key = record.key.decode("utf-8", errors="replace") if record.key else record.topic
+    client.put_record(StreamName=stream_name, Data=record.value, PartitionKey=partition_key)
+    return stream_name
+
+
+def _make_iotcore_client():
+    if not AWS_REGION or not IOTCORE_ENDPOINT_URL:
+        raise RuntimeError("AWS_REGION and IOTCORE_ENDPOINT_URL are required for AWS IoT Core")
+    import boto3
+
+    return boto3.client("iot-data", region_name=AWS_REGION, endpoint_url=IOTCORE_ENDPOINT_URL)
+
+
+def _send_to_iotcore(client, record) -> str:
+    topic = IOTCORE_TOPIC_MAP.get(record.topic, record.topic)
+    client.publish(topic=topic, qos=IOTCORE_QOS, payload=record.value)
+    return topic
+
+
 def main() -> None:
     consumer = _make_consumer()
 
@@ -133,8 +174,18 @@ def main() -> None:
         sinks = _make_eventhub_producer()
         send = lambda record: _send_to_eventhub(sinks, record)  # noqa: E731
         print(f"Mirroring {KAFKA_TOPICS} from {KAFKA_BROKERS} to Event Hubs namespace {EVENTHUB_NAMESPACE_FQDN}")
+    elif SYNC_TARGET == "kinesis":
+        sinks = _make_kinesis_client()
+        send = lambda record: _send_to_kinesis(sinks, record)  # noqa: E731
+        print(f"Mirroring {KAFKA_TOPICS} from {KAFKA_BROKERS} to AWS Kinesis in {AWS_REGION}")
+    elif SYNC_TARGET == "iotcore":
+        sinks = _make_iotcore_client()
+        send = lambda record: _send_to_iotcore(sinks, record)  # noqa: E731
+        print(f"Mirroring {KAFKA_TOPICS} from {KAFKA_BROKERS} to AWS IoT Core at {IOTCORE_ENDPOINT_URL}")
     else:
-        raise RuntimeError(f"Unknown SYNC_TARGET {SYNC_TARGET!r}; expected 'eventhub' or 'iothub'")
+        raise RuntimeError(
+            f"Unknown SYNC_TARGET {SYNC_TARGET!r}; expected 'eventhub', 'iothub', 'kinesis', or 'iotcore'"
+        )
 
     stats = {"seen": 0, "synced": 0, "failed": 0}
 
@@ -170,7 +221,7 @@ def main() -> None:
         if SYNC_TARGET == "iothub":
             for client in sinks.values():
                 client.shutdown()
-        else:
+        elif SYNC_TARGET == "eventhub":
             sinks.close()
         consumer.close()
 
