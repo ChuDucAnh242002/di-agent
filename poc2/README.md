@@ -29,6 +29,56 @@ The default topology is simple and intentional:
 
 The first VM in the list is the control plane; all remaining VMs are treated as workers.
 
+## Deploying on AKS or EKS instead of libvirt
+
+The Helm chart (`helm/di-agent-system`) and the `di-agent` peer mesh don't
+depend on libvirt at all — they only need a working `kubectl`/`KUBECONFIG`
+against *some* Kubernetes cluster. `cloud/aks` and `cloud/eks` are Terraform
+modules that stand up a managed cluster as a drop-in replacement for
+`main.tf` + `scripts/02-k8s.sh`:
+
+```bash
+# Azure (requires `az login`)
+make provision-aks
+export KUBECONFIG=$HOME/.kube/config-poc2-aks
+
+# or AWS (requires `aws configure` / `aws sso login`)
+make provision-eks
+export KUBECONFIG=$HOME/.kube/config-poc2-eks
+
+# then the usual app-layer steps, unchanged:
+make images helm-install REGISTRY=ghcr.io/your-org TAG=v1
+make agent-cloud peers-cloud REGISTRY=ghcr.io/your-org TAG=v1
+make demo-cloud
+
+# teardown:
+make teardown-aks   # or teardown-eks
+```
+
+The differences from the local flow are confined to the infrastructure and
+agent-placement layers:
+
+- `provision-aks` / `provision-eks` replace `provision` + `k8s`: they create
+  the cluster directly (AKS/EKS) instead of libvirt VMs + kubeadm, and fetch
+  its kubeconfig to `~/.kube/config-poc2-aks` or `-eks`.
+- `agent-cloud` replaces `agent`: since managed clusters don't have a fixed,
+  known set of node hostnames, di-agent runs as a `DaemonSet` (one pod per
+  node, image pulled from `REGISTRY` rather than imported into containerd)
+  instead of one `Deployment` per VM pinned by `nodeSelector`.
+- `peers-cloud` / `demo-cloud` replace `peers` / `demo`: pod IPs on AKS/EKS
+  live inside the cluster's private VNet/VPC and aren't reachable from your
+  laptop, so these scripts use `kubectl port-forward` to reach each agent
+  pod, while still registering each other's real in-cluster pod IP as the
+  peer URL (agent-to-agent traffic stays on the cluster network).
+- `helm-install` and everything under `helm/di-agent-system` (Kafka,
+  InfluxDB, Grafana, workload simulators, telemetry) is unchanged — it only
+  needs `KUBECONFIG` pointed at the right cluster and the same
+  `influxdb-credentials`/`grafana-credentials` secrets described below.
+
+See `cloud/aks/variables.tf` and `cloud/eks/variables.tf` for what's
+configurable (region/location, node count, VM/instance size); override any
+of them with `TF_VAR_<name>` before running `provision-aks`/`provision-eks`.
+
 ## What this PoC deploys
 
 The deployment consists of two separate layers:
@@ -150,9 +200,11 @@ The files that matter for understanding or running the PoC are:
 - `main.tf`: libvirt VM definition and disk layout
 - `variables.tf`: VM and image configuration
 - `providers.tf`: libvirt provider setup
+- `cloud/aks`, `cloud/eks`: Terraform modules for managed-cluster alternatives to the above (see "Deploying on AKS or EKS" above)
 - `scripts/01-provision.sh`: creates the VM fleet
 - `scripts/02-k8s.sh`: bootstraps the cluster
-- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods
+- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods (per-VM, local lab)
+- `scripts/agent-cloud.sh`, `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: DaemonSet-based di-agent deployment, peer registration, and demo for AKS/EKS
 - `scripts/04-peers.sh`: registers peers and trust values
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images

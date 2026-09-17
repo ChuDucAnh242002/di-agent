@@ -75,6 +75,34 @@ agent:
 peers:
 	@bash $(SCRIPTS)/04-peers.sh $(VMS)
 
+# ── AKS / EKS: alternative cluster backends to the local libvirt lab ─────────
+# Both provision a managed cluster via Terraform (cloud/aks, cloud/eks) and
+# fetch its kubeconfig; from there the same `make images helm-install` steps
+# apply unchanged (just point KUBECONFIG at the fetched file). di-agent is
+# deployed as a DaemonSet (agent-cloud) instead of one Deployment per VM,
+# since managed clusters don't expose a fixed, known set of node hostnames
+# and images must be pulled from a registry rather than imported directly.
+provision-aks:
+	@bash $(SCRIPTS)/provision-aks.sh
+
+teardown-aks:
+	@bash $(SCRIPTS)/teardown-aks.sh
+
+provision-eks:
+	@bash $(SCRIPTS)/provision-eks.sh
+
+teardown-eks:
+	@bash $(SCRIPTS)/teardown-eks.sh
+
+agent-cloud:
+	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/agent-cloud.sh
+
+peers-cloud:
+	@bash $(SCRIPTS)/peers-cloud.sh
+
+demo-cloud:
+	@bash $(SCRIPTS)/coordinator-cloud.sh
+
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
 
@@ -151,7 +179,8 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
-	workload-heavy workload-light workload-stop teardown status list-vms get-ip-% bdd
+	workload-heavy workload-light workload-stop teardown status list-vms get-ip-% bdd \
+	provision-aks teardown-aks provision-eks teardown-eks agent-cloud peers-cloud demo-cloud
 
 # Help target
 help:
@@ -187,3 +216,12 @@ help:
 	@echo ""
 	@echo "To override the registry/tag used by 'images' and 'helm-install':"
 	@echo "  make images helm-install REGISTRY=ghcr.io/myorg TAG=v1"
+	@echo ""
+	@echo "AKS / EKS (managed cluster alternatives to the local libvirt lab):"
+	@echo "  provision-aks / teardown-aks - terraform apply/destroy cloud/aks, fetch kubeconfig"
+	@echo "  provision-eks / teardown-eks - terraform apply/destroy cloud/eks, fetch kubeconfig"
+	@echo "  agent-cloud  - build+push di-agent and deploy it as a DaemonSet (needs REGISTRY)"
+	@echo "  peers-cloud  - register the full di-agent peer mesh via kubectl port-forward"
+	@echo "  demo-cloud   - run the trust-drain coordinator demo against the current KUBECONFIG cluster"
+	@echo "  After provision-aks/provision-eks: export KUBECONFIG to the printed path, then run"
+	@echo "  'make images helm-install agent-cloud peers-cloud demo-cloud' as usual."
