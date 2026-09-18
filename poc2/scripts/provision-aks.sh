@@ -21,16 +21,53 @@ err()  { echo "${RED}[aks] $*${RESET}" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="$(dirname "$SCRIPT_DIR")/cloud/aks"
 LOCAL_KUBECONFIG="${LOCAL_KUBECONFIG:-$HOME/.kube/config-poc2-aks}"
+TF_BACKEND_MODE="${TF_BACKEND_MODE:-local}"
+TFSTATE_RESOURCE_GROUP="${TFSTATE_RESOURCE_GROUP:-}"
+TFSTATE_STORAGE_ACCOUNT="${TFSTATE_STORAGE_ACCOUNT:-}"
+TFSTATE_CONTAINER="${TFSTATE_CONTAINER:-}"
+TFSTATE_KEY="${TFSTATE_KEY:-poc2-aks.tfstate}"
+TERRAFORM_DIR="$TF_DIR"
+LOCAL_TF_DIR=""
 
 command -v az >/dev/null 2>&1 || { err "az CLI not found. See https://learn.microsoft.com/cli/azure/install-azure-cli"; exit 1; }
 command -v terraform >/dev/null 2>&1 || { err "terraform not found"; exit 1; }
 az account show >/dev/null 2>&1 || { err "Not logged in to Azure. Run: az login"; exit 1; }
 
-info "Running terraform apply in $TF_DIR ..."
-(cd "$TF_DIR" && terraform init -input=false && terraform apply -auto-approve)
+info "Initializing Terraform with '$TF_BACKEND_MODE' state ..."
+case "$TF_BACKEND_MODE" in
+	local)
+		LOCAL_TF_DIR=$(mktemp -d)
+		trap 'rm -rf "$LOCAL_TF_DIR"' EXIT
+		cp "$TF_DIR"/*.tf "$LOCAL_TF_DIR"/
+		# The checked-in module declares an Azure Storage backend for CI.
+		# Local mode uses the same configuration with Terraform's local backend.
+		sed -i 's|backend "azurerm" {}|backend "local" { path = "'"$TF_DIR"'/terraform.tfstate" }|' "$LOCAL_TF_DIR/providers.tf"
+		TERRAFORM_DIR="$LOCAL_TF_DIR"
+		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false)
+		;;
+	remote)
+		if [ -z "$TFSTATE_RESOURCE_GROUP" ] || [ -z "$TFSTATE_STORAGE_ACCOUNT" ] || [ -z "$TFSTATE_CONTAINER" ]; then
+			err "Remote state requires TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT, and TFSTATE_CONTAINER"
+			exit 1
+		fi
+		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false \
+			-backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
+			-backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
+			-backend-config="container_name=$TFSTATE_CONTAINER" \
+			-backend-config="key=$TFSTATE_KEY" \
+			-backend-config="use_azuread_auth=true")
+		;;
+	*)
+		err "TF_BACKEND_MODE must be 'local' or 'remote'"
+		exit 1
+		;;
+esac
 
-RG=$(cd "$TF_DIR" && terraform output -raw resource_group_name)
-CLUSTER=$(cd "$TF_DIR" && terraform output -raw cluster_name)
+info "Running terraform apply in $TF_DIR ..."
+(cd "$TERRAFORM_DIR" && terraform apply -auto-approve)
+
+RG=$(cd "$TERRAFORM_DIR" && terraform output -raw resource_group_name)
+CLUSTER=$(cd "$TERRAFORM_DIR" && terraform output -raw cluster_name)
 ok "AKS cluster ready: $CLUSTER (resource group $RG)"
 
 info "Fetching kubeconfig ..."

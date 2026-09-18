@@ -10,7 +10,7 @@ data "aws_availability_zones" "available" {
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 5.8"
+  version = "~> 6.7.2"
 
   name = "${var.cluster_name}-vpc"
   cidr = var.vpc_cidr
@@ -33,17 +33,28 @@ module "vpc" {
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.0"
+  version = "~> 21.25.0"
 
-  cluster_name    = var.cluster_name
-  cluster_version = var.kubernetes_version
+  name               = var.cluster_name
+  kubernetes_version = var.kubernetes_version
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
   # PoC convenience: keep the API endpoint public. Restrict via
   # cluster_endpoint_public_access_cidrs in production.
-  cluster_endpoint_public_access = true
+  endpoint_public_access = true
+
+  security_group_additional_rules = {
+    cluster_egress = {
+      description = "Allow EKS control-plane outbound traffic"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "egress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
 
   eks_managed_node_groups = {
     default = {

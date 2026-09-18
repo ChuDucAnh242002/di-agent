@@ -22,16 +22,57 @@ err()  { echo "${RED}[eks] $*${RESET}" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="$(dirname "$SCRIPT_DIR")/cloud/eks"
 LOCAL_KUBECONFIG="${LOCAL_KUBECONFIG:-$HOME/.kube/config-poc2-eks}"
+TF_BACKEND_MODE="${TF_BACKEND_MODE:-local}"
+TFSTATE_BUCKET="${TFSTATE_BUCKET:-}"
+TFSTATE_KEY="${TFSTATE_KEY:-poc2-eks.tfstate}"
+TFSTATE_REGION="${TFSTATE_REGION:-${TF_VAR_region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}}"
+TFSTATE_DYNAMODB_TABLE="${TFSTATE_DYNAMODB_TABLE:-}"
+TERRAFORM_DIR="$TF_DIR"
+LOCAL_TF_DIR=""
+BACKEND_ARGS=()
 
 command -v aws >/dev/null 2>&1 || { err "aws CLI not found"; exit 1; }
 command -v terraform >/dev/null 2>&1 || { err "terraform not found"; exit 1; }
 aws sts get-caller-identity >/dev/null 2>&1 || { err "Not authenticated with AWS. Run: aws configure (or aws sso login)"; exit 1; }
 
-info "Running terraform apply in $TF_DIR ..."
-(cd "$TF_DIR" && terraform init -input=false && terraform apply -auto-approve)
+info "Initializing Terraform with '$TF_BACKEND_MODE' state ..."
+case "$TF_BACKEND_MODE" in
+	local)
+		LOCAL_TF_DIR=$(mktemp -d)
+		trap 'rm -rf "$LOCAL_TF_DIR"' EXIT
+		cp "$TF_DIR"/*.tf "$LOCAL_TF_DIR"/
+		# The checked-in module declares an S3 backend for CI.
+		# Local mode uses the same configuration with Terraform's local backend.
+		sed -i 's|backend "s3" {}|backend "local" { path = "'"$TF_DIR"'/terraform.tfstate" }|' "$LOCAL_TF_DIR/providers.tf"
+		TERRAFORM_DIR="$LOCAL_TF_DIR"
+		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false)
+		;;
+	remote)
+		if [ -z "$TFSTATE_BUCKET" ] || [ -z "$TFSTATE_KEY" ] || [ -z "$TFSTATE_REGION" ]; then
+			err "Remote state requires TFSTATE_BUCKET, TFSTATE_KEY, and TFSTATE_REGION"
+			exit 1
+		fi
+		BACKEND_ARGS=(
+			"-backend-config=bucket=$TFSTATE_BUCKET"
+			"-backend-config=key=$TFSTATE_KEY"
+			"-backend-config=region=$TFSTATE_REGION"
+		)
+		if [ -n "$TFSTATE_DYNAMODB_TABLE" ]; then
+			BACKEND_ARGS+=("-backend-config=dynamodb_table=$TFSTATE_DYNAMODB_TABLE")
+		fi
+		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false "${BACKEND_ARGS[@]}")
+		;;
+	*)
+		err "TF_BACKEND_MODE must be 'local' or 'remote'"
+		exit 1
+		;;
+esac
 
-CLUSTER=$(cd "$TF_DIR" && terraform output -raw cluster_name)
-REGION=$(cd "$TF_DIR" && terraform output -raw region)
+info "Running terraform apply in $TERRAFORM_DIR ..."
+(cd "$TERRAFORM_DIR" && terraform apply -auto-approve)
+
+CLUSTER=$(cd "$TERRAFORM_DIR" && terraform output -raw cluster_name)
+REGION=$(cd "$TERRAFORM_DIR" && terraform output -raw region)
 ok "EKS cluster ready: $CLUSTER ($REGION)"
 
 info "Fetching kubeconfig ..."

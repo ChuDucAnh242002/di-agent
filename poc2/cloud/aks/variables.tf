@@ -1,6 +1,6 @@
 variable "location" {
   description = "Azure region to deploy into"
-  default     = "eastus"
+  default     = "Sweden Central"
 }
 
 variable "resource_group_name" {
@@ -25,7 +25,7 @@ variable "node_count" {
 
 variable "vm_size" {
   description = "VM size for the default node pool"
-  default     = "Standard_B2s"
+  default     = "standard_dc2ads_v6"
 }
 
 variable "acr_name" {

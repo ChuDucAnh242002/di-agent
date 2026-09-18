@@ -20,6 +20,10 @@ resource "azurerm_kubernetes_cluster" "this" {
     vm_size    = var.vm_size
   }
 
+  node_provisioning_profile {
+    mode = "Manual"
+  }
+
   # SystemAssigned identity avoids managing a service-principal secret.
   identity {
     type = "SystemAssigned"

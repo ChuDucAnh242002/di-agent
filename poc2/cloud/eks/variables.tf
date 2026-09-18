@@ -1,6 +1,6 @@
 variable "region" {
   description = "AWS region to deploy into"
-  default     = "us-east-1"
+  default     = "eu-north-1"
 }
 
 variable "cluster_name" {
@@ -10,7 +10,7 @@ variable "cluster_name" {
 
 variable "kubernetes_version" {
   description = "Kubernetes version for the EKS control plane"
-  default     = "1.30"
+  default     = "1.36"
 }
 
 variable "node_count" {

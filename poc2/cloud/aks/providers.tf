@@ -2,7 +2,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.100"
+      version = "~> 5.6.0"
     }
   }
 
@@ -14,9 +14,8 @@ terraform {
   backend "azurerm" {}
 }
 
-# use_oidc lets this run under GitHub Actions' federated credentials
-# (azure/login with no client secret) as well as local `az login` sessions.
+# GitHub Actions enables OIDC through ARM_USE_OIDC=true; leaving this unset
+# here also keeps local `az login` authentication working.
 provider "azurerm" {
   features {}
-  use_oidc = true
 }

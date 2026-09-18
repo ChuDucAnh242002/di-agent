@@ -38,13 +38,27 @@ modules that stand up a managed cluster as a drop-in replacement for
 `main.tf` + `scripts/02-k8s.sh`:
 
 ```bash
-# Azure (requires `az login`)
+# Azure local development (requires `az login`; uses local Terraform state)
 make provision-aks
 export KUBECONFIG=$HOME/.kube/config-poc2-aks
+
+# Azure shared/CI state (requires an existing Storage Account + container)
+TF_BACKEND_MODE=remote \
+TFSTATE_RESOURCE_GROUP=terraform-state-rg \
+TFSTATE_STORAGE_ACCOUNT=diagenttfstate \
+TFSTATE_CONTAINER=tfstate \
+make provision-aks
 
 # or AWS (requires `aws configure` / `aws sso login`)
 make provision-eks
 export KUBECONFIG=$HOME/.kube/config-poc2-eks
+
+# AWS shared/CI state (requires an existing S3 bucket)
+TF_BACKEND_MODE=remote \
+TFSTATE_BUCKET=diagent-terraform-state \
+TFSTATE_KEY=poc2/eks.tfstate \
+TFSTATE_REGION=eu-north-1 \
+make provision-eks
 
 # then the usual app-layer steps, unchanged:
 make images helm-install REGISTRY=ghcr.io/your-org TAG=v1
@@ -78,6 +92,19 @@ agent-placement layers:
 See `cloud/aks/variables.tf` and `cloud/eks/variables.tf` for what's
 configurable (region/location, node count, VM/instance size); override any
 of them with `TF_VAR_<name>` before running `provision-aks`/`provision-eks`.
+
+`make provision-aks` defaults to `TF_BACKEND_MODE=local` so it works after
+`az login` without requiring a pre-created Terraform state account. In local
+mode the script runs Terraform from a temporary copy of the module and stores
+the state at `cloud/aks/terraform.tfstate`. Set `TF_BACKEND_MODE=remote` and
+provide `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, and
+`TFSTATE_CONTAINER` when the state must be shared by teammates or CI.
+
+`make provision-eks` also defaults to `TF_BACKEND_MODE=local` and stores state
+at `cloud/eks/terraform.tfstate`. For shared or CI state, set
+`TF_BACKEND_MODE=remote`, `TFSTATE_BUCKET`, `TFSTATE_KEY`, and
+`TFSTATE_REGION`. Optionally set `TFSTATE_DYNAMODB_TABLE` to enable the
+legacy DynamoDB locking configuration used by the S3 backend.
 
 ## CI/CD for AKS and EKS
 
