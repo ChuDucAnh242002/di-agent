@@ -43,25 +43,36 @@ module "eks" {
 
   # PoC convenience: keep the API endpoint public. Restrict via
   # cluster_endpoint_public_access_cidrs in production.
-  endpoint_public_access = true
+  endpoint_public_access       = true
+  endpoint_private_access      = false
+  endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
-  security_group_additional_rules = {
-    cluster_egress = {
-      description = "Allow EKS control-plane outbound traffic"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "egress"
-      cidr_blocks = ["0.0.0.0/0"]
+  # Let our own IAM caller manage the cluster via kubectl (module v21 no
+  # longer grants this by default), which is needed to debug NodeCreationFailure.
+  enable_cluster_creator_admin_permissions = true
+
+  # vpc-cni must be up before nodes try to join, otherwise the managed node
+  # group can report "NodeCreationFailure: Unhealthy nodes" because kubelet
+  # never reaches Ready without pod networking. before_compute=true forces
+  # the addon to be reconciled ahead of (and independent of) the node group,
+  # avoiding the race that happens when everything is created in one apply.
+  addons = {
+    vpc-cni = {
+      before_compute = true
     }
+    kube-proxy = {}
+    coredns    = {}
   }
 
   eks_managed_node_groups = {
     default = {
-      min_size       = var.node_count
-      max_size       = var.node_count + 2
-      desired_size   = var.node_count
-      instance_types = [var.instance_type]
+      min_size                   = var.node_count
+      max_size                   = var.node_count + 2
+      desired_size               = var.node_count
+      instance_types             = [var.instance_type]
+      ami_type                   = "AL2023_x86_64_STANDARD"
+      create_access_entry        = true
+      iam_role_attach_cni_policy = true
     }
   }
 }
