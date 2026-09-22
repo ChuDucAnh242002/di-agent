@@ -7,7 +7,7 @@ import time
 import numpy as np
 import requests
 from kafka import KafkaProducer
-from kafka.errors import KafkaTimeoutError
+from kafka.errors import KafkaTimeoutError, NoBrokersAvailable
 
 from shore_power import build_shore_power_system
 
@@ -32,7 +32,7 @@ def _make_producer() -> KafkaProducer:
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8"),
             )
-        except KafkaTimeoutError:
+        except (KafkaTimeoutError, NoBrokersAvailable):
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 

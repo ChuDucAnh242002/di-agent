@@ -5,7 +5,7 @@ import threading
 import time
 
 from kafka import KafkaConsumer, KafkaProducer
-from kafka.errors import KafkaTimeoutError
+from kafka.errors import KafkaTimeoutError, NoBrokersAvailable
 
 from modbus_client import ModbusPollingClient
 from opcua_client import OpcuaSubscribingClient
@@ -60,7 +60,7 @@ def _make_producer() -> KafkaProducer:
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8"),
             )
-        except KafkaTimeoutError:
+        except (KafkaTimeoutError, NoBrokersAvailable):
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 
@@ -75,7 +75,7 @@ def _make_consumer(*topics: str) -> KafkaConsumer:
                 auto_offset_reset="latest",
                 group_id=None,
             )
-        except KafkaTimeoutError:
+        except (KafkaTimeoutError, NoBrokersAvailable):
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 
