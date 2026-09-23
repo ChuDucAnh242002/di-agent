@@ -19,6 +19,8 @@ name: CD (AKS)
 #   secrets.TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT, TFSTATE_CONTAINER
 #   secrets.INFLUXDB_ADMIN_USER, INFLUXDB_ADMIN_PASSWORD, INFLUXDB_ADMIN_TOKEN
 #   secrets.GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
+#   secrets.GHCR_USERNAME, GHCR_TOKEN, GHCR_EMAIL (PAT with read:packages, for
+#   the cluster to pull private ghcr.io images)
 #   environments "staging" and "production" created in repo settings, with
 #   "production" requiring reviewer approval.
 
@@ -124,6 +126,17 @@ jobs:
             --from-literal=admin-user="${{ secrets.GRAFANA_ADMIN_USER }}" \
             --from-literal=admin-password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Ensure GHCR image pull secret
+        run: |
+          kubectl -n default create secret docker-registry ghcr-secret \
+            --docker-server=ghcr.io \
+            --docker-username="${{ secrets.GHCR_USERNAME }}" \
+            --docker-password="${{ secrets.GHCR_TOKEN }}" \
+            --docker-email="${{ secrets.GHCR_EMAIL }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n default patch serviceaccount default \
+            -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}'
 
       - name: Helm upgrade --install
         run: |

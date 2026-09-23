@@ -166,6 +166,24 @@ To wire this up in a real GitHub repo:
 5. **State backend secrets** — `TFSTATE_RESOURCE_GROUP`,
    `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER` (AKS) or `TFSTATE_BUCKET`,
    `TFSTATE_DYNAMODB_TABLE`, `TFSTATE_REGION` (EKS).
+6. **GHCR image pull secret** — the images built by CI are pushed to a
+   private `ghcr.io/chuducanh242002` repository, so the cluster needs
+   credentials to pull them. Set `GHCR_USERNAME` (your GitHub username),
+   `GHCR_TOKEN` (a PAT, classic or fine-grained, with `read:packages`
+   scope), and `GHCR_EMAIL` as GitHub secrets. The CD workflows use these to
+   create a `ghcr-secret` docker-registry secret and attach it to the
+   `default` ServiceAccount's `imagePullSecrets` before every `helm upgrade
+   --install`, equivalent to:
+
+   ```bash
+   kubectl create secret docker-registry ghcr-secret \
+     --docker-server=ghcr.io \
+     --docker-username="$GHCR_USERNAME" \
+     --docker-password="$GHCR_TOKEN" \
+     --docker-email="$GHCR_EMAIL"
+   kubectl patch serviceaccount default \
+     -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}'
+   ```
 
 With that in place, merging to `main` automatically ships a new build to
 staging; promoting to production is a manual "Run workflow" click that
@@ -207,6 +225,20 @@ This is required because `helm/di-agent-system/values.yaml` references:
 
 - `influxdb.existingSecret: influxdb-credentials`
 - `grafana.existingSecret: grafana-credentials`
+
+If the images are pulled from a private registry (e.g. `ghcr.io`), also
+create a docker-registry secret and attach it to the `default`
+ServiceAccount, otherwise pods fail with `ImagePullBackOff`:
+
+```bash
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username="$GHCR_USERNAME" \
+  --docker-password="$GHCR_TOKEN" \
+  --docker-email="$GHCR_EMAIL"
+kubectl patch serviceaccount default \
+  -p '{"imagePullSecrets": [{"name": "ghcr-secret"}]}'
+```
 
 ### Optional: cloud eventual-consistency sync
 
