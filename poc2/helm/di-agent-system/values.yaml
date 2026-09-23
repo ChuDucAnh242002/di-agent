@@ -30,6 +30,7 @@ kafka:
   persistence:
     enabled: true
     size: 10Gi
+    # Default for local dev/libvirt clusters. Override to gp2 on EKS/AKS.
     storageClass: local-path
   nodeSelector: {}
   resources: {}
@@ -161,6 +162,7 @@ influxdb:
   persistence:
     enabled: true
     size: 10Gi
+    # Default for local dev/libvirt clusters. Override to gp2 on EKS/AKS.
     storageClass: local-path
   # Pre-create this Secret in the release namespace. Required keys are
   # admin-user, admin-password, and admin-token.
@@ -279,6 +281,7 @@ prometheus:
   persistence:
     enabled: true
     size: 10Gi
+    # Default for local dev/libvirt clusters. Override to gp2 on EKS/AKS.
     storageClass: local-path
   nodeSelector: {}
   resources: {}

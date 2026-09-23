@@ -29,6 +29,7 @@ SCRIPTS := ./scripts
 HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
+STORAGE_CLASS ?= local-path
 REGISTRY ?= ghcr.io/chuducanh242002
 TAG ?= latest
 
@@ -59,7 +60,10 @@ helm-template:
 helm-install:
 	@helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) --create-namespace \
-		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG)
+		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
+		--set kafka.persistence.storageClass=$(STORAGE_CLASS) \
+		--set influxdb.persistence.storageClass=$(STORAGE_CLASS) \
+		--set prometheus.persistence.storageClass=$(STORAGE_CLASS)
 
 helm-upgrade: helm-install
 

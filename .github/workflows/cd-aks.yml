@@ -143,6 +143,9 @@ jobs:
           helm upgrade --install di-agent-system helm/di-agent-system \
             --namespace default --create-namespace \
             --set global.imageRegistry="$REGISTRY" --set global.imageTag="$TAG" \
+            --set kafka.persistence.storageClass=gp2 \
+            --set influxdb.persistence.storageClass=gp2 \
+            --set prometheus.persistence.storageClass=gp2 \
             --wait --timeout 10m0s
 
       - name: Deploy di-agent DaemonSet (pre-built image, no rebuild)
