@@ -145,14 +145,22 @@ jobs:
       - name: Register di-agent peer mesh
         run: bash scripts/peers-cloud.sh
 
-      - name: Smoke test (di-agent /cost reachable)
+      - name: Smoke-test genset REST endpoint
         run: |
-          pod=$(kubectl get pods -l app=di-agent -o jsonpath='{.items[0].metadata.name}')
-          kubectl port-forward "pod/$pod" 19090:9090 >/dev/null 2>&1 &
-          pf_pid=$!
-          sleep 3
-          curl -sf --max-time 10 "http://127.0.0.1:19090/cost?task=pod-scheduling&node=master"
-          kill "$pf_pid" >/dev/null 2>&1 || true
+          set -euo pipefail
+          kubectl run smoke-curl --image=curlimages/curl --restart=Never \
+            --command -- sleep 3600
+          kubectl wait --for=condition=Ready pod/smoke-curl --timeout=60s
+          for i in $(seq 1 12); do
+            if kubectl exec smoke-curl -- curl -sf --max-time 10 http://genset-1:8000/health; then
+              kubectl delete pod smoke-curl --wait=false
+              exit 0
+            fi
+            echo "genset-1 not reachable yet, retrying (${i}/12)..."
+            sleep 5
+          done
+          echo "::error::genset-1 /health endpoint never became reachable"
+          exit 1
 
       - name: Dump cluster state on failure
         if: failure()
