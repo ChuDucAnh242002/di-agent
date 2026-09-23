@@ -1,3 +1,13 @@
+FROM golang:1.22 AS builder
+
+WORKDIR /src/go
+
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -o /tmp/di-agent ./cmd/agent
+
 FROM ubuntu:22.04
 
 # Install curl for health checks (optional but useful)
@@ -5,9 +15,8 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the pre-built binary from your host (adjust the source path if needed)
-# The script used BINARY_OUT; here we assume it's ./cmd/agent/tmp/di-agent-poc
-COPY ./go/cmd/agent/tmp/di-agent-poc /tmp/di-agent
+# Copy the binary built reproducibly in the builder stage.
+COPY --from=builder /tmp/di-agent /tmp/di-agent
 
 # Install the binary to /usr/local/bin and make it executable
 RUN mv /tmp/di-agent /usr/local/bin/di-agent && \
