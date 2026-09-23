@@ -1,0 +1,155 @@
+name: CD (AKS)
+
+# Continuous delivery/deployment of poc2 to Azure Kubernetes Service.
+#
+# - Auto-deploys to the "staging" environment whenever CI succeeds on main
+#   (continuous *deployment*: no human in the loop).
+# - Deploys to "production" only via manual workflow_dispatch. The
+#   "production" GitHub Environment should have required reviewers
+#   configured in repo settings, so this is continuous *delivery*: always
+#   releasable, human-gated promotion.
+#
+# Auth is OIDC-based (azure/login federated credentials) — no long-lived
+# Azure secrets stored in GitHub. Terraform state is remote (Azure Storage)
+# so plans/applies are consistent across runs instead of using runner-local
+# state.
+#
+# Required repo/environment configuration (see poc2/README.md):
+#   secrets.AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID  (OIDC federated app)
+#   secrets.TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT, TFSTATE_CONTAINER
+#   secrets.INFLUXDB_ADMIN_USER, INFLUXDB_ADMIN_PASSWORD, INFLUXDB_ADMIN_TOKEN
+#   secrets.GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
+#   environments "staging" and "production" created in repo settings, with
+#   "production" requiring reviewer approval.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [staging, production]
+        default: staging
+      image_tag:
+        description: "di-agent / service image tag to deploy (defaults to the current main commit sha)"
+        required: false
+
+permissions:
+  id-token: write   # required for OIDC login
+  contents: read
+
+concurrency:
+  group: cd-aks-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy to AKS (${{ github.event.inputs.environment || 'staging' }})
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    defaults:
+      run:
+        working-directory: poc2
+
+    env:
+      REGISTRY: ghcr.io/chuducanh242002
+      TAG: ${{ github.event.inputs.image_tag || github.event.workflow_run.head_sha || github.sha }}
+      KUBECONFIG: ${{ github.workspace }}/kubeconfig-aks
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform init (remote state)
+        working-directory: poc2/cloud/aks
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ secrets.TFSTATE_CONTAINER }}" \
+            -backend-config="key=poc2-aks-${{ github.event.inputs.environment || 'staging' }}.tfstate"
+        env:
+          ARM_USE_OIDC: "true"
+
+      - name: Terraform plan
+        working-directory: poc2/cloud/aks
+        run: terraform plan -input=false -out=tfplan
+        env:
+          ARM_USE_OIDC: "true"
+          TF_VAR_cluster_name: di-agent-aks-${{ github.event.inputs.environment || 'staging' }}
+          TF_VAR_resource_group_name: di-agent-poc2-${{ github.event.inputs.environment || 'staging' }}
+
+      - name: Terraform apply
+        working-directory: poc2/cloud/aks
+        run: terraform apply -input=false -auto-approve tfplan
+        env:
+          ARM_USE_OIDC: "true"
+
+      - name: Fetch kubeconfig
+        working-directory: poc2/cloud/aks
+        run: |
+          RG=$(terraform output -raw resource_group_name)
+          CLUSTER=$(terraform output -raw cluster_name)
+          az aks get-credentials --resource-group "$RG" --name "$CLUSTER" --file "$KUBECONFIG" --overwrite-existing
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Ensure namespace + telemetry secrets
+        run: |
+          kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n default create secret generic influxdb-credentials \
+            --from-literal=admin-user="${{ secrets.INFLUXDB_ADMIN_USER }}" \
+            --from-literal=admin-password="${{ secrets.INFLUXDB_ADMIN_PASSWORD }}" \
+            --from-literal=admin-token="${{ secrets.INFLUXDB_ADMIN_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n default create secret generic grafana-credentials \
+            --from-literal=admin-user="${{ secrets.GRAFANA_ADMIN_USER }}" \
+            --from-literal=admin-password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install di-agent-system helm/di-agent-system \
+            --namespace default --create-namespace \
+            --set global.imageRegistry="$REGISTRY" --set global.imageTag="$TAG" \
+            --wait --timeout 10m0s
+
+      - name: Deploy di-agent DaemonSet (pre-built image, no rebuild)
+        run: SKIP_BUILD=1 REGISTRY="$REGISTRY" TAG="$TAG" bash scripts/agent-cloud.sh
+
+      - name: Register di-agent peer mesh
+        run: bash scripts/peers-cloud.sh
+
+      - name: Smoke test (di-agent /cost reachable)
+        run: |
+          pod=$(kubectl get pods -l app=di-agent -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$pod" 19090:9090 >/dev/null 2>&1 &
+          pf_pid=$!
+          sleep 3
+          curl -sf --max-time 10 "http://127.0.0.1:19090/cost?task=pod-scheduling&node=master"
+          kill "$pf_pid" >/dev/null 2>&1 || true
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl describe pods -l app=di-agent || true
+          kubectl logs -l app=di-agent --all-containers --tail=200 || true

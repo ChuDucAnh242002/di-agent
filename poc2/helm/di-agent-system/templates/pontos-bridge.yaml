@@ -1,0 +1,56 @@
+# Consumer/producer only: bridges telemetry from the PONTOS datahub
+# (https://pontos.ri.se) MQTT broker into the local Kafka bus. No
+# externally-exposed port. Disabled unless .Values.pontosBridge.enabled is
+# true (see values.yaml for the required existingSecret).
+{{- if .Values.pontosBridge.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pontos-bridge
+  labels:
+    app: pontos-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pontos-bridge
+  template:
+    metadata:
+      labels:
+        app: pontos-bridge
+      {{- include "diagent.podAnnotations" (dict "root" .) | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.pontosBridge.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pontos-bridge
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.pontosBridge.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.pontosBridge.kafkaTopic | quote }}
+            - name: PONTOS_HOST
+              value: {{ .Values.pontosBridge.host | quote }}
+            - name: PONTOS_PORT
+              value: {{ .Values.pontosBridge.port | quote }}
+            - name: PONTOS_PATH
+              value: {{ .Values.pontosBridge.path | quote }}
+            - name: PONTOS_USERNAME
+              value: {{ .Values.pontosBridge.username | quote }}
+            - name: PONTOS_SUBSCRIBE_TOPIC
+              value: {{ .Values.pontosBridge.subscribeTopic | quote }}
+            - name: RECONNECT_BACKOFF_S
+              value: {{ .Values.pontosBridge.reconnectBackoffSeconds | quote }}
+            - name: PONTOS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.pontosBridge.existingSecret }}
+                  key: token
+          resources:
+            {{- toYaml .Values.pontosBridge.resources | nindent 12 }}
+{{- end }}

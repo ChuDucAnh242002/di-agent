@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY propulsion.py controller.py main.py modbus_server.py sensors.py .
+COPY propulsion.py controller.py main.py modbus_server.py opcua_server.py sensors.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
     KAFKA_TOPIC=propulsion.telemetry \

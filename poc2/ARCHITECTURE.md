@@ -75,6 +75,34 @@ The chart wraps all of these in one release but does not include the `di-agent` 
 
 This split matters: the workload and telemetry services are cluster-native; the agent peers are host-native VM processes that behave like edge nodes in the same lab.
 
+## Alternative cluster backends: AKS and EKS
+
+Everything above the infrastructure/cluster layer — the Helm chart and the
+`di-agent` peer mesh — only depends on a working `kubectl`/`KUBECONFIG`, not
+on libvirt. `cloud/aks` and `cloud/eks` are Terraform modules that stand up
+a managed AKS or EKS cluster as an alternative to `main.tf` +
+`scripts/02-k8s.sh`. Once the kubeconfig is fetched, `make images
+helm-install` runs unchanged against the managed cluster.
+
+The one layer that does change is agent placement:
+
+- **Local (libvirt):** one `di-agent` `Deployment` per VM, pinned via
+  `nodeSelector: kubernetes.io/hostname` and run with `hostNetwork: true`,
+  because the exact VM hostnames are known ahead of time and the image is
+  imported directly into each VM's containerd (no registry needed).
+- **AKS/EKS (`scripts/agent-cloud.sh`):** `di-agent` runs as a `DaemonSet`
+  (one pod per node, image pulled from a registry), because managed
+  clusters don't expose a fixed, predetermined set of node hostnames the
+  way the libvirt lab's VM fleet does, and there's no way to import an
+  image straight into a managed node's runtime.
+- **Peer registration and the demo (`scripts/peers-cloud.sh`,
+  `scripts/coordinator-cloud.sh`):** pod IPs on AKS/EKS live inside the
+  cluster's private VNet/VPC and aren't reachable from the operator's
+  machine, so these use `kubectl port-forward` to issue the HTTP calls,
+  while still registering each pod's real cluster-internal IP as the peer
+  URL — agent-to-agent traffic itself stays entirely on the cluster
+  network, matching the local lab's peer-to-peer model.
+
 ## Infrastructure architecture
 
 `main.tf` creates the VM fleet. The important responsibilities are:

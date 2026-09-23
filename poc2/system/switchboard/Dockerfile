@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY switchboard.py controller.py main.py modbus_client.py .
+COPY switchboard.py controller.py main.py modbus_client.py opcua_client.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
     KAFKA_TOPIC=switchboard.telemetry \

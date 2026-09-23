@@ -1,6 +1,6 @@
-# Kafka consumer that mirrors telemetry topics to the cloud (Azure Event
-# Hubs or Azure IoT Hub, per .Values.telemetryCloudSync.target) for eventual
-# sync. No externally-exposed port (consumer only). Disabled unless
+# Kafka consumer that mirrors telemetry topics to Azure Event Hubs, Azure IoT
+# Hub, AWS Kinesis, or AWS IoT Core for eventual sync. No externally-exposed
+# port (consumer only). Disabled unless
 # .Values.telemetryCloudSync.enabled is true.
 {{- if .Values.telemetryCloudSync.enabled }}
 apiVersion: apps/v1
@@ -82,7 +82,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
                   key: {{ .Values.telemetryCloudSync.iotHub.devices.switchboard }}
-            {{- else }}
+            {{- else if eq .Values.telemetryCloudSync.target "eventhub" }}
             - name: EVENTHUB_NAMESPACE_FQDN
               value: {{ .Values.telemetryCloudSync.eventHub.namespaceFqdn | quote }}
             - name: EVENTHUB_TOPIC_MAP
@@ -92,6 +92,38 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.telemetryCloudSync.eventHub.existingSecret }}
                   key: connection-string
+            {{- else if eq .Values.telemetryCloudSync.target "kinesis" }}
+            - name: AWS_REGION
+              value: {{ .Values.telemetryCloudSync.aws.region | quote }}
+            - name: KINESIS_STREAM_MAP
+              value: {{ .Values.telemetryCloudSync.kinesis.streamMap | quote }}
+            {{- else if eq .Values.telemetryCloudSync.target "iotcore" }}
+            - name: AWS_REGION
+              value: {{ .Values.telemetryCloudSync.aws.region | quote }}
+            - name: IOTCORE_ENDPOINT_URL
+              value: {{ .Values.telemetryCloudSync.iotCore.endpointUrl | quote }}
+            - name: IOTCORE_TOPIC_MAP
+              value: {{ .Values.telemetryCloudSync.iotCore.topicMap | quote }}
+            - name: IOTCORE_QOS
+              value: {{ .Values.telemetryCloudSync.iotCore.qos | quote }}
+            {{- end }}
+            {{- if and (or (eq .Values.telemetryCloudSync.target "kinesis") (eq .Values.telemetryCloudSync.target "iotcore")) .Values.telemetryCloudSync.aws.existingSecret }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.aws.existingSecret }}
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.aws.existingSecret }}
+                  key: secret-access-key
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.aws.existingSecret }}
+                  key: session-token
+                  optional: true
             {{- end }}
           resources:
             {{- toYaml .Values.telemetryCloudSync.resources | nindent 12 }}

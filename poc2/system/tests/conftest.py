@@ -9,6 +9,7 @@ COMMON_MODULE_NAMES = [
     "sensors",
     "modbus_server",
     "modbus_client",
+    "opcua_server",
     "main",
     "battery",
     "genset",

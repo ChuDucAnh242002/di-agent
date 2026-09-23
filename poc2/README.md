@@ -29,6 +29,148 @@ The default topology is simple and intentional:
 
 The first VM in the list is the control plane; all remaining VMs are treated as workers.
 
+## Deploying on AKS or EKS instead of libvirt
+
+The Helm chart (`helm/di-agent-system`) and the `di-agent` peer mesh don't
+depend on libvirt at all — they only need a working `kubectl`/`KUBECONFIG`
+against *some* Kubernetes cluster. `cloud/aks` and `cloud/eks` are Terraform
+modules that stand up a managed cluster as a drop-in replacement for
+`main.tf` + `scripts/02-k8s.sh`:
+
+```bash
+# Azure local development (requires `az login`; uses local Terraform state)
+make provision-aks
+export KUBECONFIG=$HOME/.kube/config-poc2-aks
+
+# Azure shared/CI state (requires an existing Storage Account + container)
+TF_BACKEND_MODE=remote \
+TFSTATE_RESOURCE_GROUP=terraform-state-rg \
+TFSTATE_STORAGE_ACCOUNT=diagenttfstate \
+TFSTATE_CONTAINER=tfstate \
+make provision-aks
+
+# or AWS (requires `aws configure` / `aws sso login`)
+make provision-eks
+export KUBECONFIG=$HOME/.kube/config-poc2-eks
+
+# AWS shared/CI state (requires an existing S3 bucket)
+TF_BACKEND_MODE=remote \
+TFSTATE_BUCKET=diagent-terraform-state \
+TFSTATE_KEY=poc2/eks.tfstate \
+TFSTATE_REGION=eu-north-1 \
+make provision-eks
+
+# then the usual app-layer steps, unchanged:
+make images helm-install REGISTRY=ghcr.io/your-org TAG=v1
+make agent-cloud peers-cloud REGISTRY=ghcr.io/your-org TAG=v1
+make demo-cloud
+
+# teardown:
+make teardown-aks   # or teardown-eks
+```
+
+The differences from the local flow are confined to the infrastructure and
+agent-placement layers:
+
+- `provision-aks` / `provision-eks` replace `provision` + `k8s`: they create
+  the cluster directly (AKS/EKS) instead of libvirt VMs + kubeadm, and fetch
+  its kubeconfig to `~/.kube/config-poc2-aks` or `-eks`.
+- `agent-cloud` replaces `agent`: since managed clusters don't have a fixed,
+  known set of node hostnames, di-agent runs as a `DaemonSet` (one pod per
+  node, image pulled from `REGISTRY` rather than imported into containerd)
+  instead of one `Deployment` per VM pinned by `nodeSelector`.
+- `peers-cloud` / `demo-cloud` replace `peers` / `demo`: pod IPs on AKS/EKS
+  live inside the cluster's private VNet/VPC and aren't reachable from your
+  laptop, so these scripts use `kubectl port-forward` to reach each agent
+  pod, while still registering each other's real in-cluster pod IP as the
+  peer URL (agent-to-agent traffic stays on the cluster network).
+- `helm-install` and everything under `helm/di-agent-system` (Kafka,
+  InfluxDB, Grafana, workload simulators, telemetry) is unchanged — it only
+  needs `KUBECONFIG` pointed at the right cluster and the same
+  `influxdb-credentials`/`grafana-credentials` secrets described below.
+
+See `cloud/aks/variables.tf` and `cloud/eks/variables.tf` for what's
+configurable (region/location, node count, VM/instance size); override any
+of them with `TF_VAR_<name>` before running `provision-aks`/`provision-eks`.
+
+`make provision-aks` defaults to `TF_BACKEND_MODE=local` so it works after
+`az login` without requiring a pre-created Terraform state account. In local
+mode the script runs Terraform from a temporary copy of the module and stores
+the state at `cloud/aks/terraform.tfstate`. Set `TF_BACKEND_MODE=remote` and
+provide `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, and
+`TFSTATE_CONTAINER` when the state must be shared by teammates or CI.
+
+`make provision-eks` also defaults to `TF_BACKEND_MODE=local` and stores state
+at `cloud/eks/terraform.tfstate`. For shared or CI state, set
+`TF_BACKEND_MODE=remote`, `TFSTATE_BUCKET`, `TFSTATE_KEY`, and
+`TFSTATE_REGION`. Optionally set `TFSTATE_DYNAMODB_TABLE` to enable the
+legacy DynamoDB locking configuration used by the S3 backend.
+
+## CI/CD for AKS and EKS
+
+Manually running `provision-aks`/`provision-eks` is fine for exploration,
+but a repeatable deployment target should go through a pipeline rather than
+an operator's laptop: it removes "works on my machine" drift, gives every
+change a plan/apply audit trail, and lets you gate production behind
+review instead of `terraform apply -auto-approve` from wherever you happen
+to be. This repo has three GitHub Actions workflows:
+
+- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) — build/vet/test
+  on every push and PR, plus (on `main`) building and pushing every
+  chart-managed image *and* the `di-agent` image to `ghcr.io`, tagged with
+  both `:latest` and the immutable commit sha.
+- [`.github/workflows/cd-aks.yml`](../.github/workflows/cd-aks.yml) /
+  [`cd-eks.yml`](../.github/workflows/cd-eks.yml) — `terraform init/plan/apply`
+  the matching `cloud/aks` or `cloud/eks` module against **remote** state,
+  fetch the kubeconfig, `helm upgrade --install` the chart, deploy the
+  `di-agent` DaemonSet with `SKIP_BUILD=1` (using the exact image sha CI just
+  built — no rebuilding at deploy time), register the peer mesh, and run a
+  smoke test against `/cost`.
+
+The two deployment modes map directly onto the CD/continuous-deployment
+distinction:
+
+- **Continuous deployment to `staging`**: `cd-aks.yml`/`cd-eks.yml` trigger
+  automatically via `workflow_run` whenever `ci.yml` succeeds on `main` —
+  no human in the loop.
+- **Continuous delivery to `production`**: the same workflows can be run
+  manually (`workflow_dispatch`) against the `production` GitHub
+  Environment, which should have required reviewers configured in repo
+  settings, so a person approves before anything touches the production
+  cluster. The image deployed is always one that already passed CI.
+
+To wire this up in a real GitHub repo:
+
+1. **Create two GitHub Environments**, `staging` and `production`. Add a
+   required-reviewers rule to `production` (Settings → Environments).
+2. **Remote Terraform state** (both `cloud/aks/providers.tf` and
+   `cloud/eks/providers.tf` declare empty backend blocks configured via
+   `-backend-config` at `terraform init` time, so state never lives only on
+   an ephemeral runner):
+   - AKS: an Azure Storage account + container to hold `.tfstate` blobs.
+   - EKS: an S3 bucket (versioned) + a DynamoDB table for state locking.
+3. **Cloud auth via OIDC, not static keys** (least-privilege, no secrets to
+   rotate/leak):
+   - Azure: register an app/federated credential trusting
+     `token.actions.githubusercontent.com` for this repo, grant it
+     Contributor on the target subscription/resource group, and set
+     `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as repo
+     (or per-environment) secrets.
+   - AWS: create an IAM role with a trust policy for GitHub's OIDC
+     provider, scoped to this repo, with permissions to manage EKS/VPC/EC2;
+     set `AWS_ROLE_TO_ASSUME` as a secret.
+4. **Telemetry secrets** used by the Helm chart —
+   `INFLUXDB_ADMIN_USER/PASSWORD/TOKEN`, `GRAFANA_ADMIN_USER/PASSWORD` — as
+   GitHub secrets (per-environment, so staging and production don't share
+   credentials).
+5. **State backend secrets** — `TFSTATE_RESOURCE_GROUP`,
+   `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER` (AKS) or `TFSTATE_BUCKET`,
+   `TFSTATE_DYNAMODB_TABLE`, `TFSTATE_REGION` (EKS).
+
+With that in place, merging to `main` automatically ships a new build to
+staging; promoting to production is a manual "Run workflow" click that
+still requires an approver.
+
 ## What this PoC deploys
 
 The deployment consists of two separate layers:
@@ -150,9 +292,11 @@ The files that matter for understanding or running the PoC are:
 - `main.tf`: libvirt VM definition and disk layout
 - `variables.tf`: VM and image configuration
 - `providers.tf`: libvirt provider setup
+- `cloud/aks`, `cloud/eks`: Terraform modules for managed-cluster alternatives to the above (see "Deploying on AKS or EKS" above)
 - `scripts/01-provision.sh`: creates the VM fleet
 - `scripts/02-k8s.sh`: bootstraps the cluster
-- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods
+- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods (per-VM, local lab)
+- `scripts/agent-cloud.sh`, `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: DaemonSet-based di-agent deployment, peer registration, and demo for AKS/EKS
 - `scripts/04-peers.sh`: registers peers and trust values
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images
