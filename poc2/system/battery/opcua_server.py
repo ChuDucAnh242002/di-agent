@@ -41,7 +41,7 @@ class BatteryOpcuaServer:
         self._server.set_endpoint(self._endpoint)
         self._server.set_server_name("Battery OPC-UA Server")
         idx = self._server.register_namespace("http://di-agent.io/battery")
-        battery_obj = self._server.get_objects_node().add_object(idx, "Battery")
+        battery_obj = self._server.nodes.objects.add_object(idx, "Battery")
 
         self._nodes["current_load_ratio"] = battery_obj.add_variable(idx, "CurrentLoadRatio", 0.0)
         self._nodes["current_charge_power_kw"] = battery_obj.add_variable(

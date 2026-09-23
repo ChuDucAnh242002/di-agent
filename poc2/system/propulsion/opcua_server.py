@@ -41,7 +41,7 @@ class PropulsionOpcuaServer:
         self._server.set_endpoint(self._endpoint)
         self._server.set_server_name("Propulsion OPC-UA Server")
         idx = self._server.register_namespace("http://di-agent.io/propulsion")
-        propulsion_obj = self._server.get_objects_node().add_object(idx, "Propulsion")
+        propulsion_obj = self._server.nodes.objects.add_object(idx, "Propulsion")
 
         self._nodes["current_load_ratio"] = propulsion_obj.add_variable(
             idx, "CurrentLoadRatio", 0.0

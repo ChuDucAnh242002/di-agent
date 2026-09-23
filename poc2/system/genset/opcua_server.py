@@ -43,7 +43,7 @@ class GensetOpcuaServer:
         self._server.set_endpoint(self._endpoint)
         self._server.set_server_name("Genset OPC-UA Server")
         idx = self._server.register_namespace("http://di-agent.io/genset")
-        genset_obj = self._server.get_objects_node().add_object(idx, "Genset")
+        genset_obj = self._server.nodes.objects.add_object(idx, "Genset")
 
         self._nodes["current_load_ratio"] = genset_obj.add_variable(idx, "CurrentLoadRatio", 0.0)
         self._nodes["power_kw"] = genset_obj.add_variable(idx, "PowerKw", 0.0)
