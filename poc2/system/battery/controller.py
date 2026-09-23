@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 from kafka import KafkaProducer
-from kafka.errors import KafkaTimeoutError, NoBrokersAvailable
+from kafka.errors import KafkaTimeoutError
 
 from battery import DEFAULT_BATTERY_MODEL, NOMINAL_VOLTAGE_V, build_battery
 from modbus_server import BatteryModbusServer
@@ -48,7 +48,7 @@ def _make_producer() -> KafkaProducer:
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8"),
             )
-        except (KafkaTimeoutError, NoBrokersAvailable):
+        except KafkaTimeoutError:
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 

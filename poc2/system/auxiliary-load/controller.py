@@ -5,7 +5,7 @@ import threading
 import time
 
 from kafka import KafkaConsumer, KafkaProducer
-from kafka.errors import KafkaTimeoutError, NoBrokersAvailable
+from kafka.errors import KafkaTimeoutError
 
 from aux_load import build_auxiliary_load
 
@@ -38,7 +38,7 @@ def _make_producer() -> KafkaProducer:
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8"),
             )
-        except (KafkaTimeoutError, NoBrokersAvailable):
+        except KafkaTimeoutError:
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 
@@ -66,7 +66,7 @@ def _make_consumer() -> KafkaConsumer:
                 auto_offset_reset="latest",
                 group_id=None,
             )
-        except (KafkaTimeoutError, NoBrokersAvailable):
+        except KafkaTimeoutError:
             print(f"Kafka brokers {KAFKA_BROKERS} not available yet, retrying in 5s ...")
             time.sleep(5)
 
