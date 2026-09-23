@@ -299,3 +299,140 @@ func TestSweepIsExposed(t *testing.T) {
 func timeZero() time.Time {
 	return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 }
+
+func TestEstimate_AssumeAndWithoutParams(t *testing.T) {
+	sm, srv := stateFixture(t)
+	rng := [2]float64{0, 100}
+	_ = sm.Record(statemap.Observation{ID: "queue@pod:a", Value: 50, At: time.Now(), Subject: "pod:a", Range: &rng})
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	_ = sm.DeclareRelationship(statemap.Relationship{From: "queue@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	_ = sm.AssertRelationshipStrength(statemap.RelationshipID("queue@pod:a", "cpu_pressure_ratio", "discovered"), 0.8, "op", "t")
+
+	var res statemap.EstimateResult
+	code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=queue@pod:a=100", &res)
+	if code != 200 || res.Hypothetical == nil {
+		t.Fatalf("code=%d hypothetical=%v", code, res.Hypothetical)
+	}
+	if res.Hypothetical.Delta < 0.39 || res.Hypothetical.Delta > 0.41 {
+		t.Errorf("delta=%.3f; want ≈0.4", res.Hypothetical.Delta)
+	}
+	code = getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&without=pod:a", &res)
+	if code != 200 || len(res.Excluded) != 1 || res.Excluded[0] != "pod:a" {
+		t.Errorf("without: code=%d excluded=%v", code, res.Excluded)
+	}
+	var d statemap.Decision
+	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || len(d.Excluded) != 1 {
+		t.Errorf("decision replay: code=%d assumptions=%v excluded=%v", code, d.Assumptions, d.Excluded)
+	}
+	if _, ok := d.Assumptions["queue@pod:a"]; !ok {
+		t.Errorf("decision replay lacks the floor assumption: %v", d.Assumptions)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=garbage", nil); code != 400 {
+		t.Errorf("malformed assume returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_EmptyWithoutIsRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&without=", nil); code != 400 {
+		t.Errorf("empty without returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_ReusedIdAndNonFiniteAssumeAreRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 200 {
+		t.Fatalf("first estimate under ask-1: %d", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 409 {
+		t.Errorf("reused decision id returned %d, want 409", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=NaN", nil); code != 400 {
+		t.Errorf("NaN assume returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_RequestShapeErrorsAndIdPassthrough(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate", nil); code != 400 {
+		t.Errorf("missing target returned %d, want 400", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=abc", nil); code != 400 {
+		t.Errorf("non-numeric assume returned %d, want 400", code)
+	}
+	resp, err := http.Get(srv.URL + "/state/estimate?target=nothing_here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown target returned %d, want 404", resp.StatusCode)
+	}
+	if id, _ := body["decision_id"].(string); id == "" {
+		t.Errorf("unknown target's 404 body lacks the decision id that was still recorded: %v", body)
+	}
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-9", &res); code != 200 || res.DecisionID != "ask-9" {
+		t.Errorf("id passthrough: code=%d decision_id=%q, want 200 and ask-9", code, res.DecisionID)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/ask-9", nil); code != 200 {
+		t.Errorf("the decision recorded under the caller's id is not retrievable: %d", code)
+	}
+}
+
+// TestState_SubjectFilter: GET /state?subject= narrows the view to one subject's
+// properties, while the census still reports the whole map. The data-model filter
+// (Query.Subject) existed but the handler did not read the parameter.
+func TestState_SubjectFilter(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+
+	var v statemap.StateView
+	if code := getState(t, srv.URL+"/state?subject=pod:a", &v); code != 200 {
+		t.Fatalf("code=%d", code)
+	}
+	var sawA bool
+	for _, p := range v.Properties {
+		if p.Subject != "pod:a" {
+			t.Errorf("property %s (subject %q) leaked through subject=pod:a; want only pod:a", p.ID, p.Subject)
+		}
+		if p.ID == "cpu@pod:a" {
+			sawA = true
+		}
+	}
+	if !sawA {
+		t.Error("pod:a's property is missing from the filtered view")
+	}
+	if v.Counts.Subjects != 2 {
+		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filter", v.Counts.Subjects)
+	}
+}
+
+// TestState_UnknownSubjectIsEmptyNotAnError: a subject that names nothing is a valid
+// query that matches nothing — an empty selection with HTTP 200, and a census that
+// still reports the whole map. A regression that 404s an unknown subject, or that
+// counts the census after filtering, is what this guards.
+func TestState_UnknownSubjectIsEmptyNotAnError(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+
+	var v statemap.StateView
+	if code := getState(t, srv.URL+"/state?subject=pod:zzz", &v); code != 200 {
+		t.Fatalf("unknown subject returned %d; want 200 — a filter that matches nothing is not an error", code)
+	}
+	if len(v.Properties) != 0 {
+		t.Errorf("unknown subject returned %d properties; want an empty selection: %+v", len(v.Properties), v.Properties)
+	}
+	if v.Counts.Subjects != 2 {
+		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filtered (empty) selection", v.Counts.Subjects)
+	}
+}
