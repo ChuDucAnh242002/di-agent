@@ -83,11 +83,22 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      securityContext:
+        fsGroup: 65534
       {{- include "diagent.nodeSelector" (dict "local" .Values.prometheus.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        - name: init-data-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 65534:65534 /prometheus"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: prometheus-data
+              mountPath: /prometheus
       containers:
         - name: prometheus
           image: {{ include "diagent.publicImage" .Values.prometheus.image }}

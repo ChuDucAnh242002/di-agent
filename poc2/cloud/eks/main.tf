@@ -50,6 +50,7 @@ module "eks" {
   # Let our own IAM caller manage the cluster via kubectl (module v21 no
   # longer grants this by default), which is needed to debug NodeCreationFailure.
   enable_cluster_creator_admin_permissions = true
+  enable_irsa                              = true
 
   # vpc-cni must be up before nodes try to join, otherwise the managed node
   # group can report "NodeCreationFailure: Unhealthy nodes" because kubelet
@@ -62,6 +63,10 @@ module "eks" {
     }
     kube-proxy = {}
     coredns    = {}
+    aws-ebs-csi-driver = {
+      most_recent              = true
+      service_account_role_arn = aws_iam_role.ebs_csi.arn
+    }
   }
 
   eks_managed_node_groups = {
@@ -75,4 +80,29 @@ module "eks" {
       iam_role_attach_cni_policy = true
     }
   }
+}
+
+resource "aws_iam_role" "ebs_csi" {
+  name = "${var.cluster_name}-ebs-csi"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Action    = "sts:AssumeRoleWithWebIdentity"
+        Principal = { Federated = module.eks.oidc_provider_arn }
+        Condition = {
+          StringEquals = {
+            "${module.eks.oidc_provider}:aud" = "sts.amazonaws.com"
+            "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role       = aws_iam_role.ebs_csi.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }

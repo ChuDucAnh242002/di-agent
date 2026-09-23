@@ -274,6 +274,8 @@ jobs:
             context: poc2/system/auxiliary-load
           - service: telemetry-writer
             context: poc2/system/telemetry-writer
+          - service: navigation
+            context: poc2/system/navigation
           - service: playground
             context: poc2/playground
 
