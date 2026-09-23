@@ -165,6 +165,23 @@ jobs:
           echo "::error::genset-1 /health endpoint never became reachable"
           exit 1
 
+      - name: Smoke-test di-agent /cost endpoint
+        run: |
+          set -euo pipefail
+          pod=$(kubectl get pods -l app=di-agent -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$pod" 19090:9090 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 12); do
+            if curl -sf --max-time 10 "http://127.0.0.1:19090/cost?task=pod-scheduling&node=master"; then
+              exit 0
+            fi
+            echo "di-agent /cost endpoint not ready yet, retrying (${i}/12)..."
+            sleep 5
+          done
+          echo "::error::di-agent /cost endpoint never became reachable"
+          exit 1
+
       - name: Dump cluster state on failure
         if: failure()
         run: |
