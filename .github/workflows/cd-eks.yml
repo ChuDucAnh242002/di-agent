@@ -88,12 +88,6 @@ jobs:
             -backend-config="region=${{ secrets.TFSTATE_REGION }}" \
             -backend-config="key=poc2-eks-${{ github.event.inputs.environment || 'staging' }}.tfstate"
 
-      - name: Terraform destroy (old)
-        working-directory: poc2/cloud/eks
-        run: terraform destroy -input=false -auto-approve
-        env:
-          TF_VAR_cluster_name: di-agent-eks-${{ github.event.inputs.environment || 'staging' }}
-
       - name: Terraform plan
         working-directory: poc2/cloud/eks
         run: terraform plan -input=false -out=tfplan
