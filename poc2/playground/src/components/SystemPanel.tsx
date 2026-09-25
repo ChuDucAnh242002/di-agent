@@ -155,6 +155,34 @@ export default function SystemPanel({ system, id }: Props) {
           </strong>
         </div>
       )}
+      {system === "genset" && (
+        <div className="metric-row">
+          <span>LNG pacs ({status?.lng_pack_count ?? 2} x {status?.lng_pack_capacity_m3 ?? 80} m³)</span>
+          <strong>
+            {status?.lng_level !== undefined ? `${(status.lng_level * 100).toFixed(1)}%` : "--"}
+          </strong>
+        </div>
+      )}
+      {system === "genset" && (
+        <div className="metric-row">
+          <span>LNG remaining</span>
+          <strong>
+            {status?.lng_remaining_m3 !== undefined
+              ? `${status.lng_remaining_m3.toFixed(1)} m³`
+              : "--"}
+          </strong>
+        </div>
+      )}
+      {system === "genset" && (
+        <div className="metric-row">
+          <span>LNG time to empty</span>
+          <strong>
+            {status?.lng_time_to_empty_hr !== undefined
+              ? `${status.lng_time_to_empty_hr.toFixed(1)} h`
+              : "stable"}
+          </strong>
+        </div>
+      )}
 
       {anomalyCapable && (
         <div className="metric-row">

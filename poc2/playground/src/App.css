@@ -175,3 +175,42 @@
   padding: 0.25rem 0;
   border-top: 1px solid #334155;
 }
+
+/* Route/voyage tracking spans 2 grid columns, twice a normal panel's width. */
+.voyage-panel {
+  grid-column: span 2;
+}
+
+@media (max-width: 680px) {
+  .voyage-panel {
+    grid-column: span 1;
+  }
+}
+
+.voyage-ports {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.voyage-arrow {
+  color: #94a3b8;
+}
+
+.voyage-progress-track {
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #0f172a;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.voyage-progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  transition: width 0.5s linear;
+}
+

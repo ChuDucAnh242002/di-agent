@@ -5,6 +5,7 @@ import SystemPanel from "./components/SystemPanel";
 import SwitchboardPanel from "./components/SwitchboardPanel";
 import ShorePowerPanel from "./components/ShorePowerPanel";
 import ConditionsPanel from "./components/ConditionsPanel";
+import VoyagePanel from "./components/VoyagePanel";
 
 export default function App() {
   // Which genset/propulsion/battery/auxload instances are deployed,
@@ -43,6 +44,7 @@ export default function App() {
         ))}
         {config?.shorePower && <ShorePowerPanel />}
         <SwitchboardPanel />
+        <VoyagePanel propulsionIds={config?.propulsionIds ?? []} />
         <ConditionsPanel
           propulsionIds={config?.propulsionIds ?? []}
           auxloadIds={config?.auxloadIds ?? []}

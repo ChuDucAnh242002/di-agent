@@ -33,6 +33,21 @@ RAMP_RATE_DOWN_PER_S = float(os.environ.get("RAMP_RATE_DOWN_PER_S", str(1.0 / 4.
 # Seed for the Gaussian sensor simulator; unset gives a fresh random sequence per start.
 SENSOR_SEED = os.environ.get("SENSOR_SEED")
 
+# LNG fuel storage: 2 LNG pacs of 80 m^3 each (liquid capacity, not boil-off
+# margin), matching the dual-fuel engine's NATURAL_GAS fuel_type in genset.py.
+LNG_PACK_CAPACITY_M3 = float(os.environ.get("LNG_PACK_CAPACITY_M3", "80.0"))
+LNG_PACK_COUNT = int(os.environ.get("LNG_PACK_COUNT", "2"))
+# Typical LNG density at storage conditions (~430-470 kg/m^3).
+LNG_DENSITY_KG_PER_M3 = float(os.environ.get("LNG_DENSITY_KG_PER_M3", "450.0"))
+# Initial LNG level (0.0-1.0) the simulation starts at.
+INITIAL_LNG_LEVEL = float(os.environ.get("INITIAL_LNG_LEVEL", "1.0"))
+# Smoothing factor for the fuel-flow EMA used to predict time-to-empty for the LNG pacs.
+LNG_PREDICTION_EMA_ALPHA = float(os.environ.get("LNG_PREDICTION_EMA_ALPHA", "0.1"))
+# Below this consumption rate (kg/hr) the trend is considered flat (no prediction).
+LNG_PREDICTION_MIN_RATE_KG_PER_HR = float(
+    os.environ.get("LNG_PREDICTION_MIN_RATE_KG_PER_HR", "0.01")
+)
+
 
 def _make_producer() -> KafkaProducer:
     while True:
@@ -70,9 +85,13 @@ class GensetController:
         self._sensors = SensorSimulator(seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None)
         self._modbus_server = GensetModbusServer(self, host=MODBUS_HOST, port=MODBUS_PORT)
 
+        self.lng_capacity_kg = LNG_PACK_CAPACITY_M3 * LNG_PACK_COUNT * LNG_DENSITY_KG_PER_M3
+
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
         self._current_load_ratio = 0.0
+        self._lng_level = INITIAL_LNG_LEVEL
+        self._fuel_flow_ema_kg_per_s = 0.0
         self._last_message: dict | None = None
         self._anomaly_enabled = False
 
@@ -113,8 +132,24 @@ class GensetController:
                 "current_load_ratio": self._current_load_ratio,
                 "speed_rpm": self.genset.rated_speed if self._current_load_ratio > 0 else 0.0,
                 "anomaly_enabled": self._anomaly_enabled,
+                "lng_pack_count": LNG_PACK_COUNT,
+                "lng_pack_capacity_m3": LNG_PACK_CAPACITY_M3,
+                "lng_capacity_m3": LNG_PACK_CAPACITY_M3 * LNG_PACK_COUNT,
+                "lng_level": self._lng_level,
+                "lng_remaining_m3": self._lng_level * LNG_PACK_CAPACITY_M3 * LNG_PACK_COUNT,
+                **self._predict_lng_locked(),
                 "last_message": self._last_message,
             }
+
+    def _predict_lng_locked(self) -> dict:
+        """Predicts time-to-empty for the LNG pacs from the smoothed fuel-flow rate.
+        Must be called with self._lock held."""
+        consumption_rate_kg_per_hr = self._fuel_flow_ema_kg_per_s * 3600
+        prediction = {"lng_consumption_rate_kg_per_hr": consumption_rate_kg_per_hr}
+        if consumption_rate_kg_per_hr >= LNG_PREDICTION_MIN_RATE_KG_PER_HR:
+            remaining_kg = self._lng_level * self.lng_capacity_kg
+            prediction["lng_time_to_empty_hr"] = remaining_kg / consumption_rate_kg_per_hr
+        return prediction
 
     def get_health(self) -> dict:
         thread_status = {"telemetry": self._thread is not None and self._thread.is_alive()}
@@ -142,6 +177,7 @@ class GensetController:
             with self._lock:
                 target = self._target_load_ratio
                 current = self._current_load_ratio
+                lng_level = self._lng_level
                 anomaly_enabled = self._anomaly_enabled
 
             rate = (
@@ -154,8 +190,9 @@ class GensetController:
                 )
             )
             max_step = rate * STEP_INTERVAL_S
-            delta = max(-max_step, min(max_step, target - current))
-            current += delta
+            # Empty LNG pacs can't feed the engine, regardless of the requested load.
+            delta = max(-max_step, min(max_step, target - current)) if lng_level > 0 else -max_step
+            current = max(0.0, current + delta)
             # Genset.rated_power is the generator's rated power (electric output side), so the
             # load ratio is relative to the electric output and the generator stays in the loop.
             power_kw = self.genset.rated_power * current
@@ -181,6 +218,17 @@ class GensetController:
             load_ratio = float(run_point.genset_load_ratio[0])
             # Engine runs at a governed constant speed whenever it's on, regardless of load.
             speed_rpm = self.genset.rated_speed if load_ratio > 0 else 0.0
+
+            # The engine draws down the LNG pacs as it burns natural gas fuel.
+            lng_level = max(
+                0.0, lng_level - fuel_flow_kg_per_s * STEP_INTERVAL_S / self.lng_capacity_kg
+            )
+            # EMA of fuel flow so ramp transients don't make the time-to-empty prediction noisy.
+            fuel_flow_ema_kg_per_s = (
+                LNG_PREDICTION_EMA_ALPHA * fuel_flow_kg_per_s
+                + (1 - LNG_PREDICTION_EMA_ALPHA) * self._fuel_flow_ema_kg_per_s
+            )
+
             message = _make_event(
                 self.genset_id,
                 "genset",
@@ -194,6 +242,7 @@ class GensetController:
                     "bsfc_g_per_kwh": float(engine_run_point.bsfc_g_per_kWh[0]),
                     "co2_kg_per_s": co2_kg_per_s,
                     "nox_kg_per_s": nox_kg_per_s,
+                    "lng_level": lng_level,
                 },
             )
             # Gaussian auxiliary sensors (ambient, lube oil, vibration, per-cylinder).
@@ -205,6 +254,11 @@ class GensetController:
 
             with self._lock:
                 self._current_load_ratio = current
+                self._lng_level = lng_level
+                self._fuel_flow_ema_kg_per_s = fuel_flow_ema_kg_per_s
+                prediction = self._predict_lng_locked()
+                message["payload"].update(prediction)
+                message.update(prediction)
                 self._last_message = message
 
             self._modbus_server.sync_from_status(self.get_status())
@@ -217,6 +271,7 @@ class GensetController:
                 f"bsfc={message['bsfc_g_per_kwh']:.1f}g/kWh "
                 f"co2={message['co2_kg_per_s']:.5f}kg/s "
                 f"nox={message['nox_kg_per_s']:.6f}kg/s "
+                f"lng_level={message['lng_level'] * 100:.1f}% "
                 f"oil_temp={message['oil_temp_c']:.1f}C "
                 f"oil_press={message['oil_pressure_bar']:.2f}bar "
                 f"exh_temp_avg={np.mean([message[f'cylinder_exhaust_temp_c_{i}'] for i in range(1, NUM_CYLINDERS + 1)]):.1f}C"

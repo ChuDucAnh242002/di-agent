@@ -17,6 +17,14 @@ export interface SystemStatus {
   time_to_empty_hr?: number;
   time_to_full_hr?: number;
   anomaly_enabled?: boolean;
+  lng_pack_count?: number;
+  lng_pack_capacity_m3?: number;
+  lng_capacity_m3?: number;
+  lng_level?: number;
+  lng_remaining_m3?: number;
+  lng_consumption_rate_kg_per_hr?: number;
+  lng_time_to_empty_hr?: number;
+  last_message?: { ship_speed_knots?: number; [key: string]: unknown } | null;
   [key: string]: unknown;
 }
 
