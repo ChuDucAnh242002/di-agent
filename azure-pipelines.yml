@@ -1,21 +1,289 @@
-# Node.js
-# Build a general Node.js project with npm.
-# Add steps that analyze code, save build artifacts, deploy, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+# azure-pipelines.yml
+name: CI
 
+# Runs on every push to main and every PR targeting main.
 trigger:
-- main
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: [main]
+
+variables:
+  GO_VERSION: '1.22'
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '24'
+  # Set these in the pipeline UI / variable group (do not commit secrets):
+  #   DOCKER_REGISTRY_CONNECTION  -> service connection name for ghcr.io
+  #   GHCR_USER                   -> e.g. chuducanh242002
+  #   GHCR_TOKEN                  -> PAT with write:packages (secret)
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- task: NodeTool@0
-  inputs:
-    versionSpec: '20.x'
-  displayName: 'Install Node.js'
+stages:
+- stage: Build_Test_Vet
+  displayName: build + test + vet
+  jobs:
+  - job: test
+    displayName: build + test + vet
+    steps:
+    - checkout: self
 
-- script: |
-    npm install
-    npm run build
-  displayName: 'npm install and build'
+    - task: GoTool@0
+      inputs:
+        version: $(GO_VERSION)
+
+    - script: |
+        go mod download
+      displayName: Download Go modules
+      workingDirectory: semantic-map/go
+
+    - script: |
+        go mod tidy
+        if ! git diff --quiet -- go.mod go.sum; then
+          echo "##vso[task.logissue type=error]go.mod / go.sum need 'go mod tidy'"
+          git diff -- go.mod go.sum
+          exit 1
+        fi
+      displayName: Verify go.mod is tidy
+      workingDirectory: semantic-map/go
+
+    - script: go build ./...
+      displayName: Build
+      workingDirectory: semantic-map/go
+
+    - script: go vet ./...
+      displayName: Vet
+      workingDirectory: semantic-map/go
+
+    - script: go test -race -timeout 5m ./...
+      displayName: Test (race detector, 5m timeout)
+      workingDirectory: semantic-map/go
+
+- stage: Smoke_And_System
+  displayName: smoke + system tests
+  dependsOn: Build_Test_Vet
+  jobs:
+  - job: demo
+    displayName: dev.sh demo (smoke)
+    dependsOn: []          # runs in parallel with the other jobs in this stage
+    steps:
+    - checkout: self
+    - task: GoTool@0
+      inputs:
+        version: $(GO_VERSION)
+    - script: ./dev.sh demo --paper
+      displayName: Run guided demo in paper mode
+      workingDirectory: semantic-map/go
+
+  - job: system_tests
+    displayName: poc2/system pytest suite
+    dependsOn: []
+    steps:
+    - checkout: self
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: $(PYTHON_VERSION)
+    - script: |
+        python -m pip install --upgrade pip
+        pip install pytest httpx
+        for req in poc2/system/*/requirements.txt; do
+          pip install -r "$req"
+        done
+      displayName: Install dependencies
+    - script: pytest poc2/system/tests/
+      displayName: Run pytest
+
+  - job: bdd_tests
+    displayName: poc2/bdd godog scenarios (no live cluster)
+    dependsOn: []
+    steps:
+    - checkout: self
+    - task: GoTool@0
+      inputs:
+        version: $(GO_VERSION)
+    - script: go test ./...
+      displayName: Run godog scenarios
+      workingDirectory: poc2/bdd
+
+  - job: kind_smoke_test
+    displayName: kind Helm smoke test (di-agent-system chart)
+    dependsOn: []
+    steps:
+    - checkout: self
+
+    # kind-action equivalent: install kind + kubectl and create a cluster.
+    - script: |
+        set -euo pipefail
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+        kind create cluster --name di-agent-smoke
+      displayName: Create kind cluster
+
+    - task: HelmInstaller@1
+      inputs:
+        helmVersionToInstall: 'latest'
+
+    - script: |
+        set -euo pipefail
+        declare -A contexts=(
+          [genset]=poc2/system/genset
+          [switchboard]=poc2/system/switchboard
+          [propulsion]=poc2/system/propulsion
+          [battery]=poc2/system/battery
+          [shore-power]=poc2/system/shore-power
+          [auxload]=poc2/system/auxiliary-load
+          [telemetry-writer]=poc2/system/telemetry-writer
+          [navigation]=poc2/system/navigation
+          [playground]=poc2/playground
+        )
+        for service in "${!contexts[@]}"; do
+          docker build -t "smoke/${service}:test" "${contexts[$service]}"
+        done
+      displayName: Build chart-managed images
+
+    - script: |
+        set -euo pipefail
+        for service in genset switchboard propulsion battery shore-power auxload telemetry-writer navigation playground; do
+          kind load docker-image "smoke/${service}:test" --name di-agent-smoke
+        done
+      displayName: Load images into kind
+
+    - script: |
+        kubectl create secret generic influxdb-credentials \
+          --from-literal=admin-user=admin \
+          --from-literal=admin-password=smoke-test-password \
+          --from-literal=admin-token=smoke-test-token
+        kubectl create secret generic grafana-credentials \
+          --from-literal=admin-user=admin \
+          --from-literal=admin-password=smoke-test-password
+      displayName: Create required secrets
+
+    - script: |
+        helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+          --set global.imageRegistry=smoke \
+          --set global.imageTag=test \
+          --set global.imagePullPolicy=IfNotPresent \
+          --set kafka.persistence.enabled=false \
+          --set influxdb.persistence.enabled=false \
+          --set prometheus.persistence.enabled=false \
+          --wait --timeout 6m0s
+      displayName: Helm install (values pointed at locally-loaded images)
+
+    - script: |
+        set -euo pipefail
+        kubectl run smoke-curl --image=curlimages/curl --restart=Never \
+          --command -- sleep 3600
+        kubectl wait --for=condition=Ready pod/smoke-curl --timeout=60s
+        for i in $(seq 1 12); do
+          if kubectl exec smoke-curl -- curl -sf --max-time 10 http://genset-1:8000/health; then
+            kubectl delete pod smoke-curl --wait=false
+            exit 0
+          fi
+          echo "genset-1 not reachable yet, retrying (${i}/12)..."
+          sleep 5
+        done
+        echo "##vso[task.logissue type=error]genset-1 /health endpoint never became reachable"
+        exit 1
+      displayName: Smoke-test genset REST endpoint
+
+    - script: |
+        kubectl get pods -o wide
+        kubectl describe pods
+        kubectl logs -l app=genset --all-containers --tail=200 || true
+      displayName: Dump cluster state on failure
+      condition: failed()
+
+  - job: playground_tests
+    displayName: poc2/playground cypress suite (no live cluster)
+    dependsOn: []
+    steps:
+    - checkout: self
+    - task: NodeTool@0
+      inputs:
+        versionSpec: $(NODE_VERSION)
+    - script: npm install
+      displayName: Install dependencies
+      workingDirectory: poc2/playground
+    - script: npm run build
+      displayName: Build
+      workingDirectory: poc2/playground
+    - script: |
+        npx start-server-and-test \
+          "npm run preview -- --port 4173" \
+          http://localhost:4173 \
+          "npx cypress run --spec cypress/e2e/playground.cy.ts"
+      displayName: Run Cypress tests (stubbed, non-live)
+      workingDirectory: poc2/playground
+
+# ---------------------------------------------------------------------------
+# Image build/push only runs on main pushes (matches the GitHub `if:` guard).
+# ---------------------------------------------------------------------------
+- stage: Publish_Images
+  displayName: build + push images
+  dependsOn: Build_Test_Vet
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+  jobs:
+  - job: build_push_images
+    displayName: build + push images
+    strategy:
+      matrix:
+        genset:
+          service: genset
+          context: poc2/system/genset
+        switchboard:
+          service: switchboard
+          context: poc2/system/switchboard
+        propulsion:
+          service: propulsion
+          context: poc2/system/propulsion
+        battery:
+          service: battery
+          context: poc2/system/battery
+        shore_power:
+          service: shore-power
+          context: poc2/system/shore-power
+        auxload:
+          service: auxload
+          context: poc2/system/auxiliary-load
+        telemetry_writer:
+          service: telemetry-writer
+          context: poc2/system/telemetry-writer
+        navigation:
+          service: navigation
+          context: poc2/system/navigation
+        playground:
+          service: playground
+          context: poc2/playground
+    steps:
+    - checkout: self
+    - task: Docker@2
+      displayName: Build and push $(service)
+      inputs:
+        command: buildAndPush
+        containerRegistry: $(DOCKER_REGISTRY_CONNECTION)
+        repository: $(GHCR_USER)/$(service)
+        dockerfile: '$(context)/Dockerfile'
+        buildContext: '$(context)'
+        tags: |
+          $(Build.SourceVersion)
+          latest
+
+  - job: build_push_di_agent
+    displayName: build + push di-agent image
+    steps:
+    - checkout: self
+    - task: Docker@2
+      displayName: Build and push di-agent
+      inputs:
+        command: buildAndPush
+        containerRegistry: $(DOCKER_REGISTRY_CONNECTION)
+        repository: $(GHCR_USER)/di-agent
+        dockerfile: 'semantic-map/Dockerfile'
+        buildContext: 'semantic-map'
+        tags: |
+          $(Build.SourceVersion)
+          latest
