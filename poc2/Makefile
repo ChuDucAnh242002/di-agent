@@ -65,6 +65,7 @@ helm-upgrade: helm-install
 
 helm-uninstall:
 	@helm uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+	@kubectl -n $(HELM_NAMESPACE) delete job postgres-ingest --ignore-not-found
 
 helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
@@ -158,7 +159,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
 	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
-	@echo "                 telemetry-writer/telemetry-cloud-sync/playground images to REGISTRY (default $(REGISTRY))"
+	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest images to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"

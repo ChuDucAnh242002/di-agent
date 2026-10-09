@@ -66,6 +66,19 @@ This is required because `helm/di-agent-system/values.yaml` references:
 - `influxdb.existingSecret: influxdb-credentials`
 - `grafana.existingSecret: grafana-credentials`
 
+### PostgreSQL engine dataset
+
+The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
+
+```bash
+kubectl -n default create secret generic postgres-credentials \
+  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
+kubectl -n default create secret generic data-url --from-literal=data-url="$DATA_URL"
+helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeout 30m
+```
+
+Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
+
 ### Optional: cloud eventual-consistency sync
 
 `telemetryCloudSync` mirrors telemetry Kafka topics to Azure (Event Hubs or IoT Hub), and `telemetryWriterCloud` is a second telemetry-writer that reads them back out of Event Hubs into a cloud-hosted InfluxDB, so the cloud store eventually converges with the edge one. Both are disabled by default. To enable them:

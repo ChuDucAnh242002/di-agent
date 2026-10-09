@@ -188,6 +188,7 @@ jobs:
             --set global.imagePullPolicy=IfNotPresent \
             --set kafka.persistence.enabled=false \
             --set influxdb.persistence.enabled=false \
+            --set postgres.enabled=false \
             --set prometheus.persistence.enabled=false \
             --wait --timeout 6m0s
 
@@ -276,6 +277,8 @@ jobs:
             context: poc2/system/telemetry-writer
           - service: playground
             context: poc2/playground
+          - service: data-ingest
+            context: poc2/data-ingest
 
     steps:
       - name: Checkout

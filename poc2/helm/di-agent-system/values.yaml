@@ -145,6 +145,32 @@ influxdb:
   nodeSelector: {}
   resources: {}
 
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16"
+  port: 5432
+  database: engine
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: local-path
+  # Pre-create this Secret in the release namespace. Required keys are
+  # username and password.
+  existingSecret: postgres-credentials
+  ingest:
+    # Post-install/upgrade Job that downloads the CSVs and COPYs them in.
+    enabled: true
+    image:
+      repository: data-ingest
+      tag: ""
+    # Secret with key data-url holding the SharePoint share link (DATA_URL).
+    dataUrlSecret: data-url
+    resources: {}
+  nodeSelector: {}
+  resources: {}
+
 telemetryWriter:
   image:
     repository: telemetry-writer
