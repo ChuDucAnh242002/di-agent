@@ -57,8 +57,16 @@ export class Force {
       if (!seen.has(id)) { this.nodes.delete(id); topologyChanged = true; }
     }
 
-    if (links.length !== this.links.length) topologyChanged = true;
-    this.links = links.filter((l) => this.nodes.has(l.source) && this.nodes.has(l.target));
+    // Compared as a SET, not a count. One relationship retiring while another is
+    // confirmed in the same poll leaves the count unchanged, and a layout that
+    // never reheats draws the new edge across positions arranged for the old one.
+    const next = links.filter((l) => this.nodes.has(l.source) && this.nodes.has(l.target));
+    const key = (l) => `${l.source}\u0001${l.target}`;
+    const before = new Set(this.links.map(key));
+    if (next.length !== before.size || next.some((l) => !before.has(key(l)))) {
+      topologyChanged = true;
+    }
+    this.links = next;
 
     if (topologyChanged) this.reheat(0.75);
     return topologyChanged;

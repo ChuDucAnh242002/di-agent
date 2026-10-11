@@ -43,7 +43,7 @@ export class GraphView {
     this.tooltip = tooltip;
     this.force = new Force();
     this.selected = null;
-    this.filter = { text: '', status: 'live' };
+    this.filter = { text: '' };
     this.transform = { k: 1, x: 0, y: 0 };
     this.raf = null;
     this.pulses = new Map();   // id -> ms when it last moved, for the ping animation
@@ -234,17 +234,18 @@ export class GraphView {
 
   // -- which properties are on screen ---------------------------------------
 
+  /**
+   * Text search only. Lifecycle status is chosen in the REQUEST — see
+   * STATUS_QUERY in app.js — because the agent decides which statuses to send
+   * and filtering the response could only ever hide what arrived, never fetch
+   * what did not.
+   */
   visible(model) {
-    const { text, status } = this.filter;
-    const needle = text.trim().toLowerCase();
-    return model.properties.filter((p) => {
-      if (status === 'live' && p.status === 'retired') return false;
-      if (status !== 'live' && status !== 'all' && p.status !== status) return false;
-      if (!needle) return true;
-      return p.id.toLowerCase().includes(needle)
-        || (p.subject || '').toLowerCase().includes(needle)
-        || (p.unit || '').toLowerCase().includes(needle);
-    });
+    const needle = this.filter.text.trim().toLowerCase();
+    if (!needle) return model.properties;
+    return model.properties.filter((p) => p.id.toLowerCase().includes(needle)
+      || (p.subject || '').toLowerCase().includes(needle)
+      || (p.unit || '').toLowerCase().includes(needle));
   }
 
   // -- render ---------------------------------------------------------------

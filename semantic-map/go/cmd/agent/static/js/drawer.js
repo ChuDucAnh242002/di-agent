@@ -45,6 +45,7 @@ export class Drawer {
     });
   }
 
+  /** Returns the poll it starts, so a caller can wait for it. */
   activate(name) {
     this.active = name;
     this.root.classList.remove('collapsed');
@@ -55,7 +56,7 @@ export class Drawer {
     for (const [k, pane] of Object.entries(this.panes)) {
       pane.classList.toggle('active', k === name);
     }
-    this.poll({ force: true });
+    return this.poll({ force: true });
   }
 
   /** Called after every /state poll, plus on demand. */
@@ -90,7 +91,8 @@ export class Drawer {
     set('c-journal', this.events.length);
     set('c-decisions', this.decisions.length);
     set('c-subjects', model?.counts?.subjects ?? 0);
-    set('c-cluster', this.peers?.peers?.length ?? 0);
+    set('c-cluster', (this.peers?.peers?.length ?? 0)
+      + Object.keys(this.peers?.silent || {}).length);
     const cEl = document.getElementById('c-discovery');
     cEl.textContent = this.candidates.length;
     // Pending discovery is the one count worth interrupting for: the map has
@@ -154,11 +156,20 @@ export class Drawer {
 
   async pollDecisions() {
     const res = await api.decisions(40);
-    this.decisions = res.decisions || [];
+    const fresh = res.decisions || [];
+    // The listing is capped, so an older trace the operator deliberately opened
+    // is not in it. Dropping it here would make the row vanish from under them a
+    // moment after they clicked "Open the trace".
+    const held = this.openDecisionID
+      && this.decisions.find((d) => d.id === this.openDecisionID);
+    if (held && !fresh.some((d) => d.id === held.id)) fresh.unshift(held);
+    this.decisions = fresh;
   }
 
   async openDecision(id) {
-    this.activate('decisions');
+    // Awaited: activate() starts a poll that replaces this.decisions wholesale,
+    // and if it lands after the fetch below it discards the record just injected.
+    await this.activate('decisions');
     try {
       const d = await api.decision(id);
       this.openDecisionID = id;
@@ -331,7 +342,14 @@ export class Drawer {
     const p = this.peers;
     if (!p) { this.panes.cluster.innerHTML = `<div class="empty">Loading…</div>`; return; }
 
-    if (!p.peers?.length) {
+    // `silent` maps a URL to the reason that peer has never answered. It is an
+    // object, not an array, and a peer in it is deliberately absent from `peers`
+    // — the store has no owner id to key it under. Both of those bit the first
+    // version: the length check never fired, and a configured-but-unreachable
+    // peer was reported as "none configured", which is the opposite diagnosis.
+    const silent = Object.entries(p.silent || {});
+
+    if (!p.peers?.length && !silent.length) {
       this.panes.cluster.innerHTML = `<div class="empty">
         <strong>No peers registered</strong>
         <span class="why">This agent is node-local by design: one agent per machine,
@@ -340,6 +358,32 @@ export class Drawer {
         <span class="mono">-peers http://node_1:8080,…</span> or POST to
         <span class="mono">/peers</span>.</span>
       </div>`;
+      return;
+    }
+
+    if (!p.peers?.length) {
+      this.panes.cluster.innerHTML = `<div class="pane-pad">
+        <p style="font-size:12.5px;color:var(--status-serious);margin:0 0 9px;line-height:1.55">
+          <strong>${silent.length} peer${silent.length === 1 ? ' is' : 's are'} configured but
+          ${silent.length === 1 ? 'has' : 'have'} never answered</strong>, so this agent holds no
+          state for ${silent.length === 1 ? 'it' : 'them'} and cannot name
+          ${silent.length === 1 ? 'it' : 'them'}. That is a different situation from a known peer
+          that is currently unreachable.
+        </p>
+        <table class="grid">
+          <thead><tr><th>url</th><th>why it has never answered</th></tr></thead>
+          <tbody>${silent.map(([url, why]) => `<tr>
+            <td class="mono">${escapeHTML(url)}</td>
+            <td><span class="badge alarm">! ${escapeHTML(why)}</span></td>
+          </tr>`).join('')}</tbody>
+        </table>
+        <div class="row-between" style="margin-top:10px">
+          <span class="muted" style="font-size:11.5px">Local node
+            <span class="mono">${escapeHTML(p.self || '')}</span>.</span>
+          <button class="btn small" data-act="refresh-peers">Poll peers now</button>
+        </div>
+      </div>`;
+      this.wireRefreshPeers();
       return;
     }
 
@@ -370,10 +414,15 @@ export class Drawer {
       </table>
       ${p.stale?.length ? `<p style="font-size:11.5px;color:var(--status-serious);margin:9px 0 0">
         Stale snapshots: ${p.stale.map(escapeHTML).join(', ')} — a snapshot is only as good as its age.</p>` : ''}
-      ${p.silent?.length ? `<p style="font-size:11.5px;color:var(--ink-muted);margin:5px 0 0">
-        Silent: ${p.silent.map(escapeHTML).join(', ')}</p>` : ''}
+      ${silent.length ? `<p style="font-size:11.5px;color:var(--status-serious);margin:5px 0 0;line-height:1.5">
+        Never answered, so no state is held for ${silent.length === 1 ? 'it' : 'them'}:
+        ${silent.map(([url, why]) => `${escapeHTML(url)} (${escapeHTML(why)})`).join('; ')}</p>` : ''}
     </div>`;
 
+    this.wireRefreshPeers();
+  }
+
+  wireRefreshPeers() {
     this.panes.cluster.querySelector('[data-act="refresh-peers"]')?.addEventListener('click', async (e) => {
       e.currentTarget.disabled = true;
       try {

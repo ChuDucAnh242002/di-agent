@@ -521,8 +521,17 @@ export class Inspector {
       });
       if (!got) return;
       if (!got.reason?.trim()) return this.ctx.toast('A reason is required.', 'err');
+      // An empty field reads as 0 and garbage reads as NaN, which the wire turns
+      // into null and Go decodes as 0.0 — an assertion that outranks both learned
+      // layers, never decays, and is undone only by another assertion. Too costly
+      // to arrive at by leaving a box blank.
+      const strength = Number(got.strength);
+      if (got.strength?.trim() === '' || !Number.isFinite(strength)
+          || strength < 0 || strength > 1) {
+        return this.ctx.toast('Strength must be a number between 0 and 1.', 'err');
+      }
       try {
-        await api.assertStrength(r.id, Number(got.strength), got.reason.trim(), got.actor?.trim() || 'operator');
+        await api.assertStrength(r.id, strength, got.reason.trim(), got.actor?.trim() || 'operator');
         this.ctx.toast('Assertion recorded', 'ok');
         this.ctx.refresh();
       } catch (err) { this.ctx.toast(err.message, 'err'); }

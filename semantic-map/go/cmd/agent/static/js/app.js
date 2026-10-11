@@ -21,6 +21,25 @@ let live = true;
 let interval = 2000;
 let lastRevision = -1;
 let failures = 0;
+let inflight = false;
+let statusFilter = 'live';
+
+/**
+ * What each status choice asks the agent for.
+ *
+ * This has to travel in the request. GET /state with no status defaults to
+ * active+stale server-side, so a retired property never reaches the page at all
+ * — filtering the response could only ever hide things, never reveal them, which
+ * left "retired only" permanently empty and made "everything" a synonym for
+ * "active + stale".
+ */
+const STATUS_QUERY = {
+  live: undefined,                               // the server's own default
+  all: ['active', 'stale', 'retired'],
+  active: ['active'],
+  stale: ['stale'],
+  retired: ['retired'],
+};
 
 // ── chrome helpers ───────────────────────────────────────────────────────────
 
@@ -222,8 +241,13 @@ function renderStats(counts) {
 // ── the poll loop ────────────────────────────────────────────────────────────
 
 async function tick() {
+  // One poll at a time. Two overlapping requests can resolve out of order, and
+  // ingesting the older snapshot second rewinds the revision, flashes the badge
+  // and pushes a stale point into every sparkline.
+  if (inflight) return;
+  inflight = true;
   try {
-    const view = await api.state();
+    const view = await api.state({ status: STATUS_QUERY[statusFilter] });
     model.ingest(view);
     failures = 0;
     setHealth('ok', `agent ok`);
@@ -247,6 +271,8 @@ async function tick() {
     failures++;
     setHealth('down', failures > 2 ? 'agent unreachable' : 'retrying…');
     if (failures === 1) toast(`Lost the agent: ${err.message}`, 'err');
+  } finally {
+    inflight = false;
   }
 }
 
@@ -256,9 +282,18 @@ function setHealth(state, label) {
   document.getElementById('health-label').textContent = label;
 }
 
+/**
+ * Chained rather than periodic: the next poll is scheduled once the previous one
+ * has finished, so a slow agent stretches the cadence instead of accumulating
+ * overlapping requests.
+ */
 function schedule() {
-  clearInterval(timer);
-  if (live) timer = setInterval(tick, interval);
+  clearTimeout(timer);
+  if (!live) return;
+  timer = setTimeout(async () => {
+    await tick();
+    schedule();
+  }, interval);
 }
 
 // ── controls ─────────────────────────────────────────────────────────────────
@@ -272,7 +307,7 @@ document.getElementById('live-btn').addEventListener('click', () => {
 document.getElementById('step-btn').addEventListener('click', () => {
   live = false;
   document.getElementById('live-btn').setAttribute('aria-pressed', 'false');
-  clearInterval(timer);
+  clearTimeout(timer);
   tick();
 });
 document.getElementById('interval').addEventListener('change', (e) => {
@@ -284,7 +319,8 @@ document.getElementById('search').addEventListener('input', (e) => {
   graph.setFilter({ text: e.target.value });
 });
 document.getElementById('status-filter').addEventListener('change', (e) => {
-  graph.setFilter({ status: e.target.value });
+  statusFilter = e.target.value;
+  tick();            // the choice changes what is fetched, not just what is drawn
 });
 document.getElementById('relayout-btn').addEventListener('click', () => graph.relayout());
 document.getElementById('fit-btn').addEventListener('click', () => graph.fit());
@@ -325,8 +361,8 @@ document.addEventListener('keydown', (e) => {
 
 // A hidden tab should not keep polling an edge node it is not being read on.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) clearInterval(timer);
-  else if (live) { schedule(); tick(); }
+  if (document.hidden) clearTimeout(timer);
+  else if (live) { tick().then(schedule); }
 });
 
 // ── go ───────────────────────────────────────────────────────────────────────

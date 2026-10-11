@@ -66,7 +66,9 @@ go run ./cmd/mapctl estimate cpu_pressure_ratio \
 ```bash
 # 4. Open the operator console (no external assets — works offline)
 open http://localhost:8080/ui/            # macOS; xdg-open on Linux
-# → click an edge → side panel populates → Deprecate / Set strength / Reset
+# → click a property → value, confidence, influences, and "what if" estimates
+# → click a relationship → the three strength layers, and which one answers
+# → the drawer carries the journal, traced decisions and the discovery queue
 ```
 
 ```bash
