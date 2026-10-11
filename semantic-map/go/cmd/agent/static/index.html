@@ -3,139 +3,154 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Semantic Map &mdash; Live Ontology</title>
-  <link rel="stylesheet" href="/ui/style.css" />
+  <title>Semantic Map — operator console</title>
+  <link rel="stylesheet" href="./style.css" />
   <!--
-    Cytoscape.js is loaded from a pinned CDN. Built-in cose layout is
-    sufficient for a 7-node graph; no extra extension libraries are needed.
+    No external dependencies, by design.
+
+    The previous console pulled Cytoscape from a CDN, which makes the operator
+    surface of an edge agent unusable on exactly the node it was written for: one
+    that is offline, air-gapped, or on a metered link. The force layout and every
+    chart here are drawn in ./js — the page is whatever the binary already
+    embeds, and nothing else.
   -->
-  <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+  <script>
+    // Applied before first paint so a dark-themed console never flashes white.
+    try {
+      const t = localStorage.getItem('sm-theme');
+      if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+    } catch (_) { /* private mode: fall through to the OS preference */ }
+  </script>
 </head>
 <body>
-  <header>
+
+<header>
+  <div class="brand">
     <h1>Semantic Map</h1>
-    <div class="header-meta">
-      <span id="health-dot" class="health-dot health-unknown" title="agent health"></span>
-      <span id="health-label">checking&hellip;</span>
-      <span id="candidates-chip" class="chip hidden" title="Pending candidates">0 candidates</span>
-      <label class="auto-refresh">
-        <input type="checkbox" id="auto-refresh" /> auto-refresh (5s)
-      </label>
-      <button id="refresh-btn" type="button">Refresh</button>
+    <span class="owner" id="owner" title="the system these properties describe">…</span>
+  </div>
+
+  <div class="header-spacer"></div>
+
+  <div class="header-group">
+    <div class="revision" id="revision" title="every mutation advances the revision">
+      <span>rev</span><span class="n" id="revision-n">—</span>
     </div>
-  </header>
 
-  <main>
-    <div id="cy"></div>
+    <div class="toggle" role="group" aria-label="polling">
+      <button id="live-btn" aria-pressed="true" title="poll the agent continuously">Live</button>
+      <button id="step-btn" title="fetch once">Step</button>
+    </div>
 
-    <aside id="panel">
-      <section id="panel-empty" class="panel-section">
-        <p class="hint">Click a <strong>node</strong> to inspect the construct, or an <strong>edge</strong> for proposition descriptor + history + mutations.</p>
-        <p class="hint small">Edges colored <span class="legend-pos">green</span> for positive direction, <span class="legend-neg">red</span> for negative. Dashed edges are deprecated. Opacity scales with confidence.</p>
-      </section>
+    <select id="interval" aria-label="poll interval" style="width:auto">
+      <option value="1000">1s</option>
+      <option value="2000" selected>2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
 
-      <section id="panel-node" class="panel-section hidden">
-        <h2>Construct</h2>
-        <table id="node-table">
-          <tbody>
-            <tr><th>ID</th><td id="nd-id"></td></tr>
-            <tr><th>Name</th><td id="nd-name"></td></tr>
-            <tr><th>Description</th><td id="nd-desc"></td></tr>
-            <tr><th>Degree</th><td id="nd-degree"></td></tr>
-          </tbody>
-        </table>
+    <button class="btn ghost" id="theme-btn" title="light / dark / follow system" aria-label="theme">◐</button>
 
-        <h2>Outgoing edges <span id="nd-out-count" class="hint small"></span></h2>
-        <ul id="nd-out-list" class="edge-link-list">
-          <li class="hint small">No outgoing propositions.</li>
-        </ul>
+    <span class="health" id="health" data-state="unknown">
+      <span class="dot"></span><span id="health-label">connecting…</span>
+    </span>
+  </div>
+</header>
 
-        <h2>Incoming edges <span id="nd-in-count" class="hint small"></span></h2>
-        <ul id="nd-in-list" class="edge-link-list">
-          <li class="hint small">No incoming propositions.</li>
-        </ul>
+<section class="stats" id="stats" aria-label="map census"></section>
 
-        <p class="hint small">Constructs are append-only — they have no mutation actions. Click any related edge to inspect or mutate it.</p>
-      </section>
+<main>
+  <div id="canvas-wrap">
+    <svg id="graph" role="img" aria-label="the state map: properties and the relationships between them"></svg>
 
-      <section id="panel-candidates" class="panel-section hidden">
-        <h2>Pending Candidates</h2>
-        <div id="candidates-list"></div>
-      </section>
-
-      <section id="panel-tune">
-        <h3>Operator Tune</h3>
-        <div class="tune-form">
-          <input type="text" id="tune-input" placeholder='e.g. "prioritize security"' autocomplete="off"/>
-          <button id="tune-btn" type="button" onclick="submitTune()">Tune</button>
-        </div>
-        <div id="tune-result"></div>
-      </section>
-
-      <section id="panel-edge" class="panel-section hidden">
-        <h2>Edge descriptor</h2>
-        <p id="ed-description" class="edge-description hint"></p>
-        <table id="edge-table">
-          <tbody>
-            <tr><th>FromID</th><td id="ed-from"></td></tr>
-            <tr><th>ToID</th><td id="ed-to"></td></tr>
-            <tr><th>PropositionID</th><td id="ed-pid"></td></tr>
-            <tr><th>Direction</th><td id="ed-dir"></td></tr>
-            <tr><th>PriorWeight</th><td id="ed-prior"></td></tr>
-            <tr><th>EMAWeight</th><td id="ed-ema"></td></tr>
-            <tr><th>Confidence</th><td id="ed-conf"></td></tr>
-            <tr><th>NObservations</th><td id="ed-nobs"></td></tr>
-            <tr><th>Deprecated</th><td id="ed-deprecated"></td></tr>
-          </tbody>
-        </table>
-
-        <h2>Recent history</h2>
-        <ol id="history-list" class="history-list">
-          <li class="hint small">No history yet for this proposition.</li>
-        </ol>
-
-        <div class="panel-actions">
-          <button id="btn-strength" type="button">Set strength</button>
-          <button id="btn-deprecate" type="button">Deprecate</button>
-          <button id="btn-reset" type="button">Reset</button>
-        </div>
-      </section>
-    </aside>
-  </main>
-
-  <!--
-    Single modal dialog. Class is swapped per action (modal-strength,
-    modal-deprecate, modal-reset). One openModal(kind, edge) call in app.js
-    populates the right fields and rebinds the submit handler.
-  -->
-  <dialog id="modal">
-    <form method="dialog" id="modal-form">
-      <h2 id="modal-title">Action</h2>
-      <p id="modal-subtitle" class="hint small"></p>
-
-      <div class="modal-field modal-strength-field">
-        <label for="modal-strength-input">Strength (0.0 &ndash; 1.0)</label>
-        <input type="number" id="modal-strength-input" min="0" max="1" step="0.01" value="0.5" />
+    <div class="canvas-overlay top-left">
+      <div class="search-box">
+        <input type="search" id="search" placeholder="Filter properties  (/)" aria-label="filter properties" />
       </div>
+      <select id="status-filter" aria-label="status filter" style="width:auto">
+        <option value="live">active + stale</option>
+        <option value="all">everything</option>
+        <option value="active">active only</option>
+        <option value="stale">stale only</option>
+        <option value="retired">retired only</option>
+      </select>
+    </div>
 
-      <div class="modal-field modal-deprecate-field">
-        <label for="modal-reason-input">Reason</label>
-        <input type="text" id="modal-reason-input" placeholder="e.g. superseded by new evidence" />
+    <div class="canvas-overlay top-right">
+      <button class="btn small" id="relayout-btn" title="re-run the force layout">Re-layout</button>
+      <button class="btn small" id="fit-btn" title="fit the graph to the viewport">Fit</button>
+      <button class="btn small" id="legend-btn" aria-pressed="true">Legend</button>
+    </div>
+
+    <div id="legends">
+      <div class="legend">
+        <section>
+          <h3>Sign</h3>
+          <ul>
+            <li><span class="line" style="background:var(--sign-pos)"></span> raises target</li>
+            <li><span class="line" style="background:var(--sign-neg)"></span> lowers target</li>
+            <li><span class="line dashed"></span> nothing observed yet</li>
+            <li class="muted">width = strength · opacity = confidence</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Provenance</h3>
+          <ul>
+            <li><span class="swatch" style="background:var(--prov-seeded)"></span> seeded</li>
+            <li><span class="swatch" style="background:var(--prov-learned)"></span> learned</li>
+            <li><span class="swatch" style="background:var(--prov-discovered)"></span> discovered</li>
+            <li><span class="swatch" style="background:var(--prov-asserted)"></span> asserted</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Property</h3>
+          <ul>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="var(--ink-secondary)"/></svg> observed</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.2" fill="none" stroke="var(--ink-secondary)" stroke-width="1.6"/><circle cx="7" cy="7" r="1.8" fill="var(--ink-secondary)"/></svg> derived</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--status-serious)" stroke-width="1.6"/></svg> stale</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--ink-muted)" stroke-width="1.4" stroke-dasharray="2 2"/></svg> retired</li>
+          </ul>
+        </section>
       </div>
+    </div>
+  </div>
 
-      <div class="modal-field modal-reset-field">
-        <p class="hint">This will reset the EMA weight on the edge from <strong id="modal-reset-from"></strong> &rarr; <strong id="modal-reset-to"></strong> back to its prior. History will record the reset.</p>
-      </div>
+  <aside id="inspector" class="hidden" aria-label="inspector"></aside>
+</main>
 
-      <div class="modal-actions">
-        <button type="button" id="modal-cancel">Cancel</button>
-        <button type="submit" id="modal-submit">Confirm</button>
-      </div>
-    </form>
-  </dialog>
+<section id="drawer" aria-label="live record">
+  <div class="drawer-tabs" role="tablist">
+    <button class="tab" role="tab" data-pane="journal" aria-selected="true">Journal <span class="count" id="c-journal">0</span></button>
+    <button class="tab" role="tab" data-pane="decisions" aria-selected="false">Decisions <span class="count" id="c-decisions">0</span></button>
+    <button class="tab" role="tab" data-pane="discovery" aria-selected="false">Discovery <span class="count" id="c-discovery">0</span></button>
+    <button class="tab" role="tab" data-pane="subjects" aria-selected="false">Subjects <span class="count" id="c-subjects">0</span></button>
+    <button class="tab" role="tab" data-pane="cluster" aria-selected="false">Cluster <span class="count" id="c-cluster">0</span></button>
+    <button class="tab" role="tab" data-pane="backbone" aria-selected="false">Backbone</button>
+    <div class="header-spacer"></div>
+    <button class="btn ghost small" id="drawer-toggle" title="collapse / expand">▾</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-pane active" id="pane-journal" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-decisions" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-discovery" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-subjects" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-cluster" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-backbone" role="tabpanel"></div>
+  </div>
+</section>
 
-  <div id="toasts" aria-live="polite" aria-atomic="true"></div>
+<div id="tooltip" role="tooltip" aria-hidden="true"></div>
+<div id="toasts" aria-live="polite"></div>
 
-  <script src="/ui/app.js"></script>
+<dialog id="prompt-dialog">
+  <h2 id="prompt-title">Confirm</h2>
+  <div class="body" id="prompt-body"></div>
+  <div class="foot">
+    <button class="btn" value="cancel" id="prompt-cancel">Cancel</button>
+    <button class="btn primary" value="ok" id="prompt-ok">Apply</button>
+  </div>
+</dialog>
+
+<script type="module" src="./js/app.js"></script>
 </body>
 </html>

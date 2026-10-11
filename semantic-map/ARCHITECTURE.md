@@ -1218,9 +1218,9 @@ The Semantic Map facade is a Go API. The agent daemon wraps it in three layers s
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer C — Web UI         cmd/agent/static/{index,app,style} │
-│  Vanilla JS + Cytoscape.js, embedded via go:embed all:static │
-│  Click-to-mutate viewer at /ui/                              │
+│  Layer C — Web console    cmd/agent/static/{index,style,js/} │
+│  Vanilla ES modules, no CDN, embedded via go:embed all:static │
+│  Live state-model console at /ui/                            │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer B — CLI            cmd/mapctl/                        │
 │  cobra + tablewriter; one binary, sixteen subcommands        │
@@ -1260,7 +1260,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
-| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/JS/CSS for the viewer; served by `http.FileServer` over an `embed.FS` sub-tree            |
+| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree   |
 
 Errors on the new endpoints follow a single shape:
 
@@ -1315,25 +1315,72 @@ DTOs are duplicated in `cmd/mapctl/client/types.go` rather than imported from `c
 
 Dependencies: `github.com/spf13/cobra v1.8.1`, `github.com/olekukonko/tablewriter v0.0.5`. `tablewriter` is pinned below 1.x because the 1.x API revamp is breaking.
 
-### The web viewer
+### The operator console
 
-`/ui/` serves a single-page application:
+`/ui/` serves a single-page console over the state model. It is a tree of ES
+modules under `static/js/`, embedded in the binary alongside `index.html` and
+`style.css`.
 
-- `index.html` — markup: header (title + healthz dot + refresh), Cytoscape mount, side panel, one `<dialog>` modal, toast container
-- `app.js` — controller: fetches `/graph`, builds the Cytoscape model, renders the side panel from selection events, POSTs mutations back through the same API
-- `style.css` — visual rules: edge color by direction (green `+`, red `−`), opacity proportional to confidence, dashed when deprecated
+| Module | Holds |
+| --- | --- |
+| `app.js` | the poll loop, the census strip, theme, toasts, the prompt dialog |
+| `api.js` | every route the console calls, and how this agent reports failure |
+| `model.js` | effective-strength precedence, per-property value history, subject grouping |
+| `force.js` | the force-directed layout |
+| `graph.js` | the SVG canvas |
+| `charts.js` | sparkline, strength layers, diverging contributions, census bar |
+| `inspector.js` | property and relationship detail, and the counterfactual studio |
+| `drawer.js` | journal, decisions, discovery, subjects, cluster, backbone |
 
-Cytoscape.js 3.28.1 is loaded from `unpkg.com` (single CDN pin, no build chain). The built-in `cose` layout is sufficient for seven nodes — no extension packages needed.
+**No external dependency.** The previous viewer pulled Cytoscape.js from
+`unpkg.com`. A CDN pin makes the operator surface of an offline, air-gapped or
+metered node a blank page — which is the deployment this agent exists for — so the
+layout and every chart are drawn here instead. `TestStaticUI_HasNoExternalDependency`
+pins that: a reviewer adding a remote `<script src>` fails in CI rather than on a
+disconnected device.
 
-Mutation flow (single edge):
+**What the canvas encodes.** Each visual channel carries exactly one meaning, and
+the two that would otherwise compete are separated deliberately:
 
-1. User clicks edge → side panel populates from cached graph state and a filtered `/history` fetch
-2. User clicks Deprecate / Set strength / Reset → the same `<dialog>` opens with class swaps providing the appropriate input
-3. Submit → `fetch(..., {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(req)})`
-4. `204` → success toast → re-fetch `/graph` → Cytoscape redraws (dashed edge for Deprecate, opacity/weight change for Strength, EMA fields reset for Reset)
-5. non-2xx → toast with the server's `{"error":"..."}` message
+| Channel | Meaning |
+| --- | --- |
+| edge colour | the relationship's sign (diverging blue/red) |
+| edge width | effective strength — the number the agent reasons with |
+| edge opacity | confidence (never a hue; hue is reserved for sign) |
+| edge dash | nothing observed yet — distinct from a measured zero |
+| midpoint dot | provenance: seeded / learned / discovered / asserted |
+| node shape | observed (filled) vs derived (ring and core) |
+| node ring | lifecycle: active / stale / retired |
+| node arc | the value within its declared range, when one was declared |
 
-There is no auto-poll by default; an opt-in checkbox enables a 5-second refresh tick. Same-origin only — no CORS configuration.
+Properties scoped to a subject are enclosed and labelled with that subject, so the
+picture answers *which workloads are running* before anything is clicked.
+
+**Honesty rules the console enforces.** These exist because the state model draws
+distinctions a naive renderer would flatten:
+
+- a relationship nothing has been observed about has **no** strength, and is drawn
+  dashed rather than as a measured `0.00`;
+- the three strength layers are shown together with the one that *answers* marked,
+  because precedence is by authority — assertion over established over recent — and
+  not arithmetic;
+- the journal states its window (`held`, `dropped`, `oldest_revision`) so an empty
+  list is not readable as "nothing happened";
+- an undeclared range is never normalised, so no value arc is drawn for it;
+- `sign_suspect` is surfaced as an alarm, because such a relationship reports a
+  strength near zero and would otherwise read as a quiet system;
+- an empty list says *why* it is empty — "the proposer needs N pairs" rather than
+  "no candidates".
+
+**Value history is the console's own.** The map holds a current value per property,
+not a series, so the sparkline is accumulated from successive polls and labelled as
+console history. It is never presented as the agent's record.
+
+**Liveness** is a 2s poll of `/state`, adjustable or steppable, paused when the tab
+is hidden. The revision counter, the journal, the value arcs and the edge-flow
+animation all move from the same snapshot. Mutation flow is unchanged: POST with
+`Content-Type: application/json`, `204` → toast → re-poll; non-2xx → toast carrying
+the server's own `{"error":"…"}` text. Same-origin only — no CORS configuration.
 
 ### Why three layers, not one
 

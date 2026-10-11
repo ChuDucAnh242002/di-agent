@@ -64,7 +64,7 @@ go run ./cmd/mapctl estimate cpu_pressure_ratio \
 ```
 
 ```bash
-# 4. Open the embedded viewer (Cytoscape.js)
+# 4. Open the operator console (no external assets — works offline)
 open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 # → click an edge → side panel populates → Deprecate / Set strength / Reset
 ```
@@ -74,7 +74,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for click-to-mutate demos. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. All three speak the same JSON HTTP API.
 
 ---
 
@@ -222,10 +222,18 @@ semantic-map/
     │   │   ├── explain-v1.md   Answering agent — graph semantics, tools, response schema
     │   │   ├── planner-v1.md   Planner agent — planning rules + worked examples
     │   │   └── critic-v1.md    Critic agent — what Gate 1 already covers, what only it can catch
-    │   └── static/             Embedded web UI assets
-    │       ├── index.html      Cytoscape mount + side panel + <dialog> modal + toast region
-    │       ├── app.js          Vanilla-JS controller; fetches /graph; POSTs mutations
-    │       └── style.css       Edge color by direction, opacity by confidence, dashed when deprecated
+    │   └── static/             Embedded operator console — no external assets
+    │       ├── index.html      Shell: header, census strip, canvas, inspector, drawer
+    │       ├── style.css       Design tokens (sign / status / provenance / ink) + layout
+    │       └── js/             ES modules, served from the binary
+    │           ├── app.js      Poll loop, census strip, theme, toasts, prompt dialog
+    │           ├── api.js      One place that knows the routes and the error shape
+    │           ├── model.js    Effective-strength precedence, value history, subjects
+    │           ├── force.js    Force-directed layout (hand-rolled; no CDN)
+    │           ├── graph.js    SVG canvas: properties, relationships, subject enclosures
+    │           ├── charts.js   Sparkline, strength layers, diverging contributions
+    │           ├── inspector.js  Property / relationship detail + counterfactual studio
+    │           └── drawer.js   Journal, decisions, discovery, subjects, cluster, backbone
     │
     ├── cmd/mapctl/             CLI binary — cobra + tablewriter; speaks the daemon's HTTP API
     │   ├── main.go             cmd.Execute()
