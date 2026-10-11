@@ -185,3 +185,16 @@ export function escapeHTML(s) {
 
 /** Direction arrives as a Go iota on the candidate wire: 0 positive, 1 negative. */
 export const directionSign = (d) => (d === 1 || d === '1' || d === 'negative' ? -1 : 1);
+
+/**
+ * Whether the operator is working a control inside root that a rebuild would
+ * destroy: typing, dragging a slider, or choosing from a dropdown. Buttons do not
+ * count — they keep focus after a click and after a dialog closes, and treating
+ * that as "busy" would freeze a live pane until the operator clicked elsewhere.
+ */
+export function isEditing(el, root) {
+  if (!el || el === document.body || !root.contains(el)) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  if (el.tagName !== 'INPUT') return false;
+  return !['button', 'submit', 'reset', 'checkbox', 'radio'].includes(el.type);
+}

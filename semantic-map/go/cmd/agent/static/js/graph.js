@@ -348,13 +348,19 @@ export class GraphView {
       this.edgeEls.push({ kind: 'member', from: m.from, to: m.to, path, curve: 0 });
     }
 
-    // Relationships. Opposite-direction pairs are bowed apart so both are legible.
+    // Relationships. Edges between the same two nodes are bowed apart so each is
+    // legible and clickable. The bend is applied perpendicular to the edge's own
+    // direction, so it is chosen in the sorted pair's frame and flipped for an
+    // edge running the other way — otherwise A→B at +b and B→A at −b would land
+    // on one control point and draw the same curve.
     const pairIndex = new Map();
     for (const r of rels) {
-      const key = [r.from, r.to].sort().join('||');
+      const pair = [r.from, r.to].sort();
+      const key = pair.join('||');
       const n = pairIndex.get(key) || 0;
       pairIndex.set(key, n + 1);
-      const curve = n === 0 ? 0.16 : -0.16 * n;
+      const bend = n === 0 ? 0.16 : -0.16 * n;
+      const curve = r.from === pair[0] ? bend : -bend;
 
       const eff = effective(r);
       const sign = r.sign < 0 ? 'neg' : 'pos';

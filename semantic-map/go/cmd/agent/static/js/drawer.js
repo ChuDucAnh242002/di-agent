@@ -11,7 +11,7 @@
 //     happened.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, directionSign } from './model.js';
+import { fmt, escapeHTML, effective, directionSign, isEditing } from './model.js';
 
 const JOURNAL_BUFFER = 400;
 
@@ -34,6 +34,7 @@ export class Drawer {
     this.question = '';
     this.asking = false;
     this.askError = null;
+    this.busy = new Set();  // panes with an operator-started request in flight
     this.panes = {};
     for (const name of ['journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
@@ -86,8 +87,13 @@ export class Drawer {
     // worth reading, and a request that can take minutes. A poll-driven rerender
     // would discard all three, so it only redraws when it asks to.
     if (this.active === 'ask' && this.askRendered) return;
-    if (this.active === 'ask') this.askRendered = true;
-    else this.askRendered = false;
+    // Every pane is rebuilt wholesale, so a poll must not land on top of an
+    // operator: an open dropdown would close mid-choice, and a button disabled
+    // for its request would come back enabled and invite a duplicate. The pane
+    // redraws itself when its request settles; the next poll catches up after.
+    const pane = this.panes[this.active];
+    if (this.busy.has(this.active) || isEditing(document.activeElement, pane)) return;
+    this.askRendered = this.active === 'ask';
     switch (this.active) {
       case 'journal': return this.renderJournal();
       case 'decisions': return this.renderDecisions();
@@ -283,17 +289,20 @@ export class Drawer {
       b.addEventListener('click', async (e) => {
         e.stopPropagation();
         const { cand, verdict } = b.dataset;
-        b.disabled = true;
+        if (this.busy.has('discovery')) return;
+        this.busy.add('discovery');
+        this.panes.discovery.querySelectorAll('[data-cand]').forEach((x) => { x.disabled = true; });
         try {
           await api.reviewCandidate(cand, verdict);
           this.ctx.toast(`Candidate ${verdict}ed`, 'ok');
           await this.pollCandidates();
-          this.renderDiscovery();
-          this.renderCounts();
           this.ctx.refresh();
         } catch (err) {
           this.ctx.toast(err.message, 'err');
-          b.disabled = false;
+        } finally {
+          this.busy.delete('discovery');
+          this.renderDiscovery();
+          this.renderCounts();
         }
       });
     });
@@ -490,11 +499,14 @@ export class Drawer {
       const id = e.target.value;
       this.whereProperty = id;
       if (!id) { this.where = null; return this.renderCluster(); }
+      this.busy.add('cluster');
       try {
         this.where = await api.where(id);
       } catch (err) {
         this.where = null;
         this.ctx.toast(err.message, 'err');
+      } finally {
+        this.busy.delete('cluster');
       }
       this.renderCluster();
     });
@@ -502,13 +514,19 @@ export class Drawer {
 
   wireRefreshPeers() {
     this.panes.cluster.querySelector('[data-act="refresh-peers"]')?.addEventListener('click', async (e) => {
+      if (this.busy.has('cluster')) return;
       e.currentTarget.disabled = true;
+      this.busy.add('cluster');
       try {
         const res = await api.refreshPeers();
         this.ctx.toast(`${res.answered} answered, ${res.failed} failed`, res.failed ? 'err' : 'ok');
         await this.pollPeers();
+      } catch (err) {
+        this.ctx.toast(err.message, 'err');
+      } finally {
+        this.busy.delete('cluster');
         this.renderCluster();
-      } catch (err) { this.ctx.toast(err.message, 'err'); }
+      }
     });
     this.wireWhere();
   }
@@ -667,7 +685,9 @@ export class Drawer {
             <td class="mono">${escapeHTML(p.from)}</td>
             <td class="mono">${escapeHTML(p.to)}</td>
             <td>${escapeHTML(p.direction)}</td>
-            <td class="num">${fmt.num(p.prior_strength, 3)}</td>
+            <td class="num">${p.instantiated
+              ? fmt.num(p.prior_strength, 3)
+              : '<span class="muted" title="not instantiated: the value on the wire is a placeholder, not a prior">—</span>'}</td>
             <td class="muted">${escapeHTML((p.evidence_sources || []).join(', ') || '—')}</td>
             <td>${p.deprecated
               ? `<span class="badge" title="${escapeHTML(p.deprecated_reason || '')}">deprecated</span>`
@@ -677,6 +697,7 @@ export class Drawer {
       <div class="row-between" style="margin-top:12px">
         <span class="muted" style="font-size:11.5px">
           ${(b.graph?.constructs || []).length} constructs · ${props.length} propositions
+          · ${props.filter((p) => p.instantiated).length} with an instantiated prior
         </span>
         <button class="btn small" data-act="tune">Apply an operator intent…</button>
       </div>

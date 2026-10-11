@@ -286,10 +286,15 @@ function setHealth(state, label) {
  * Chained rather than periodic: the next poll is scheduled once the previous one
  * has finished, so a slow agent stretches the cadence instead of accumulating
  * overlapping requests.
+ *
+ * A hidden tab never schedules. Checking here rather than only in the
+ * visibilitychange handler matters: a tick already in flight when the tab is
+ * hidden has no timer to cancel, and would otherwise reschedule itself on
+ * completion and poll the node indefinitely in the background.
  */
 function schedule() {
   clearTimeout(timer);
-  if (!live) return;
+  if (!live || document.hidden) return;
   timer = setTimeout(async () => {
     await tick();
     schedule();

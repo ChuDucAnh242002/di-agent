@@ -53,7 +53,7 @@ export const api = {
   // ── the state model ──────────────────────────────────────────────────────
   state: (params) => send('GET', `/state${q(params)}`),
   property: (id) => send('GET', `/state/properties/${encodeURIComponent(id)}`),
-  explain: (id) => send('GET', `/state/properties/${encodeURIComponent(id)}`, { accept: 'text/plain' }),
+  explainProperty: (id) => send('GET', `/state/properties/${encodeURIComponent(id)}`, { accept: 'text/plain' }),
   relationships: (params) => send('GET', `/state/relationships${q(params)}`),
   journal: (params) => send('GET', `/state/journal${q(params)}`),
   decisions: (limit) => send('GET', `/state/decisions${q({ limit })}`),

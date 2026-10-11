@@ -8,7 +8,7 @@
 // agent attached is shown rather than summarised away.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective } from './model.js';
+import { fmt, escapeHTML, effective, isEditing } from './model.js';
 import { sparkline, strengthLayers, contributionBars, signSplit, meter } from './charts.js';
 
 export class Inspector {
@@ -40,13 +40,17 @@ export class Inspector {
    * The panel is rebuilt wholesale, so a refresh that lands while an operator is
    * typing a reason, dragging an assumption slider or reading a trace would take
    * the caret and throw the scroll position away. Twice a second, that makes the
-   * panel unusable. A focused control inside the panel means the refresh waits;
-   * the next poll after they click away picks the new values up.
+   * panel unusable. A focused editing control inside the panel means the refresh
+   * waits; the next poll after they click away picks the new values up.
+   *
+   * Only editing controls count. A dialog hands focus back to the button that
+   * opened it, and a clicked button keeps focus in Chromium, so a guard on any
+   * focused element would freeze the panel after every action until the operator
+   * happened to click elsewhere.
    */
   refresh() {
     if (!this.selection) return;
-    const focused = document.activeElement;
-    if (focused && focused !== document.body && this.root.contains(focused)) return;
+    if (isEditing(document.activeElement, this.root)) return;
     this.render();
   }
 
@@ -208,7 +212,7 @@ export class Inspector {
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
-        this.explainText = await api.explain(p.id);
+        this.explainText = await api.explainProperty(p.id);
         this.render();
       } catch (err) {
         this.ctx.toast(err.message, 'err');
@@ -264,13 +268,25 @@ export class Inspector {
           <div data-slot="assumptions">
             ${[...this.assume.entries()].map(([id, v]) => {
               const ap = model.property(id);
-              const lo = ap?.range_declared ? ap.range[0] : 0;
-              const hi = ap?.range_declared ? ap.range[1] : 1;
+              // Estimate substitutes the raw value, so a slider is only offered where
+              // the property declares the range it lives in. Without one, any bound
+              // this page invented would clamp the assumption to a value the operator
+              // never meant; the number field is left unbounded instead.
+              if (!ap?.range_declared) {
+                return `<div class="assume-row" data-assume="${escapeHTML(id)}">
+                  <span class="id" title="${escapeHTML(id)}">${escapeHTML(id)}</span>
+                  <input type="number" step="any" value="${v}" data-assume-value />
+                  <button class="btn ghost small" data-drop-assume aria-label="remove">✕</button>
+                  <span class="muted" style="grid-column:1 / -1;font-size:11px">no declared range — enter the raw value</span>
+                </div>`;
+              }
+              const [lo, hi] = ap.range;
+              const step = (hi - lo) / 200 || 'any';
               return `<div class="assume-row" data-assume="${escapeHTML(id)}">
                 <span class="id" title="${escapeHTML(id)}">${escapeHTML(id)}</span>
-                <input type="number" step="0.01" min="${lo}" max="${hi}" value="${v}" data-assume-value />
+                <input type="number" step="any" min="${lo}" max="${hi}" value="${v}" data-assume-value />
                 <button class="btn ghost small" data-drop-assume aria-label="remove">✕</button>
-                <input type="range" min="${lo}" max="${hi}" step="0.005" value="${v}"
+                <input type="range" min="${lo}" max="${hi}" step="${step}" value="${v}"
                        data-assume-range style="grid-column:1 / -1" />
               </div>`;
             }).join('') || '<p class="muted" style="font-size:11px;margin:0">None — this estimates the system as it stands.</p>'}
@@ -332,9 +348,13 @@ export class Inspector {
       const id = row.dataset.assume;
       const num = row.querySelector('[data-assume-value]');
       const rng = row.querySelector('[data-assume-range]');
-      const set = (v) => { this.assume.set(id, Number(v)); num.value = v; rng.value = v; };
+      const set = (v) => {
+        this.assume.set(id, Number(v));
+        if (num.value !== v) num.value = v;
+        if (rng && rng.value !== v) rng.value = v;
+      };
       num.addEventListener('input', () => set(num.value));
-      rng.addEventListener('input', () => set(rng.value));
+      rng?.addEventListener('input', () => set(rng.value));
     });
 
     slot.querySelector('[data-act="run-estimate"]').addEventListener('click', async (e) => {
