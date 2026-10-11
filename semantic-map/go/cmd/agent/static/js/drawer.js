@@ -28,8 +28,14 @@ export class Drawer {
     this.candidates = [];
     this.peers = null;
     this.backbone = null;
+    this.where = null;      // the last GET /state/where answer
+    this.whereProperty = '';
+    this.answer = null;     // the last POST /explain answer
+    this.question = '';
+    this.asking = false;
+    this.askError = null;
     this.panes = {};
-    for (const name of ['journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone']) {
+    for (const name of ['journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
     }
     this.wireTabs();
@@ -76,6 +82,12 @@ export class Drawer {
   }
 
   renderActive() {
+    // The ask pane owns its own lifecycle: it holds a typed question, an answer
+    // worth reading, and a request that can take minutes. A poll-driven rerender
+    // would discard all three, so it only redraws when it asks to.
+    if (this.active === 'ask' && this.askRendered) return;
+    if (this.active === 'ask') this.askRendered = true;
+    else this.askRendered = false;
     switch (this.active) {
       case 'journal': return this.renderJournal();
       case 'decisions': return this.renderDecisions();
@@ -83,6 +95,7 @@ export class Drawer {
       case 'subjects': return this.renderSubjects();
       case 'cluster': return this.renderCluster();
       case 'backbone': return this.renderBackbone();
+      case 'ask': return this.renderAsk();
     }
   }
 
@@ -412,6 +425,7 @@ export class Drawer {
               : `<span class="badge status-active">● answered</span>`}</td>
           </tr>`).join('')}</tbody>
       </table>
+      ${this.whereSection()}
       ${p.stale?.length ? `<p style="font-size:11.5px;color:var(--status-serious);margin:9px 0 0">
         Stale snapshots: ${p.stale.map(escapeHTML).join(', ')} — a snapshot is only as good as its age.</p>` : ''}
       ${silent.length ? `<p style="font-size:11.5px;color:var(--status-serious);margin:5px 0 0;line-height:1.5">
@@ -420,6 +434,70 @@ export class Drawer {
     </div>`;
 
     this.wireRefreshPeers();
+  }
+
+  /**
+   * "Who else has this property, and what do they say it is."
+   *
+   * The answers are kept apart on purpose. The reason to ask several nodes is to
+   * be able to pick one, and that needs each machine's own number — a mean across
+   * machines is a figure describing none of them, so none is offered here.
+   */
+  whereSection() {
+    const model = this.ctx.model();
+    const options = model.properties
+      .filter((x) => x.status !== 'retired')
+      .map((x) => x.id)
+      .sort();
+    const w = this.where;
+
+    return `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:11px">
+      <div class="row-between" style="margin-bottom:8px">
+        <span class="muted" style="font-size:11.5px">Locate one property across the cluster</span>
+        <span class="inline">
+          <select data-act="where-pick" style="width:auto;max-width:230px">
+            <option value="">choose a property…</option>
+            ${options.map((id) => `<option value="${escapeHTML(id)}"${
+              id === this.whereProperty ? ' selected' : ''}>${escapeHTML(id)}</option>`).join('')}
+          </select>
+        </span>
+      </div>
+      ${w ? `
+        <table class="grid">
+          <thead><tr><th>node</th><th class="num">value</th><th class="num">confidence</th>
+            <th>status</th><th class="num">observations</th><th class="num">age</th></tr></thead>
+          <tbody>${(w.holders || []).map((h) => `<tr>
+            <td class="mono">${escapeHTML(h.node)}${h.local
+              ? ' <span class="badge" style="font-size:9.5px">this node</span>' : ''}</td>
+            <td class="num">${fmt.num(h.value, 4)}</td>
+            <td class="num">${fmt.num(h.confidence, 3)}</td>
+            <td><span class="badge status-${escapeHTML(h.status)}">${escapeHTML(h.status)}</span></td>
+            <td class="num">${fmt.int(h.n_observations)}</td>
+            <td class="num muted">${h.age_seconds ? fmt.duration(h.age_seconds) : '—'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+        ${(w.holders || []).length > 1 ? `<p class="muted" style="font-size:11px;margin:7px 0 0;line-height:1.5">
+          Spread across ${w.holders.length} nodes:
+          ${fmt.num(Math.min(...w.holders.map((h) => h.value)), 4)} to
+          ${fmt.num(Math.max(...w.holders.map((h) => h.value)), 4)}.
+          ${escapeHTML(w.note || '')}</p>` : ''}
+      ` : '<p class="muted" style="font-size:11.5px;margin:0">Nothing looked up yet.</p>'}
+    </div>`;
+  }
+
+  wireWhere() {
+    this.panes.cluster.querySelector('[data-act="where-pick"]')?.addEventListener('change', async (e) => {
+      const id = e.target.value;
+      this.whereProperty = id;
+      if (!id) { this.where = null; return this.renderCluster(); }
+      try {
+        this.where = await api.where(id);
+      } catch (err) {
+        this.where = null;
+        this.ctx.toast(err.message, 'err');
+      }
+      this.renderCluster();
+    });
   }
 
   wireRefreshPeers() {
@@ -431,6 +509,134 @@ export class Drawer {
         await this.pollPeers();
         this.renderCluster();
       } catch (err) { this.ctx.toast(err.message, 'err'); }
+    });
+    this.wireWhere();
+  }
+
+  // ── ask ───────────────────────────────────────────────────────────────────
+
+  /**
+   * The natural-language surface over the map.
+   *
+   * The reason this is worth a pane rather than a chat box is the citation list.
+   * Every claim the answer makes is supposed to name the property or relationship
+   * it came from, and the agent runs a deterministic validator over those
+   * citations before the answer is allowed out — an answer naming a number the
+   * map does not hold is refused rather than shown. So the citations are rendered
+   * as the primary result, not a footnote, and each one selects that property on
+   * the canvas: the claim and the state that justifies it, one click apart.
+   */
+  renderAsk() {
+    const a = this.answer;
+    const busy = this.asking;
+
+    this.panes.ask.innerHTML = `<div class="pane-pad">
+      <div class="inline" style="gap:8px;margin-bottom:10px">
+        <input type="text" id="ask-input" placeholder="Ask about this system — e.g. what is it doing right now?"
+               value="${escapeHTML(this.question || '')}" ${busy ? 'disabled' : ''}
+               style="flex:1;min-width:240px" />
+        <button class="btn primary" data-act="ask" ${busy ? 'disabled' : ''}>
+          ${busy ? 'Thinking…' : 'Ask'}
+        </button>
+      </div>
+
+      ${busy ? `<p class="muted" style="font-size:11.5px;margin:0;line-height:1.5">
+        The agent is reading its own map to answer. Against a local model this takes
+        seconds to minutes; the answer is withheld until its citations check out
+        against the state model.</p>` : ''}
+
+      ${this.askError ? `<div class="empty" style="padding:14px 0">
+        <strong style="color:var(--status-critical)">The agent did not answer</strong>
+        <span class="why">${escapeHTML(this.askError)}</span>
+        ${/not enabled|501/i.test(this.askError) ? `<span class="why muted">
+          Start the daemon with <span class="mono">-explain-provider openai-compatible</span>
+          and an <span class="mono">-explain-url</span> it can reach.</span>` : ''}
+      </div>` : ''}
+
+      ${a ? `
+        <div class="stack">
+          <p style="font-size:13px;line-height:1.6;margin:0">${escapeHTML(a.answer || '')}</p>
+
+          <div class="chips">
+            <span class="badge">confidence: ${escapeHTML(a.confidence || '—')}</span>
+            <span class="badge mono">${escapeHTML(a.model_name || '')}</span>
+            <span class="badge">${fmt.int(a.iterations)} iteration${a.iterations === 1 ? '' : 's'}</span>
+            <span class="badge">${fmt.int((a.usage || {}).total_tokens)} tokens</span>
+            ${(a.usage || {}).tool_calls !== undefined
+              ? `<span class="badge">${fmt.int(a.usage.tool_calls)} tool calls</span>` : ''}
+          </div>
+
+          <div>
+            <h3 style="margin:0 0 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted)">
+              Cited from the map <span style="text-transform:none;letter-spacing:0;font-weight:400">
+              — checked against the state model before the answer was released</span>
+            </h3>
+            ${(a.citations || []).length ? `<div class="chips">
+              ${a.citations.map((c) => {
+                const bits = [];
+                if (c.value !== undefined) bits.push(fmt.num(c.value, 4));
+                if (c.effective !== undefined && c.effective !== null) bits.push(`eff ${fmt.num(c.effective, 3)}`);
+                else if (c.established !== undefined && c.established !== null) bits.push(`est ${fmt.num(c.established, 3)}`);
+                if (c.confidence) bits.push(`c=${fmt.num(c.confidence, 3)}`);
+                if (c.n_observations) bits.push(`n=${c.n_observations}`);
+                return `<span class="badge mono" data-cite-kind="${escapeHTML(c.kind)}"
+                              data-cite="${escapeHTML(c.id)}"
+                              style="cursor:${c.kind === 'property' ? 'pointer' : 'default'}"
+                              title="${escapeHTML(c.kind)}">
+                  ${escapeHTML(c.id)}${bits.length ? ' · ' + escapeHTML(bits.join(' ')) : ''}
+                </span>`;
+              }).join('')}
+            </div>` : `<p class="muted" style="font-size:11.5px;margin:0">
+              None — an answer citing nothing is one the map did not supply.</p>`}
+          </div>
+
+          ${(a.tool_trace || []).length ? `<div>
+            <h3 style="margin:0 0 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted)">
+              What it read
+            </h3>
+            <table class="grid"><tbody>
+              ${a.tool_trace.map((t) => `<tr>
+                <td class="mono" style="width:150px">${escapeHTML(t.name)}</td>
+                <td class="muted">${escapeHTML(t.result_digest || t.error || '')}</td>
+              </tr>`).join('')}
+            </tbody></table>
+          </div>` : ''}
+
+          ${a.critic_verdict ? `<p class="muted" style="font-size:11px;margin:0;line-height:1.5">
+            Critic: ${escapeHTML(JSON.stringify(a.critic_verdict).slice(0, 300))}</p>` : ''}
+        </div>
+      ` : (!busy && !this.askError ? `<div class="empty">
+        <strong>Ask the map something</strong>
+        <span class="why">The answer is assembled from this node's own state and is
+        released only once every citation in it has been checked against that state.
+        A claim the map cannot support does not reach you.</span>
+      </div>` : '')}
+    </div>`;
+
+    const input = this.panes.ask.querySelector('#ask-input');
+    const run = async () => {
+      const q = (input.value || '').trim();
+      if (!q || this.asking) return;
+      this.question = q;
+      this.asking = true;
+      this.askError = null;
+      this.answer = null;
+      this.renderAsk();
+      try {
+        this.answer = await api.explain(q);
+      } catch (err) {
+        this.askError = err.message;
+      } finally {
+        this.asking = false;
+        this.renderAsk();
+      }
+    };
+    this.panes.ask.querySelector('[data-act="ask"]')?.addEventListener('click', run);
+    input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+
+    // A citation is a pointer into the map, so make it behave like one.
+    this.panes.ask.querySelectorAll('[data-cite-kind="property"]').forEach((el) => {
+      el.addEventListener('click', () => this.ctx.selectProperty(el.dataset.cite));
     });
   }
 

@@ -235,7 +235,8 @@ semantic-map/
     │           ├── graph.js    SVG canvas: properties, relationships, subject enclosures
     │           ├── charts.js   Sparkline, strength layers, diverging contributions
     │           ├── inspector.js  Property / relationship detail + counterfactual studio
-    │           └── drawer.js   Journal, decisions, discovery, subjects, cluster, backbone
+    │           └── drawer.js   Journal, decisions, discovery, subjects, cluster,
+    │                           backbone, ask
     │
     ├── cmd/mapctl/             CLI binary — cobra + tablewriter; speaks the daemon's HTTP API
     │   ├── main.go             cmd.Execute()

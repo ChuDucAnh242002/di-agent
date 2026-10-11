@@ -92,6 +92,15 @@ export const api = {
     send('POST', '/ontology/deprecate', { body: { proposition_id: propositionID, reason } }),
   tune: (intent, operator) => send('POST', '/agent/tune', { body: { intent, operator } }),
 
+  // ── the natural-language surface ─────────────────────────────────────────
+  //
+  // Answers take seconds to minutes against a local model, so this one is left
+  // without a client-side deadline: the agent's own budget is the limit that
+  // matters, and cutting it short here would report a timeout for work that is
+  // still running.
+  explain: (question, opts = {}) =>
+    send('POST', '/explain', { body: { question, ...opts } }),
+
   // ── meta ─────────────────────────────────────────────────────────────────
   health: () => send('GET', '/healthz'),
   version: () => send('GET', '/version'),

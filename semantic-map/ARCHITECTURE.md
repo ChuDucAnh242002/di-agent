@@ -1330,7 +1330,7 @@ modules under `static/js/`, embedded in the binary alongside `index.html` and
 | `graph.js` | the SVG canvas |
 | `charts.js` | sparkline, strength layers, diverging contributions, census bar |
 | `inspector.js` | property and relationship detail, and the counterfactual studio |
-| `drawer.js` | journal, decisions, discovery, subjects, cluster, backbone |
+| `drawer.js` | journal, decisions, discovery, subjects, cluster, backbone, ask |
 
 **No external dependency.** The previous viewer pulled Cytoscape.js from
 `unpkg.com`. A CDN pin makes the operator surface of an offline, air-gapped or
@@ -1371,6 +1371,23 @@ distinctions a naive renderer would flatten:
   strength near zero and would otherwise read as a quiet system;
 - an empty list says *why* it is empty — "the proposer needs N pairs" rather than
   "no candidates".
+
+**Two panes answer questions wider than one property.**
+
+*Cluster* lists the peers and, through `GET /state/where`, locates one property
+across every node that holds it. The answers are kept apart and no aggregate is
+offered, because the reason to ask several nodes is to be able to pick one. On a
+four-machine replay of the testbed this reads `cpu_utilization` as 0.005 on the
+master and 0.29–0.30 on the three workers: a mean of 0.22 would be the load on no
+machine in the cluster.
+
+*Ask* is the natural-language surface over `POST /explain`. The citation list is
+rendered as the primary result rather than a footnote, because the agent runs a
+deterministic validator over those citations before releasing the answer — one
+naming a number the map does not hold is refused rather than shown. Each cited
+property selects itself on the canvas, so a claim and the state that justifies it
+are one click apart. With no provider configured the endpoint answers 501 and the
+pane says which flag turns it on.
 
 **Value history is the console's own.** The map holds a current value per property,
 not a series, so the sparkline is accumulated from successive polls and labelled as
