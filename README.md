@@ -6,6 +6,9 @@
 
 Implementation artifact for the dissertation *A Context-Aware Agentic Framework for Decentralized Edge Computing* (Tampere University, Diyaz Yakubov, supervised by David Hästbacka and Sergio Moreschini). Funded by Business Finland — Industry X and 6GSoft projects.
 
+> **[Live Playground](http://a575f6d9e82174d81a4f2936d3a08ccf-1423634940.eu-north-1.elb.amazonaws.com)**
+> This link opens the playground, served by the AWS load balancer on the EKS cluster. It uses plain HTTP, and the hostname changes whenever the load balancer is recreated (for example after `make helm-uninstall` and a redeploy).
+
 ---
 
 ## What this is

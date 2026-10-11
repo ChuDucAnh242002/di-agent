@@ -20,7 +20,7 @@ variable "node_count" {
 
 variable "instance_type" {
   description = "Instance type for the managed node group"
-  default     = "t3.medium"
+  default     = "t3.small"
 }
 
 variable "vpc_cidr" {

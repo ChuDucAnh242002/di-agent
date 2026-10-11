@@ -140,6 +140,7 @@ jobs:
             --set kafka.persistence.storageClass=gp2 \
             --set influxdb.persistence.storageClass=gp2 \
             --set prometheus.persistence.storageClass=gp2 \
+            --set playground.service.type=LoadBalancer \
             --wait --timeout 10m0s
 
       - name: Deploy di-agent DaemonSet (pre-built image, no rebuild)

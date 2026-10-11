@@ -290,6 +290,11 @@ playground:
   image:
     repository: playground
     tag: ""
+  # NodePort (local/lab) or LoadBalancer (EKS: provisions a public AWS ELB).
+  service:
+    type: NodePort
+    # Restrict who can reach a LoadBalancer, e.g. ["203.0.113.0/24"].
+    loadBalancerSourceRanges: []
   nodePort: 30080
   switchboardUpstream: "switchboard:8000"
   nodeSelector: {}
