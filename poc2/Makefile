@@ -30,6 +30,8 @@ HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
 STORAGE_CLASS ?= local-path
+# NodePort (local/lab) or LoadBalancer (EKS: provisions a public AWS ELB).
+PLAYGROUND_SERVICE_TYPE ?= NodePort
 REGISTRY ?= ghcr.io/chuducanh242002
 TAG ?= latest
 
@@ -63,7 +65,8 @@ helm-install:
 		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
 		--set kafka.persistence.storageClass=$(STORAGE_CLASS) \
 		--set influxdb.persistence.storageClass=$(STORAGE_CLASS) \
-		--set prometheus.persistence.storageClass=$(STORAGE_CLASS)
+		--set prometheus.persistence.storageClass=$(STORAGE_CLASS) \
+		--set playground.service.type=$(PLAYGROUND_SERVICE_TYPE)
 
 helm-upgrade: helm-install
 

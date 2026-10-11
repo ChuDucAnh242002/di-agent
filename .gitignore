@@ -20,3 +20,5 @@ terraform.*
 tfplan
 
 *.env
+
+/poc2/data

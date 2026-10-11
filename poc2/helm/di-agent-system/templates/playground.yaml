@@ -76,10 +76,16 @@ metadata:
   labels:
     app: playground
 spec:
-  type: NodePort
+  type: {{ .Values.playground.service.type }}
+  {{- with .Values.playground.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     app: playground
   ports:
     - port: 80
       targetPort: 80
+      {{- if eq .Values.playground.service.type "NodePort" }}
       nodePort: {{ .Values.playground.nodePort }}
+      {{- end }}
