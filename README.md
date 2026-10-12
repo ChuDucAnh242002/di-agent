@@ -10,11 +10,15 @@ Implementation artifact for the dissertation *A Context-Aware Agentic Framework 
 
 ## What this is
 
-`di-agent` is an autonomous orchestration agent designed for resource-constrained edge nodes (Raspberry Pi 4 and equivalent). It makes context-aware task scheduling and offloading decisions without a centralised control plane.
+`di-agent` is an orchestration agent for resource-constrained edge nodes (Raspberry Pi 4 and equivalent). Every node runs its own agent, and each agent models only the machine it runs on. Questions about the whole cluster go to peers, not to a central control plane.
 
-The agent's decision logic is driven by the **Semantic Map** — an adaptive behavioral data structure that takes its *structure* from five empirical publications (which properties relate, and in which direction) and learns every *magnitude* from live deployment telemetry. A freshly started agent reports that it does not yet know what any relationship is worth, rather than reporting a constant nobody measured; as paired observations accumulate it answers from what this machine has done, without labeling or manual tuning.
+The agent reasons against the **Semantic Map**, a live model of one system's state:
 
-The implementation is organized around a contract-based architecture: six swappable interfaces (Collector, Storage, Ontology, Updater, Reasoner, Proposer) allow the same agent binary to run on a Raspberry Pi (`edge-minimal` profile) or a cloud VM (`cloud-full` profile) by changing a single startup flag.
+- **Properties.** The map holds what the node and each workload on it (a pod, a systemd unit, any producer that names a subject) are doing. A property is admitted when it is first observed, marked stale when it goes silent, and retired when it stays silent. If it is observed again, it comes back.
+- **Relationships.** Relationships between properties are learned from paired observations. A freshly started agent reports that it does not know what a relationship is worth yet, instead of reporting a constant nobody measured. The proposer also *discovers* relationships that nobody declared, which an operator then confirms.
+- **Answers you can trace.** `GET /state` says what the system is doing right now. `GET /state/estimate` answers "what happens to X if this workload grows, or leaves". Every answer carries a decision id whose inputs can be replayed afterwards.
+
+The code is built on five swappable contracts (Collector, Ontology, Reasoner, Proposer, Tuner) with a compliance suite for each. The shipped profile is `edge-minimal`: a single static Go binary with no runtime dependencies.
 
 ---
 
@@ -33,9 +37,9 @@ The agent synthesises findings from five prior publications:
 |-------------|--------------------------------|
 | P1 — [Performance & Resource Efficiency](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_7) | Evidence behind the declared propositions; the workloads the convergence study replays per distribution |
 | P2 — [Security, Resilience & Maintainability](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_8) | Evidence for the constructs a running cluster cannot move, which is why they stay at selection time. Recovery time constants |
-| P3 — Di-Select Orchestration Selection Framework | Backbone topology: 7 constructs, 15 causal propositions (P1–P15) |
-| P4 — Energy Analysis (DVFS / CPU microarchitecture) | Why energy is *not* routed: the model is calibrated for one hardware class and no node here measures a joule |
-| P5 — Overhead Decomposition (k0s cgroup analysis) | Per-container evidence that the orchestration tax is real and small; k0s-only |
+| P3 — [Di-Select](https://link.springer.com/article/10.1007/s10586-026-06269-5) (*Cluster Computing*, 2026) | Backbone topology: 7 constructs, 15 causal propositions (P1–P15) |
+| P4 — Energy Analysis, DVFS / CPU microarchitecture (ESOCC 2026, to appear) | Why energy is *not* routed: the model is calibrated for one hardware class and no node here measures a joule |
+| P5 — Overhead Decomposition, k0s cgroup analysis (ESOCC 2026, to appear) | Per-container evidence that the orchestration tax is real and small; k0s-only |
 
 ---
 
@@ -65,26 +69,35 @@ P5: Overhead decomposition
 
 ## Status
 
-Early implementation — contracts, edge-minimal daemon, and the structural initialization pipeline are in active development. Code will be published here as P6 matures toward submission.
+**Research prototype, open for testing.** The `edge-minimal` daemon, the state model (subjects, lifecycle, discovery, counterfactual estimates), the `mapctl` CLI, the embedded operator console, peer coordination and the natural-language `/explain` layer are all implemented and covered by CI. The `cloud-full` profile (graph database, RDF/OWL ontology, Bayesian reasoner) is planned and does not exist yet.
+
+There is **no authentication** on any endpoint. Run it on a trusted network only. See [`OPERATING.md`](OPERATING.md#read-this-first).
 
 ## Quick start
 
 Go 1.22+ is the only hard requirement.
 
 ```bash
-cd semantic-map/go
+git clone https://github.com/DiyazY/di-agent && cd di-agent/semantic-map/go
 go build ./... && go test ./...     # verify the checkout
 
-./dev.sh demo              # 3-minute guided tour: build, graph, 12 scenarios, UI
-./dev.sh replay list       # inventory of the dissertation's 225 Netdata parquets
-./dev.sh replay run --kd k0s --test idle --run 1 --speed 0   # replay one parquet
+./dev.sh demo              # guided tour: build, start, scenarios, operator console
 ```
+
+**Testing it?** [`TESTING.md`](TESTING.md) has a 15-minute walkthrough that works from a fresh clone, what to look at, and how to report what you find.
+
+The parquet replay tool (`./dev.sh replay …`) replays the dissertation's Netdata dataset. That dataset is **not part of this repository**, so replay needs `--data-dir` pointing at a copy of it. Everything else runs without it.
 
 ## Documentation
 
 | Document | Read it for |
 | -------- | ----------- |
+| [`TESTING.md`](TESTING.md) | **Trying it out?** A guided walkthrough from a fresh clone, what is in and out of scope, and how to report issues. |
 | [`DEVELOPING.md`](DEVELOPING.md) | **Changing code?** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
 | [`OPERATING.md`](OPERATING.md) | **Deploying it?** Security posture (read this first — there is no auth), resource footprint, systemd unit, health checks, monitoring, multi-node setup, upgrades, what it touches on your system. |
-| [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the six contracts and why, multigraph backbone, coordination, the natural-language layer. |
+| [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the five contracts and why, multigraph backbone, coordination, the natural-language layer. |
 | [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, structural initialization, PoC quickstart. |
+
+## License
+
+MIT. See [`LICENSE`](LICENSE). Copyright © 2026 Tampere University.
