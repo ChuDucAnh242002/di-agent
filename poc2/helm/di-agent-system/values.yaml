@@ -35,6 +35,23 @@ kafka:
   nodeSelector: {}
   resources: {}
 
+# di-agent (semantic-map). DaemonSet by default; set nodes to render one
+# pinned Deployment per node instead, e.g.
+#   nodes: [{ name: ubuntu-vm2, regime: bursty }, { name: ubuntu-vm3 }]
+agent:
+  enabled: true
+  image:
+    repository: di-agent
+    tag: ""
+  port: 9090
+  regime: stable
+  proposer: "true"
+  # Required on the local lab so peers reach the agent on the node IP.
+  hostNetwork: false
+  nodes: []
+  nodeSelector: {}
+  resources: {}
+
 genset:
   image:
     repository: genset

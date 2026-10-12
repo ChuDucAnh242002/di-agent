@@ -62,7 +62,7 @@ make provision-eks
 
 # then the usual app-layer steps, unchanged:
 make images helm-install REGISTRY=ghcr.io/your-org TAG=v1
-make agent-cloud peers-cloud REGISTRY=ghcr.io/your-org TAG=v1
+make peers-cloud
 make demo-cloud
 
 # teardown:
@@ -75,10 +75,10 @@ agent-placement layers:
 - `provision-aks` / `provision-eks` replace `provision` + `k8s`: they create
   the cluster directly (AKS/EKS) instead of libvirt VMs + kubeadm, and fetch
   its kubeconfig to `~/.kube/config-poc2-aks` or `-eks`.
-- `agent-cloud` replaces `agent`: since managed clusters don't have a fixed,
-  known set of node hostnames, di-agent runs as a `DaemonSet` (one pod per
-  node, image pulled from `REGISTRY` rather than imported into containerd)
-  instead of one `Deployment` per VM pinned by `nodeSelector`.
+- di-agent is part of the Helm chart. Locally, `make helm-install` renders one
+  hostNetwork `Deployment` per worker VM (`agent.nodes`); on managed clusters
+  (no VMs, or `AGENT_NODES=`) it renders a `DaemonSet` (one pod per node).
+  Images are pulled from `REGISTRY`; build with `make images IMAGES=di-agent`.
 - `peers-cloud` / `demo-cloud` replace `peers` / `demo`: pod IPs on AKS/EKS
   live inside the cluster's private VNet/VPC and aren't reachable from your
   laptop, so these scripts use `kubectl port-forward` to reach each agent
@@ -200,7 +200,7 @@ The deployment consists of two separate layers:
 
 2. Application and demo layer
    - Helm chart in `helm/di-agent-system` deploys Kafka, InfluxDB, Grafana, genset, battery, propulsion, auxload, switchboard, telemetry-writer, and playground
-   - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
+   - the same chart deploys `di-agent` (image built with `make images IMAGES=di-agent`)
    - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
 
@@ -327,8 +327,7 @@ The files that matter for understanding or running the PoC are:
 - `cloud/aks`, `cloud/eks`: Terraform modules for managed-cluster alternatives to the above (see "Deploying on AKS or EKS" above)
 - `scripts/01-provision.sh`: creates the VM fleet
 - `scripts/02-k8s.sh`: bootstraps the cluster
-- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods (per-VM, local lab)
-- `scripts/agent-cloud.sh`, `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: DaemonSet-based di-agent deployment, peer registration, and demo for AKS/EKS
+- `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: peer registration and demo for AKS/EKS
 - `scripts/04-peers.sh`: registers peers and trust values
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images

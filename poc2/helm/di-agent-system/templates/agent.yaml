@@ -1,0 +1,125 @@
+{{- /*
+di-agent: by default a DaemonSet (one pod per node). When agent.nodes is set
+(local lab), one pinned Deployment per entry is rendered instead, each with
+its own REGIME.
+*/ -}}
+{{- define "diagent.agentMeta" -}}
+{{- $root := .root -}}
+{{- $a := $root.Values.agent -}}
+labels:
+  app: di-agent
+  {{- if .node }}
+  node: {{ .node }}
+  {{- end }}
+{{- include "diagent.podAnnotations" (dict "root" $root) }}
+{{- end -}}
+{{- define "diagent.agentSpec" -}}
+{{- $root := .root -}}
+{{- $a := $root.Values.agent -}}
+{{- if .node }}
+nodeSelector:
+  kubernetes.io/hostname: {{ .node }}
+{{- else }}
+{{- include "diagent.nodeSelector" (dict "local" $a.nodeSelector "global" $root.Values.global.nodeSelector) | nindent 0 }}
+{{- end }}
+{{- if $a.hostNetwork }}
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+{{- end }}
+{{- with $root.Values.global.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+containers:
+  - name: di-agent
+    image: {{ include "diagent.customImage" (dict "global" $root.Values.global "image" $a.image) }}
+    imagePullPolicy: {{ $root.Values.global.imagePullPolicy }}
+    env:
+      - name: NODE_ID
+        {{- if .node }}
+        value: {{ .node | quote }}
+        {{- else }}
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+        {{- end }}
+      - name: REGIME
+        value: {{ .regime | quote }}
+      - name: KAFKA_BROKERS
+        value: "kafka:{{ $root.Values.kafka.port }}"
+      - name: PROPOSER
+        value: {{ $a.proposer | quote }}
+      - name: CGROUP_ROOT
+        value: /host/cgroup
+    ports:
+      - containerPort: {{ $a.port }}
+    volumeMounts:
+      - name: host-cgroup
+        mountPath: /host/cgroup
+        readOnly: true
+    resources:
+      {{- toYaml $a.resources | nindent 6 }}
+volumes:
+  - name: host-cgroup
+    hostPath:
+      path: /sys/fs/cgroup
+      type: Directory
+{{- end -}}
+{{- if .Values.agent.enabled }}
+{{- if .Values.agent.nodes }}
+{{- range .Values.agent.nodes }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: di-agent-{{ .name }}
+  labels:
+    app: di-agent
+    node: {{ .name }}
+spec:
+  replicas: 1
+  # hostNetwork pins the port per node: old pod must stop before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: di-agent
+      node: {{ .name }}
+  template:
+    metadata:
+      {{- include "diagent.agentMeta" (dict "root" $ "node" .name) | nindent 6 }}
+    spec:
+      {{- include "diagent.agentSpec" (dict "root" $ "node" .name "regime" (.regime | default $.Values.agent.regime)) | nindent 6 }}
+---
+{{- end }}
+{{- else }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: di-agent
+  labels:
+    app: di-agent
+spec:
+  selector:
+    matchLabels:
+      app: di-agent
+  template:
+    metadata:
+      {{- include "diagent.agentMeta" (dict "root" $) | nindent 6 }}
+    spec:
+      {{- include "diagent.agentSpec" (dict "root" $ "regime" .Values.agent.regime) | nindent 6 }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: di-agent-headless
+  labels:
+    app: di-agent
+spec:
+  clusterIP: None
+  selector:
+    app: di-agent
+  ports:
+    - port: {{ .Values.agent.port }}
+      targetPort: {{ .Values.agent.port }}
+{{- end }}

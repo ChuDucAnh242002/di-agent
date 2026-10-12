@@ -134,7 +134,7 @@ func TestCollectWalksPodsAsSubjects(t *testing.T) {
 	if a[types.MemoryUtilization] == nil || a[types.MemoryUtilization].Value != float64(268435456)/float64(4<<30) {
 		t.Errorf("pod A memory share %v; want memory.current / MemTotal", a[types.MemoryUtilization])
 	}
-	if s := a[types.CPUUtilization]; s == nil || s.Value <= 0 || s.Value > 1 || s.Unit != "share-of-node-capacity" || s.Range == nil || s.Labels["qos"] != "burstable" {
+	if s := a[types.CPUUtilization]; s == nil || s.Value <= 0 || s.Value > 1 || s.Unit != "fraction" || s.Range == nil || s.Labels["qos"] != "burstable" {
 		t.Errorf("pod A cpu sample %+v; want a share in (0,1] with declared unit/range and labels", s)
 	}
 	if s := a[types.CPUThrottleRatio]; s == nil || s.Value != 0.5 {
@@ -207,7 +207,7 @@ func TestRootMemoryComesFromMeminfoOnCgroupV2(t *testing.T) {
 	if s.Value != fakeMemShare {
 		t.Errorf("root memory share %v; want (MemTotal − MemAvailable) / MemTotal = %v", s.Value, fakeMemShare)
 	}
-	if s.Unit != "share-of-node-capacity" || s.Range == nil {
+	if s.Unit != "fraction" || s.Range == nil {
 		t.Errorf("root memory sample %+v; want the declared unit and range", s)
 	}
 }
