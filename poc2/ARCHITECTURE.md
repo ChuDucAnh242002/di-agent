@@ -90,7 +90,7 @@ The one layer that does change is agent placement:
   `nodeSelector: kubernetes.io/hostname` and run with `hostNetwork: true`,
   because the exact VM hostnames are known ahead of time and the image is
   imported directly into each VM's containerd (no registry needed).
-- **AKS/EKS (`scripts/agent-cloud.sh`):** `di-agent` runs as a `DaemonSet`
+- **AKS/EKS (`scripts/agent-cloud.sh`):** `di-agent` runs as replicated `Deployment`s (one extra, `di-agent-public`, exposed via a LoadBalancer)
   (one pod per node, image pulled from a registry), because managed
   clusters don't expose a fixed, predetermined set of node hostnames the
   way the libvirt lab's VM fleet does, and there's no way to import an

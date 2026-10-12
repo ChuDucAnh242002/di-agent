@@ -1,5 +1,7 @@
 {{- /*
-di-agent: by default a DaemonSet (one pod per node). When agent.nodes is set
+di-agent: by default a Deployment with agent.replicas pods spread across nodes,
+plus an optional public agent exposed through a LoadBalancer Service
+(agent.public). When agent.nodes is set
 (local lab), one pinned Deployment per entry is rendered instead, each with
 its own REGIME.
 */ -}}
@@ -11,6 +13,9 @@ labels:
   {{- if .node }}
   node: {{ .node }}
   {{- end }}
+  {{- if .role }}
+  role: {{ .role }}
+  {{- end }}
 {{- include "diagent.podAnnotations" (dict "root" $root) }}
 {{- end -}}
 {{- define "diagent.agentSpec" -}}
@@ -21,6 +26,13 @@ nodeSelector:
   kubernetes.io/hostname: {{ .node }}
 {{- else }}
 {{- include "diagent.nodeSelector" (dict "local" $a.nodeSelector "global" $root.Values.global.nodeSelector) | nindent 0 }}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: di-agent
 {{- end }}
 {{- if $a.hostNetwork }}
 hostNetwork: true
@@ -93,18 +105,20 @@ spec:
 {{- end }}
 {{- else }}
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: di-agent
   labels:
     app: di-agent
 spec:
+  replicas: {{ .Values.agent.replicas }}
   selector:
     matchLabels:
       app: di-agent
+      role: peer
   template:
     metadata:
-      {{- include "diagent.agentMeta" (dict "root" $) | nindent 6 }}
+      {{- include "diagent.agentMeta" (dict "root" $ "role" "peer") | nindent 6 }}
     spec:
       {{- include "diagent.agentSpec" (dict "root" $ "regime" .Values.agent.regime) | nindent 6 }}
 ---
@@ -122,4 +136,46 @@ spec:
   ports:
     - port: {{ .Values.agent.port }}
       targetPort: {{ .Values.agent.port }}
+{{- if and .Values.agent.public.enabled (not .Values.agent.nodes) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: di-agent-public
+  labels:
+    app: di-agent
+    role: public
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: di-agent
+      role: public
+  template:
+    metadata:
+      {{- include "diagent.agentMeta" (dict "root" $ "role" "public") | nindent 6 }}
+    spec:
+      {{- include "diagent.agentSpec" (dict "root" $ "regime" .Values.agent.regime) | nindent 6 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: di-agent-public
+  labels:
+    app: di-agent
+    role: public
+  {{- with .Values.agent.public.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.agent.public.service.type }}
+  selector:
+    app: di-agent
+    role: public
+  ports:
+    - name: http
+      port: {{ .Values.agent.public.service.port }}
+      targetPort: {{ .Values.agent.port }}
+{{- end }}
 {{- end }}

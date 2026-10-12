@@ -31,7 +31,7 @@ HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
 STORAGE_CLASS ?= local-path
 # Local lab: one pinned hostNetwork Deployment per worker VM (first worker
-# bursty, rest stable). Set AGENT_NODES= (empty) for a plain DaemonSet (cloud).
+# bursty, rest stable). Set AGENT_NODES= (empty) for plain replicated Deployments (cloud).
 AGENT_WORKERS := $(wordlist 2,$(words $(VMS)),$(VMS))
 AGENT_NODES ?= $(AGENT_WORKERS)
 AGENT_HELM_ARGS = $(if $(strip $(AGENT_NODES)),--set agent.hostNetwork=true \
@@ -94,7 +94,7 @@ peers:
 # Both provision a managed cluster via Terraform (cloud/aks, cloud/eks) and
 # fetch its kubeconfig; from there the same `make images helm-install` steps
 # apply unchanged (just point KUBECONFIG at the fetched file). di-agent is
-# deployed as a DaemonSet (agent-cloud) instead of one Deployment per VM,
+# deployed as a replicated Deployment (agent-cloud) instead of one Deployment per VM,
 # since managed clusters don't expose a fixed, known set of node hostnames
 # and images must be pulled from a registry rather than imported directly.
 provision-aks:
@@ -109,7 +109,7 @@ provision-eks:
 teardown-eks:
 	@bash $(SCRIPTS)/teardown-eks.sh
 
-# di-agent ships in the chart (DaemonSet); alias of helm-install for the cloud.
+# di-agent ships in the chart (Deployment); alias of helm-install for the cloud.
 agent-cloud: helm-install
 
 peers-cloud:
@@ -235,7 +235,7 @@ help:
 	@echo "AKS / EKS (managed cluster alternatives to the local libvirt lab):"
 	@echo "  provision-aks / teardown-aks - terraform apply/destroy cloud/aks, fetch kubeconfig"
 	@echo "  provision-eks / teardown-eks - terraform apply/destroy cloud/eks, fetch kubeconfig"
-	@echo "  agent-cloud  - alias of helm-install (di-agent is a DaemonSet in the chart)"
+	@echo "  agent-cloud  - alias of helm-install (di-agent is a Deployment in the chart)"
 	@echo "  peers-cloud  - register the full di-agent peer mesh via kubectl port-forward"
 	@echo "  demo-cloud   - run the trust-drain coordinator demo against the current KUBECONFIG cluster"
 	@echo "  After provision-aks/provision-eks: export KUBECONFIG to the printed path, then run"

@@ -77,7 +77,7 @@ agent-placement layers:
   its kubeconfig to `~/.kube/config-poc2-aks` or `-eks`.
 - di-agent is part of the Helm chart. Locally, `make helm-install` renders one
   hostNetwork `Deployment` per worker VM (`agent.nodes`); on managed clusters
-  (no VMs, or `AGENT_NODES=`) it renders a `DaemonSet` (one pod per node).
+  (no VMs, or `AGENT_NODES=`) it renders a `Deployment` (`agent.replicas`, default 3) plus a public `di-agent-public` Deployment behind a `LoadBalancer` Service (`kubectl get svc di-agent-public`).
   Images are pulled from `REGISTRY`; build with `make images IMAGES=di-agent`.
 - `peers-cloud` / `demo-cloud` replace `peers` / `demo`: pod IPs on AKS/EKS
   live inside the cluster's private VNet/VPC and aren't reachable from your
@@ -123,7 +123,7 @@ to be. This repo has three GitHub Actions workflows:
   [`cd-eks.yml`](../.github/workflows/cd-eks.yml) — `terraform init/plan/apply`
   the matching `cloud/aks` or `cloud/eks` module against **remote** state,
   fetch the kubeconfig, `helm upgrade --install` the chart, deploy the
-  `di-agent` DaemonSet with `SKIP_BUILD=1` (using the exact image sha CI just
+  `di-agent` Deployments with `SKIP_BUILD=1` (using the exact image sha CI just
   built — no rebuilding at deploy time), register the peer mesh, and run a
   smoke test against `/cost`.
 

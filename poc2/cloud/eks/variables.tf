@@ -15,7 +15,7 @@ variable "kubernetes_version" {
 
 variable "node_count" {
   description = "Desired size of the managed node group (mirrors the local PoC's worker count)"
-  default     = 3
+  default     = 4
 }
 
 variable "instance_type" {

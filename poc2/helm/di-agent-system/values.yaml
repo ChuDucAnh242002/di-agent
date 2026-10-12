@@ -25,6 +25,8 @@ kafka:
   port: 9092
   controllerPort: 9093
   clusterId: ZGlhZ2VudC1rYWZrYS0
+  # JVM heap cap; the image default (1G) overwhelms small (2 GiB) nodes.
+  heapOpts: "-Xms256m -Xmx384m"
   logRetentionHours: "168"
   logRetentionBytes: "1073741824"
   persistence:
@@ -35,8 +37,8 @@ kafka:
   nodeSelector: {}
   resources: {}
 
-# di-agent (semantic-map). DaemonSet by default; set nodes to render one
-# pinned Deployment per node instead, e.g.
+# di-agent (semantic-map). A Deployment with `replicas` pods by default; set
+# nodes to render one pinned Deployment per node instead, e.g.
 #   nodes: [{ name: ubuntu-vm2, regime: bursty }, { name: ubuntu-vm3 }]
 agent:
   enabled: true
@@ -48,6 +50,15 @@ agent:
   proposer: "true"
   # Required on the local lab so peers reach the agent on the node IP.
   hostNetwork: false
+  replicas: 3
+  # One extra agent exposed publicly through a LoadBalancer Service
+  # (ignored when `nodes` is set).
+  public:
+    enabled: true
+    service:
+      type: LoadBalancer
+      port: 80
+      annotations: {}
   nodes: []
   nodeSelector: {}
   resources: {}
