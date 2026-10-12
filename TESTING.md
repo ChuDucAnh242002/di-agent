@@ -120,7 +120,8 @@ Try the other scenarios at their native tick: `-script ../scenarios/<name>.json 
 `POST /explain` and the console's **Ask** tab need a local OpenAI-compatible LLM. Without one they return `501`, which is expected.
 
 ```bash
-brew install ollama && ollama pull qwen2.5:7b-instruct    # or any OpenAI-compatible server
+brew install ollama && brew services start ollama        # or run `ollama serve` in another terminal
+ollama pull qwen2.5:7b-instruct                           # or use any OpenAI-compatible server
 /tmp/di-agent/agent -addr 127.0.0.1:8080 -explain-provider openai-compatible \
     -script /tmp/di-agent/linear-fast.json -collect-interval 1s
 ```

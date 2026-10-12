@@ -133,7 +133,10 @@ cmd_start() {
         fi
     fi
 
-    local args=(-profile "$PROFILE" -addr "$BIND:$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
+    # An IPv6 literal needs brackets before the port (BIND=::1 → [::1]:8080).
+    local host="$BIND"
+    [[ "$host" == *:* && "$host" != \[* ]] && host="[$host]"
+    local args=(-profile "$PROFILE" -addr "$host:$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
     [[ -n "$KD" ]]     && args+=(-kd "$KD")
     [[ -n "$PRIORS" ]] && args+=(-priors "$PRIORS")
 
