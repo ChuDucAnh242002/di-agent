@@ -254,7 +254,7 @@ func resolveDataDir(override string) (string, error) {
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			return "", fmt.Errorf("could not find %s by walking up from %s", defaultDataDir, cwd)
+			return "", fmt.Errorf("could not find %s by walking up from %s; the parquet dataset is not part of this repository, so pass --data-dir pointing at a copy of it", defaultDataDir, cwd)
 		}
 		d = parent
 	}

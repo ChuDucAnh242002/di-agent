@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PORT="${PORT:-8080}"
+# Loopback by default: the daemon has no authentication (see OPERATING.md).
+BIND="${BIND:-127.0.0.1}"
 PROFILE="${PROFILE:-edge-minimal}"
 KD="${KD:-}"
 PRIORS="${PRIORS:-}"
@@ -70,7 +72,8 @@ step() { printf "%s%s%s\n" "${DIM}" "$*" "${RESET}"; }
 
 running_pid() {
     local pid
-    pid=$(ss -tulpn 2>/dev/null | grep ":$PORT" | grep -oP 'pid=\K\d+' | head -1)
+    # ss is Linux-only and BSD grep has no -P, so extract the pid portably.
+    pid=$(ss -tulpn 2>/dev/null | grep ":$PORT" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
     if [[ -n "$pid" ]]; then
         echo "$pid"
         return 0
@@ -130,7 +133,10 @@ cmd_start() {
         fi
     fi
 
-    local args=(-profile "$PROFILE" -addr ":$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
+    # An IPv6 literal needs brackets before the port (BIND=::1 → [::1]:8080).
+    local host="$BIND"
+    [[ "$host" == *:* && "$host" != \[* ]] && host="[$host]"
+    local args=(-profile "$PROFILE" -addr "$host:$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
     [[ -n "$KD" ]]     && args+=(-kd "$KD")
     [[ -n "$PRIORS" ]] && args+=(-priors "$PRIORS")
 
@@ -271,7 +277,7 @@ cmd_smoke() {
         echo
     fi
     echo
-    info "GET /edges?from=RC&to=PS (expect 2 — conflict pair)"
+    info "GET /edges?from=RC&to=PS (edges between the two shipped constructs)"
     if command -v jq >/dev/null 2>&1; then
         curl -s "localhost:$PORT/edges?from=RC&to=PS" | jq 'length'
     else
@@ -279,8 +285,8 @@ cmd_smoke() {
         echo
     fi
     echo
-    info "mapctl deprecate P11 'smoke from dev.sh'"
-    cmd_cli deprecate P11 "smoke from dev.sh" || true
+    info "mapctl deprecate P10 'smoke from dev.sh'"
+    cmd_cli deprecate P10 "smoke from dev.sh" || true
     echo
     info "GET /history (last entry)"
     if command -v jq >/dev/null 2>&1; then
@@ -325,7 +331,7 @@ cmd_demo() {
 ${BOLD}${BLUE}
 ╔══════════════════════════════════════════════════════════════╗
 ║          Semantic Map  —  guided demo                        ║
-║          12 scenarios · live evolution · ~3 minutes           ║
+║          scenarios · live evolution · ~3 minutes             ║
 ╚══════════════════════════════════════════════════════════════╝
 ${RESET}
 HEADER
@@ -344,11 +350,11 @@ HEADER
     # ── Step 2: static state ────────────────────────────────────────────────
     if [[ "$paper" -eq 0 ]]; then
         echo
-        info "Step 2/5  what the agent ships with — 7 constructs, 15 propositions"
-        step "(Di-Select backbone, multigraph: 3 conflict pairs)"
+        info "Step 2/5  what the agent ships with — the domain model in domain_spec.json"
+        step "(the observable subset of the Di-Select backbone; magnitudes start unknown and are learned)"
         cmd_cli graph
         echo
-        info "the multigraph conflict pair on RC→PS (P2 negative, P3 positive):"
+        info "every layer of one relationship, RC→PS (all empty until paired observations arrive):"
         cmd_cli edges --from RC --to PS
         eval "$PAUSE"
     fi
@@ -356,7 +362,7 @@ HEADER
     # ── Step 3: invariant scenarios (6 tests) ───────────────────────────────
     if [[ "$paper" -eq 0 ]]; then
         echo
-        info "Step 3/5  6 invariant scenarios — core mechanics (cold start, convergence, deprecation, replay, audit)"
+        info "Step 3/5  invariant scenarios — core mechanics (known-truth scenario files, cold start, convergence, deprecation, replay, audit, coordination)"
         step "(go test -v -run TestScenario)"
     fi
     go test -v -run TestScenario ./internal/minimal/tests/... 2>&1 | demo_filter_test_output
@@ -365,7 +371,7 @@ HEADER
     # ── Step 4: evolution scenarios (6 tests) ───────────────────────────────
     if [[ "$paper" -eq 0 ]]; then
         echo
-        info "Step 4/5  6 evolution scenarios — live convergence via ScriptedCollector + Bridge"
+        info "Step 4/5  evolution scenarios — learning, regime change, discovery, subject lifecycle, operator tuning"
         step "(go test -v -run TestEvolution)"
     fi
     go test -v -run TestEvolution ./internal/minimal/tests/... 2>&1 | demo_filter_test_output
@@ -374,8 +380,8 @@ HEADER
     # ── Step 5: open the UI ─────────────────────────────────────────────────
     if [[ "$paper" -eq 0 ]]; then
         echo
-        info "Step 5/5  the embedded web viewer at http://localhost:$PORT/ui/"
-        step "(7-node cytoscape graph · click nodes/edges · deprecate/strength/reset live)"
+        info "Step 5/5  the operator console at http://localhost:$PORT/ui/"
+        step "(operator console: properties, subjects, relationships, candidates and estimates · no CDN)"
         if [[ "$noui" -eq 0 ]]; then
             cmd_ui
             echo
@@ -425,12 +431,13 @@ ${BOLD}Commands:${RESET}
   ${BOLD}replay${RESET} ... Run replay with --addr + --data-dir already set, e.g. ./dev.sh replay run --kd k0s --test idle --run 1 --speed 60
   ${BOLD}test${RESET}       go test ./... + go vet ./...
   ${BOLD}smoke${RESET}      End-to-end smoke (curl + mapctl) against the running daemon
-  ${BOLD}demo${RESET}       Guided tour: build → graph → 12 scenarios → UI (use --quick, --paper, --no-ui)
+  ${BOLD}demo${RESET}       Guided tour: build → graph → scenarios → operator console (use --quick, --paper, --no-ui)
   ${BOLD}clean${RESET}      Stop, remove binaries, clear go build cache
   ${BOLD}help${RESET}       This help
 
 ${BOLD}Environment overrides:${RESET}
   PORT          ${BLUE}${PORT}${RESET}            HTTP port
+  BIND          ${BLUE}${BIND}${RESET}       listen address (0.0.0.0 exposes the unauthenticated API)
   PROFILE       ${BLUE}${PROFILE}${RESET}   Deployment profile
     BUILD_GOOS    ${BLUE}${BUILD_GOOS:-(auto)}${RESET}         build target GOOS (default: host)
     BUILD_GOARCH  ${BLUE}${BUILD_GOARCH:-(auto)}${RESET}         build target GOARCH (default: host)
