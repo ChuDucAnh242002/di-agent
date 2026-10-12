@@ -251,7 +251,7 @@ func TestIngestSample_FeedsProposerAndForgetsOnRetirement(t *testing.T) {
 		ts := t0 + int64(i)*10
 		x := float64(i%20) / 20
 		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: ts,
-			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "share-of-node-capacity", Range: &[2]float64{0, 1}})
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "fraction", Range: &[2]float64{0, 1}})
 		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: ts + 1,
 			EventID: "n" + strconv.Itoa(i)})
 	}
