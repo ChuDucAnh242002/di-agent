@@ -1,5 +1,6 @@
 # Build artifacts
 semantic-map/go/agent
+semantic-map/go/cmd/agent/tmp/
 
 # Python bytecode. Five .pyc files were committed under prior_init/, which meant a
 # `git status` after running the calibration pipeline reported modifications to

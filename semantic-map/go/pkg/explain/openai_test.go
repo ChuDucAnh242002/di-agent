@@ -674,3 +674,70 @@ func TestExplain_UsageAccountsTokensAndWallClock(t *testing.T) {
 		t.Errorf("wall clock must be non-negative; got %d", resp.Usage.WallClockMs)
 	}
 }
+
+func TestExplain_ProseAnswerIsRetriedWithoutTools(t *testing.T) {
+	// A turn that may legitimately emit tool_calls cannot also be constrained to
+	// a JSON object, so `chat` applies the backend's JSON constraint only when it
+	// sends no tools. That makes an answering turn with tools still on the table
+	// unconstrained — and a model that replies in prose there will do it again on
+	// every retry, because nothing about the next attempt has changed. The whole
+	// reflection budget then burns on one failure mode.
+	//
+	// Withholding the tools on the retry is what makes the second attempt
+	// different from the first. Observed against qwen2.5:7b-instruct on Ollama,
+	// the documented default backend: offered tools it answered in prose every
+	// time; the same evidence with no tools produced the response object.
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "On reflection, " + e0.PropositionID + " is the driver.",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "medium",
+	})
+	llm := &scriptedLLM{responses: []string{
+		assistantToolCall("c1", "get_edges", `{}`),
+		assistantOnly("The strongest relationship is the first one, at about 0.42."), // prose
+		assistantOnly(string(answer)),
+	}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := exp.Explain(context.Background(), explain.ExplainRequest{
+		Question: "What is the strongest relationship?",
+	})
+	if err != nil {
+		t.Fatalf("a prose answer should be recoverable, not fatal: %v", err)
+	}
+	if !strings.Contains(resp.Answer, e0.PropositionID) {
+		t.Errorf("expected the recovered grounded answer; got %q", resp.Answer)
+	}
+
+	if llm.requestCount() != 3 {
+		t.Fatalf("expected 3 turns (tool, prose, retry); got %d", llm.requestCount())
+	}
+	// The turn that produced prose was offered tools — that is the condition
+	// being recovered from, and asserting it keeps the test honest about which
+	// turn the fix applies to.
+	if !strings.Contains(llm.requestBody(1), `"tools"`) {
+		t.Error("the answering turn should have been sent with tools available")
+	}
+	// The retry must not be: with tools present the JSON constraint is skipped,
+	// and the retry is then identical to the attempt that just failed.
+	if strings.Contains(llm.requestBody(2), `"tools"`) {
+		t.Error("the retry after an unparseable answer must be sent with tools stripped")
+	}
+	if !strings.Contains(llm.requestBody(2), "response_format") {
+		t.Error("the tool-free retry should carry the JSON constraint that makes it worth retrying")
+	}
+}
