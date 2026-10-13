@@ -22,7 +22,7 @@
 // the picture answers "which workloads are running" before anything is clicked.
 
 import { effective, subjectOf, shortLabel, fmt, escapeHTML } from './model.js';
-import { Force } from './force.js';
+import { Force, footprint, HULL_PAD, HULL_LABEL } from './force.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const el = (name, attrs = {}) => {
@@ -35,6 +35,13 @@ const el = (name, attrs = {}) => {
 
 const R_OBSERVED = 17;
 const R_DERIVED = 21;
+// The two label lines under a disc (name at r+14, value at r+26) and the room
+// their descenders need.
+const LABEL_BELOW = 30;
+// ui-monospace at 11px is ~0.6em per glyph; the value line is never wider than
+// "unobserved".
+const GLYPH = 6.6;
+const labelHalfWidth = (p, r) => Math.max(r, (Math.max(shortLabel(p.id).length, 10) * GLYPH) / 2 + 3);
 
 export class GraphView {
   constructor(svg, { onSelect, tooltip }) {
@@ -49,6 +56,11 @@ export class GraphView {
     this.pulses = new Map();   // id -> ms when it last moved, for the ping animation
     this.lastModel = null;
     this.fittedOnce = false;
+    // Whether the operator has framed the view themselves since the last fit. Until
+    // they do, the view re-frames whenever the topology changes — a subject leaving
+    // otherwise left the remaining graph wherever the old frame put it.
+    this.viewTouched = false;
+    this.pendingFit = false;
 
     this.defs = el('defs');
     this.gRoot = el('g');
@@ -134,11 +146,14 @@ export class GraphView {
         if (!press?.moved) return;         // a tremor is not a drag
         const pt = this.toWorld(e.clientX, e.clientY);
         dragging.n.x = pt.x; dragging.n.y = pt.y;
+        this.viewTouched = true;
         this.force.reheat(0.25);
         this.start();
         return;
       }
       if (panning) {
+        if (!press?.moved) return;         // a click to deselect is not a pan
+        this.viewTouched = true;
         this.transform.x = panning.tx + (e.clientX - panning.x);
         this.transform.y = panning.ty + (e.clientY - panning.y);
         this.applyTransform();
@@ -181,6 +196,7 @@ export class GraphView {
       this.transform.x = mx - ((mx - this.transform.x) * k) / this.transform.k;
       this.transform.y = my - ((my - this.transform.y) * k) / this.transform.k;
       this.transform.k = k;
+      this.viewTouched = true;
       this.applyTransform();
     }, { passive: false });
 
@@ -257,11 +273,10 @@ export class GraphView {
 
     for (const id of model.changed) this.pulses.set(id, Date.now());
 
-    const nodes = props.map((p) => ({
-      id: p.id,
-      r: p.kind === 'derived' ? R_DERIVED : R_OBSERVED,
-      group: subjectOf(p),
-    }));
+    const nodes = props.map((p) => {
+      const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
+      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: subjectOf(p) };
+    });
 
     const rels = model.relationships.filter((r) => ids.has(r.from) && ids.has(r.to));
     const members = model.memberships().filter((m) => ids.has(m.from) && ids.has(m.to));
@@ -271,6 +286,14 @@ export class GraphView {
       ...members.map((m) => ({ source: m.from, target: m.to, distance: 155 })),
     ];
 
+    // The first layout is laid out for the canvas it will be drawn in. Data can
+    // arrive before the ResizeObserver's first callback, and that callback skips
+    // re-laying out, so a graph laid out at the simulation's default 800×600 was
+    // drawn as a small square in the middle of a wide canvas until Re-layout.
+    if (!this.fittedOnce) {
+      const box = this.svg.getBoundingClientRect();
+      if (box.width && box.height) this.force.size(box.width, box.height);
+    }
     const topologyChanged = this.force.sync(nodes, links);
     if (topologyChanged) {
       // Settle synchronously. The first layout is run to completion so the first
@@ -282,6 +305,13 @@ export class GraphView {
     this.position();
     if ((refit || (topologyChanged && !this.fittedOnce)) && props.length && this.fit()) {
       this.fittedOnce = true;
+    } else if (topologyChanged && !this.viewTouched && props.length) {
+      // Framed now, on the warmed layout, and again once it has settled: the short
+      // warm leaves it still moving, but the animation that settles it does not run
+      // in a background tab, and a frame left for later would then be stale
+      // whenever someone brought the tab forward.
+      this.fit();
+      this.pendingFit = true;
     }
     this.start();
   }
@@ -292,6 +322,10 @@ export class GraphView {
       const moving = this.force.tick();
       this.position();
       const pulsing = [...this.pulses.values()].some((t) => Date.now() - t < 1400);
+      if (!moving && this.pendingFit) {
+        this.pendingFit = false;
+        if (!this.viewTouched) this.fit();
+      }
       if (moving || pulsing) {
         this.raf = requestAnimationFrame(step);
       } else {
@@ -524,24 +558,27 @@ export class GraphView {
       const geom = curvePath(a, b, e.curve, nodeRadius(this.nodeEls, e.from), nodeRadius(this.nodeEls, e.to));
       e.path.setAttribute('d', geom.d);
       if (e.hit) e.hit.setAttribute('d', geom.d);
-      if (e.dot) { e.dot.setAttribute('cx', geom.mx); e.dot.setAttribute('cy', geom.my); }
-      if (e.alarm) { e.alarm.setAttribute('x', geom.mx); e.alarm.setAttribute('y', geom.my - 12); }
+      if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
+      if (e.alarm) { e.alarm.setAttribute('x', geom.px); e.alarm.setAttribute('y', geom.py - 12); }
     }
 
     for (const h of this.hullEls) {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      // Enclose the labels too: sized from the discs alone, a member's name spilled
+      // out of its own subject's box and read as belonging to the neighbour.
       for (const id of h.memberIDs) {
         const n = this.force.at(id);
         if (!n) continue;
-        x0 = Math.min(x0, n.x - n.r); y0 = Math.min(y0, n.y - n.r);
-        x1 = Math.max(x1, n.x + n.r); y1 = Math.max(y1, n.y + n.r);
+        const f = footprint(n);
+        x0 = Math.min(x0, f.x0); y0 = Math.min(y0, f.y0);
+        x1 = Math.max(x1, f.x1); y1 = Math.max(y1, f.y1);
       }
       if (!Number.isFinite(x0)) continue;
-      const pad = 26;
+      const pad = HULL_PAD;
       h.rect.setAttribute('x', x0 - pad);
-      h.rect.setAttribute('y', y0 - pad - 10);
+      h.rect.setAttribute('y', y0 - pad - HULL_LABEL);
       h.rect.setAttribute('width', x1 - x0 + pad * 2);
-      h.rect.setAttribute('height', y1 - y0 + pad * 2 + 10);
+      h.rect.setAttribute('height', y1 - y0 + pad * 2 + HULL_LABEL);
       h.label.setAttribute('x', x0 - pad + 10);
       h.label.setAttribute('y', y0 - pad + 4);
     }
@@ -571,7 +608,14 @@ export class GraphView {
    */
   /** Returns whether there was anything to frame. */
   fit() {
-    const b = this.force.bounds();
+    const raw = this.force.bounds();
+    // Frame the subject enclosures as well as the properties inside them: framed to
+    // the properties alone, an enclosure at the edge was cut off by the canvas.
+    const b = raw && {
+      x0: raw.x0 - HULL_PAD, x1: raw.x1 + HULL_PAD,
+      y0: raw.y0 - HULL_PAD - HULL_LABEL, y1: raw.y1 + HULL_PAD,
+    };
+    if (b) { b.w = b.x1 - b.x0; b.h = b.y1 - b.y0; }
     const rect = this.svg.getBoundingClientRect();
     if (!b || !rect.width || !rect.height) return false;
 
@@ -589,6 +633,7 @@ export class GraphView {
     this.transform.k = k;
     this.transform.x = sideInset + availW / 2 - ((b.x0 + b.x1) / 2) * k;
     this.transform.y = topInset + availH / 2 - ((b.y0 + b.y1) / 2) * k;
+    this.viewTouched = false;
     this.applyTransform();
     return true;
   }
@@ -610,7 +655,13 @@ export class GraphView {
 
 const nodeRadius = (map, id) => map.get(id)?.r ?? R_OBSERVED;
 
-/** A quadratic bow from a to b, trimmed to each disc's edge so arrows land clean. */
+/**
+ * A quadratic bow from a to b, trimmed to each disc's edge so arrows land clean.
+ *
+ * (mx, my) is the control point, which a bowed curve never passes through; (px, py)
+ * is the curve's own midpoint, B(½) = ¼·start + ½·control + ¼·end, and is where
+ * anything meant to sit ON the edge — the provenance dot, the alarm — belongs.
+ */
 function curvePath(a, b, curve, ra, rb) {
   const dx = b.x - a.x, dy = b.y - a.y;
   const d = Math.hypot(dx, dy) || 1;
@@ -622,6 +673,8 @@ function curvePath(a, b, curve, ra, rb) {
   return {
     d: `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`,
     mx, my,
+    px: 0.25 * sx + 0.5 * mx + 0.25 * ex,
+    py: 0.25 * sy + 0.5 * my + 0.25 * ey,
   };
 }
 
