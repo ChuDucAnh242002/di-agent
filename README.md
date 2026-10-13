@@ -8,6 +8,9 @@ Implementation artifact for the dissertation *A Context-Aware Agentic Framework 
 
 > **[Live Playground](http://a575f6d9e82174d81a4f2936d3a08ccf-1423634940.eu-north-1.elb.amazonaws.com)**
 > This link opens the playground, served by the AWS load balancer on the EKS cluster. It uses plain HTTP, and the hostname changes whenever the load balancer is recreated (for example after `make helm-uninstall` and a redeploy).
+>
+> **[Live di-agent API](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com)** · [Health check](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com/healthz)
+> The API is served by the public di-agent load balancer on the EKS cluster. It uses plain HTTP, and its hostname can change if the load balancer is recreated.
 
 ---
 

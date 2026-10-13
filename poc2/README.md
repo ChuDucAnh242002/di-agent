@@ -1,7 +1,5 @@
 # PoC2: local di-agent lab on libvirt VMs
 
-**Live EKS di-agent API:** [http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com) (health check: [`/healthz`](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com/healthz)).
-
 This directory is the second proof-of-concept for the di-agent project: a small Kubernetes lab that runs on libvirt virtual machines, with a distributed telemetry stack and a trust-based coordination experiment.
 
 The important thing to understand is that PoC2 is not just a cluster bootstrap. It is a reproducible environment for testing a specific thesis:
