@@ -33,9 +33,11 @@ import (
 // capped at CgroupOptions.MaxSubjects; beyond the cap the collector logs once
 // and skips the rest.
 //
-// CPU and memory samples — root or subject — are declared as
-// "share-of-node-capacity" with Range [0,1]: a fraction of what the whole node
-// has, never a fraction of a subject-local limit. When the node's capacity is
+// CPU and memory samples — root or subject — are declared as "fraction" with
+// Range [0,1]: a fraction of what the whole node has, never a fraction of a
+// subject-local limit. "fraction" is the unit the domain specification declares
+// for the routed node-level properties, and the map refuses a reading whose unit
+// contradicts the declared one. When the node's capacity is
 // unknown (no MemTotal), memory is not reported at all rather than as a share of
 // the subject's own memory.max, which is a different quantity. cpu_throttle_ratio
 // is throttled periods over elapsed periods and is declared as "share-of-periods"
@@ -392,8 +394,15 @@ func readMemTotal(path string) uint64 {
 var shareRange = [2]float64{0, 1}
 
 const (
-	// unitNodeShare: a fraction of what the whole node has (CPU, memory).
-	unitNodeShare = "share-of-node-capacity"
+	// unitNodeShare: a fraction of what the whole node has (CPU, memory), for the
+	// node and for every subject alike — a pod's share is of the node, never of its
+	// own limit. It is "fraction" because that is the unit the domain specification
+	// declares for the routed node-level properties, and the one every other
+	// node-level producer (Netdata, replay, the scripted system) uses. The map
+	// refuses an observation that contradicts a declared unit, so any other label
+	// had every node-level reading refused; and the Collector contract keeps a
+	// type's unit stable across subjects, so the subjects carry the same label.
+	unitNodeShare = "fraction"
 	// unitPeriodShare: throttled CFS periods over elapsed periods, a fraction of
 	// the subject's own scheduling periods rather than of the node.
 	unitPeriodShare = "share-of-periods"

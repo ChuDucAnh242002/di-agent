@@ -653,7 +653,7 @@ Each `MetricSample` carries:
 | `timestamp_unix` | `int`        | Unix timestamp of the observation                        |
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
-| `unit`           | `str`        | What the value means (`share-of-node-capacity`, `items`, …); stamped on the property at admission |
+| `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
 | `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Required with `unit` on every sample (a contract MUST) |
 | `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
@@ -1014,7 +1014,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `share-of-node-capacity` `[0,1]` (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1032,8 +1032,13 @@ share of its limit, a different quantity, and the estimator normalises by what a
 declares. A root that *does* carry memory files — the daemon
 itself running inside a container, whose cgroup is its root — keeps the subject rule
 and is measured against `MemTotal`, so the ratio is still against the machine and not
-the container's limit. The declared unit `share-of-node-capacity` names exactly that
-quantity, not a fraction of any per-process or per-container ceiling; the one reading
+the container's limit. Every CPU and memory share, node or subject, is declared as
+`fraction` of the node — never a fraction of any per-process or per-container ceiling.
+The label is the domain spec's: the node's readings land on routed properties the spec
+declares as `fraction`, the map holds a declared unit fixed and refuses a reading that
+contradicts it, and the Collector contract keeps a type's unit stable across subjects.
+(An earlier `share-of-node-capacity` label named the same quantity and had every
+node-level reading refused as a conflict.) The one reading
 that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
 elapsed periods), is declared as `share-of-periods` instead. The two sources
 account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
