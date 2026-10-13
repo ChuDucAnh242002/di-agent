@@ -62,7 +62,7 @@ make provision-eks
 
 # then the usual app-layer steps, unchanged:
 make images helm-install REGISTRY=ghcr.io/your-org TAG=v1
-make agent-cloud peers-cloud REGISTRY=ghcr.io/your-org TAG=v1
+make peers-cloud
 make demo-cloud
 
 # teardown:
@@ -75,10 +75,10 @@ agent-placement layers:
 - `provision-aks` / `provision-eks` replace `provision` + `k8s`: they create
   the cluster directly (AKS/EKS) instead of libvirt VMs + kubeadm, and fetch
   its kubeconfig to `~/.kube/config-poc2-aks` or `-eks`.
-- `agent-cloud` replaces `agent`: since managed clusters don't have a fixed,
-  known set of node hostnames, di-agent runs as a `DaemonSet` (one pod per
-  node, image pulled from `REGISTRY` rather than imported into containerd)
-  instead of one `Deployment` per VM pinned by `nodeSelector`.
+- di-agent is part of the Helm chart. Locally, `make helm-install` renders one
+  hostNetwork `Deployment` per worker VM (`agent.nodes`); on managed clusters
+  (no VMs, or `AGENT_NODES=`) it renders a `Deployment` (`agent.replicas`, default 3) plus a public `di-agent-public` Deployment behind a `LoadBalancer` Service (`kubectl get svc di-agent-public`).
+  Images are pulled from `REGISTRY`; build with `make images IMAGES=di-agent`.
 - `peers-cloud` / `demo-cloud` replace `peers` / `demo`: pod IPs on AKS/EKS
   live inside the cluster's private VNet/VPC and aren't reachable from your
   laptop, so these scripts use `kubectl port-forward` to reach each agent
@@ -106,6 +106,21 @@ at `cloud/eks/terraform.tfstate`. For shared or CI state, set
 `TFSTATE_REGION`. Optionally set `TFSTATE_DYNAMODB_TABLE` to enable the
 legacy DynamoDB locking configuration used by the S3 backend.
 
+### EKS cost schedule, probes and peer reconciler
+
+- **Office-hours schedule** (`cloud/eks/schedule.tf`): EventBridge Scheduler
+  scales the node group to 0 at `schedule_stop` and back to `node_count` at
+  `schedule_start` (defaults: Mon-Fri 17:00 / 09:00, `Europe/Helsinki`).
+  Set `schedule_enabled=false` to disable. Load balancer URLs do not change.
+  Scale-down takes ~17 min because coredns/ebs-csi PDBs block the last drain.
+  The EKS control plane, NAT gateway and load balancers still bill while off.
+- **Health probes**: simulators get startup/liveness probes on `/health`
+  (`healthProbes.*`), so a pod whose telemetry thread died is restarted.
+- **Peer reconciler**: CronJob `di-agent-peers` (`agent.peers.*`) re-registers
+  di-agent peers by pod IP every 10 minutes, so no manual `make peers-cloud`
+  is needed after pods restart or the cluster scales up.
+- Upgrade an existing release with `helm upgrade ... --reset-then-reuse-values`.
+
 ## CI/CD for AKS and EKS
 
 Manually running `provision-aks`/`provision-eks` is fine for exploration,
@@ -123,7 +138,7 @@ to be. This repo has three GitHub Actions workflows:
   [`cd-eks.yml`](../.github/workflows/cd-eks.yml) — `terraform init/plan/apply`
   the matching `cloud/aks` or `cloud/eks` module against **remote** state,
   fetch the kubeconfig, `helm upgrade --install` the chart, deploy the
-  `di-agent` DaemonSet with `SKIP_BUILD=1` (using the exact image sha CI just
+  `di-agent` Deployments with `SKIP_BUILD=1` (using the exact image sha CI just
   built — no rebuilding at deploy time), register the peer mesh, and run a
   smoke test against `/cost`.
 
@@ -200,7 +215,7 @@ The deployment consists of two separate layers:
 
 2. Application and demo layer
    - Helm chart in `helm/di-agent-system` deploys Kafka, InfluxDB, Grafana, genset, battery, propulsion, auxload, switchboard, telemetry-writer, and playground
-   - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
+   - the same chart deploys `di-agent` (image built with `make images IMAGES=di-agent`)
    - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
 
@@ -327,8 +342,7 @@ The files that matter for understanding or running the PoC are:
 - `cloud/aks`, `cloud/eks`: Terraform modules for managed-cluster alternatives to the above (see "Deploying on AKS or EKS" above)
 - `scripts/01-provision.sh`: creates the VM fleet
 - `scripts/02-k8s.sh`: bootstraps the cluster
-- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods (per-VM, local lab)
-- `scripts/agent-cloud.sh`, `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: DaemonSet-based di-agent deployment, peer registration, and demo for AKS/EKS
+- `scripts/peers-cloud.sh`, `scripts/coordinator-cloud.sh`: peer registration and demo for AKS/EKS
 - `scripts/04-peers.sh`: registers peers and trust values
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images

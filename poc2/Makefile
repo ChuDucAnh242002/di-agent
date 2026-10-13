@@ -22,7 +22,7 @@ $(eval $(VM_DEFS))
 
 SCRIPTS := ./scripts
 
-# Helm chart covering every service except di-agent (kafka, genset,
+# Helm chart covering every service including di-agent (kafka, genset,
 # switchboard, propulsion, battery, auxload, influxdb, telemetry-writer,
 # grafana, playground) — see helm/di-agent-system. Any of its pods can be
 # scheduled on any cluster node; there is no per-service VM pinning.
@@ -30,6 +30,13 @@ HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
 STORAGE_CLASS ?= local-path
+# Local lab: one pinned hostNetwork Deployment per worker VM (first worker
+# bursty, rest stable). Set AGENT_NODES= (empty) for plain replicated Deployments (cloud).
+AGENT_WORKERS := $(wordlist 2,$(words $(VMS)),$(VMS))
+AGENT_NODES ?= $(AGENT_WORKERS)
+AGENT_HELM_ARGS = $(if $(strip $(AGENT_NODES)),--set agent.hostNetwork=true \
+	$(foreach i,$(shell seq 1 $(words $(AGENT_NODES))),--set 'agent.nodes[$(shell echo $$(($(i)-1)))].name=$(word $(i),$(AGENT_NODES))' \
+	--set 'agent.nodes[$(shell echo $$(($(i)-1)))].regime=$(if $(filter 1,$(i)),bursty,stable)')) 
 # NodePort (local/lab) or LoadBalancer (EKS: provisions a public AWS ELB).
 PLAYGROUND_SERVICE_TYPE ?= NodePort
 REGISTRY ?= ghcr.io/chuducanh242002
@@ -38,7 +45,7 @@ TAG ?= latest
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
 
-all: provision k8s images helm-install agent peers
+all: provision k8s images helm-install peers
 
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
@@ -66,7 +73,8 @@ helm-install:
 		--set kafka.persistence.storageClass=$(STORAGE_CLASS) \
 		--set influxdb.persistence.storageClass=$(STORAGE_CLASS) \
 		--set prometheus.persistence.storageClass=$(STORAGE_CLASS) \
-		--set playground.service.type=$(PLAYGROUND_SERVICE_TYPE)
+		--set playground.service.type=$(PLAYGROUND_SERVICE_TYPE) \
+		$(AGENT_HELM_ARGS)
 
 helm-upgrade: helm-install
 
@@ -76,8 +84,8 @@ helm-uninstall:
 helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
-agent:
-	@bash $(SCRIPTS)/03-agent.sh $(VMS)
+# di-agent is now part of the Helm chart; `make agent` is kept as an alias.
+agent: helm-install
 
 peers:
 	@bash $(SCRIPTS)/04-peers.sh $(VMS)
@@ -86,7 +94,7 @@ peers:
 # Both provision a managed cluster via Terraform (cloud/aks, cloud/eks) and
 # fetch its kubeconfig; from there the same `make images helm-install` steps
 # apply unchanged (just point KUBECONFIG at the fetched file). di-agent is
-# deployed as a DaemonSet (agent-cloud) instead of one Deployment per VM,
+# deployed as a replicated Deployment (agent-cloud) instead of one Deployment per VM,
 # since managed clusters don't expose a fixed, known set of node hostnames
 # and images must be pulled from a registry rather than imported directly.
 provision-aks:
@@ -101,8 +109,8 @@ provision-eks:
 teardown-eks:
 	@bash $(SCRIPTS)/teardown-eks.sh
 
-agent-cloud:
-	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/agent-cloud.sh
+# di-agent ships in the chart (Deployment); alias of helm-install for the cloud.
+agent-cloud: helm-install
 
 peers-cloud:
 	@bash $(SCRIPTS)/peers-cloud.sh
@@ -192,8 +200,8 @@ get-ip-%:
 # Help target
 help:
 	@echo "Available targets:"
-	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
-	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
+	@echo "  all          - Full stack: provision → k8s → images → helm-install (incl. di-agent) → peers"
+	@echo "  images       - Build+push di-agent/genset/switchboard/propulsion/battery/auxload/"
 	@echo "                 telemetry-writer/telemetry-cloud-sync/playground images to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
@@ -227,8 +235,8 @@ help:
 	@echo "AKS / EKS (managed cluster alternatives to the local libvirt lab):"
 	@echo "  provision-aks / teardown-aks - terraform apply/destroy cloud/aks, fetch kubeconfig"
 	@echo "  provision-eks / teardown-eks - terraform apply/destroy cloud/eks, fetch kubeconfig"
-	@echo "  agent-cloud  - build+push di-agent and deploy it as a DaemonSet (needs REGISTRY)"
+	@echo "  agent-cloud  - alias of helm-install (di-agent is a Deployment in the chart)"
 	@echo "  peers-cloud  - register the full di-agent peer mesh via kubectl port-forward"
 	@echo "  demo-cloud   - run the trust-drain coordinator demo against the current KUBECONFIG cluster"
 	@echo "  After provision-aks/provision-eks: export KUBECONFIG to the printed path, then run"
-	@echo "  'make images helm-install agent-cloud peers-cloud demo-cloud' as usual."
+	@echo "  'make images helm-install peers-cloud demo-cloud' as usual."

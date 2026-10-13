@@ -53,7 +53,7 @@ Measured on the reference build (`linux/arm64`, single static binary, no runtime
 | RSS after 500 observations (warm graph) | ~15 MB |
 | OS threads | 8 |
 
-A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. The graph is fixed at 7 constructs and 15 edges, so memory does **not** grow with uptime; the ~3 MB delta above is the observation ring buffers, and those are bounded.
+A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. Memory grows with what the map holds, not with uptime: the domain model is small, the cgroup walk admits at most `-cgroup-max-subjects` subjects (default 256), silent properties are retired, and the observation ring buffers (the ~3 MB delta above) are bounded.
 
 Set `-proposer=false` on nodes where you want to reclaim the ring-buffer overhead entirely.
 

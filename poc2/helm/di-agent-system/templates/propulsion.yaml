@@ -51,6 +51,7 @@ spec:
               value: {{ $.Values.propulsion.allocationKafkaTopic | quote }}
             - name: MODBUS_PORT
               value: {{ $.Values.propulsion.modbusPort | quote }}
+          {{- include "diagent.healthProbes" $ | nindent 10 }}
           resources:
             {{- toYaml $.Values.propulsion.resources | nindent 12 }}
 ---

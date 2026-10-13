@@ -81,3 +81,27 @@ switchboard's Modbus polling client. Called as:
 {{- join "," $names -}}
 {{- end -}}
 
+
+{{/*
+Health probes for the FastAPI simulators. /health returns 503 once a worker
+thread has died (e.g. lost Kafka), so a liveness probe makes Kubernetes
+restart the pod and reconnect. The startup probe is generous so a cold
+start with Kafka still booting does not restart-loop the pod.
+*/}}
+{{- define "diagent.healthProbes" -}}
+{{- if .Values.healthProbes.enabled }}
+startupProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  periodSeconds: 10
+  failureThreshold: {{ .Values.healthProbes.startupFailureThreshold }}
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 4
+{{- end }}
+{{- end -}}

@@ -31,7 +31,7 @@ command -v kubectl >/dev/null 2>&1 || { err "kubectl not found"; exit 1; }
 mapfile -t POD_LINES < <(kubectl -n "$NAMESPACE" get pods -l app=di-agent \
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}')
 if [ "${#POD_LINES[@]}" -eq 0 ]; then
-    err "No di-agent pods found in namespace $NAMESPACE. Run agent-cloud.sh first."
+    err "No di-agent pods found in namespace $NAMESPACE. Run helm-install first."
     exit 1
 fi
 

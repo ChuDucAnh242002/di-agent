@@ -1,0 +1,127 @@
+{{- /*
+Peer-mesh reconciler. di-agent peers are registered by pod IP, which changes
+on every restart (including the daily scale-down/scale-up of the cluster), so
+this CronJob keeps every agent registered with every other agent. It adds
+missing peers (with agent.peers.trust), removes stale ones, and never touches
+the trust of peers that are already registered.
+*/ -}}
+{{- if and .Values.agent.enabled .Values.agent.peers.enabled (not .Values.agent.nodes) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: di-agent-peers
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: di-agent-peers
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: di-agent-peers
+subjects:
+  - kind: ServiceAccount
+    name: di-agent-peers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: di-agent-peers
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: di-agent-peers-script
+data:
+  reconcile.py: |
+    import json, os, ssl, sys, urllib.request
+
+    NS = open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
+    TOKEN = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+    CA = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    PORT = os.environ["AGENT_PORT"]
+    TRUST = float(os.environ["TRUST"])
+
+    def call(url, method="GET", body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        ctx = ssl.create_default_context(cafile=CA) if url.startswith("https") else None
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else None
+
+    api = "https://%s:%s/api/v1/namespaces/%s/pods?labelSelector=app%%3Ddi-agent" % (
+        os.environ["KUBERNETES_SERVICE_HOST"], os.environ["KUBERNETES_SERVICE_PORT"], NS)
+    pods = call(api, headers={"Authorization": "Bearer " + TOKEN})["items"]
+    ips = sorted(
+        p["status"]["podIP"] for p in pods
+        if p["status"].get("phase") == "Running" and p["status"].get("podIP")
+        and not p["metadata"].get("deletionTimestamp")
+        and all(c.get("ready") for c in p["status"].get("containerStatuses", []))
+    )
+    print("agents:", ips)
+
+    failed = False
+    for ip in ips:
+        base = "http://%s:%s" % (ip, PORT)
+        try:
+            want = {"http://%s:%s" % (o, PORT) for o in ips if o != ip}
+            have = {p["url"]: p["id"] for p in call(base + "/peers") or []}
+            for url, pid in have.items():
+                if url not in want:
+                    call("%s/peers/%s" % (base, pid), "DELETE")
+                    print(ip, "removed stale peer", url)
+            for url in sorted(want - set(have)):
+                pid = call(base + "/peers", "POST", {"url": url})["id"]
+                call("%s/peers/%s/trust" % (base, pid), "POST", {"value": TRUST})
+                print(ip, "added peer", url)
+        except Exception as e:
+            failed = True
+            print(ip, "reconcile failed:", e)
+    sys.exit(1 if failed else 0)
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: di-agent-peers
+spec:
+  schedule: {{ .Values.agent.peers.schedule | quote }}
+  timeZone: {{ .Values.agent.peers.timeZone | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          serviceAccountName: di-agent-peers
+          restartPolicy: Never
+          containers:
+            - name: reconcile
+              image: {{ include "diagent.publicImage" .Values.agent.peers.image }}
+              command: ["python", "/scripts/reconcile.py"]
+              env:
+                - name: AGENT_PORT
+                  value: {{ .Values.agent.port | quote }}
+                - name: TRUST
+                  value: {{ .Values.agent.peers.trust | quote }}
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  memory: 32Mi
+          volumes:
+            - name: script
+              configMap:
+                name: di-agent-peers-script
+{{- end }}

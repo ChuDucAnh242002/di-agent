@@ -37,6 +37,7 @@ spec:
               value: {{ .Values.shorePower.ratedPowerKw | quote }}
             - name: BATTERY_URL
               value: {{ .Values.shorePower.batteryUrl | quote }}
+          {{- include "diagent.healthProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.shorePower.resources | nindent 12 }}
 ---

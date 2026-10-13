@@ -326,14 +326,27 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 				return nil, err
 			}
 
+			// Two reasons to withhold the tools and demand an answer from the
+			// evidence already gathered.
+			//
 			// Tool budget exhausted: rather than failing the request, strip
-			// the tools and demand an answer from the evidence already
-			// gathered. A model that loops on tool calls (small models do
+			// the tools. A model that loops on tool calls (small models do
 			// this) still produces something citable, and the deterministic
 			// validator still gates it. Erroring out here would throw away
 			// perfectly good evidence.
+			//
+			// The previous round answered in prose: `chat` applies the backend's
+			// JSON constraint only to a tool-free turn, because a turn that may
+			// legitimately emit tool_calls cannot also be forced into an object.
+			// So an answering turn with tools still on the table is unconstrained,
+			// and a model that replies in prose there will do it again on the
+			// retry no matter what the critique says — the reflection budget then
+			// burns on a failure the loop never changes the conditions of.
+			// Withholding the tools puts the constraint back in play, which is
+			// what makes the retry different from the attempt that failed.
 			turnTools := tools
-			if toolCallsSpent >= budget.MaxToolCalls {
+			switch {
+			case toolCallsSpent >= budget.MaxToolCalls:
 				if !toolBudgetAnnounced {
 					messages = append(messages, chatMessage{
 						Role: "user",
@@ -345,6 +358,10 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 					toolBudgetAnnounced = true
 					emit(Event{Kind: EventAnswering, Iteration: iter, Message: "tool budget exhausted; forcing final answer"})
 				}
+				turnTools = nil
+			case lastFailure == failureParse:
+				emit(Event{Kind: EventAnswering, Iteration: iter,
+					Message: "previous answer was not the response object; retrying without tools"})
 				turnTools = nil
 			}
 

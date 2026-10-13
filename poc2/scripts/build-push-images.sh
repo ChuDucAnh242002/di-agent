@@ -5,9 +5,8 @@
 #                         values.yaml: global.imageRegistry/global.imageTag).
 #
 # Usage: REGISTRY=ghcr.io/myorg TAG=v1 ./build-push-images.sh [options] [service ...]
-#   With no service names given, builds+pushes all of them. di-agent is
-#   intentionally not included here; it is still built/deployed via
-#   scripts/04-agent.sh.
+#   With no service names given, builds+pushes all of them (including
+#   di-agent, built from ../semantic-map and deployed by the chart).
 #
 # Options:
 #   -h, --help              Show this help and exit.
@@ -43,10 +42,10 @@ SYSTEM_DIR="$POC_DIR/system"
 REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
 TAG="${TAG:-latest}"
 
-ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync pontos-bridge playground)
+ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync pontos-bridge playground di-agent)
 
 usage() {
-    sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 service_dir() {
@@ -62,6 +61,7 @@ service_dir() {
         telemetry-cloud-sync) printf '%s\n' "$SYSTEM_DIR/telemetry-cloud-sync" ;;
         pontos-bridge) printf '%s\n' "$SYSTEM_DIR/pontos-bridge" ;;
         playground) printf '%s\n' "$POC_DIR/playground" ;;
+        di-agent) printf '%s\n' "$(dirname "$POC_DIR")/semantic-map" ;;
         *) return 1 ;;
     esac
 }

@@ -15,7 +15,7 @@ variable "kubernetes_version" {
 
 variable "node_count" {
   description = "Desired size of the managed node group (mirrors the local PoC's worker count)"
-  default     = 3
+  default     = 4
 }
 
 variable "instance_type" {
@@ -26,4 +26,25 @@ variable "instance_type" {
 variable "vpc_cidr" {
   description = "CIDR block for the VPC created for this cluster"
   default     = "10.60.0.0/16"
+}
+
+variable "schedule_enabled" {
+  description = "Scale the node group to zero outside office hours to save cost"
+  type        = bool
+  default     = true
+}
+
+variable "schedule_timezone" {
+  description = "IANA timezone for the schedule expressions"
+  default     = "Europe/Helsinki"
+}
+
+variable "schedule_start" {
+  description = "EventBridge Scheduler cron expression that scales the node group up"
+  default     = "cron(0 9 ? * MON-FRI *)"
+}
+
+variable "schedule_stop" {
+  description = "EventBridge Scheduler cron expression that scales the node group to zero"
+  default     = "cron(0 17 ? * MON-FRI *)"
 }

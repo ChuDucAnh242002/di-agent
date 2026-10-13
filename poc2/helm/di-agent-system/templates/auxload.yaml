@@ -47,6 +47,7 @@ spec:
               value: {{ $.Values.auxload.requestKafkaTopic | quote }}
             - name: ALLOCATION_KAFKA_TOPIC
               value: {{ $.Values.auxload.allocationKafkaTopic | quote }}
+          {{- include "diagent.healthProbes" $ | nindent 10 }}
           resources:
             {{- toYaml $.Values.auxload.resources | nindent 12 }}
 ---

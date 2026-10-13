@@ -143,9 +143,6 @@ jobs:
             --set playground.service.type=LoadBalancer \
             --wait --timeout 10m0s
 
-      - name: Deploy di-agent DaemonSet (pre-built image, no rebuild)
-        run: SKIP_BUILD=1 REGISTRY="$REGISTRY" TAG="$TAG" bash scripts/agent-cloud.sh
-
       - name: Register di-agent peer mesh
         run: bash scripts/peers-cloud.sh
 

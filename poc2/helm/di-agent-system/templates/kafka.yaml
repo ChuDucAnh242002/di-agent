@@ -78,6 +78,8 @@ spec:
               value: "1"
             - name: KAFKA_NUM_PARTITIONS
               value: "1"
+            - name: KAFKA_HEAP_OPTS
+              value: {{ .Values.kafka.heapOpts | quote }}
             - name: KAFKA_LOG_RETENTION_HOURS
               value: {{ .Values.kafka.logRetentionHours | quote }}
             - name: KAFKA_LOG_RETENTION_BYTES

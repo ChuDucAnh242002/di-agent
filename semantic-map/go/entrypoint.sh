@@ -11,6 +11,7 @@ COLLECT_INTERVAL=${COLLECT_INTERVAL:-"5s"}
 PROPOSER=${PROPOSER:-"false"}
 NETDATA_URL=${NETDATA_URL:-"http://localhost:19999"}
 DOMAIN_SPEC=${DOMAIN_SPEC:-"/etc/di-agent/domain_spec.json"}
+CGROUP_ROOT=${CGROUP_ROOT:-"/sys/fs/cgroup"}
 
 echo "Starting di-agent with:"
 echo "  NODE_ID=${NODE_ID}"
@@ -22,6 +23,7 @@ echo "  COLLECT_INTERVAL=${COLLECT_INTERVAL}"
 echo "  PROPOSER=${PROPOSER}"
 echo "  NETDATA_URL=${NETDATA_URL}"
 echo "  DOMAIN_SPEC=${DOMAIN_SPEC}"
+echo "  CGROUP_ROOT=${CGROUP_ROOT}"
 
 # Execute with ALL required flags
 exec /usr/local/bin/di-agent \
@@ -29,6 +31,7 @@ exec /usr/local/bin/di-agent \
   -addr ":${PORT}" \
   -domain "${DOMAIN_SPEC}" \
   -netdata-url "${NETDATA_URL}" \
+  -cgroup-root "${CGROUP_ROOT}" \
   -kd "${KD}" \
   -node-id "${NODE_ID}" \
   -regime "${REGIME}" \

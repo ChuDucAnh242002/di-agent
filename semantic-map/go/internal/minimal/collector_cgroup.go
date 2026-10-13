@@ -34,8 +34,9 @@ import (
 // and skips the rest.
 //
 // CPU and memory samples — root or subject — are declared as
-// "share-of-node-capacity" with Range [0,1]: a fraction of what the whole node
-// has, never a fraction of a subject-local limit. When the node's capacity is
+// "fraction" with Range [0,1], the unit domain_spec.json declares for the node's own
+// properties (a map refuses a sample naming another unit): a fraction of what the
+// whole node has, never a fraction of a subject-local limit. When the node's capacity is
 // unknown (no MemTotal), memory is not reported at all rather than as a share of
 // the subject's own memory.max, which is a different quantity. cpu_throttle_ratio
 // is throttled periods over elapsed periods and is declared as "share-of-periods"
@@ -392,8 +393,9 @@ func readMemTotal(path string) uint64 {
 var shareRange = [2]float64{0, 1}
 
 const (
-	// unitNodeShare: a fraction of what the whole node has (CPU, memory).
-	unitNodeShare = "share-of-node-capacity"
+	// unitNodeShare: a fraction of what the whole node has (CPU, memory), named
+	// "fraction" because that is the unit the domain specification declares.
+	unitNodeShare = "fraction"
 	// unitPeriodShare: throttled CFS periods over elapsed periods, a fraction of
 	// the subject's own scheduling periods rather than of the node.
 	unitPeriodShare = "share-of-periods"

@@ -71,7 +71,9 @@ module "eks" {
 
   eks_managed_node_groups = {
     default = {
-      min_size                   = var.node_count
+      # min 0 so the office-hours schedule (schedule.tf) can scale to zero and
+      # so `terraform apply` never conflicts with the current desired size.
+      min_size                   = 0
       max_size                   = var.node_count + 2
       desired_size               = var.node_count
       instance_types             = [var.instance_type]
