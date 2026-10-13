@@ -248,8 +248,11 @@ const boxHalfHeight = (n) => (2 * n.r + (n.below ?? 0)) / 2;
 const boxShift = (n) => (n.below ?? 0) / 2;
 
 // Clearance between two footprints. Properties of different subjects are kept
-// further apart than the subject enclosure's padding, so an enclosure never
-// takes in a property that is not its own; inside one subject they sit close.
+// further apart than the subject enclosure's padding, so a property does not sit
+// inside the padding around a neighbour of another subject; inside one subject
+// they sit close. This is pairwise only: an enclosure is the box around all its
+// members, so a foreign property can still settle in the gap between two members
+// of a spread-out subject and fall inside that box.
 const HULL_PAD = 26;
 const HULL_LABEL = 10;
 function separation(a, b) {

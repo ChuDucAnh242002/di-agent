@@ -152,6 +152,7 @@ export class GraphView {
         return;
       }
       if (panning) {
+        if (!press?.moved) return;         // a click to deselect is not a pan
         this.viewTouched = true;
         this.transform.x = panning.tx + (e.clientX - panning.x);
         this.transform.y = panning.ty + (e.clientY - panning.y);
