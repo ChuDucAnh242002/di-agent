@@ -44,6 +44,7 @@ spec:
               value: {{ .Values.navigation.initialSpeedKnots | quote }}
             - name: NAV_TIME_SCALE
               value: {{ .Values.navigation.timeScale | quote }}
+          {{- include "diagent.healthProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.navigation.resources | nindent 12 }}
 ---

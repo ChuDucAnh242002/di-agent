@@ -18,6 +18,12 @@ global:
   nodeSelector: {}
   namespace: default
 
+# Liveness/startup probes on the simulators' /health endpoint.
+healthProbes:
+  enabled: true
+  # startupProbe window = failureThreshold x 10s (default 15 min).
+  startupFailureThreshold: 90
+
 kafka:
   image:
     repository: apache/kafka
@@ -59,6 +65,15 @@ agent:
       type: LoadBalancer
       port: 80
       annotations: {}
+  # CronJob that re-registers the peer mesh by pod IP (IPs change on restart).
+  peers:
+    enabled: true
+    schedule: "*/10 * * * *"
+    timeZone: Europe/Helsinki
+    trust: 0.8
+    image:
+      repository: python
+      tag: 3.12-alpine
   nodes: []
   nodeSelector: {}
   resources: {}

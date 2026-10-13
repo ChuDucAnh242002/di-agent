@@ -42,6 +42,7 @@ spec:
               value: {{ include "diagent.modbusTargets" (dict "prefix" "battery" "count" .Values.battery.count "port" .Values.battery.modbusPort) | quote }}
             - name: MODBUS_POLL_INTERVAL_S
               value: {{ .Values.switchboard.modbusPollIntervalS | quote }}
+          {{- include "diagent.healthProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.switchboard.resources | nindent 12 }}
 ---

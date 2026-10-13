@@ -48,6 +48,7 @@ spec:
               value: {{ $.Values.battery.kafkaTopic | quote }}
             - name: MODBUS_PORT
               value: {{ $.Values.battery.modbusPort | quote }}
+          {{- include "diagent.healthProbes" $ | nindent 10 }}
           resources:
             {{- toYaml $.Values.battery.resources | nindent 12 }}
 ---

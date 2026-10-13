@@ -1,5 +1,7 @@
 # PoC2: local di-agent lab on libvirt VMs
 
+**Live EKS di-agent API:** [http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com) (health check: [`/healthz`](http://a5d1c67b4c47c4dc686d3ea46dee9b03-1698089244.eu-north-1.elb.amazonaws.com/healthz)).
+
 This directory is the second proof-of-concept for the di-agent project: a small Kubernetes lab that runs on libvirt virtual machines, with a distributed telemetry stack and a trust-based coordination experiment.
 
 The important thing to understand is that PoC2 is not just a cluster bootstrap. It is a reproducible environment for testing a specific thesis:
@@ -105,6 +107,21 @@ at `cloud/eks/terraform.tfstate`. For shared or CI state, set
 `TF_BACKEND_MODE=remote`, `TFSTATE_BUCKET`, `TFSTATE_KEY`, and
 `TFSTATE_REGION`. Optionally set `TFSTATE_DYNAMODB_TABLE` to enable the
 legacy DynamoDB locking configuration used by the S3 backend.
+
+### EKS cost schedule, probes and peer reconciler
+
+- **Office-hours schedule** (`cloud/eks/schedule.tf`): EventBridge Scheduler
+  scales the node group to 0 at `schedule_stop` and back to `node_count` at
+  `schedule_start` (defaults: Mon-Fri 17:00 / 09:00, `Europe/Helsinki`).
+  Set `schedule_enabled=false` to disable. Load balancer URLs do not change.
+  Scale-down takes ~17 min because coredns/ebs-csi PDBs block the last drain.
+  The EKS control plane, NAT gateway and load balancers still bill while off.
+- **Health probes**: simulators get startup/liveness probes on `/health`
+  (`healthProbes.*`), so a pod whose telemetry thread died is restarted.
+- **Peer reconciler**: CronJob `di-agent-peers` (`agent.peers.*`) re-registers
+  di-agent peers by pod IP every 10 minutes, so no manual `make peers-cloud`
+  is needed after pods restart or the cluster scales up.
+- Upgrade an existing release with `helm upgrade ... --reset-then-reuse-values`.
 
 ## CI/CD for AKS and EKS
 

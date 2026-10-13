@@ -44,6 +44,7 @@ spec:
               value: {{ $.Values.genset.kafkaTopic | quote }}
             - name: MODBUS_PORT
               value: {{ $.Values.genset.modbusPort | quote }}
+          {{- include "diagent.healthProbes" $ | nindent 10 }}
           resources:
             {{- toYaml $.Values.genset.resources | nindent 12 }}
 ---
