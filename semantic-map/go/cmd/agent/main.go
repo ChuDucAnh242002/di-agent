@@ -174,9 +174,11 @@ func main() {
 			"than withheld.")
 	domainPath := flag.String("domain", "",
 		"path to domain_spec.json: the constructs, metric routing, propositions, "+
-			"adjustment policy and operator vocabulary the agent reasons over. "+
-			"Required — the binary carries no built-in model. When empty the daemon "+
-			"searches upward from the working directory.")
+			"adjustment policy and operator vocabulary the agent reasons over. When "+
+			"empty the daemon searches upward from the working directory, and runs "+
+			"without a domain model if none is found: every observed property is still "+
+			"recorded and relationships are still discovered, but cost, recommendations "+
+			"and tuning are unavailable. A path that does not load is an error.")
 	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
@@ -233,23 +235,34 @@ func main() {
 		}
 	}
 
-	// The domain model is data, not code: the binary ships with no constructs,
-	// propositions or routing of its own. An agent without a model has nothing to
-	// reason over, so this fails loud rather than serving an empty graph.
-	var (
-		spec    *domain.Spec
-		specErr error
-	)
-	if *domainPath != "" {
-		spec, specErr = domain.Load(*domainPath)
+	// The domain model is data, not code, and it is optional: the binary ships with
+	// no constructs, propositions or routing of its own, and a node may have none to
+	// give it. Without one the map still records every property the node exhibits
+	// and discovers how they relate; what it cannot do is reason over constructs
+	// nobody declared. A path that was named and does not load is still an error,
+	// because silently running without the model someone asked for is worse.
+	var spec *domain.Spec
+	switch {
+	case *domainPath != "":
+		var err error
+		if spec, err = domain.Load(*domainPath); err != nil {
+			log.Fatalf("domain spec: %v", err)
+		}
+	default:
+		if p, err := domain.FindSpec(""); err == nil {
+			if spec, err = domain.Load(p); err != nil {
+				log.Fatalf("domain spec: %v", err)
+			}
+		}
+	}
+	if spec != nil {
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
+			len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	} else {
-		spec, specErr = domain.LoadFound()
+		log.Printf("domain model: none (no -domain and no domain_spec.json found): every " +
+			"observed property is recorded and relationships are discovered; cost, " +
+			"recommendations and tuning return 501")
 	}
-	if specErr != nil {
-		log.Fatalf("domain spec: %v (pass -domain <path>)", specErr)
-	}
-	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	switch *ingestScope {
 	case "self":
 		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)

@@ -110,8 +110,10 @@ type Config struct {
 	ProposerBufSize int
 
 	// DomainSpec is the loaded domain model: constructs, metric routing,
-	// propositions, adjustment policy and operator vocabulary. Required — a
-	// profile without one has no graph to reason over. See pkg/domain.
+	// propositions, adjustment policy and operator vocabulary. Nil runs the agent
+	// without one: the state model still admits every property it observes and
+	// discovers relationships, while cost and tuning return
+	// contracts.ErrNoDomainModel. See pkg/domain.
 	DomainSpec *domain.Spec
 
 	// UseRuleBasedTuner enables the RuleBasedTuner instead of the DisabledTuner.
@@ -240,12 +242,6 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	if err := validateKD(pw, cfg.KD); err != nil {
 		return nil, nil, err
 	}
-	// A profile without a domain model has no graph to reason over. Fail here
-	// rather than constructing an agent whose /graph is empty, which would look
-	// identical to an agent whose telemetry has not arrived yet.
-	if cfg.DomainSpec == nil {
-		return nil, nil, fmt.Errorf("no domain spec: pass -domain <path> to load one")
-	}
 	switch profileName {
 	case "edge-minimal":
 		// A caller that did not supply a state model gets one. Everything this profile
@@ -262,8 +258,10 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 		}
 		// Seed the state model here, where both the specification and the calibration are
 		// in hand: relationships get this cluster's priors instead of a placeholder.
-		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
-			return nil, nil, err
+		if cfg.DomainSpec != nil {
+			if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
+				return nil, nil, err
+			}
 		}
 		sm, coll, err := buildEdgeMinimal(cfg, pw)
 		if err != nil {

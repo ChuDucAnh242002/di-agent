@@ -34,7 +34,8 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 
 ```bash
 # 1. Start the daemon (edge-minimal profile, in-memory).
-# -domain is required: the binary embeds no domain model.
+# -domain loads the domain model; without it (and with no domain_spec.json found
+# above the working directory) the agent runs with none. See §3.
 cd semantic-map/go
 go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json &
 ```
@@ -87,8 +88,9 @@ semantic-map/
 │
 ├── domain_spec.json            THE DOMAIN MODEL — constructs, propositions, metric routing,
 │                               adjustment policy, tuner intent rules. The daemon loads this
-│                               at startup (-domain) and refuses to run without it; no
-│                               construct or proposition identifier exists in any binary.
+│                               at startup (-domain) and runs without a domain model when
+│                               there is none; no construct or proposition identifier
+│                               exists in any binary.
 │
 │  ── Python layer (the calibration pipeline — a build-time step) ──
 │
@@ -465,7 +467,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400` | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
@@ -698,13 +700,17 @@ this estimator and one that moved an edge on any single sample; only this readin
 defensible, so the choice went. See ARCHITECTURE.md §5 for what it does and does not
 claim.
 
-`-domain` is mandatory. The daemon carries no constructs, propositions, metric
-routes, adjustment bounds or tuner keywords of its own, so without a
-specification there is no graph to serve and it exits with
-`no domain spec: pass -domain <path> to load one` rather than starting on a
-built-in default. Deploy the specification alongside the binary and treat it as
-part of the release: two daemons on the same binary and different specifications
-are different agents. The daemon also rejects positional arguments, because Go's
+`-domain` is optional. The daemon carries no constructs, propositions, metric
+routes, adjustment bounds or tuner keywords of its own. Without `-domain` it
+searches upward from the working directory for `domain_spec.json`, and if there is
+none it runs **without a domain model**: every observed property is still admitted,
+subjects are still modelled, relationships are still discovered and estimates still
+answered, but nothing is routed into a construct, and `GET /cost`, `POST /recommend`,
+`POST /simulate` and `POST /agent/tune` answer `501` saying so. The startup log
+states which mode the agent is in. A `-domain` path that does not load is an error,
+not a fallback. When you do deploy a specification, treat it as part of the
+release: two daemons on the same binary and different specifications are different
+agents. The daemon also rejects positional arguments, because Go's
 `flag` package stops parsing at the first one — `-proposer false` (a space
 instead of `=`) silently discarded every flag after it and cost this project a
 full round of invalid measurements.

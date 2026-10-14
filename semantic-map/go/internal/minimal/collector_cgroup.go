@@ -48,7 +48,10 @@ import (
 // dropped so a later reappearance (a reused pod UID, say) starts clean. There
 // is no "gone" event — absence is silence, not a signal.
 //
-// CPU metrics (cpu_utilization, cpu_throttle_ratio) require two consecutive
+// cpu_pressure_ratio is the PSI "some" stall share of the window, from cpu.pressure,
+// declared as "fraction" on [0,1]. It is absent where the kernel exposes no PSI.
+//
+// CPU metrics (cpu_utilization, cpu_throttle_ratio, cpu_pressure_ratio) require two consecutive
 // Collect() calls per subject to establish a measurement window. The first
 // call a subject is seen, it contributes only memory_utilization (which is
 // instantaneous); CPU samples follow from the second call onward.
@@ -114,12 +117,17 @@ type cpuSnapshot struct {
 	usageUsec   uint64
 	nrPeriods   uint64
 	nrThrottled uint64
+	// stallUsec is cpu.pressure's cumulative "some" stall time; hasStall is false
+	// when the file is absent (a kernel booted with psi=0, or a cgroup without it).
+	stallUsec uint64
+	hasStall  bool
 }
 
 var cgroupAvailMetrics = []types.MetricType{
 	types.CPUUtilization,
 	types.MemoryUtilization,
 	types.CPUThrottleRatio,
+	types.CPUPressureRatio,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -268,8 +276,10 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		return nil, err
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
+	stall, stallErr := readCPUStallUsec(filepath.Join(dir, "cpu.pressure"))
 	prev := c.prev[subject]
-	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
+	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled,
+		stallUsec: stall, hasStall: stallErr == nil}
 
 	var samples []*types.MetricSample
 	switch {
@@ -303,6 +313,17 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if cpu.nrPeriods > prev.nrPeriods && cpu.nrThrottled >= prev.nrThrottled {
 		throttle := clamp(float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods), 0, 1)
 		samples = append(samples, c.sample(types.CPUThrottleRatio, unitPeriodShare, throttle, now, prev.ts, subject, labels))
+	}
+	// CPU pressure is the share of the window in which at least one runnable task in
+	// this cgroup waited for a CPU: the delta of PSI's cumulative "some" stall time
+	// over the elapsed time. The cumulative counter is used rather than avg10 so the
+	// reading covers exactly the collection window, whatever the interval. Without
+	// it nothing live observes cpu_pressure_ratio, and every construct and
+	// proposition it feeds stays unknown on a real node. Guarded against a counter
+	// reset like the others.
+	if stallErr == nil && prev.hasStall && stall >= prev.stallUsec {
+		pressure := clamp(float64(stall-prev.stallUsec)/float64(elapsedUs), 0, 1)
+		samples = append(samples, c.sample(types.CPUPressureRatio, unitNodeShare, pressure, now, prev.ts, subject, labels))
 	}
 	return samples, nil
 }
@@ -471,6 +492,30 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 		return nil, fmt.Errorf("%s has no usage_usec", path)
 	}
 	return stat, nil
+}
+
+// readCPUStallUsec returns the cumulative "some" stall time, in microseconds, from a
+// cgroup v2 cpu.pressure file:
+//
+//	some avg10=0.35 avg60=0.28 avg300=0.34 total=11060241
+//	full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+func readCPUStallUsec(path string) (uint64, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, f := range fields[1:] {
+			if v, ok := strings.CutPrefix(f, "total="); ok {
+				return strconv.ParseUint(v, 10, 64)
+			}
+		}
+	}
+	return 0, fmt.Errorf("%s has no some total", path)
 }
 
 // readMemoryCurrent returns the cgroup's memory.current in bytes. memory.max is not

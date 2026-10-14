@@ -557,3 +557,65 @@ func TestSubjectWithUnreadableCPUStatIsAbsentThisTick(t *testing.T) {
 		t.Error("the readable subject beside it went missing too")
 	}
 }
+
+func writePressure(t *testing.T, dir string, someTotalUsec uint64) {
+	t.Helper()
+	content := fmt.Sprintf("some avg10=1.00 avg60=1.00 avg300=1.00 total=%d\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", someTotalUsec)
+	if err := os.WriteFile(filepath.Join(dir, "cpu.pressure"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCPUPressureIsTheStallShareOfTheWindow: cpu_pressure_ratio is the delta of
+// PSI's cumulative "some" stall time over the elapsed window, for the node and for
+// each subject, declared as "fraction" on [0,1]. A cgroup without cpu.pressure
+// (a kernel booted with psi=0) yields no sample rather than a zero.
+func TestCPUPressureIsTheStallShareOfTheWindow(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	writePressure(t, root, 5_000_000)
+	writePressure(t, podA, 1_000_000)
+	// podB deliberately has no cpu.pressure.
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, root, 5_000_000+2_500_000) // stalled 2.5 s of 10 s
+	writePressure(t, podA, 1_000_000+500_000)   // stalled 0.5 s of 10 s
+	advance(t, podB, 600_000, 0, 0)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	for subject, want := range map[string]float64{"": 0.25, "pod:" + testUID: 0.05} {
+		s := got[subject][types.CPUPressureRatio]
+		if s == nil {
+			t.Errorf("subject %q: no cpu_pressure_ratio after two collects", subject)
+			continue
+		}
+		if d := s.Value - want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: cpu_pressure_ratio %v, want %v", subject, s.Value, want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: unit %q range %v, want fraction on [0,1]: the spec declares cpu_pressure_ratio so",
+				subject, s.Unit, s.Range)
+		}
+	}
+	if s := got["pod:11111111-2222-3333-4444-555555555555"][types.CPUPressureRatio]; s != nil {
+		t.Errorf("pod without cpu.pressure reported %v; want no sample rather than a zero", s.Value)
+	}
+
+	// A counter that went backwards (the cgroup was recreated) yields no sample.
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, podA, 10)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := bySubject(samples)["pod:"+testUID][types.CPUPressureRatio]; s != nil {
+		t.Errorf("cpu_pressure_ratio %v across a counter reset; want no sample", s.Value)
+	}
+}
