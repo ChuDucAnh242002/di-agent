@@ -545,13 +545,14 @@ curl -s 'localhost:8080/state/journal?limit=10' | jq '.held, .dropped'
 # does the graph assert a direction this machine keeps contradicting?
 curl -s localhost:8080/state | jq '.counts.relationships_sign_suspect'
 curl -s localhost:8080/state \
-  | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, strength, sign_conflicts, sign_agreements}'
+  | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, effective, basis, sign_conflicts, sign_agreements}'
 ```
 
-**The three strength layers.** A relationship reports `recent` (the fast EMA, as
-`ema_weight`), `established` (the long-run learned baseline), `assertion` (an operator's
-override), the `effective` value the agent reasons with, and `basis` naming which of the
-three that came from. `effective` and the two pointer layers are **absent rather than
+**The three strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
+calls it `ema_weight`), `established` (the long-run learned baseline), `assertion` (an
+operator's override), the `effective` value the agent reasons with, and `basis` naming
+which of the three that came from. Read `effective`: `recent` is the fastest-moving
+layer and answers only when neither of the others exists. `effective` and the two pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
 nothing and absence is not that claim.
 

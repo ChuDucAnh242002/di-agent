@@ -825,7 +825,9 @@ so the estimator resumes from what it concluded rather than from what it was mid
 through concluding. The snapshot carries a format version and an owner, and a mismatch
 in either is refused rather than guessed at — a version 1 file half-loads under version
 2's field names, and a snapshot copied from another host would install that machine's
-observations as this one's history at full confidence.
+observations as this one's history at full confidence. A relationship serialises its
+recent layer as `recent` and adds the derived `effective` and `basis`, so a reader is
+handed the answer rather than three layers and a precedence rule.
 
 #### The three paces
 

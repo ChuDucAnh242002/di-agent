@@ -125,7 +125,7 @@ export function strengthLayers(rel) {
   const rows = [
     ['assertion', rel.assertion, 'asserted', 'an operator set this directly'],
     ['established', rel.established, 'established', 'the long-run estimate from this machine'],
-    ['recent', rel.n_observations > 0 ? rel.strength : null, 'recent', 'the last window of paired observations'],
+    ['recent', rel.n_observations > 0 ? rel.recent : null, 'recent', 'the last window of paired observations'],
   ];
 
   const wrap = document.createElement('div');
