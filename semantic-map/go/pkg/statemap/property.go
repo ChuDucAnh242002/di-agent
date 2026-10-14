@@ -193,9 +193,7 @@ type Relationship struct {
 	// has no strength rather than a strength of zero.
 	//
 	// It is not the strength the agent reasons with: Effective is, and it prefers an
-	// assertion or the established layer when there is one. The field was serialised
-	// as "strength" until snapshot version 3, which invited readers to take the
-	// fastest-moving layer for the answer.
+	// assertion or the established layer when there is one.
 	Recent     float64 `json:"recent"`
 	Confidence float64 `json:"confidence"`
 
@@ -303,6 +301,8 @@ func (r *Relationship) Basis() string {
 // came from. Without them a consumer is handed three layers and left to apply the
 // precedence rule itself, and the one it reaches for first is the fastest-moving.
 // Effective is absent, not zero, for a relationship nothing has been observed about.
+// Both are derived, so they are not read back: decoding ignores them and they are
+// recomputed from the layers.
 func (r Relationship) MarshalJSON() ([]byte, error) {
 	type plain Relationship // no methods, so no recursion
 	out := struct {
@@ -314,33 +314,6 @@ func (r Relationship) MarshalJSON() ([]byte, error) {
 		out.Effective = &v
 	}
 	return json.Marshal(out)
-}
-
-// UnmarshalJSON reads the recent layer from "recent", or from "strength" when only
-// that is present. The key was renamed in snapshot version 3, and relationships
-// written under the old name still arrive: in a version 2 snapshot, in the decisions
-// its journal carries, and from a peer that has not been upgraded. Read with the
-// default decoder, every one of them would restore a recent strength of zero beside
-// an observation count that says otherwise. "effective" and "basis" are derived, so
-// they are ignored on the way in and recomputed from the layers.
-func (r *Relationship) UnmarshalJSON(b []byte) error {
-	type plain Relationship
-	var in struct {
-		plain
-		Recent *float64 `json:"recent"`
-		Legacy *float64 `json:"strength"`
-	}
-	if err := json.Unmarshal(b, &in); err != nil {
-		return err
-	}
-	*r = Relationship(in.plain)
-	switch {
-	case in.Recent != nil:
-		r.Recent = *in.Recent
-	case in.Legacy != nil:
-		r.Recent = *in.Legacy
-	}
-	return nil
 }
 
 // SignSuspectMinPairs is the support a conflict share needs before it means anything.

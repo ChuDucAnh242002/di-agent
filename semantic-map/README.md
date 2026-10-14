@@ -552,9 +552,7 @@ curl -s localhost:8080/state \
 calls it `ema_weight`), `established` (the long-run learned baseline), `assertion` (an
 operator's override), the `effective` value the agent reasons with, and `basis` naming
 which of the three that came from. Read `effective`: `recent` is the fastest-moving
-layer and answers only when neither of the others exists. (`GET /state` named the recent
-layer `strength` before snapshot version 3; the agent still reads that name from older
-state files and peers.) `effective` and the two pointer layers are **absent rather than
+layer and answers only when neither of the others exists. `effective` and the two pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
 nothing and absence is not that claim.
 

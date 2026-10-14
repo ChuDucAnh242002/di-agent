@@ -20,26 +20,9 @@ export const HISTORY_LIMIT = 180;
 
 /** Which layer answers, and with what, as the agent reported it. */
 export function effective(rel) {
-  if (rel.basis) {
-    const known = rel.effective !== undefined && rel.effective !== null;
-    return { value: known ? clamp01(rel.effective) : 0, basis: rel.basis, known };
-  }
-  // A peer older than the `recent`/`effective` wire names reports neither, so its
-  // relationships are resolved here with the same precedence as Relationship.Effective.
-  if (rel.assertion !== undefined && rel.assertion !== null) {
-    return { value: clamp01(rel.assertion), basis: 'asserted', known: true };
-  }
-  if (rel.established !== undefined && rel.established !== null) {
-    return { value: clamp01(rel.established), basis: 'established', known: true };
-  }
-  if (rel.n_observations > 0) {
-    return { value: clamp01(recentOf(rel)), basis: 'recent', known: true };
-  }
-  return { value: 0, basis: 'unknown', known: false };
+  const known = rel.effective !== undefined && rel.effective !== null;
+  return { value: known ? clamp01(rel.effective) : 0, basis: rel.basis, known };
 }
-
-/** The recent layer, under its current name or the one a pre-rename peer sends. */
-export const recentOf = (rel) => rel.recent ?? rel.strength;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
