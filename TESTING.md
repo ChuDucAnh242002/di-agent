@@ -143,7 +143,6 @@ On Linux with cgroup v2, drop `-script` and the agent walks `/sys/fs/cgroup`, mo
 
 ## Known rough edges
 
-- When a subject's properties have all retired, `GET /state?subject=<it>` returns `"properties": null` rather than an empty list.
 - `-collect-interval` must equal the scenario's `tick_seconds`. The daemon refuses to start otherwise, and says so.
 
 ## Reporting

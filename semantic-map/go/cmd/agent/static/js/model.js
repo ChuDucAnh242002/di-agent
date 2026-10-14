@@ -2,12 +2,13 @@
 //
 // Two things live here that are easy to get wrong elsewhere.
 //
-// First, EFFECTIVE STRENGTH. A relationship's JSON carries three layers and no
-// effective value, because the agent decides which one answers by authority rather
-// than arithmetic: an operator's assertion outranks the long-run estimate, which
-// outranks the most recent few pairs, and a relationship nothing has been observed
-// about has no strength to offer at all. That last case is why `known` is reported
-// separately — rendering an unobserved relationship as 0.00 would show a measured
+// First, EFFECTIVE STRENGTH. A relationship's JSON carries three layers, and the
+// agent decides which one answers by authority rather than arithmetic: an operator's
+// assertion outranks the long-run estimate, which outranks the most recent few pairs,
+// and a relationship nothing has been observed about has no strength to offer at all.
+// The agent reports its own answer as `effective` and `basis`, and the page uses that
+// rather than re-deriving it. `effective` is absent for an unknown relationship, which
+// is why `known` is reported separately — rendering one as 0.00 would show a measured
 // zero where there is no measurement.
 //
 // Second, HISTORY. The map holds a current value per property, not a series. A
@@ -17,8 +18,14 @@
 
 export const HISTORY_LIMIT = 180;
 
-/** Which layer answers, and with what. Mirrors Relationship.Effective in Go. */
+/** Which layer answers, and with what, as the agent reported it. */
 export function effective(rel) {
+  if (rel.basis) {
+    const known = rel.effective !== undefined && rel.effective !== null;
+    return { value: known ? clamp01(rel.effective) : 0, basis: rel.basis, known };
+  }
+  // A peer older than the `recent`/`effective` wire names reports neither, so its
+  // relationships are resolved here with the same precedence as Relationship.Effective.
   if (rel.assertion !== undefined && rel.assertion !== null) {
     return { value: clamp01(rel.assertion), basis: 'asserted', known: true };
   }
@@ -26,10 +33,13 @@ export function effective(rel) {
     return { value: clamp01(rel.established), basis: 'established', known: true };
   }
   if (rel.n_observations > 0) {
-    return { value: clamp01(rel.strength), basis: 'recent', known: true };
+    return { value: clamp01(recentOf(rel)), basis: 'recent', known: true };
   }
   return { value: 0, basis: 'unknown', known: false };
 }
+
+/** The recent layer, under its current name or the one a pre-rename peer sends. */
+export const recentOf = (rel) => rel.recent ?? rel.strength;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 

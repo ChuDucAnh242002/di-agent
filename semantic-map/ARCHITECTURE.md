@@ -825,7 +825,12 @@ so the estimator resumes from what it concluded rather than from what it was mid
 through concluding. The snapshot carries a format version and an owner, and a mismatch
 in either is refused rather than guessed at — a version 1 file half-loads under version
 2's field names, and a snapshot copied from another host would install that machine's
-observations as this one's history at full confidence.
+observations as this one's history at full confidence. Version 3 renamed a
+relationship's recent layer from `strength`, a name that read as the answer, to
+`recent`, and added the derived `effective` and `basis` to its serialised form. Version
+2 is still read, because the relationship decoder takes the old key when the new one is
+absent; the same decoder covers the decisions a version 2 journal carries and peers not
+yet upgraded. A version 2 agent refuses a version 3 file rather than restore zeros.
 
 #### The three paces
 

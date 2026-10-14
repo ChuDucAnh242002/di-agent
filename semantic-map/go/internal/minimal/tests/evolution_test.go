@@ -138,7 +138,7 @@ func snap(t *testing.T, state *statemap.Map, propID string) edgeSnap {
 			To:            r.To,
 			Direction:     dir,
 			Prior:         established(r),
-			EMA:           r.Strength,
+			EMA:           r.Recent,
 			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,

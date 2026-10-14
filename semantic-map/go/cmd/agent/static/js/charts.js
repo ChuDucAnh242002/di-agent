@@ -11,7 +11,7 @@
 //     series, and the chart says so in words instead of drawing a flat line at
 //     zero, which would look exactly like a measured zero.
 
-import { fmt, escapeHTML, effective } from './model.js';
+import { fmt, escapeHTML, effective, recentOf } from './model.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const svgEl = (name, attrs = {}) => {
@@ -125,7 +125,7 @@ export function strengthLayers(rel) {
   const rows = [
     ['assertion', rel.assertion, 'asserted', 'an operator set this directly'],
     ['established', rel.established, 'established', 'the long-run estimate from this machine'],
-    ['recent', rel.n_observations > 0 ? rel.strength : null, 'recent', 'the last window of paired observations'],
+    ['recent', rel.n_observations > 0 ? recentOf(rel) : null, 'recent', 'the last window of paired observations'],
   ];
 
   const wrap = document.createElement('div');

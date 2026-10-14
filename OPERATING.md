@@ -339,7 +339,7 @@ sudo systemctl start di-agent
 curl -s http://$ADDR/version | jq -r .agent_version    # confirm
 ```
 
-Rollback is the same procedure with the old binary. Keep the previous one around.
+Rollback is the same procedure with the old binary. Keep the previous one around. A rollback across a snapshot format change needs the state file from before the upgrade: an agent refuses a snapshot newer than the format it writes rather than restore it with fields missing (version 3, which renamed a relationship's `strength` to `recent`, is one such change). Keep a copy of the state file with the binary.
 
 **Plan for the state loss.** Without `-state-file` every upgrade returns the graph to cold start — every relationship reporting `unknown` — and the agent needs `-convergence` *paired* observations per relationship to re-converge (500 at default, ~40 minutes at a 5 s collect interval). Upgrade during a period when degraded decision quality is acceptable, and stagger across nodes rather than restarting a whole mesh at once.
 

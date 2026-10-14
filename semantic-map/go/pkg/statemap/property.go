@@ -36,6 +36,7 @@
 package statemap
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/DiyazY/di-agent/pkg/types"
 	"math"
@@ -186,16 +187,21 @@ type Relationship struct {
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
 	Sign int `json:"sign"`
 
-	// Strength is the *recent* estimate in [0,1] — the fast EMA over the most recent
+	// Recent is the *recent* estimate in [0,1] — the fast EMA over the most recent
 	// pairs — and Confidence reports how much of it rests on observation. It carries no
 	// meaning until NObservations > 0; a relationship nothing has been observed about
 	// has no strength rather than a strength of zero.
-	Strength   float64 `json:"strength"`
+	//
+	// It is not the strength the agent reasons with: Effective is, and it prefers an
+	// assertion or the established layer when there is one. The field was serialised
+	// as "strength" until snapshot version 3, which invited readers to take the
+	// fastest-moving layer for the answer.
+	Recent     float64 `json:"recent"`
 	Confidence float64 `json:"confidence"`
 
 	// Established is the long-run estimate: what this machine has shown across
 	// regimes, accumulated from the same pairs on a slower time constant than
-	// Strength. It is nil until it has support.
+	// Recent. It is nil until it has support.
 	//
 	// It is *learned, not given*. Nothing seeds it, and no calibration writes it. The
 	// field this replaced held a cross-distribution constant derived from published
@@ -260,7 +266,7 @@ func (r *Relationship) Effective() (float64, bool) {
 		return clamp01(*r.Established), true
 	}
 	if r.NObservations > 0 {
-		return clamp01(r.Strength), true
+		return clamp01(r.Recent), true
 	}
 	return 0, false
 }
@@ -290,6 +296,51 @@ func (r *Relationship) Basis() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON adds the two things a reader of a relationship most needs and would
+// otherwise have to re-derive: the strength the agent reasons with, and the layer it
+// came from. Without them a consumer is handed three layers and left to apply the
+// precedence rule itself, and the one it reaches for first is the fastest-moving.
+// Effective is absent, not zero, for a relationship nothing has been observed about.
+func (r Relationship) MarshalJSON() ([]byte, error) {
+	type plain Relationship // no methods, so no recursion
+	out := struct {
+		plain
+		Effective *float64 `json:"effective,omitempty"`
+		Basis     string   `json:"basis"`
+	}{plain: plain(r), Basis: r.Basis()}
+	if v, ok := r.Effective(); ok {
+		out.Effective = &v
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON reads the recent layer from "recent", or from "strength" when only
+// that is present. The key was renamed in snapshot version 3, and relationships
+// written under the old name still arrive: in a version 2 snapshot, in the decisions
+// its journal carries, and from a peer that has not been upgraded. Read with the
+// default decoder, every one of them would restore a recent strength of zero beside
+// an observation count that says otherwise. "effective" and "basis" are derived, so
+// they are ignored on the way in and recomputed from the layers.
+func (r *Relationship) UnmarshalJSON(b []byte) error {
+	type plain Relationship
+	var in struct {
+		plain
+		Recent *float64 `json:"recent"`
+		Legacy *float64 `json:"strength"`
+	}
+	if err := json.Unmarshal(b, &in); err != nil {
+		return err
+	}
+	*r = Relationship(in.plain)
+	switch {
+	case in.Recent != nil:
+		r.Recent = *in.Recent
+	case in.Legacy != nil:
+		r.Recent = *in.Legacy
+	}
+	return nil
 }
 
 // SignSuspectMinPairs is the support a conflict share needs before it means anything.
@@ -356,7 +407,7 @@ type Config struct {
 	ConvergenceObservations int
 
 	// Alpha is the EMA weight on each new observation for the RECENT layer — a
-	// relationship's Strength and a property's Value.
+	// relationship's Recent and a property's Value.
 	Alpha float64
 
 	// AlphaSlow is the EMA weight for the ESTABLISHED layer: the same pairs, read on a
@@ -1101,7 +1152,7 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	// A declaration asserts that a relationship exists and which way it runs. What
 	// it is worth is for the machine to say, so every evidence field the caller may
 	// have filled — including through POST /state/relationships — is dropped here.
-	r.Strength, r.Confidence, r.NObservations = 0, 0, 0
+	r.Recent, r.Confidence, r.NObservations = 0, 0, 0
 	r.Established, r.Assertion = nil, nil
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
@@ -1196,9 +1247,9 @@ func (m *Map) ObserveRelationshipEvent(id string, strength float64, at time.Time
 	s := clamp01(strength)
 	if r.NObservations == 0 {
 		r.FirstObserved = at
-		r.Strength = s
+		r.Recent = s
 	} else {
-		r.Strength = m.cfg.Alpha*s + (1-m.cfg.Alpha)*r.Strength
+		r.Recent = m.cfg.Alpha*s + (1-m.cfg.Alpha)*r.Recent
 	}
 	r.NObservations++
 	r.LastObserved = at
@@ -1297,9 +1348,9 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 		return fmt.Errorf("relationship %q not found", id)
 	}
 	discarded := r.NObservations
-	oldStrength, oldConfidence := r.Strength, r.Confidence
+	oldRecent, oldConfidence := r.Recent, r.Confidence
 
-	r.Strength = 0
+	r.Recent = 0
 	r.Confidence = 0
 	r.NObservations = 0
 	r.FirstObserved = time.Time{}
@@ -1320,7 +1371,7 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	m.bump(EventRelationshipAsserted, id, actor, map[string]any{
 		"reset": true, "reason": reason,
 		"discarded_observations": discarded,
-		"strength_before":        oldStrength,
+		"recent_before":          oldRecent,
 		"confidence_before":      oldConfidence,
 		"basis_after":            r.Basis(),
 		"note": "evidence discarded and the pair window cleared, so nothing from " +

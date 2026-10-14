@@ -119,7 +119,12 @@ func (m *Map) State(q Query) StateView {
 		}
 	}
 
-	view := StateView{Owner: m.owner, Revision: m.revision, Counts: m.censusLocked()}
+	// Empty, not nil: a filter that matches nothing is an answer, and it should
+	// serialise as [] rather than null, which a client has to special-case.
+	view := StateView{
+		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(),
+		Properties: []Property{}, Relationships: []Relationship{},
+	}
 	selected := map[string]bool{}
 	for _, p := range m.properties {
 		if !wantStatus[p.Status] {

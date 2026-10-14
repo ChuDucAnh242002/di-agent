@@ -94,7 +94,7 @@ func snapEdgeByPropID(t *testing.T, state *statemap.Map, propID string) edgeSnap
 			ToID:          r.To,
 			PropID:        r.Label,
 			PriorWeight:   establishedOf(r),
-			EMAWeight:     r.Strength,
+			EMAWeight:     r.Recent,
 			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,

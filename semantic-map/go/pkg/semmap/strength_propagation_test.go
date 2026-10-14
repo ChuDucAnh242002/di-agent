@@ -100,9 +100,9 @@ func TestSetPropositionStrengthPreservesEvidence(t *testing.T) {
 	}
 
 	after := relationshipFor(t, state, specProp(t))
-	if math.Abs(after.Strength-before.Strength) > 1e-12 {
+	if math.Abs(after.Recent-before.Recent) > 1e-12 {
 		t.Errorf("learned strength changed %v -> %v; recalibrating a prior must not "+
-			"rewrite accumulated evidence", before.Strength, after.Strength)
+			"rewrite accumulated evidence", before.Recent, after.Recent)
 	}
 	if after.NObservations != before.NObservations {
 		t.Errorf("observation count changed %d -> %d", before.NObservations, after.NObservations)

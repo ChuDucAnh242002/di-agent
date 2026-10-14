@@ -35,7 +35,15 @@ import (
 // case-insensitively but not "NObservations" to "n_observations" — so the values would
 // arrive and the observation counts and timestamps would not. That is the silent
 // partial restore this field exists to prevent, so the version moved with the format.
-const SnapshotVersion = 2
+//
+// Version 3 renamed a relationship's recent layer from "strength" to "recent". A
+// version 2 file is still read, because Relationship's decoder takes the old key when
+// the new one is absent; nothing else changed. A version 2 agent refuses a version 3
+// file, which is the point: it would read no "strength" and restore zeros.
+const SnapshotVersion = 3
+
+// readableSnapshotVersions are the versions Load accepts.
+var readableSnapshotVersions = map[int]bool{2: true, 3: true}
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -149,7 +157,7 @@ func (m *Map) Load(path string) (bool, error) {
 	if err := json.Unmarshal(blob, &snap); err != nil {
 		return false, fmt.Errorf("decoding snapshot: %w", err)
 	}
-	if snap.Version != SnapshotVersion {
+	if !readableSnapshotVersions[snap.Version] {
 		return false, fmt.Errorf(
 			"snapshot is version %d, this agent writes version %d: refusing to guess at "+
 				"the difference, since a misread field would become state the agent reasons from",
