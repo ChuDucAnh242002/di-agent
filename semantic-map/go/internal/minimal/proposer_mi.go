@@ -35,9 +35,10 @@ import (
 //
 // p-values are computed via the Fisher z-transform (two-tailed).
 //
-// ObserveProperty, the property path with the scope rule, is the entry point
-// from ingestion: a scoped property (non-empty subject) pairs only with
-// unscoped ones, direction scoped -> unscoped, inside a time tolerance.
+// ObserveProperty, the property path, is the entry point from ingestion. Inside a
+// time tolerance it pairs a scoped property (non-empty subject) with each unscoped
+// one, directed scoped -> unscoped, and two unscoped properties with each other as
+// an undirected pair. Two scoped properties are not paired.
 // Observe is the explicit path for a caller that already knows the pair and
 // supplies both values; ObserveConstruct is the explicit construct path that
 // pairs each construct value with the latest of every other construct,
@@ -59,6 +60,7 @@ type MICorrelationProposer struct {
 	latestProps      map[string]latestValue // property path: id → last value, time, scope
 
 	threshold  float64
+	minSpread  float64 // the variation gate: least spread, as a share of the declared range
 	minPairs   int
 	bufSize    int
 	pairWindow time.Duration
@@ -71,6 +73,18 @@ type latestValue struct {
 	value  float64
 	at     time.Time
 	scoped bool
+	rng    *[2]float64 // declared range; nil when the producer declared none
+}
+
+// pairMeta is what the property path knows about a pair beyond its values. The
+// explicit paths pass the zero value: a caller-supplied pair is directed, and its
+// caller has declared no ranges to check movement against.
+type pairMeta struct {
+	property   bool // formed by ObserveProperty: the variation gate and caveats apply
+	undirected bool
+	kind       string
+	xRange     *[2]float64
+	yRange     *[2]float64
 }
 
 // NewMICorrelationProposer builds the proposer. lookup answers "already known";
@@ -94,10 +108,26 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		latestConstructs: make(map[string]float64),
 		latestProps:      make(map[string]latestValue),
 		threshold:        threshold,
+		minSpread:        DefaultMinSpread,
 		minPairs:         minPairs,
 		bufSize:          bufSize,
 		pairWindow:       pairWindow,
 		maxPending:       64,
+	}
+}
+
+// DefaultMinSpread is the variation gate's default: over the window, each end of a
+// pair must have moved by at least 1% of its declared range.
+const DefaultMinSpread = 0.01
+
+// SetMinSpread sets the variation gate: a candidate is emitted only when each end
+// with a declared range moved, over the window, by at least this share of that
+// range. 0 disables the gate; a negative value is ignored.
+func (p *MICorrelationProposer) SetMinSpread(share float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if share >= 0 {
+		p.minSpread = share
 	}
 }
 
@@ -118,7 +148,7 @@ func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB floa
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.seq++
-	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10))
+	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10), pairMeta{})
 }
 
 // ObserveConstruct is the explicit construct-pairing path: it pairs the value with
@@ -138,28 +168,35 @@ func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float
 			fromID, toID, valA, valB = otherID, constructID, otherVal, value
 		}
 		p.seq++
-		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10)); err != nil && firstErr == nil {
+		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10), pairMeta{}); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-// ObserveProperty is the entry point from ingestion. The scope rule: a scoped
-// property (non-empty subject) pairs only with unscoped ones, never with another
-// scoped one, and the direction is scoped -> unscoped — a subject is a component of
-// the node, so the modelling assumption is component influences whole. Readings
-// further apart than pairWindow do not form a pair.
-func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float64, at time.Time) error {
+// ObserveProperty is the entry point from ingestion. The pairing rule:
+//
+//   - a scoped property (non-empty subject) pairs with each unscoped one, directed
+//     scoped -> unscoped: a subject is a component of the node, so the modelling
+//     assumption is component influences whole;
+//   - two unscoped properties pair as an undirected candidate, ordered
+//     lexicographically, because nothing says which node-level quantity drives the
+//     other and the operator chooses on confirm;
+//   - two scoped properties are not paired.
+//
+// Readings further apart than pairWindow do not form a pair.
+func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	id, at := r.ID, r.At
 	if at.IsZero() {
 		at = time.Now()
 	}
-	me := latestValue{value: value, at: at, scoped: subject != ""}
+	me := latestValue{value: r.Value, at: at, scoped: r.Subject != "", rng: r.Range}
 	p.latestProps[id] = me
 	for otherID, other := range p.latestProps {
-		if otherID == id || other.scoped == me.scoped {
+		if otherID == id || (other.scoped && me.scoped) {
 			continue
 		}
 		gap := at.Sub(other.at)
@@ -169,21 +206,34 @@ func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float6
 		if gap > p.pairWindow {
 			continue
 		}
-		from, to, x, y := id, otherID, value, other.value
-		xAt, yAt := at.UnixNano(), other.at.UnixNano()
-		if !me.scoped {
-			from, to, x, y = otherID, id, other.value, value
-			xAt, yAt = other.at.UnixNano(), at.UnixNano()
+		// Orient the pair: the scoped end first, or for two unscoped ends the
+		// lexicographically smaller one, so both arrival orders fold into one buffer.
+		from, to, fv, tv := id, otherID, me, other
+		undirected := !me.scoped && !other.scoped
+		if (undirected && otherID < id) || (!undirected && !me.scoped) {
+			from, to, fv, tv = otherID, id, other, me
 		}
+		xAt, yAt := fv.at.UnixNano(), tv.at.UnixNano()
 		key := from + "→" + to
 		if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
 			continue // that reading already took part in a pair with this counterpart
 		}
-		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
-		_ = p.observeLocked(from, to, x, y, identity) // never non-nil; the contract keeps the error return
+		meta := pairMeta{property: true, undirected: undirected, xRange: fv.rng, yRange: tv.rng}
+		if !undirected && metricOf(from) == to {
+			meta.kind = types.CandidateKindComposition
+		}
+		identity := from + "|" + to + "|" + strconv.FormatInt(fv.at.Unix(), 10) + "|" + strconv.FormatInt(tv.at.Unix(), 10)
+		_ = p.observeLocked(from, to, fv.value, tv.value, identity, meta) // never non-nil; the contract keeps the error return
 		p.lastPair[key] = [2]int64{xAt, yAt}
 	}
 	return nil
+}
+
+// metricOf is the metric a property id names: "cpu_utilization@pod:a" and
+// "cpu_utilization" both name cpu_utilization.
+func metricOf(id string) string {
+	m, _, _ := strings.Cut(id, "@")
+	return m
 }
 
 // Forget drops the buffers, latest values and candidates involving a property.
@@ -212,7 +262,7 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 	return nil
 }
 
-func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string) error {
+func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string, meta pairMeta) error {
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
@@ -233,10 +283,14 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if r < 0 {
 		direction, sign = types.Negative, -1
 	}
-	if p.lookup != nil && p.lookup.Covered(fromID, toID, sign) {
-		return nil
+	if p.lookup != nil && (p.lookup.Covered(fromID, toID, sign) ||
+		(meta.undirected && p.lookup.Covered(toID, fromID, sign))) {
+		return nil // an undirected pair is covered by a relationship either way round
 	}
 	candID := fromID + "->" + toID
+	if meta.undirected {
+		candID = fromID + "<->" + toID
+	}
 	if existing, ok := p.candidates[candID]; ok {
 		switch existing.Status {
 		case types.Confirmed:
@@ -263,14 +317,46 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			return nil
 		}
 	}
+	var caveats []string
+	if meta.property {
+		var moved bool
+		if moved, caveats = p.movedEnoughLocked(fromID, toID, buf, meta); !moved {
+			return nil
+		}
+	}
 	p.candidates[candID] = &types.CandidateEdge{
 		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
 		MIScore: math.Abs(r), PValue: stats.FisherPValue(r, buf.Len()),
 		NObservations: buf.Len(), Status: types.Pending,
+		Undirected: meta.undirected, Kind: meta.kind, Caveats: caveats,
 	}
 	p.order = append(p.order, candID)
 	p.enforceCapLocked()
 	return nil
+}
+
+// movedEnoughLocked is the variation gate. Correlation is scale-free: a pod whose
+// memory steps between 572 KB and 1 MB correlates with node memory at r = 0.995 while
+// moving 0.01% of the node. So each end with a declared range must have moved, over
+// the window, by at least minSpread of that range. An end without a declared range
+// cannot be checked, and the candidate says so instead of passing silently.
+func (p *MICorrelationProposer) movedEnoughLocked(fromID, toID string, buf *stats.PairWindow, meta pairMeta) (bool, []string) {
+	xs, ys := buf.Spread()
+	var caveats []string
+	for _, end := range []struct {
+		id     string
+		spread float64
+		rng    *[2]float64
+	}{{fromID, xs, meta.xRange}, {toID, ys, meta.yRange}} {
+		if end.rng == nil {
+			caveats = append(caveats, fmt.Sprintf("%s declares no range, so whether it moved enough to matter was not checked", end.id))
+			continue
+		}
+		if width := end.rng[1] - end.rng[0]; end.spread < p.minSpread*width {
+			return false, nil
+		}
+	}
+	return true, caveats
 }
 
 // enforceCapLocked defers the weakest pending candidates until at most maxPending
@@ -381,6 +467,8 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 }
 
 // Confirm marks a Pending candidate accepted and returns the proposition it represents.
+// from orients it: "" or the candidate's FromID for a directed candidate; either end
+// for an undirected one, which has no orientation until an operator gives it.
 // The synthesized PropositionID is
 //
 //	"P-" + hex(sha256(CandidateID))[:8]
@@ -396,7 +484,7 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // The candidate is marked Confirmed here, before the facade applies the proposition.
 // If applying fails the facade calls Reopen, so the candidate returns to Pending rather
 // than standing in history as confirmed with nothing behind it.
-func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition, error) {
+func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
@@ -406,15 +494,35 @@ func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition,
 	if c.Status != types.Pending {
 		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
+	src, dst := c.FromID, c.ToID
+	switch {
+	case c.Undirected && from == "":
+		return nil, fmt.Errorf("%w: %s is undirected; name the end it runs from (%s or %s)",
+			contracts.ErrBadConfirmation, candidateID, c.FromID, c.ToID)
+	case c.Undirected && from == c.ToID:
+		src, dst = c.ToID, c.FromID
+	case from != "" && from != c.FromID:
+		if c.Undirected {
+			return nil, fmt.Errorf("%w: %q is not an end of %s", contracts.ErrBadConfirmation, from, candidateID)
+		}
+		return nil, fmt.Errorf("%w: %s runs from %s; a directed candidate is confirmed as proposed",
+			contracts.ErrBadConfirmation, candidateID, c.FromID)
+	}
 
 	prop := &types.Proposition{
 		PropositionID:   "P-" + synthesizePropSuffix(candidateID),
-		FromConstruct:   c.FromID,
-		ToConstruct:     c.ToID,
+		FromConstruct:   src,
+		ToConstruct:     dst,
 		Direction:       c.Direction,
 		PriorStrength:   c.MIScore,
 		Description:     fmt.Sprintf("Auto-proposed by MICorrelationProposer (|r|=%.3f, n=%d)", c.MIScore, c.NObservations),
 		EvidenceSources: []string{"proposer-mi"},
+	}
+	if c.Undirected {
+		prop.Description += "; direction chosen by the operator"
+	}
+	if c.Kind == types.CandidateKindComposition {
+		prop.Description += "; composition: the source is part of the target"
 	}
 	c.Status = types.Confirmed
 	return prop, nil
@@ -501,6 +609,7 @@ func synthesizePropSuffix(candidateID string) string {
 
 func copyCandidate(c *types.CandidateEdge) *types.CandidateEdge {
 	cp := *c
+	cp.Caveats = append([]string(nil), c.Caveats...)
 	return &cp
 }
 

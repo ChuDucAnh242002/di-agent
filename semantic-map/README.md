@@ -419,16 +419,29 @@ def push(base, node, subject, source, metric, unit, rng, value):
 Lists Proposer candidate edges pending review.
 
 ```json
-[{"CandidateID":"cpu_utilization@pod:a->pressure","FromID":"cpu_utilization@pod:a","ToID":"pressure",
-  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending"}]
+[{"CandidateID":"cpu_utilization@pod:a->cpu_pressure_ratio","FromID":"cpu_utilization@pod:a","ToID":"cpu_pressure_ratio",
+  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Undirected":false,"Kind":"","Caveats":null},
+ {"CandidateID":"cpu_pressure_ratio<->cpu_utilization","FromID":"cpu_pressure_ratio","ToID":"cpu_utilization",
+  "Direction":0,"MIScore":0.88,"PValue":0.004,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Undirected":true,"Kind":"","Caveats":null}]
 ```
 
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
 candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
-stands). `Direction` is `0` for positive, `1` for negative.
+stands). `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
 
-Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. A confirmation whose
+`Undirected` is `true` for a pair of node-level properties: correlation does not say which
+drives the other, so `FromID`/`ToID` are just the pair in lexicographic order and the id
+uses `<->`. `Kind` is `composition` when the source is part of the target by definition (a
+pod's CPU against node CPU). `Caveats` lists what the proposer could not check, such as an
+end with no declared range.
+
+Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
+candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
+(`mapctl candidates confirm <id> --from cpu_utilization`); without one, or with a property
+that is not an end, the answer is `400` and the candidate stays pending. A confirmation whose
 declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
 a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
 
@@ -457,7 +470,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-"}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
 | POST | `/agent/tune`                       | `TuneRequest{intent, operator?}`                         | Step 7   | Map natural-language intent to proposition strength adjustments |
-| POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
+| POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
@@ -799,9 +812,10 @@ the shape of the real thing.
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
-| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs each subject's properties with the node's, and node-level properties with each other). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
+| `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |

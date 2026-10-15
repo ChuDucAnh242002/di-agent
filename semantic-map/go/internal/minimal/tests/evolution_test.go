@@ -769,7 +769,7 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	}
 
 	// Confirm.
-	if err := a.sm.ConfirmCandidate(cand.CandidateID); err != nil {
+	if err := a.sm.ConfirmCandidate(cand.CandidateID, ""); err != nil {
 		t.Fatalf("Confirm error: %v", err)
 	}
 

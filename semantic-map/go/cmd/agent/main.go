@@ -46,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
@@ -103,6 +104,10 @@ func main() {
 	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
 		"co-observations a pair needs inside the pair window before it can become a "+
 			"candidate — the pace at which structure appears")
+	proposerMinSpread := flag.Float64("proposer-min-spread", minimal.DefaultMinSpread,
+		"least movement, as a share of its declared range, each end of a pair must show "+
+			"over the window to become a candidate. Correlation is scale-free: without "+
+			"this, a series that barely moves can correlate perfectly. 0 disables it")
 	nodeID := flag.String("node-id", "",
 		"the machine this agent models. Used both to stamp its own MetricSamples and "+
 			"as its identity: the map is node-local, so samples labelled with another "+
@@ -275,7 +280,7 @@ func main() {
 	}
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
 		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
-	log.Printf("proposer: threshold=%.2f min-pairs=%d", *proposerThreshold, *proposerMinPairs)
+	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f", *proposerThreshold, *proposerMinPairs, *proposerMinSpread)
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
 		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
@@ -301,6 +306,7 @@ func main() {
 		UseProposer:          useProposer,
 		ProposerThreshold:    *proposerThreshold,
 		ProposerMinPairs:     *proposerMinPairs,
+		ProposerMinSpread:    proposerMinSpread,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then

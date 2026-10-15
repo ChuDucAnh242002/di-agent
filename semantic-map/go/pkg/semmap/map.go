@@ -242,10 +242,18 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return err
 	}
 
-	// Every observed property reaches the proposer; it applies the scope rule itself.
-	// Advisory: its errors must not block telemetry.
+	// Every observed property reaches the proposer; it applies the pairing rule
+	// itself. The range it gets is the one the map holds, and only when a producer
+	// declared it: an assumed [0,1] would make the variation gate measure movement
+	// against a scale nobody stated. Advisory: its errors must not block telemetry.
 	if m.proposer != nil {
-		_ = m.proposer.ObserveProperty(id, sample.Subject, value, time.Unix(sample.TimestampUnix, 0))
+		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Value: value,
+			At: time.Unix(sample.TimestampUnix, 0)}
+		if p, ok := m.state.Property(id); ok && p.RangeDeclared {
+			rng := p.Range
+			reading.Range = &rng
+		}
+		_ = m.proposer.ObserveProperty(reading)
 	}
 	return nil
 }
@@ -353,19 +361,21 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetHistory()
 }
 
-// ConfirmCandidate applies an operator's confirmation. A candidate with a scoped
-// endpoint becomes a state-map relationship with Discovered provenance — never a
-// Di-Select proposition, whose vocabulary is constructs. A candidate whose endpoints
-// are both unscoped (the explicit construct path) goes through the ontology as before.
-func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
-	prop, err := m.proposer.Confirm(candidateID)
+// ConfirmCandidate applies an operator's confirmation. from orients an undirected
+// candidate (either end) and is "" for a directed one. A candidate between two
+// properties of the state model becomes a state-map relationship with Discovered
+// provenance — never a Di-Select proposition, whose vocabulary is constructs. A
+// candidate between constructs (the explicit construct path) goes through the
+// ontology.
+func (m *SemanticMap) ConfirmCandidate(candidateID, from string) error {
+	prop, err := m.proposer.Confirm(candidateID, from)
 	if err != nil {
 		return err
 	}
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
 	}
-	if m.state != nil && (m.isScoped(prop.FromConstruct) || m.isScoped(prop.ToConstruct)) {
+	if m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
 		sign := 1
 		if prop.Direction == types.Negative {
 			sign = -1
@@ -394,9 +404,35 @@ func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
 	return m.AddValidatedProposition(prop)
 }
 
-func (m *SemanticMap) isScoped(id string) bool {
-	p, ok := m.state.Property(id)
-	return ok && p.Subject != ""
+// isPropertyPair reports whether a confirmed candidate relates two properties of the
+// state model rather than two constructs. Scope cannot decide it: two node-level
+// properties are both unscoped and still not constructs. The explicit construct path
+// may name a construct with no property behind it yet, and that one belongs to the
+// ontology, which declares the missing endpoint itself.
+func (m *SemanticMap) isPropertyPair(from, to string) bool {
+	if m.state == nil {
+		return false
+	}
+	for _, id := range []string{from, to} {
+		if _, ok := m.state.Property(id); !ok {
+			return false
+		}
+	}
+	return !(m.isConstruct(from) && m.isConstruct(to))
+}
+
+// isConstruct reports whether id is a construct of the loaded ontology.
+func (m *SemanticMap) isConstruct(id string) bool {
+	cs, err := m.ontology.Constructs()
+	if err != nil {
+		return false
+	}
+	for _, c := range cs {
+		if c.ConstructID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *SemanticMap) RejectCandidate(candidateID string) error {

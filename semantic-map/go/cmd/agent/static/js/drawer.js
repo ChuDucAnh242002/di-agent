@@ -249,7 +249,8 @@ export class Drawer {
       this.panes.discovery.innerHTML = `<div class="empty">
         <strong>Nothing proposed right now</strong>
         <span class="why">The proposer pairs a subject's property with the node-level
-        properties it co-varies with, and only emits a candidate once the correlation
+        properties it co-varies with, and node-level properties with each other. It
+        only emits a candidate once each end has moved enough to matter and the correlation
         clears the configured threshold over the configured minimum number of pairs
         (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>).
         An empty queue means no pair has cleared both yet — not that the proposer is off.</span>
@@ -261,24 +262,34 @@ export class Drawer {
       <p class="muted" style="font-size:11.5px;margin:0 0 9px;line-height:1.5">
         The map produced structure it was not told about. Confirming one admits it as a
         relationship with <span class="mono">discovered</span> provenance; rejecting tells
-        the proposer to forget the pair.
+        the proposer to forget the pair. A pair shown with ↔ has no direction yet:
+        correlation does not say which end drives the other, so you choose when you confirm.
       </p>
       <table class="grid">
         <thead><tr><th>pair</th><th>sign</th><th class="num">|r|</th><th class="num">p</th>
           <th class="num">pairs</th><th>status</th><th></th></tr></thead>
         <tbody>${this.candidates.map((c) => {
           const sign = directionSign(c.Direction);
+          const from = escapeHTML(c.FromID), to = escapeHTML(c.ToID), id = escapeHTML(c.CandidateID);
+          const confirm = c.Undirected
+            ? `<button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${from}" title="confirm as ${from} → ${to}">Confirm →</button>
+               <button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${to}" title="confirm as ${to} → ${from}">Confirm ←</button>`
+            : `<button class="btn small primary" data-cand="${id}" data-verdict="confirm">Confirm</button>`;
+          const notes = [
+            c.Kind === 'composition' ? `<span class="muted" title="the source is part of the target by definition, so the correlation is accounting rather than something learned">composition</span>` : '',
+            ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
+          ].filter(Boolean).join('<br>');
           return `<tr>
-            <td class="mono">${escapeHTML(c.FromID)} → ${escapeHTML(c.ToID)}</td>
+            <td class="mono">${from} ${c.Undirected ? '↔' : '→'} ${to}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
             <td style="color:${sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)'}">${sign < 0 ? '↓ negative' : '↑ positive'}</td>
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
             <td class="num">${fmt.num(c.PValue, 4)}</td>
             <td class="num">${fmt.int(c.NObservations)}</td>
             <td class="muted">${escapeHTML(String(c.Status ?? ''))}</td>
             <td class="nowrap">
-              <button class="btn small primary" data-cand="${escapeHTML(c.CandidateID)}" data-verdict="confirm">Confirm</button>
-              <button class="btn small" data-cand="${escapeHTML(c.CandidateID)}" data-verdict="defer">Defer</button>
-              <button class="btn small danger" data-cand="${escapeHTML(c.CandidateID)}" data-verdict="reject">Reject</button>
+              ${confirm}
+              <button class="btn small" data-cand="${id}" data-verdict="defer">Defer</button>
+              <button class="btn small danger" data-cand="${id}" data-verdict="reject">Reject</button>
             </td>
           </tr>`;
         }).join('')}</tbody>
@@ -288,12 +299,12 @@ export class Drawer {
     this.panes.discovery.querySelectorAll('[data-cand]').forEach((b) => {
       b.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const { cand, verdict } = b.dataset;
+        const { cand, verdict, from } = b.dataset;
         if (this.busy.has('discovery')) return;
         this.busy.add('discovery');
         this.panes.discovery.querySelectorAll('[data-cand]').forEach((x) => { x.disabled = true; });
         try {
-          await api.reviewCandidate(cand, verdict);
+          await api.reviewCandidate(cand, verdict, from);
           this.ctx.toast(`Candidate ${verdict}ed`, 'ok');
           await this.pollCandidates();
           this.ctx.refresh();

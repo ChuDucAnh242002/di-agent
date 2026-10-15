@@ -46,6 +46,22 @@ func (w *PairWindow) Fold(identity string, x, y float64) bool {
 
 func (w *PairWindow) Len() int { return len(w.xs) }
 
+// Spread returns max − min of each side over the window: how far each series moved.
+// Correlation is scale-free, so a series that barely moves can still correlate
+// perfectly; the spread is what says whether the movement is worth anything.
+func (w *PairWindow) Spread() (x, y float64) { return spread(w.xs), spread(w.ys) }
+
+func spread(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	lo, hi := v[0], v[0]
+	for _, x := range v[1:] {
+		lo, hi = math.Min(lo, x), math.Max(hi, x)
+	}
+	return hi - lo
+}
+
 // Pearson returns the correlation over the window, and false when it is undefined.
 func (w *PairWindow) Pearson() (float64, bool) { return Pearson(w.xs, w.ys) }
 
