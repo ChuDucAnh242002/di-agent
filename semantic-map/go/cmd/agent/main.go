@@ -178,7 +178,8 @@ func main() {
 			"empty the daemon searches upward from the working directory, and runs "+
 			"without a domain model if none is found: every observed property is still "+
 			"recorded and relationships are still discovered, but cost, recommendations "+
-			"and tuning are unavailable. A path that does not load is an error.")
+			"and tuning are unavailable. A path that does not load is an error, and so "+
+			"is -no-admit with no domain model and no restored state, which would record nothing.")
 	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
@@ -355,6 +356,10 @@ func main() {
 		} else {
 			log.Printf("state model: no snapshot at %s, starting cold", *stateFile)
 		}
+	}
+
+	if err := checkCanRecord(spec != nil, *noAdmit, state.Census().PropertiesTotal); err != nil {
+		log.Fatal(err)
 	}
 
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
@@ -699,6 +704,19 @@ func checkNoPositionalArgs(n int, first string) error {
 	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
 		"the form -flag=false (not -flag false), otherwise every flag after it "+
 		"is silently ignored", first)
+}
+
+// checkCanRecord refuses a configuration that can never record anything: without a
+// domain model nothing is declared, and -no-admit refuses whatever is not, so unless
+// a restored snapshot supplies properties every sample would be dropped while /state
+// stays empty, which looks the same as telemetry that has not arrived yet.
+func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
+	if hasSpec || !noAdmit || restored > 0 {
+		return nil
+	}
+	return fmt.Errorf("-no-admit without a domain model records nothing: no property " +
+		"is declared, so every observation would be refused. Give -domain, restore a " +
+		"snapshot with -state-file, or drop -no-admit")
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

@@ -96,3 +96,20 @@ func expectNoDomain(t *testing.T, what string, resp *http.Response) {
 		t.Errorf("%s: error %q does not say the agent runs without a domain model", what, b)
 	}
 }
+
+// TestNoAdmitWithoutADomainModelIsRefused: with nothing declared, -no-admit would
+// drop every sample while the agent looked healthy. A restored snapshot supplies
+// declared properties, so that combination is still allowed.
+func TestNoAdmitWithoutADomainModelIsRefused(t *testing.T) {
+	if err := checkCanRecord(false, true, 0); err == nil {
+		t.Error("-no-admit with no domain model and no restored state must be refused")
+	}
+	for _, c := range []struct {
+		hasSpec, noAdmit bool
+		restored         int
+	}{{true, true, 0}, {false, false, 0}, {false, true, 3}} {
+		if err := checkCanRecord(c.hasSpec, c.noAdmit, c.restored); err != nil {
+			t.Errorf("spec=%v no-admit=%v restored=%d: %v", c.hasSpec, c.noAdmit, c.restored, err)
+		}
+	}
+}
