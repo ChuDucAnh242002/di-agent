@@ -97,6 +97,13 @@ var (
 	ErrInsufficientTrust = contractError("no peer meets the minimum trust threshold")
 )
 
+// ErrNoDomainModel is returned by an operation that is defined over a domain model
+// (cost, which names a resource and a pressure construct; tuning, which adjusts
+// propositions) when the agent runs without one. The map itself needs no domain
+// model: it admits every property it observes and discovers relationships between
+// them. Only the operations that reason over declared constructs are unavailable.
+var ErrNoDomainModel = contractError("this agent runs without a domain model")
+
 // ── Proposer ──────────────────────────────────────────────────────────────────
 
 // RelationshipLookup answers whether a relationship already runs from -> to with a

@@ -132,7 +132,12 @@ than a convenience.
 proposition identifier. `domain_spec.json` declares the constructs, the
 propositions over them with their directions, the metric-to-construct routing,
 the adjustment floor and ceiling, and the tuner's intent vocabulary; the daemon
-loads it via `-domain` and refuses to start without one. Two consequences: the
+loads it via `-domain`. It is optional: a node may have no specification to give
+it, and the state model needs none — it admits whatever a node exhibits and
+discovers how those properties relate. Without one, only the operations defined
+over declared constructs are unavailable (cost and its recommendations, tuning),
+and they return `contracts.ErrNoDomainModel` (`501`) rather than a cost computed
+over constructs nobody declared. Two consequences of keeping it data: the
 graph a given deployment ran can be reconstructed from an artefact rather than
 from a binary, and a property that appears while the cluster is running is
 admitted by adding a construct and a route rather than by rebuilding. The
@@ -687,7 +692,7 @@ fraction.
 | `network_latency_ms`    | CO        | worse    | **inverted at ingestion** — RTT to a peer, against a budget |
 | `pod_startup_ms`        | PS        | worse    | creation timestamp → Running, normalized against a budget  |
 | `scheduling_latency_ms` | PS        | worse    | Pending → Scheduled, likewise                              |
-| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall fraction                              |
+| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall share of the window (cgroup `cpu.pressure`) |
 | `io_pressure_ratio`     | PS        | worse    | PSI `io.some` stall fraction                               |
 
 The catalogue names the types a collector or a test can reference; it is not the
@@ -1016,7 +1021,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU pressure from `cpu.pressure`, per node and per subject; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1042,7 +1047,14 @@ contradicts it, and the Collector contract keeps a type's unit stable across sub
 (An earlier `share-of-node-capacity` label named the same quantity and had every
 node-level reading refused as a conflict.) The one reading
 that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
-elapsed periods), is declared as `share-of-periods` instead. The two sources
+elapsed periods), is declared as `share-of-periods` instead. `cpu_pressure_ratio` is
+the share of the collection window in which at least one runnable task in the cgroup
+waited for a CPU: the delta of PSI's cumulative `some` stall time over the elapsed
+time, rather than the kernel's `avg10`, so it covers exactly the window whatever the
+interval. It is declared as `fraction` on `[0,1]`, matching the spec's route into PS.
+Before it was collected, no live producer observed PS at all, so on a real node both
+propositions stayed unknown however long the agent ran; only replay supplied it. A
+kernel without PSI (`psi=0`) yields no pressure sample rather than a zero. The two sources
 account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
 cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
 subjects' figures are not the same quantity and are not expected to add up.

@@ -360,7 +360,7 @@ Full inventory, so you can reason about it before deploying.
 
 | Path / endpoint | When | Why |
 | --------------- | ---- | --- |
-| `/sys/fs/cgroup/**` | Every `-collect-interval` | CPU/memory/IO metrics. Read-only. Disable with `-cgroup-root ""`. |
+| `/sys/fs/cgroup/**` | Every `-collect-interval` | CPU, memory, throttling and CPU pressure (`cpu.stat`, `memory.current`, `cpu.pressure`). Read-only. Disable with `-cgroup-root ""`. |
 | `$NETDATA_URL/api/v1/data` | Every `-collect-interval` | Host metrics. Disable with `-netdata-url ""`. |
 | `-priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
 | `-explain-prompt` files | Once, at startup | Only when the explain layer is enabled. |

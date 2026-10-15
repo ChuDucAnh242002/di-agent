@@ -174,9 +174,12 @@ func main() {
 			"than withheld.")
 	domainPath := flag.String("domain", "",
 		"path to domain_spec.json: the constructs, metric routing, propositions, "+
-			"adjustment policy and operator vocabulary the agent reasons over. "+
-			"Required — the binary carries no built-in model. When empty the daemon "+
-			"searches upward from the working directory.")
+			"adjustment policy and operator vocabulary the agent reasons over. When "+
+			"empty the daemon searches upward from the working directory, and runs "+
+			"without a domain model if none is found: every observed property is still "+
+			"recorded and relationships are still discovered, but cost, recommendations "+
+			"and tuning are unavailable. A path that does not load is an error, and so "+
+			"is -no-admit with no domain model and no restored state, which would record nothing.")
 	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
@@ -233,23 +236,34 @@ func main() {
 		}
 	}
 
-	// The domain model is data, not code: the binary ships with no constructs,
-	// propositions or routing of its own. An agent without a model has nothing to
-	// reason over, so this fails loud rather than serving an empty graph.
-	var (
-		spec    *domain.Spec
-		specErr error
-	)
-	if *domainPath != "" {
-		spec, specErr = domain.Load(*domainPath)
+	// The domain model is data, not code, and it is optional: the binary ships with
+	// no constructs, propositions or routing of its own, and a node may have none to
+	// give it. Without one the map still records every property the node exhibits
+	// and discovers how they relate; what it cannot do is reason over constructs
+	// nobody declared. A path that was named and does not load is still an error,
+	// because silently running without the model someone asked for is worse.
+	var spec *domain.Spec
+	switch {
+	case *domainPath != "":
+		var err error
+		if spec, err = domain.Load(*domainPath); err != nil {
+			log.Fatalf("domain spec: %v", err)
+		}
+	default:
+		if p, err := domain.FindSpec(""); err == nil {
+			if spec, err = domain.Load(p); err != nil {
+				log.Fatalf("domain spec: %v", err)
+			}
+		}
+	}
+	if spec != nil {
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
+			len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	} else {
-		spec, specErr = domain.LoadFound()
+		log.Printf("domain model: none (no -domain and no domain_spec.json found): every " +
+			"observed property is recorded and relationships are discovered; cost, " +
+			"recommendations and tuning return 501")
 	}
-	if specErr != nil {
-		log.Fatalf("domain spec: %v (pass -domain <path>)", specErr)
-	}
-	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	switch *ingestScope {
 	case "self":
 		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
@@ -342,6 +356,10 @@ func main() {
 		} else {
 			log.Printf("state model: no snapshot at %s, starting cold", *stateFile)
 		}
+	}
+
+	if err := checkCanRecord(spec != nil, *noAdmit, state.Census().PropertiesTotal); err != nil {
+		log.Fatal(err)
 	}
 
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
@@ -686,6 +704,19 @@ func checkNoPositionalArgs(n int, first string) error {
 	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
 		"the form -flag=false (not -flag false), otherwise every flag after it "+
 		"is silently ignored", first)
+}
+
+// checkCanRecord refuses a configuration that can never record anything: without a
+// domain model nothing is declared, and -no-admit refuses whatever is not, so unless
+// a restored snapshot supplies properties every sample would be dropped while /state
+// stays empty, which looks the same as telemetry that has not arrived yet.
+func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
+	if hasSpec || !noAdmit || restored > 0 {
+		return nil
+	}
+	return fmt.Errorf("-no-admit without a domain model records nothing: no property " +
+		"is declared, so every observation would be refused. Give -domain, restore a " +
+		"snapshot with -state-file, or drop -no-admit")
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

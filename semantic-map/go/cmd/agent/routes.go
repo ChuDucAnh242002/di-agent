@@ -131,7 +131,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.CostOfAction(task, node)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
@@ -146,16 +146,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.RecommendPeer(&ctx)
 		if err != nil {
-			// ErrInsufficientTrust covers "no peer registry", "no peers
-			// registered" and "no peer qualifies" — all ordinary states of a
-			// single-node or freshly-started deployment, not server faults.
-			// 409 says the request was well-formed but current state cannot
-			// satisfy it, which is what an operator needs to distinguish.
-			if errors.Is(err, contracts.ErrInsufficientTrust) {
-				writeError(w, http.StatusConflict, err.Error())
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
@@ -173,7 +164,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.SimulateOutcome(&req.Context, req.TargetNodeID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
@@ -191,6 +182,23 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// writeReasonerError maps the reasoning operations' errors to a status an operator
+// can act on. ErrInsufficientTrust covers "no peer registry", "no peers registered"
+// and "no peer qualifies": ordinary states of a single-node or freshly started
+// deployment, so 409 (well-formed, but current state cannot satisfy it).
+// ErrNoDomainModel is an agent started without a domain model, for which the
+// operation does not exist, so 501, as /explain answers without an LLM.
+func writeReasonerError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, contracts.ErrNoDomainModel):
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, contracts.ErrInsufficientTrust):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
 
 // writeJSON serializes v as JSON with a 200 OK header. It is shared by both
 // old and new endpoints because the success-path content type is the same.
@@ -505,7 +513,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		applied, err := sm.Tune(req.Intent, req.Operator)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeReasonerError(w, err)
 			return
 		}
 		dtos := make([]TuneAdjustmentDTO, len(applied))

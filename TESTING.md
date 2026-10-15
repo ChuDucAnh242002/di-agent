@@ -55,7 +55,7 @@ sed -e 's/"tick_seconds": 10/"tick_seconds": 1/' -e 's/"period": 600/"period": 6
     -stale-after 20s -retire-after 60s
 ```
 
-Run the agent from `semantic-map/go`: it finds `domain_spec.json` by searching upward from the working directory, or you can pass `-domain <path>`.
+Run the agent from `semantic-map/go`: it finds `domain_spec.json` by searching upward from the working directory, or you can pass `-domain <path>`. Without one it still runs, with no domain model: properties, subjects, discovery and estimates work, while cost and tuning answer `501`.
 
 In `linear`, one pod (`pod:a`) runs a sine-wave CPU load between 0.10 and 0.60. The node's `pressure` is exactly `0.05 + pod:a's cpu`. Leave the agent running and use a second terminal:
 
