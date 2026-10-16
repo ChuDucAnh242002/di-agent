@@ -14,22 +14,26 @@ import (
 // newCandidatesCmd returns `mapctl candidates [list|confirm|reject|defer]`.
 // `list` is the default action when no subcommand is given.
 func newCandidatesCmd(deps *Deps) *cobra.Command {
+	var status string
 	parent := &cobra.Command{
 		Use:   "candidates",
 		Short: "Inspect or review pending candidate edges",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Default behavior: list. Subcommands handle their own RunE.
-			return runCandidatesList(cmd, deps)
+			return runCandidatesList(cmd, deps, status)
 		},
 	}
+	parent.Flags().StringVar(&status, "status", "", "all, or one of pending, confirmed, rejected, deferred (default: pending)")
 
-	parent.AddCommand(&cobra.Command{
+	list := &cobra.Command{
 		Use:   "list",
-		Short: "List pending candidate edges (GET /candidates)",
+		Short: "List candidate edges (GET /candidates); pending unless --status says otherwise",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCandidatesList(cmd, deps)
+			return runCandidatesList(cmd, deps, status)
 		},
-	})
+	}
+	list.Flags().StringVar(&status, "status", "", "all, or one of pending, confirmed, rejected, deferred (default: pending)")
+	parent.AddCommand(list)
 
 	var from string
 	confirm := &cobra.Command{
@@ -81,8 +85,8 @@ func newCandidatesCmd(deps *Deps) *cobra.Command {
 
 // runCandidatesList is the shared list implementation used by the bare
 // `candidates` command and `candidates list`.
-func runCandidatesList(cmd *cobra.Command, deps *Deps) error {
-	candidates, err := deps.Client().Candidates(deps.Ctx)
+func runCandidatesList(cmd *cobra.Command, deps *Deps, status string) error {
+	candidates, err := deps.Client().Candidates(deps.Ctx, status)
 	if err != nil {
 		return err
 	}
@@ -96,7 +100,7 @@ func runCandidatesList(cmd *cobra.Command, deps *Deps) error {
 // renderCandidatesTable formats candidate edges for terminal output.
 func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 	if len(candidates) == 0 {
-		fmt.Fprintln(w, "(no pending candidates)")
+		fmt.Fprintln(w, "(no candidates)")
 		return
 	}
 	rows := make([][]string, 0, len(candidates))

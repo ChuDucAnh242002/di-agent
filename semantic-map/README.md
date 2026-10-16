@@ -419,7 +419,11 @@ def push(base, node, subject, source, metric, unit, rng, value):
 
 ### `GET /candidates`
 
-Lists Proposer candidate edges pending review.
+Lists Proposer candidate edges pending review. `?status=all` lists every candidate the
+proposer has emitted, first-seen first, each with its current `Status` and, when deferred,
+its `Reason`; `?status=confirmed`, `rejected` or `deferred` lists one status of them
+(`mapctl candidates --status all`). Any other value is `400`. Without the history, a
+candidate an operator rejected and one never proposed look the same.
 
 ```json
 [{"CandidateID":"cpu_utilization@pod:a->cpu_pressure_ratio","FromID":"cpu_utilization@pod:a","ToID":"cpu_pressure_ratio",
@@ -489,7 +493,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
 | POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
-| GET  | `/candidates`                       | —                                                        | existing |
+| GET  | `/candidates`                       | `?status=all\|pending\|confirmed\|rejected\|deferred` (default pending) | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |
 | GET  | `/edges`                            | `?from=&to=`                                             | Phase 1  |
 | GET  | `/constructs`                       | —                                                        | Phase 1  |

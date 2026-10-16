@@ -85,6 +85,42 @@ func TestNodePairDiscoveredAndConfirmedWithADirection(t *testing.T) {
 		t.Fatalf("confirm from cpu_utilization: %d; want 204", code)
 	}
 
+	// The confirmed candidate leaves the pending list and stays in the history.
+	list := func(query string) (int, []types.CandidateEdge) {
+		resp, err := http.Get(srv.URL + "/candidates" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var cs []types.CandidateEdge
+		if resp.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(resp.Body).Decode(&cs)
+		}
+		return resp.StatusCode, cs
+	}
+	has := func(cs []types.CandidateEdge) bool {
+		for _, c := range cs {
+			if c.CandidateID == id {
+				return c.Status == types.Confirmed
+			}
+		}
+		return false
+	}
+	if _, cs := list(""); has(cs) {
+		t.Error("a confirmed candidate is still listed as pending")
+	}
+	for _, q := range []string{"?status=all", "?status=confirmed"} {
+		if code, cs := list(q); code != http.StatusOK || !has(cs) {
+			t.Errorf("GET /candidates%s: %d; want 200 listing %s as confirmed", q, code, id)
+		}
+	}
+	if _, cs := list("?status=rejected"); len(cs) != 0 {
+		t.Errorf("?status=rejected lists %d candidates; none was rejected", len(cs))
+	}
+	if code, _ := list("?status=bogus"); code != http.StatusBadRequest {
+		t.Errorf("?status=bogus: %d; want 400", code)
+	}
+
 	var v statemap.StateView
 	if code := getState(t, srv.URL+"/state", &v); code != 200 {
 		t.Fatalf("GET /state: %d", code)
