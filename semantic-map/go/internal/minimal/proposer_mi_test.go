@@ -302,6 +302,14 @@ type coveredNone struct{}
 
 func (coveredNone) Covered(_, _ string, _ int) bool { return false }
 
+// subjectPairsKnown counts every pair of two subjects' properties as already a
+// relationship, so a test about another mechanism sees only pairs with the node.
+type subjectPairsKnown struct{}
+
+func (subjectPairsKnown) Covered(from, to string, _ int) bool {
+	return strings.Contains(from, "@") && strings.Contains(to, "@")
+}
+
 func feedScoped(p *minimal.MICorrelationProposer, n int, gap time.Duration) {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < n; i++ {
@@ -322,26 +330,33 @@ func mustCandidates(t *testing.T, p *minimal.MICorrelationProposer) []*types.Can
 	return cs
 }
 
-func TestObserveProperty_PairsScopedWithUnscopedOnly(t *testing.T) {
+func TestObserveProperty_PairsSubjectsWithTheNodeAndWithEachOther(t *testing.T) {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
 	feedScoped(p, 40, 2*time.Second)
-	ids := map[string]bool{}
+	byID := map[string]*types.CandidateEdge{}
 	for _, c := range mustCandidates(t, p) {
-		ids[c.CandidateID] = true
+		byID[c.CandidateID] = c
 		if c.FromID == "cpu_pressure_ratio" {
 			t.Errorf("direction must be scoped -> unscoped; got %s -> %s", c.FromID, c.ToID)
 		}
 	}
-	if !ids["cpu_utilization@pod:a->cpu_pressure_ratio"] || !ids["cpu_utilization@pod:b->cpu_pressure_ratio"] {
-		t.Errorf("expected both pods to be proposed against node pressure; got %v", ids)
+	for _, id := range []string{"cpu_utilization@pod:a->cpu_pressure_ratio", "cpu_utilization@pod:b->cpu_pressure_ratio"} {
+		if c := byID[id]; c == nil || c.Undirected {
+			t.Errorf("expected directed %s; got %+v", id, c)
+		}
 	}
-	if ids["cpu_utilization@pod:a->cpu_utilization@pod:b"] || ids["cpu_utilization@pod:b->cpu_utilization@pod:a"] {
-		t.Error("two scoped properties must never be paired, however correlated")
+	// The two pods move in opposite directions: an undirected, negative, same-metric pair.
+	c := byID["cpu_utilization@pod:a<->cpu_utilization@pod:b"]
+	if c == nil {
+		t.Fatalf("expected the two pods to be paired with each other; got %v", byID)
+	}
+	if !c.Undirected || c.Direction != types.Negative || c.Kind != types.CandidateKindSameMetric {
+		t.Errorf("pod pair: undirected=%v direction=%v kind=%q; want undirected, negative, same-metric", c.Undirected, c.Direction, c.Kind)
 	}
 }
 
 func TestObserveProperty_RespectsTimeTolerance(t *testing.T) {
-	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	p := minimal.NewMICorrelationProposer(subjectPairsKnown{}, 0.8, 10, 60, 15*time.Second)
 	feedScoped(p, 40, 10*time.Minute) // every node reading is minutes away from every pod reading, so no pair can ever fall inside the 15s window
 	if cs := mustCandidates(t, p); len(cs) != 0 {
 		t.Errorf("readings outside the pair window formed %d candidates; want none", len(cs))
@@ -358,7 +373,7 @@ func TestObserveProperty_SkipsCoveredPairs(t *testing.T) {
 	ids := map[string]bool{}
 	for _, c := range mustCandidates(t, p) {
 		ids[c.CandidateID] = true
-		if c.FromID == "cpu_utilization@pod:a" {
+		if c.FromID == "cpu_utilization@pod:a" && !c.Undirected {
 			t.Error("a pair the state map already holds must not be re-proposed")
 		}
 	}
@@ -410,7 +425,7 @@ func feedPendingCap(p *minimal.MICorrelationProposer) {
 }
 
 func TestPendingCapDefersTheWeakest(t *testing.T) {
-	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
+	p := minimal.NewMICorrelationProposer(subjectPairsKnown{}, 0.5, 10, 60, 15*time.Second)
 	p.SetMaxPending(2)
 	feedPendingCap(p)
 
@@ -459,7 +474,7 @@ func TestPendingCapDefersTheWeakest(t *testing.T) {
 // the only way to reach the tie-break: equal bits on every platform, broken by
 // the lexicographically larger CandidateID.
 func buildCapScenario(affine bool) *minimal.MICorrelationProposer {
-	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
+	p := minimal.NewMICorrelationProposer(subjectPairsKnown{}, 0.5, 10, 60, 15*time.Second)
 	p.SetMaxPending(2)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 30; i++ {
@@ -525,7 +540,7 @@ func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
 
 	var cid string
 	for _, c := range mustCandidates(t, p) {
-		if c.FromID == "cpu_utilization@pod:a" {
+		if c.FromID == "cpu_utilization@pod:a" && !c.Undirected {
 			cid = c.CandidateID
 		}
 	}
@@ -635,7 +650,7 @@ func TestEachObservationPairsOnce(t *testing.T) {
 // and it is not permanent — when the deferred pair later outranks a pending one, the
 // two swap, so the cap bounds what is shown rather than what can ever be seen.
 func TestCapDeferralIsRecordedAndReentersWhenItOutranksThePending(t *testing.T) {
-	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	p := minimal.NewMICorrelationProposer(subjectPairsKnown{}, 0.5, 5, 60, 15*time.Second)
 	p.SetMaxPending(1)
 	var logged []string
 	p.SetLogger(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
@@ -938,5 +953,147 @@ func TestConfirmOrientation(t *testing.T) {
 	}
 	if _, err := q.Confirm(cs[0].CandidateID, cs[0].FromID); err != nil {
 		t.Errorf("directed candidate confirmed from its source: %v", err)
+	}
+}
+
+// feedRationing drives five node-level properties: two that never move, one that
+// moves without following anything, and two that move together. Their names put the
+// quiet ones first, so while the budget has room they take it.
+func feedRationing(p *minimal.MICorrelationProposer, from, to int) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := from; i < to; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		for _, r := range []types.PropertyReading{
+			{ID: "a_quiet", Value: 0.5},
+			{ID: "b_quiet", Value: 0.5},
+			{ID: "c_noise", Value: 0.5 + 0.4*math.Sin(float64(i)*1.7)},
+			{ID: "x", Value: x},
+			{ID: "y", Value: 0.2 + 0.7*x},
+		} {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+	}
+}
+
+// TestBudgetRationsPairsToTheMostVariable: a budget of three is filled first by the
+// quiet properties, which arrive first. Once those pairs have held matureAt pairs
+// below the threshold they are displaced, and the moving pair is found.
+func TestBudgetRationsPairsToTheMostVariable(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 300, 15*time.Second)
+	p.SetMaxPairs(3)
+	feedRationing(p, 0, 120)
+
+	d, _ := p.Discovery()
+	if d.Budget != 3 || d.TestedPairs > 3 {
+		t.Errorf("budget %d, tested %d; the budget must hold", d.Budget, d.TestedPairs)
+	}
+	if d.Properties != 5 || d.EligiblePairs != 10 {
+		t.Errorf("properties %d, eligible %d; want 5 and 10", d.Properties, d.EligiblePairs)
+	}
+	if d.Displaced == 0 {
+		t.Error("nothing displaced: the quiet pairs kept the budget")
+	}
+	h, _ := p.GetHistory()
+	var found *types.CandidateEdge
+	for _, c := range h {
+		if strings.Contains(c.CandidateID, "quiet") {
+			t.Errorf("a property that never moved reached a candidate: %s", c.CandidateID)
+		}
+		if c.CandidateID == "x<->y" {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatalf("x<->y never proposed; history %d", len(h))
+	}
+
+	// A pair at or above the threshold keeps its slot: it goes on accumulating.
+	n := found.NObservations
+	feedRationing(p, 120, 200)
+	for _, c := range mustCandidates(t, p) {
+		if c.CandidateID == "x<->y" && c.NObservations <= n {
+			t.Errorf("x<->y stayed at n=%d after 80 more ticks; a candidate's pair must not be displaced", c.NObservations)
+		}
+	}
+}
+
+// TestSettledPairStopsBeingTested: rejecting a candidate frees its slot at the next
+// rationing pass, and the pair is not admitted again.
+func TestSettledPairStopsBeingTested(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	p.SetMaxPairs(1)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tick := func(i int) {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty(types.PropertyReading{ID: "x", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "y", Value: x, At: at})
+	}
+	for i := 0; i < 20; i++ {
+		tick(i)
+	}
+	if err := p.Reject("x<->y"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 20; i < 25; i++ {
+		tick(i)
+	}
+	if d, _ := p.Discovery(); d.TestedPairs != 0 {
+		t.Errorf("tested %d pairs after the only pair was rejected; want 0", d.TestedPairs)
+	}
+}
+
+// TestForgetFreesTheBudget: a departed property's pairs leave the budget.
+func TestForgetFreesTheBudget(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 5, 2*time.Second)
+	before, _ := p.Discovery()
+	_ = p.Forget("cpu_utilization@pod:a")
+	after, _ := p.Discovery()
+	if before.TestedPairs != 3 || after.TestedPairs != 1 {
+		t.Errorf("tested %d before and %d after forgetting pod:a; want 3 and 1", before.TestedPairs, after.TestedPairs)
+	}
+}
+
+// TestReplayedReadingIsNotFoldedTwice: the property path keeps no identities per
+// pair; a reading no newer than its property's last is what it refuses instead.
+func TestReplayedReadingIsNotFoldedTwice(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var batch []types.PropertyReading
+	for i := 0; i < 10; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i % 2)
+		batch = append(batch, types.PropertyReading{ID: "x", Value: x, At: at}, types.PropertyReading{ID: "y", Value: x, At: at})
+	}
+	for range 2 { // the whole batch, then the same batch again
+		for _, r := range batch {
+			_ = p.ObserveProperty(r)
+		}
+	}
+	h, _ := p.GetHistory()
+	if len(h) != 1 || h[0].NObservations != 10 {
+		t.Errorf("history %d candidates, n=%v; want one with n=10", len(h), h)
+	}
+}
+
+func TestDerivePairBudget(t *testing.T) {
+	const gib = 1 << 30
+	pi := minimal.DerivePairBudget(8*gib, 4, 10*time.Second, 120)
+	vm := minimal.DerivePairBudget(2*gib, 2, 10*time.Second, 120)
+	if pi <= vm {
+		t.Errorf("an 8 GiB, 4-core machine got %d pairs and a 2 GiB, 2-core one %d; more machine must allow more", pi, vm)
+	}
+	if want := int(0.01 * 2 * gib / float64(minimal.PairBytes(120))); vm != want {
+		t.Errorf("2 GiB: %d pairs; memory allows %d and should bind", vm, want)
+	}
+	if fast := minimal.DerivePairBudget(64*gib, 1, 100*time.Millisecond, 120); fast != 200 {
+		t.Errorf("one core at a 100ms tick: %d pairs; CPU allows 200 and should bind", fast)
+	}
+	if got := minimal.DerivePairBudget(0, 4, 10*time.Second, 120); got != minimal.FallbackPairBudget {
+		t.Errorf("unreadable memory: %d; want the fallback", got)
 	}
 }

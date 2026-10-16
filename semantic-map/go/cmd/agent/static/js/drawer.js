@@ -244,21 +244,38 @@ export class Drawer {
     this.candidates = Array.isArray(res) ? res : (res?.candidates || []);
   }
 
+  /** How far discovery was rationed, from /state; empty when the proposer is off. */
+  rationingLine() {
+    const d = this.ctx.model()?.view?.discovery;
+    if (!d) return '';
+    const by = d.tested_by_class || {};
+    const budget = d.budget ? `a budget of ${fmt.int(d.budget)}` : 'no budget limit';
+    const short = d.budget && d.eligible_pairs > d.tested_pairs;
+    return `<p class="muted" style="font-size:11.5px;margin:0 0 9px;line-height:1.5"
+        title="subject → node ${fmt.int(by['subject->node'] || 0)} · node ↔ node ${fmt.int(by['node<->node'] || 0)} · subject ↔ subject ${fmt.int(by['subject<->subject'] || 0)}">
+        Testing ${fmt.int(d.tested_pairs)} of ${fmt.int(d.eligible_pairs)} pairs among
+        ${fmt.int(d.properties)} properties, with ${budget}${d.displaced ? `; ${fmt.int(d.displaced)} displaced so far` : ''}.
+        ${short ? 'The most variable properties get pairs first, so a quiet pair may not have been looked at yet.' : ''}
+      </p>`;
+  }
+
   renderDiscovery() {
     if (!this.candidates.length) {
       this.panes.discovery.innerHTML = `<div class="empty">
         <strong>Nothing proposed right now</strong>
-        <span class="why">The proposer pairs a subject's property with the node-level
-        properties it co-varies with, and node-level properties with each other. It
+        ${this.rationingLine()}
+        <span class="why">The proposer pairs any two properties: a subject's against the
+        node's, the node's with each other, and subjects' with each other. It
         only emits a candidate once each end has moved enough to matter and the correlation
         clears the configured threshold over the configured minimum number of pairs
         (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>).
-        An empty queue means no pair has cleared both yet — not that the proposer is off.</span>
+        An empty queue means no tested pair has cleared both yet — not that the proposer is off.</span>
       </div>`;
       return;
     }
 
     this.panes.discovery.innerHTML = `<div class="pane-pad">
+      ${this.rationingLine()}
       <p class="muted" style="font-size:11.5px;margin:0 0 9px;line-height:1.5">
         The map produced structure it was not told about. Confirming one admits it as a
         relationship with <span class="mono">discovered</span> provenance; rejecting tells
@@ -277,6 +294,7 @@ export class Drawer {
             : `<button class="btn small primary" data-cand="${id}" data-verdict="confirm">Confirm</button>`;
           const notes = [
             c.Kind === 'composition' ? `<span class="muted" title="the source is part of the target by definition, so the correlation is accounting rather than something learned">composition</span>` : '',
+            c.Kind === 'same-metric' ? `<span class="muted" title="two subjects' readings of one metric often move together because something drives both, not because either drives the other">same metric: a shared driver is likely</span>` : '',
             ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
           ].filter(Boolean).join('<br>');
           return `<tr>

@@ -436,7 +436,7 @@ Subjects and discovery added guarantees to two of the five contracts:
 
 - **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
 - **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
-- **Proposer** — the pairing rule: `ObserveProperty` pairs a scoped property (non-empty subject) with each unscoped one, directed scoped → unscoped, and two unscoped properties as an undirected candidate, inside a time tolerance. Two scoped properties are not paired.
+- **Proposer** — the pairing rule: `ObserveProperty` pairs any two properties inside a time tolerance — a scoped property (non-empty subject) with an unscoped one directed scoped → unscoped, two unscoped or two scoped properties as an undirected candidate. How many pairs are tested at once is the implementation's budget; `Discovery()` reports the budget, the pairs eligible, tested and displaced, so a short candidate list cannot be mistaken for nothing to find.
 - **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate pending.
 - **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
 
@@ -1141,9 +1141,9 @@ The Proposer contract supports discovering relationships the loaded specificatio
 ```
 Telemetry accumulates in the evidence layer
         ↓
-Proposer pairs each scoped property with the node-level properties it co-occurs
-with, and node-level properties with each other — one pair per reading (the
-pairing rule below)
+Proposer pairs any two properties that co-occur — subject → node, node ↔ node,
+subject ↔ subject — one pair per reading, as many pairs at once as the pair budget
+allows (the pairing rule below)
         ↓
 If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND each end moved by
 -proposer-min-spread of its declared range AND the map does not already hold the
@@ -1174,9 +1174,24 @@ The proposer is fed every observed property, and pairs them inside the pair wind
 | --- | --- | --- |
 | subject → node | directed, subject → node | a subject is a component of the node, so the stated assumption is component influences whole |
 | node ↔ node | **undirected**, the pair in lexicographic order, id `a<->b` | correlation is symmetric and nothing says which node-level quantity drives the other; the operator names the end it runs from on confirm (`{"from": ...}`), and a relationship declared either way round covers it |
-| subject ↔ subject | not paired | the pair count grows with the square of the subjects, and needs a budget first |
+| subject ↔ subject | **undirected**, as node ↔ node | two workloads can drive each other or share a driver. Two subjects' readings of one metric (`cpu_utilization@pod:a <-> cpu_utilization@pod:b`) carry `Kind: "same-metric"`: they are proposed like any other pair, and the kind says a shared driver (the same cron, the same client) is the likelier explanation |
 
-Readings further apart than the pair window do not form a pair; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+Readings further apart than the pair window do not form a pair, and a reading no newer than its property's last one is a repeat and is not paired; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+
+### The pair budget
+
+The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `-proposer-max-pairs`, is shared by all three classes.
+
+- **Default from the machine.** `0` (the default) derives it at start from 1% of the agent's memory (`MemTotal`, or its own cgroup's `memory.max` when lower) at ~2.6 KB per tested pair, and 1% of each collection tick across its CPUs (`cpu.max` when lower) at 5 µs per pair per tick — ten times what an Apple M-series core measured, so a Raspberry Pi-class core is not overcommitted — whichever allows fewer. A 2 GiB VM gets about 8 000 pairs; an 8 GiB, 4-core Raspberry Pi about 32 000. Fixed at start rather than adapting while the agent runs, so a run's budget is one number in its log and in `/state`. When the memory cannot be read (not Linux), 4 096. An explicit value always wins.
+- **While there is room** every pair a reading can form is tested, so a node within its budget behaves as if there were none.
+- **When it is full**, a rationing pass runs at most once per pair window of reading time:
+  - pairs whose candidate was confirmed, rejected or deferred by an operator, or that became a relationship, stop being tested;
+  - only properties observed within the pair window that moved by at least `-proposer-min-spread` of their declared range (of their largest magnitude when they declare none) compete;
+  - the most variable properties get pairs first, whatever the class — a pair ranks by its less variable end, because the variation gate needs both;
+  - a new pair takes a free slot or displaces a tested pair that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A pair at or above the threshold is never displaced.
+- **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `tested_by_class`, `displaced` — and the console's Discovery pane says how many of the eligible pairs are being tested.
+
+The per-pair cost is what made the budget affordable: each pair window used to keep a set of up to four windows' worth of pair identities against replays, ~23 KB of a pair's ~26 KB. The property path now refuses a reading no newer than its property's last instead, one timestamp per property, and its windows keep no identities.
 
 Two gates shape what is proposed:
 

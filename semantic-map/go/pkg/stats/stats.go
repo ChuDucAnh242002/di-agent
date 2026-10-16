@@ -24,14 +24,11 @@ func NewPairWindow(capacity int) *PairWindow {
 // Fold adds (x, y) under identity unless that identity was already folded. The
 // dedup set is trimmed when it exceeds 4*capacity, because an identity that can no
 // longer be in the window cannot be a duplicate of anything in it. Returns false
-// when the pair was a duplicate.
+// when the pair was a duplicate. An empty identity skips the check, for a caller
+// that refuses repeats itself: the set is most of a window's memory.
 func (w *PairWindow) Fold(identity string, x, y float64) bool {
-	if _, dup := w.seen[identity]; dup {
+	if !w.remember(identity) {
 		return false
-	}
-	w.seen[identity] = struct{}{}
-	if w.capacity > 0 && len(w.seen) > 4*w.capacity {
-		w.seen = map[string]struct{}{identity: {}}
 	}
 	if w.capacity <= 0 || len(w.xs) < w.capacity {
 		w.xs = append(w.xs, x)
@@ -52,15 +49,29 @@ func (w *PairWindow) ReplaceLast(identity string, x, y float64) bool {
 	if len(w.xs) == 0 {
 		return w.Fold(identity, x, y)
 	}
-	if _, dup := w.seen[identity]; dup {
+	if !w.remember(identity) {
 		return false
 	}
-	w.seen[identity] = struct{}{}
 	last := len(w.xs) - 1
 	if w.capacity > 0 && len(w.xs) == w.capacity {
 		last = (w.next - 1 + w.capacity) % w.capacity
 	}
 	w.xs[last], w.ys[last] = x, y
+	return true
+}
+
+// remember records identity, and reports false when it was already folded.
+func (w *PairWindow) remember(identity string) bool {
+	if identity == "" {
+		return true
+	}
+	if _, dup := w.seen[identity]; dup {
+		return false
+	}
+	w.seen[identity] = struct{}{}
+	if w.capacity > 0 && len(w.seen) > 4*w.capacity {
+		w.seen = map[string]struct{}{identity: {}}
+	}
 	return true
 }
 

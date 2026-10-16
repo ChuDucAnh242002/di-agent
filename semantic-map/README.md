@@ -192,6 +192,7 @@ semantic-map/
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
+    │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via -tuner=true)
     │       └── tests/
@@ -219,6 +220,7 @@ semantic-map/
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
+    │   ├── machine.go          The memory and CPUs the agent may use (host, or its cgroup limit)
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
     │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
@@ -432,11 +434,26 @@ candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (p
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
 stands). `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
 
-`Undirected` is `true` for a pair of node-level properties: correlation does not say which
-drives the other, so `FromID`/`ToID` are just the pair in lexicographic order and the id
-uses `<->`. `Kind` is `composition` when the source is part of the target by definition (a
-pod's CPU against node CPU). `Caveats` lists what the proposer could not check, such as an
-end with no declared range.
+`Undirected` is `true` for two node-level properties or two subjects' properties:
+correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
+lexicographic order and the id uses `<->`. `Kind` is `composition` when the source is part
+of the target by definition (a pod's CPU against node CPU), and `same-metric` for two
+subjects' readings of one metric, where a shared driver is the likelier explanation.
+`Caveats` lists what the proposer could not check, such as an end with no declared range.
+
+How many pairs are being tested is in `GET /state`, not here: an empty list means only
+that no *tested* pair has cleared the threshold.
+
+```json
+"discovery": {"budget": 7989, "properties": 39, "eligible_pairs": 741, "tested_pairs": 741,
+  "tested_by_class": {"node<->node": 36, "subject->node": 270, "subject<->subject": 435},
+  "displaced": 0}
+```
+
+`budget` is `-proposer-max-pairs` as resolved at start (`0`: no limit). When
+`tested_pairs` is below `eligible_pairs` the budget is rationing: the most variable
+properties get pairs first, and `displaced` counts pairs dropped to make room. The block
+is absent when the proposer is off.
 
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
 candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
@@ -480,7 +497,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400` | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
@@ -540,6 +557,9 @@ every sample, queryable and traceable.
 ```bash
 # what is this system doing right now
 curl -s localhost:8080/state | jq '.counts'
+
+# how many property pairs discovery is testing, of how many it could
+curl -s localhost:8080/state | jq '.discovery'
 
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
@@ -812,10 +832,11 @@ the shape of the real thing.
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
-| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs each subject's properties with the node's, and node-level properties with each other). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
 | `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
+| `-proposer-max-pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |

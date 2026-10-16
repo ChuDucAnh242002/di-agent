@@ -124,8 +124,8 @@ time.
   have fewer subjects.
 - **Pod names.** Pods appear as UIDs. The cgroup path carries nothing else.
 - **Discovery is narrow.** Only pod → node pairs are tested. Node ↔ node and
-  pod ↔ pod correlations are never proposed. Node ↔ node pairs were added after
-  this run; pod ↔ pod pairs are still not tested.
+  pod ↔ pod correlations are never proposed. Node ↔ node and pod ↔ pod pairs were
+  added after this run, under a pair budget derived from the machine.
 
 ## Reproducing
 

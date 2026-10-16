@@ -115,12 +115,13 @@ type RelationshipLookup interface {
 // ProposerContract detects statistical patterns suggesting new relationships.
 //
 // ObserveProperty is the entry point from IngestSample: every observed property is
-// fed, inside a time tolerance. The implementation pairs a scoped property
-// (non-empty subject) with each unscoped one, directed scoped -> unscoped, and two
-// unscoped properties with each other as an undirected pair, since correlation does
-// not say which drives which. Two scoped properties are not paired. Observe is the
-// explicit path for a caller that already knows the pair; ObserveConstruct is the
-// explicit construct-pairing path kept for callers that drive it directly.
+// fed, inside a time tolerance. Any two properties may pair. A scoped property
+// (non-empty subject) pairs with an unscoped one directed scoped -> unscoped; two
+// unscoped properties, or two scoped ones, pair undirected, since correlation does
+// not say which drives which. How many pairs are tested at once is the
+// implementation's budget, and Discovery reports it. Observe is the explicit path
+// for a caller that already knows the pair; ObserveConstruct is the explicit
+// construct-pairing path kept for callers that drive it directly.
 //
 // Guarantees:
 //   - Read-only observation: no Observe* method modifies the model.
@@ -138,6 +139,9 @@ type RelationshipLookup interface {
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.
+//   - Rationing is visible: Discovery reports the budget, the pairs eligible, the
+//     pairs tested (never more than a non-zero budget) and the pairs displaced. An
+//     implementation that tests nothing returns nil.
 type ProposerContract interface {
 	Observe(fromID, toID string, valueA, valueB float64) error
 	ObserveConstruct(constructID string, value float64) error
@@ -148,6 +152,7 @@ type ProposerContract interface {
 	Reject(candidateID string) error
 	Defer(candidateID string) error
 	GetHistory() ([]*types.CandidateEdge, error)
+	Discovery() (*types.DiscoveryCounts, error)
 }
 
 // ErrBadConfirmation is returned by Confirm when the orientation given does not fit

@@ -35,7 +35,7 @@ func TestAgentRunsWithoutADomainModel(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explain.NewDisabled())
-	registerStateRoutes(mux, state)
+	registerStateRoutes(mux, state, sm.Discovery)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

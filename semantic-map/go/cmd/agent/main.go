@@ -108,6 +108,11 @@ func main() {
 		"least movement, as a share of its declared range, each end of a pair must show "+
 			"over the window to become a candidate. Correlation is scale-free: without "+
 			"this, a series that barely moves can correlate perfectly. 0 disables it")
+	proposerMaxPairs := flag.Int("proposer-max-pairs", 0,
+		"how many property pairs discovery tests at once, across every pair class. 0 "+
+			"derives it from the machine: 1% of its memory and 1% of each collection "+
+			"tick's CPU, whichever allows fewer. When the budget is full the most "+
+			"variable properties get pairs first, and /state reports how far it rationed")
 	nodeID := flag.String("node-id", "",
 		"the machine this agent models. Used both to stamp its own MetricSamples and "+
 			"as its identity: the map is node-local, so samples labelled with another "+
@@ -280,7 +285,19 @@ func main() {
 	}
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
 		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
-	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f", *proposerThreshold, *proposerMinPairs, *proposerMinSpread)
+	maxPairs := *proposerMaxPairs
+	if maxPairs <= 0 && useProposer {
+		mem, cores := machineMemory(), machineCores()
+		maxPairs = minimal.DerivePairBudget(mem, cores, *collectInterval, profiles.DefaultProposerBufSize)
+		if mem == 0 {
+			log.Printf("proposer: machine memory unreadable; pair budget %d (fallback)", maxPairs)
+		} else {
+			log.Printf("proposer: pair budget %d derived from %.1f GiB and %d cores at a %s tick",
+				maxPairs, float64(mem)/(1<<30), cores, *collectInterval)
+		}
+	}
+	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f max-pairs=%d",
+		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, maxPairs)
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
 		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
@@ -307,6 +324,7 @@ func main() {
 		ProposerThreshold:    *proposerThreshold,
 		ProposerMinPairs:     *proposerMinPairs,
 		ProposerMinSpread:    proposerMinSpread,
+		ProposerMaxPairs:     maxPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then
@@ -412,7 +430,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
-	registerStateRoutes(mux, state)
+	registerStateRoutes(mux, state, sm.Discovery)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
