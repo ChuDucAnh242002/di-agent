@@ -378,9 +378,18 @@ table.grid td.mono, table.grid th.mono { font-family: var(--mono); font-size: 11
 
 #drawer {
   flex: none; background: var(--surface-1); border-top: 1px solid var(--border);
-  display: flex; flex-direction: column; height: 190px; min-height: 0;
+  display: flex; flex-direction: column; height: 190px; min-height: 0; position: relative;
 }
-#drawer.collapsed { height: 37px; }
+/* !important: a dragged height is an inline style, and collapsing must still win. */
+#drawer.collapsed { height: 37px !important; }
+#drawer.collapsed .drawer-resize { display: none; }
+/* The grab strip straddles the drawer's top border, so it is found where the eye
+   puts the edge. */
+.drawer-resize {
+  position: absolute; left: 0; right: 0; top: -4px; height: 8px; z-index: 5;
+  cursor: ns-resize; touch-action: none;
+}
+.drawer-resize:hover, .drawer-resize.active { background: var(--border-strong); opacity: .5; }
 #drawer.collapsed .drawer-body { display: none; }
 .drawer-tabs {
   display: flex; align-items: center; gap: 2px; padding: 0 8px; flex: none;
