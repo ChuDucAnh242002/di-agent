@@ -230,8 +230,8 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			}
 			t.Skip("implementation tests no pairs — nothing to account for")
 		}
-		if d.Budget > 0 && d.TestedPairs > d.Budget {
-			t.Errorf("tested %d pairs with a budget of %d", d.TestedPairs, d.Budget)
+		if d.Budget > 0 && d.TestedPairs+d.IdlePairs > d.Budget {
+			t.Errorf("tested %d pairs and held %d idle with a budget of %d", d.TestedPairs, d.IdlePairs, d.Budget)
 		}
 		if d.TestedPairs > d.EligiblePairs {
 			t.Errorf("tested %d pairs of %d eligible", d.TestedPairs, d.EligiblePairs)

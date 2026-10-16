@@ -430,7 +430,9 @@ Lists Proposer candidate edges pending review.
 ```
 
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
-candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (provisional;
+candidate carries `Reason`: `untested` when its pair was displaced from the pair budget, so
+its numbers stopped being updated (it re-enters if the pair is tested again and still clears
+the threshold); `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
 stands). `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
 
@@ -445,15 +447,17 @@ How many pairs are being tested is in `GET /state`, not here: an empty list mean
 that no *tested* pair has cleared the threshold.
 
 ```json
-"discovery": {"budget": 7989, "properties": 39, "eligible_pairs": 741, "tested_pairs": 741,
+"discovery": {"budget": 7989, "properties": 39, "eligible_pairs": 741, "tested_pairs": 741, "idle_pairs": 0,
   "tested_by_class": {"node<->node": 36, "subject->node": 270, "subject<->subject": 435},
   "displaced": 0}
 ```
 
 `budget` is `-proposer-max-pairs` as resolved at start (`0`: no limit). When
 `tested_pairs` is below `eligible_pairs` the budget is rationing: the most variable
-properties get pairs first, and `displaced` counts pairs dropped to make room. The block
-is absent when the proposer is off.
+properties get pairs first, and `displaced` counts pairs dropped to make room.
+`idle_pairs` are tested pairs with an end not observed within the pair window: they still
+hold budget, are displaced first, and go when the property retires. The block is absent
+when the proposer is off.
 
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
 candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`

@@ -134,8 +134,9 @@ type RelationshipLookup interface {
 //   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
 //     or an operator's Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
-//     proposed again. A cap deferral is the proposer's own and provisional: it
-//     re-enters when it outranks a pending candidate.
+//     proposed again. A cap deferral, or an untested one (its pair displaced from
+//     the budget), is the proposer's own and provisional: it re-enters when the
+//     evidence holds again.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.

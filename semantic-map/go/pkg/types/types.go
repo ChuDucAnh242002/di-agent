@@ -377,7 +377,12 @@ type DiscoveryCounts struct {
 	// latest reading: the ones a pair can be formed from now.
 	Properties    int `json:"properties"`
 	EligiblePairs int `json:"eligible_pairs"`
-	TestedPairs   int `json:"tested_pairs"`
+	// TestedPairs is the pairs being tested whose ends were both observed within the
+	// pair window; IdlePairs those with an end gone quiet. Both hold budget: an idle
+	// pair is displaced first when a new pair needs room, and dropped when its
+	// property retires.
+	TestedPairs int `json:"tested_pairs"`
+	IdlePairs   int `json:"idle_pairs"`
 	// TestedByClass splits TestedPairs by pair class.
 	TestedByClass map[string]int `json:"tested_by_class"`
 	// Displaced counts pairs dropped, since the start, to make room for more
@@ -410,9 +415,10 @@ type CandidateEdge struct {
 	// variation gate skipped because an endpoint declared no range.
 	Caveats []string
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
-	// pending cap chose it as the weakest, "operator" when Defer was called. A
-	// cap deferral is provisional and re-enters when it outranks a pending one; an
-	// operator's is not overturned.
+	// pending cap chose it as the weakest, "untested" when its pair was displaced
+	// from the pair budget and its numbers stopped being updated, "operator" when
+	// Defer was called. The proposer's own deferrals are provisional and re-enter
+	// when the evidence holds again; an operator's is not overturned.
 	Reason string
 }
 

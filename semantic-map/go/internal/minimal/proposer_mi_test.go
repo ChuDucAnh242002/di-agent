@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1095,5 +1096,84 @@ func TestDerivePairBudget(t *testing.T) {
 	}
 	if got := minimal.DerivePairBudget(0, 4, 10*time.Second, 120); got != minimal.FallbackPairBudget {
 		t.Errorf("unreadable memory: %d; want the fallback", got)
+	}
+}
+
+// feedUncorrelated drives node-level properties that each move with their own
+// amplitude and frequency, so no pair correlates: every tested pair matures weak.
+func feedUncorrelated(p *minimal.MICorrelationProposer, amp map[string]float64, from, to int) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	ids := make([]string, 0, len(amp))
+	for id := range amp {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for i := from; i < to; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		for k, id := range ids {
+			v := 0.5 + amp[id]*math.Sin(float64(i)*(1.3+0.71*float64(k)))
+			_ = p.ObserveProperty(types.PropertyReading{ID: id, Value: v, At: at, Range: rng})
+		}
+	}
+}
+
+// TestDisplacementRespectsRank: a weak pair of the most variable properties is not
+// displaced by a pair that varies less, so the budget settles rather than rotating.
+func TestDisplacementRespectsRank(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	p.SetMaxPairs(1)
+	// "a_lo"/"b_lo" sort first, so the low pair takes the only slot; the high pair
+	// displaces it once it matures, and nothing displaces the high pair after.
+	feedUncorrelated(p, map[string]float64{"a_lo": 0.05, "b_lo": 0.05, "c_hi": 0.45, "d_hi": 0.45}, 0, 400)
+	d, _ := p.Discovery()
+	if d.Displaced != 1 {
+		t.Errorf("displaced %d times over 400 ticks; want once, the low pair making way for the high one", d.Displaced)
+	}
+}
+
+// TestQuietPairIsDisplacedAndItsCandidateDeferred: a pair whose property stopped
+// reporting holds no claim on the budget, mature or not, and a pending candidate it
+// backed leaves the queue as untested rather than standing with frozen numbers.
+func TestQuietPairIsDisplacedAndItsCandidateDeferred(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	p.SetMaxPairs(1)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := 0; i < 40; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty(types.PropertyReading{ID: "x", Value: x, At: at, Range: rng})
+		if i < 20 { // y stops reporting
+			_ = p.ObserveProperty(types.PropertyReading{ID: "y", Value: x, At: at, Range: rng})
+		}
+		_ = p.ObserveProperty(types.PropertyReading{ID: "z", Value: 1 - x, At: at, Range: rng})
+	}
+	h, _ := p.GetHistory()
+	byID := map[string]*types.CandidateEdge{}
+	for _, c := range h {
+		byID[c.CandidateID] = c
+	}
+	if c := byID["x<->y"]; c == nil || c.Status != types.Deferred || c.Reason != "untested" {
+		t.Errorf("x<->y after y fell silent: %+v; want deferred as untested", c)
+	}
+	if c := byID["x<->z"]; c == nil || c.Status != types.Pending {
+		t.Errorf("x<->z: %+v; the freed slot should have found it", c)
+	}
+	d, _ := p.Discovery()
+	if d.TestedPairs > d.EligiblePairs || d.TestedPairs+d.IdlePairs > d.Budget {
+		t.Errorf("discovery %+v: tested above eligible, or above the budget", d)
+	}
+}
+
+// TestDiscoveryCountsIdlePairsApart: pairs whose ends went quiet are reported as
+// idle, so tested pairs never exceed the eligible ones.
+func TestDiscoveryCountsIdlePairsApart(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedUncorrelated(p, map[string]float64{"a": 0.3, "b": 0.3, "c": 0.3, "d": 0.3}, 0, 5)
+	feedUncorrelated(p, map[string]float64{"a": 0.3}, 10, 12) // only a keeps reporting
+	d, _ := p.Discovery()
+	if d.Properties != 1 || d.EligiblePairs != 0 || d.TestedPairs != 0 || d.IdlePairs != 6 {
+		t.Errorf("discovery %+v; want 1 property, 0 eligible, 0 tested, 6 idle", d)
 	}
 }

@@ -1188,8 +1188,9 @@ The pair count grows with the square of the properties: about 20 node ↔ node p
   - pairs whose candidate was confirmed, rejected or deferred by an operator, or that became a relationship, stop being tested;
   - only properties observed within the pair window that moved by at least `-proposer-min-spread` of their declared range (of their largest magnitude when they declare none) compete;
   - the most variable properties get pairs first, whatever the class — a pair ranks by its less variable end, because the variation gate needs both;
-  - a new pair takes a free slot or displaces a tested pair that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A pair at or above the threshold is never displaced.
-- **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `tested_by_class`, `displaced` — and the console's Discovery pane says how many of the eligible pairs are being tested.
+  - a new pair takes a free slot or displaces a tested pair that ranks below it: first one with an end gone quiet (not observed within the pair window), then one that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A live pair at or above the threshold is never displaced, and a pair is never displaced by one that ranks no higher, so the budget settles instead of rotating;
+  - a pending candidate whose pair is displaced is deferred with `Reason: "untested"`: nothing updates its numbers, so it should not ask for confirmation or hold a place under the pending cap. It re-enters if the pair is tested again and still clears the threshold.
+- **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `idle_pairs` (tested, with an end gone quiet), `tested_by_class`, `displaced` — and the console's Discovery pane says how many of the eligible pairs are being tested.
 
 The per-pair cost is what made the budget affordable: each pair window used to keep a set of up to four windows' worth of pair identities against replays, ~23 KB of a pair's ~26 KB. The property path now refuses a reading no newer than its property's last instead, one timestamp per property, and its windows keep no identities.
 

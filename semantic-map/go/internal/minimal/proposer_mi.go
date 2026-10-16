@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -336,10 +337,10 @@ func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected b
 }
 
 // settled is a candidate evidence cannot change: confirmed, rejected, or deferred by
-// an operator. A cap deferral is the proposer's own and can still re-enter.
+// an operator. The proposer's own deferrals (cap, untested) can still re-enter.
 func settled(c *types.CandidateEdge) bool {
 	return c.Status == types.Confirmed || c.Status == types.Rejected ||
-		(c.Status == types.Deferred && c.Reason != deferredByCap)
+		(c.Status == types.Deferred && c.Reason == deferredByOperator)
 }
 
 // admitAllLocked starts testing every pair id can form now, while the budget has
@@ -441,9 +442,12 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 //     (of their largest magnitude when they declare none);
 //   - the most variable properties get pairs first, whatever the pair's class: a
 //     pair ranks by its less variable end, because the variation gate needs both;
-//   - a new pair takes a free slot, or displaces a tested pair that has held
-//     matureAt pairs and stays below the candidate threshold, weakest |r|·n first.
-//     A pair at or above the threshold is never displaced.
+//   - a new pair takes a free slot, or displaces a tested pair that ranks below it:
+//     first one with an end gone quiet (not observed within the pair window), then
+//     one that has held matureAt pairs and stays below the candidate threshold,
+//     weakest |r|·n first. A live pair at or above the threshold is never
+//     displaced, and a pair is never displaced by one that ranks no higher, so the
+//     budget settles instead of rotating.
 func (p *MICorrelationProposer) rationLocked(now time.Time) {
 	for key, sl := range p.slots {
 		if !p.worthTestingLocked(sl.from, sl.to, sl.class != types.PairSubjectNode) {
@@ -456,12 +460,16 @@ func (p *MICorrelationProposer) rationLocked(now time.Time) {
 		v  float64
 	}
 	var comp []competitor
+	rank := map[string]float64{} // a competing property's variability; absent ranks 0
+	fresh := map[string]bool{}
 	for id, lv := range p.latestProps {
 		if absDur(now.Sub(lv.at)) > p.pairWindow {
 			continue
 		}
+		fresh[id] = true
 		if v := p.variability(id, lv); v > 0 && v >= p.minSpread {
 			comp = append(comp, competitor{id, v})
+			rank[id] = v
 		}
 	}
 	sort.Slice(comp, func(i, j int) bool {
@@ -475,23 +483,33 @@ func (p *MICorrelationProposer) rationLocked(now time.Time) {
 	if mature > p.bufSize {
 		mature = p.bufSize
 	}
-	var victims []string
+	type victim struct {
+		key   string
+		quiet bool
+		score float64
+		rank  float64
+	}
+	var victims []victim
 	for key, sl := range p.slots {
-		if sl.n >= mature && math.Abs(sl.r) < p.threshold {
-			victims = append(victims, key)
+		quiet := !fresh[sl.from] || !fresh[sl.to]
+		if quiet || (sl.n >= mature && math.Abs(sl.r) < p.threshold) {
+			victims = append(victims, victim{key, quiet, math.Abs(sl.r) * float64(sl.n), math.Min(rank[sl.from], rank[sl.to])})
 		}
 	}
 	sort.Slice(victims, func(i, j int) bool {
-		a, b := p.slots[victims[i]], p.slots[victims[j]]
-		sa, sb := math.Abs(a.r)*float64(a.n), math.Abs(b.r)*float64(b.n)
-		if sa != sb {
-			return sa < sb
+		a, b := victims[i], victims[j]
+		if a.quiet != b.quiet {
+			return a.quiet
 		}
-		return victims[i] > victims[j]
+		if a.score != b.score {
+			return a.score < b.score
+		}
+		return a.key > b.key
 	})
 
 	// Pair (i, j) with i < j ranks by comp[j].v, so walking j upward visits pairs in
-	// descending rank.
+	// descending rank. A pair that finds no victim ranked below it ends the pass: every
+	// later pair ranks no higher.
 	for j := 1; j < len(comp); j++ {
 		for i := 0; i < j; i++ {
 			a, b := comp[i].id, comp[j].id
@@ -502,16 +520,32 @@ func (p *MICorrelationProposer) rationLocked(now time.Time) {
 				continue
 			}
 			if !p.roomLocked() {
-				if len(victims) == 0 {
+				k := slices.IndexFunc(victims, func(v victim) bool { return v.rank < comp[j].v })
+				if k < 0 {
 					return
 				}
-				p.dropLocked(victims[0])
-				victims = victims[1:]
-				p.displaced++
+				p.displaceLocked(victims[k].key)
+				victims = slices.Delete(victims, k, k+1)
 			}
 			p.admitLocked(a, b)
 		}
 	}
+}
+
+// displaceLocked stops testing a pair to make room for another. A pending candidate
+// it backed is deferred as untested: nothing updates its numbers any more, so it
+// should not ask an operator to confirm them, nor hold a place under the pending cap.
+// It re-enters if the pair is tested again and its evidence still holds.
+func (p *MICorrelationProposer) displaceLocked(key string) {
+	sl := p.slots[key]
+	if sl == nil {
+		return
+	}
+	if c := p.candidates[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)]; c != nil && c.Status == types.Pending {
+		c.Status, c.Reason = types.Deferred, deferredUntested
+	}
+	p.dropLocked(key)
+	p.displaced++
 }
 
 // variability is how far a property moved over its recent values: spread as a share
@@ -541,18 +575,24 @@ func (p *MICorrelationProposer) Discovery() (*types.DiscoveryCounts, error) {
 	defer p.mu.Unlock()
 	d := &types.DiscoveryCounts{
 		Budget:        p.maxPairs,
-		TestedPairs:   len(p.slots),
 		TestedByClass: map[string]int{types.PairSubjectNode: 0, types.PairNodeNode: 0, types.PairSubjectSubject: 0},
 		Displaced:     p.displaced,
 	}
-	for _, lv := range p.latestProps {
+	fresh := map[string]bool{}
+	for id, lv := range p.latestProps {
 		if absDur(p.latestAt.Sub(lv.at)) <= p.pairWindow {
-			d.Properties++
+			fresh[id] = true
 		}
 	}
+	d.Properties = len(fresh)
 	d.EligiblePairs = d.Properties * (d.Properties - 1) / 2
 	for _, sl := range p.slots {
-		d.TestedByClass[sl.class]++
+		if fresh[sl.from] && fresh[sl.to] {
+			d.TestedPairs++
+			d.TestedByClass[sl.class]++
+		} else {
+			d.IdlePairs++
+		}
 	}
 	return d, nil
 }
@@ -651,7 +691,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		case types.Rejected:
 			return nil // permanent suppression within the session
 		case types.Deferred:
-			if existing.Reason != deferredByCap {
+			if existing.Reason == deferredByOperator {
 				return nil // an operator's deferral is not overturned by evidence
 			}
 			existing.Direction, existing.MIScore = direction, math.Abs(r)
@@ -749,6 +789,9 @@ func (p *MICorrelationProposer) log(format string, args ...any) {
 const (
 	deferredByCap      = "cap"
 	deferredByOperator = "operator"
+	// deferredUntested is a pending candidate whose pair was displaced from the
+	// budget: its numbers stopped being updated.
+	deferredUntested = "untested"
 )
 
 func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }

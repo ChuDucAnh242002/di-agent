@@ -254,7 +254,7 @@ export class Drawer {
     return `<p class="muted" style="font-size:11.5px;margin:0 0 9px;line-height:1.5"
         title="subject → node ${fmt.int(by['subject->node'] || 0)} · node ↔ node ${fmt.int(by['node<->node'] || 0)} · subject ↔ subject ${fmt.int(by['subject<->subject'] || 0)}">
         Testing ${fmt.int(d.tested_pairs)} of ${fmt.int(d.eligible_pairs)} pairs among
-        ${fmt.int(d.properties)} properties, with ${budget}${d.displaced ? `; ${fmt.int(d.displaced)} displaced so far` : ''}.
+        ${fmt.int(d.properties)} properties, with ${budget}${d.idle_pairs ? `; ${fmt.int(d.idle_pairs)} more held by properties gone quiet` : ''}${d.displaced ? `; ${fmt.int(d.displaced)} displaced so far` : ''}.
         ${short ? 'The most variable properties get pairs first, so a quiet pair may not have been looked at yet.' : ''}
       </p>`;
   }
