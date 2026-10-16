@@ -25,6 +25,9 @@ healthProbes:
   startupFailureThreshold: 90
 
 kafka:
+  # Kafka's EBS volume pins it to one AZ; this lets it preempt other pods there
+  # after a scale-up instead of staying Pending and stalling every simulator.
+  priorityClassName: diagent-kafka
   image:
     repository: apache/kafka
     tag: latest

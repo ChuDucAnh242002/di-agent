@@ -18,6 +18,9 @@ spec:
       labels:
         app: kafka
     spec:
+      {{- with .Values.kafka.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       securityContext:
         fsGroup: 1000
       {{- include "diagent.nodeSelector" (dict "local" .Values.kafka.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}

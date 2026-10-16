@@ -114,6 +114,11 @@ legacy DynamoDB locking configuration used by the S3 backend.
   Set `schedule_enabled=false` to disable. Load balancer URLs do not change.
   Scale-down takes ~17 min because coredns/ebs-csi PDBs block the last drain.
   The EKS control plane, NAT gateway and load balancers still bill while off.
+- **Kafka after scale-up**: Kafka's EBS volume pins it to one AZ, so on small
+  nodes it could stay `Pending` and leave every simulator unready. It now has
+  `kafka.priorityClassName` (`diagent-kafka`) so it preempts other pods, and
+  the chart defaults to one genset, battery and propulsion instance each
+  (`genset.count`, `battery.count`, `propulsion.count`) to fit 4 x `t3.small`.
 - **Health probes**: simulators get startup/liveness probes on `/health`
   (`healthProbes.*`), so a pod whose telemetry thread died is restarted.
 - **Peer reconciler**: CronJob `di-agent-peers` (`agent.peers.*`) re-registers
