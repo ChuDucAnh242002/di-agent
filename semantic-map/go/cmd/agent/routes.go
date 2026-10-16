@@ -173,14 +173,42 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// GET /candidates  — pending graph extension proposals
+	// GET /candidates  — pending graph extension proposals. ?status=all returns every
+	// candidate the proposer has emitted, in first-seen order, with its current status
+	// and, when deferred, the reason; ?status=<pending|confirmed|rejected|deferred>
+	// one status of them. Without the history, a candidate an operator rejected and
+	// one never proposed look the same.
 	mux.HandleFunc("GET /candidates", func(w http.ResponseWriter, r *http.Request) {
-		candidates, err := sm.PendingCandidates()
+		status := r.URL.Query().Get("status")
+		if status == "" || status == types.Pending.String() {
+			candidates, err := sm.PendingCandidates()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, candidates)
+			return
+		}
+		valid := status == "all"
+		for _, s := range []types.CandidateStatus{types.Confirmed, types.Rejected, types.Deferred} {
+			valid = valid || status == s.String()
+		}
+		if !valid {
+			http.Error(w, fmt.Sprintf("status %q is not all, pending, confirmed, rejected or deferred", status), http.StatusBadRequest)
+			return
+		}
+		history, err := sm.CandidateHistory()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, candidates)
+		out := make([]*types.CandidateEdge, 0, len(history))
+		for _, c := range history {
+			if status == "all" || c.Status.String() == status {
+				out = append(out, c)
+			}
+		}
+		writeJSON(w, out)
 	})
 }
 

@@ -39,8 +39,11 @@ import (
 // ObserveProperty, the property path, is the entry point from ingestion. Inside a
 // time tolerance any two properties may pair: a scoped property (non-empty subject)
 // with an unscoped one directed scoped -> unscoped, and two unscoped or two scoped
-// properties as an undirected pair. How many pairs are tested at once is the pair
-// budget (SetMaxPairs); see rationLocked for how it is shared out.
+// properties as an undirected pair. Properties of one chart and one subject that stay
+// at |r| >= groupR are an arithmetic group, and only its representative pairs outside
+// it (see regroupLocked). How many pairs are tested at once is the pair budget
+// (SetMaxPairs); see rationLocked for how it is shared out. A candidate's p-value must
+// also clear a bar corrected for how many pairs are tested (SetFDR, barLocked).
 // Observe is the explicit path for a caller that already knows the pair and
 // supplies both values; ObserveConstruct is the explicit construct path that
 // pairs each construct value with the latest of every other construct,
@@ -75,6 +78,22 @@ type MICorrelationProposer struct {
 	displaced uint64
 	lastPass  time.Time // reading time of the last rationing pass
 	latestAt  time.Time // the latest reading time seen
+
+	// Arithmetic groups. links holds, by pair key, the tested pairs of one chart and
+	// one subject at |r| >= groupR; repOf maps each member of a group to its
+	// representative, and is recomputed when a link forms or breaks.
+	links map[string]struct{}
+	repOf map[string]string
+
+	// The corrected bar. pvals holds every pair's p-value at its last fold with enough
+	// pairs to give one; bar is the Benjamini–Hochberg bar over them at rate fdr,
+	// recomputed once per round of folds (folds counts them, barFolds marks the last).
+	fdr             float64
+	pvals           map[string]float64
+	bar             float64
+	barValid        bool
+	folds, barFolds uint64
+	barTests        int // the m the bar was last computed over
 
 	threshold  float64
 	minSpread  float64 // the variation gate: least spread, as a share of the declared range
@@ -111,11 +130,14 @@ func (v *valueRing) push(x float64, capacity int) {
 }
 
 type latestValue struct {
-	value  float64
-	at     time.Time
-	scoped bool
-	rng    *[2]float64 // declared range; nil when the producer declared none
+	value   float64
+	at      time.Time
+	subject string
+	chart   string
+	rng     *[2]float64 // declared range; nil when the producer declared none
 }
+
+func (v latestValue) scoped() bool { return v.subject != "" }
 
 // pairMeta is what the property path knows about a pair beyond its values. The
 // explicit paths pass the zero value: a caller-supplied pair is directed, and its
@@ -125,6 +147,7 @@ type pairMeta struct {
 	undirected bool
 	kind       string
 	replace    bool // overwrite the last folded pair: this one shares a reading with it and is closer in time
+	sameChart  bool // both ends are of one chart and one subject: the pair can link an arithmetic group
 	xRange     *[2]float64
 	yRange     *[2]float64
 }
@@ -152,6 +175,10 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		recent:           make(map[string]*valueRing),
 		slots:            make(map[string]*pairSlot),
 		partners:         make(map[string]map[string]struct{}),
+		links:            make(map[string]struct{}),
+		repOf:            make(map[string]string),
+		pvals:            make(map[string]float64),
+		fdr:              DefaultFDR,
 		threshold:        threshold,
 		minSpread:        DefaultMinSpread,
 		minPairs:         minPairs,
@@ -175,6 +202,28 @@ func (p *MICorrelationProposer) SetMinSpread(share float64) {
 		p.minSpread = share
 	}
 }
+
+// DefaultFDR is the false-discovery rate the candidate bar holds to by default: of
+// the candidates the bar lets through, about 5% are expected to be chance.
+const DefaultFDR = 0.05
+
+// SetFDR sets the false-discovery rate of the candidate bar. A pair becomes a
+// candidate only when its p-value is at or under the Benjamini–Hochberg bar at this
+// rate over every pair being tested, so the more pairs are tested the more evidence a
+// candidate needs. 0 disables the correction; a value outside [0, 1) is ignored.
+func (p *MICorrelationProposer) SetFDR(q float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if q >= 0 && q < 1 {
+		p.fdr = q
+		p.barValid = false
+	}
+}
+
+// groupR is the |r| at which two properties of one chart and one subject are taken to
+// be arithmetic of each other: sums, complements or smoothings, which correlate
+// near-perfectly by construction.
+const groupR = 0.99
 
 // SetMaxPairs sets the pair budget: how many pairs the property path tests at once,
 // across every pair class. 0 or less removes the limit, and every eligible pair is
@@ -265,7 +314,7 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	if prev, ok := p.latestProps[id]; ok && !at.After(prev.at) {
 		return nil
 	}
-	p.latestProps[id] = latestValue{value: r.Value, at: at, scoped: r.Subject != "", rng: r.Range}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: r.Chart, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -295,7 +344,7 @@ func (p *MICorrelationProposer) roomLocked() bool {
 // first when exactly one end is scoped (directed), otherwise lexicographic
 // (undirected).
 func (p *MICorrelationProposer) orient(a, b string) (from, to string, undirected bool, class string) {
-	sa, sb := p.latestProps[a].scoped, p.latestProps[b].scoped
+	sa, sb := p.latestProps[a].scoped(), p.latestProps[b].scoped()
 	switch {
 	case sa && !sb:
 		return a, b, false, types.PairSubjectNode
@@ -320,8 +369,12 @@ func candidateID(from, to string, undirected bool) string {
 }
 
 // worthTestingLocked reports whether a pair could still produce anything: not
-// settled by an operator, and not already a relationship either sign or way round.
+// barred by an arithmetic group, not settled by an operator, and not already a
+// relationship either sign or way round.
 func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected bool) bool {
+	if p.barredLocked(from, to) {
+		return false
+	}
 	if c, ok := p.candidates[candidateID(from, to, undirected)]; ok && settled(c) {
 		return false
 	}
@@ -367,6 +420,26 @@ func (p *MICorrelationProposer) admitAllLocked(id string, at time.Time) {
 	}
 }
 
+// sameChart reports whether two properties are of one chart and one subject, which is
+// where an arithmetic group can form.
+func (p *MICorrelationProposer) sameChart(a, b string) bool {
+	va, vb := p.latestProps[a], p.latestProps[b]
+	return va.chart != "" && va.chart == vb.chart && va.subject == vb.subject
+}
+
+// barredLocked reports whether a pair would pair a group member other than its
+// representative with a property outside its chart: the representative stands for
+// the group there. Pairs inside a chart are never barred; they are what links a group
+// and what would show it breaking.
+func (p *MICorrelationProposer) barredLocked(a, b string) bool {
+	if p.sameChart(a, b) {
+		return false
+	}
+	ra, ga := p.repOf[a]
+	rb, gb := p.repOf[b]
+	return (ga && ra != a) || (gb && rb != b)
+}
+
 func (p *MICorrelationProposer) paired(a, b string) bool {
 	_, ok := p.partners[a][b]
 	return ok
@@ -397,8 +470,15 @@ func (p *MICorrelationProposer) dropLocked(key string) {
 	delete(p.slots, key)
 	delete(p.buffers, key)
 	delete(p.lastPair, key)
+	delete(p.pvals, key)
 	delete(p.partners[sl.from], sl.to)
 	delete(p.partners[sl.to], sl.from)
+	if _, linked := p.links[key]; linked {
+		// An untested link can neither hold nor break a group: the group goes with it,
+		// and its members compete like any other property until it forms again.
+		delete(p.links, key)
+		p.regroupLocked()
+	}
 }
 
 // foldLocked folds id's latest reading with otherID's, if they are close enough in
@@ -419,12 +499,15 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 		}
 		replace = true // a closer partner arrived for a reading already paired: swap it in
 	}
-	meta := pairMeta{property: true, undirected: undirected, replace: replace, xRange: fv.rng, yRange: tv.rng}
+	meta := pairMeta{property: true, undirected: undirected, replace: replace, sameChart: p.sameChart(from, to),
+		xRange: fv.rng, yRange: tv.rng}
 	switch {
 	case !undirected && metricOf(from) == to:
 		meta.kind = types.CandidateKindComposition
-	case fv.scoped && tv.scoped && metricOf(from) == metricOf(to):
+	case fv.scoped() && tv.scoped() && metricOf(from) == metricOf(to):
 		meta.kind = types.CandidateKindSameMetric
+	case fv.scoped() && fv.subject == tv.subject:
+		meta.kind = types.CandidateKindSameSubject
 	}
 	// No identity: ObserveProperty refuses a reading that is not newer than its
 	// property's last, which is the dedup this path needs.
@@ -439,7 +522,8 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 //     being tested: nothing they show can change anything;
 //   - properties compete only if they were observed within the pair window and
 //     moved, over their recent values, by at least minSpread of their declared range
-//     (of their largest magnitude when they declare none);
+//     (of their largest magnitude when they declare none), and an arithmetic group
+//     only through its representative;
 //   - the most variable properties get pairs first, whatever the pair's class: a
 //     pair ranks by its less variable end, because the variation gate needs both;
 //   - a new pair takes a free slot, or displaces a tested pair that ranks below it:
@@ -467,6 +551,9 @@ func (p *MICorrelationProposer) rationLocked(now time.Time) {
 			continue
 		}
 		fresh[id] = true
+		if rep, ok := p.repOf[id]; ok && rep != id {
+			continue // its group competes through its representative
+		}
 		if v := p.variability(id, lv); v > 0 && v >= p.minSpread {
 			comp = append(comp, competitor{id, v})
 			rank[id] = v
@@ -569,6 +656,147 @@ func (p *MICorrelationProposer) variability(id string, lv latestValue) float64 {
 	return (hi - lo) / scale
 }
 
+// linkLocked records whether a pair of one chart and one subject links an arithmetic
+// group, regrouping when that changes, and reports whether it does.
+func (p *MICorrelationProposer) linkLocked(key string, linked bool) bool {
+	_, was := p.links[key]
+	switch {
+	case linked && !was:
+		p.links[key] = struct{}{}
+		p.regroupLocked()
+	case !linked && was:
+		delete(p.links, key)
+		p.regroupLocked()
+	}
+	return linked
+}
+
+// regroupLocked recomputes the arithmetic groups from their links: the members a
+// chain of links connects are one group. Its representative is the most variable
+// member, except that a member already representing part of the group keeps the
+// role, so one link forming elsewhere does not move every group's pairs. A pair that
+// regrouping bars stops being tested, and a pending candidate it backed is deferred
+// as grouped; it re-enters if the group breaks and the pair still holds.
+func (p *MICorrelationProposer) regroupLocked() {
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(x string) string {
+		if parent[x] == x {
+			return x
+		}
+		parent[x] = find(parent[x])
+		return parent[x]
+	}
+	for key := range p.links {
+		a, b, _ := strings.Cut(key, "→")
+		for _, x := range []string{a, b} {
+			if _, ok := parent[x]; !ok {
+				parent[x] = x
+			}
+		}
+		if ra, rb := find(a), find(b); ra != rb {
+			parent[ra] = rb
+		}
+	}
+	groups := map[string][]string{}
+	for x := range parent {
+		groups[find(x)] = append(groups[find(x)], x)
+	}
+	prev := p.repOf
+	p.repOf = make(map[string]string, len(parent))
+	for _, members := range groups {
+		sort.Strings(members)
+		pick := func(eligible func(string) bool) string {
+			best, bestV := "", -1.0
+			for _, m := range members {
+				if !eligible(m) {
+					continue
+				}
+				if v := p.variability(m, p.latestProps[m]); v > bestV {
+					best, bestV = m, v
+				}
+			}
+			return best
+		}
+		rep := pick(func(m string) bool { return prev[m] == m })
+		if rep == "" {
+			rep = pick(func(string) bool { return true })
+		}
+		for _, m := range members {
+			p.repOf[m] = rep
+		}
+	}
+	for key, sl := range p.slots {
+		if !p.barredLocked(sl.from, sl.to) {
+			continue
+		}
+		if c := p.candidates[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)]; c != nil && c.Status == types.Pending {
+			c.Status, c.Reason = types.Deferred, deferredGrouped
+		}
+		p.dropLocked(key)
+	}
+}
+
+// groupsLocked lists the arithmetic groups, ordered by representative.
+func (p *MICorrelationProposer) groupsLocked() []types.ArithmeticGroup {
+	byRep := map[string][]string{}
+	for m, rep := range p.repOf {
+		byRep[rep] = append(byRep[rep], m)
+	}
+	out := make([]types.ArithmeticGroup, 0, len(byRep))
+	for rep, members := range byRep {
+		sort.Strings(members)
+		lv := p.latestProps[rep]
+		out = append(out, types.ArithmeticGroup{Chart: lv.chart, Subject: lv.subject, Representative: rep, Members: members})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Representative < out[j].Representative })
+	return out
+}
+
+// barLocked is the p-value bar a candidate must be at or under: Benjamini–Hochberg at
+// rate fdr over the m pairs being tested, arithmetic links aside. A pair without
+// enough readings for a p-value yet still counts, as a test that has found nothing:
+// otherwise, in the first round, the first pairs to reach enough readings would be
+// judged as if they were the only tests. With the p-values sorted ascending, the bar
+// is k·fdr/m for the largest k whose p-value is at or under that, and fdr/m when none
+// is — so a candidate needs more evidence the more pairs are tested. It is recomputed
+// once per round of folds, or sooner when m has moved by a tenth, which keeps its
+// cost about one sort per tick. 0 when fdr is 0.
+func (p *MICorrelationProposer) barLocked() float64 {
+	if p.fdr <= 0 {
+		return 0
+	}
+	tests := len(p.buffers) - len(p.links)
+	if p.barValid && p.folds-p.barFolds < uint64(len(p.pvals)) && absInt(tests-p.barTests)*10 < p.barTests {
+		return p.bar
+	}
+	ps := make([]float64, 0, len(p.pvals))
+	for _, v := range p.pvals {
+		ps = append(ps, v)
+	}
+	sort.Float64s(ps)
+	m, k := float64(max(tests, len(ps))), 1
+	for i := len(ps) - 1; i >= 0; i-- {
+		if ps[i] <= float64(i+1)*p.fdr/m {
+			k = i + 1
+			break
+		}
+	}
+	p.bar = p.fdr
+	if m > 0 {
+		p.bar = float64(k) * p.fdr / m
+	}
+	p.barValid, p.barFolds, p.barTests = true, p.folds, tests
+	return p.bar
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // Discovery reports the budget and how far it rationed the pairs.
 func (p *MICorrelationProposer) Discovery() (*types.DiscoveryCounts, error) {
 	p.mu.Lock()
@@ -586,6 +814,9 @@ func (p *MICorrelationProposer) Discovery() (*types.DiscoveryCounts, error) {
 	}
 	d.Properties = len(fresh)
 	d.EligiblePairs = d.Properties * (d.Properties - 1) / 2
+	d.Groups = p.groupsLocked()
+	d.FDR, d.PBar = p.fdr, p.barLocked()
+	d.PValuesTested = max(len(p.buffers)-len(p.links), len(p.pvals))
 	for _, sl := range p.slots {
 		if fresh[sl.from] && fresh[sl.to] {
 			d.TestedPairs++
@@ -636,7 +867,22 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 		if from == propertyID || to == propertyID {
 			delete(p.buffers, key)
 			delete(p.lastPair, key)
+			delete(p.pvals, key)
 		}
+	}
+	regroup := false
+	if _, ok := p.repOf[propertyID]; ok {
+		regroup = true
+	}
+	for key := range p.links {
+		from, to, _ := strings.Cut(key, "→")
+		if from == propertyID || to == propertyID {
+			delete(p.links, key)
+			regroup = true
+		}
+	}
+	if regroup {
+		p.regroupLocked()
 	}
 	kept := p.order[:0]
 	for _, cid := range p.order {
@@ -672,7 +918,46 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if sl := p.slots[key]; sl != nil {
 		sl.n, sl.r = buf.Len(), r // r is 0 when undefined, which ranks the pair weakest
 	}
+	pv := 1.0 // a pair whose r is undefined was tested and showed nothing
+	if ok {
+		pv = stats.FisherPValue(r, buf.Len())
+	}
+	p.folds++
+	candID := candidateID(fromID, toID, meta.undirected)
+	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= groupR) {
+		// Arithmetic, not a finding: the group is reported in Discovery instead, and
+		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
+		delete(p.pvals, key)
+		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
+			c.Status, c.Reason = types.Deferred, deferredGrouped
+		}
+		return nil
+	}
+	p.pvals[key] = pv
 	if !ok || math.Abs(r) < p.threshold {
+		// A pending candidate whose pair no longer holds leaves the queue with the
+		// numbers that put it out, rather than asking an operator to confirm an |r|
+		// it had once. It re-enters if the pair holds again. A dip smaller than the
+		// window's sampling error is not a pair that stopped holding: leaving at the
+		// threshold itself, a pair sitting on it flapped in and out of the queue.
+		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
+			c.MIScore, c.NObservations = math.Abs(r), buf.Len()
+			c.PValue = pv
+			if !ok || math.Abs(r) < weakenedBelow(p.threshold, buf.Len()) {
+				c.Status, c.Reason = types.Deferred, deferredWeakened
+			}
+		}
+		return nil
+	}
+	bar := p.barLocked()
+	if bar > 0 && pv > bar {
+		// Strong enough alone, not once the number of pairs tested is counted. A pending
+		// candidate the bar has tightened past leaves the queue with the numbers that
+		// put it out; it re-enters if it clears the bar again.
+		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
+			c.MIScore, c.PValue, c.PBar, c.NObservations = math.Abs(r), pv, bar, buf.Len()
+			c.Status, c.Reason = types.Deferred, deferredByBar
+		}
 		return nil
 	}
 	direction, sign := types.Positive, 1
@@ -683,7 +968,6 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		(meta.undirected && p.lookup.Covered(toID, fromID, sign))) {
 		return nil // an undirected pair is covered by a relationship either way round
 	}
-	candID := candidateID(fromID, toID, meta.undirected)
 	if existing, ok := p.candidates[candID]; ok {
 		switch existing.Status {
 		case types.Confirmed:
@@ -695,7 +979,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 				return nil // an operator's deferral is not overturned by evidence
 			}
 			existing.Direction, existing.MIScore = direction, math.Abs(r)
-			existing.PValue, existing.NObservations = stats.FisherPValue(r, buf.Len()), buf.Len()
+			existing.PValue, existing.PBar, existing.NObservations = pv, bar, buf.Len()
 			if p.outranksPendingLocked(existing) {
 				existing.Status, existing.Reason = types.Pending, ""
 				p.log("proposer: %s re-enters pending with |r|·n=%.1f; the cap defers the weakest instead", candID, score(existing))
@@ -705,7 +989,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		case types.Pending:
 			existing.Direction = direction
 			existing.MIScore = math.Abs(r)
-			existing.PValue = stats.FisherPValue(r, buf.Len())
+			existing.PValue, existing.PBar = pv, bar
 			existing.NObservations = buf.Len()
 			return nil
 		}
@@ -719,7 +1003,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	p.candidates[candID] = &types.CandidateEdge{
 		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
-		MIScore: math.Abs(r), PValue: stats.FisherPValue(r, buf.Len()),
+		MIScore: math.Abs(r), PValue: pv, PBar: bar,
 		NObservations: buf.Len(), Status: types.Pending,
 		Undirected: meta.undirected, Kind: meta.kind, Caveats: caveats,
 	}
@@ -792,6 +1076,16 @@ const (
 	// deferredUntested is a pending candidate whose pair was displaced from the
 	// budget: its numbers stopped being updated.
 	deferredUntested = "untested"
+	// deferredGrouped is a candidate an arithmetic group took over: its pair links the
+	// group, or an end joined a group it does not represent.
+	deferredGrouped = "grouped"
+	// deferredByBar is a pending candidate whose p-value no longer clears the bar, as
+	// more pairs came to be tested beside it.
+	deferredByBar = "bar"
+	// deferredWeakened is a pending candidate whose |r| fell below the candidate
+	// threshold by more than its sampling error (weakenedBelow): the evidence it
+	// was emitted on no longer holds.
+	deferredWeakened = "weakened"
 )
 
 func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }
@@ -922,6 +1216,8 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Propos
 		prop.Description += "; composition: the source is part of the target"
 	case types.CandidateKindSameMetric:
 		prop.Description += "; same metric on two subjects: a shared driver is likely"
+	case types.CandidateKindSameSubject:
+		prop.Description += "; two metrics of one subject: they may hold together by construction"
 	}
 	c.Status = types.Confirmed
 	return prop, nil
@@ -1036,4 +1332,16 @@ func (l ontologyLookup) Covered(from, to string, sign int) bool {
 		}
 	}
 	return false
+}
+
+// weakenedBelow is the |r| under which a pending candidate leaves the queue: the
+// threshold less one standard error of Fisher's z over n pairs, 1/√(n−3). Entering
+// takes the threshold itself, so a pair whose |r| jitters around it is proposed once
+// rather than at every crossing; the band narrows as the window fills (0.82 for a
+// 0.85 threshold at 120 pairs).
+func weakenedBelow(threshold float64, n int) float64 {
+	if n <= 3 || threshold >= 1 {
+		return threshold // no band to give
+	}
+	return math.Tanh(math.Atanh(threshold) - 1/math.Sqrt(float64(n-3)))
 }

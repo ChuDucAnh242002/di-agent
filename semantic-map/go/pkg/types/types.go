@@ -283,6 +283,11 @@ const (
 // a pod, a disk, a systemd unit, an application component. Kind is whatever the
 // producer says; the map never interprets it. Unit and Range are the producer's
 // declaration of what the value means; the map stamps them at admission.
+// Chart names the series a producer computes together from one reading of its
+// source (a Netdata chart, one line of /proc/stat); empty when it groups nothing.
+// Series of one chart and one subject that stay perfectly correlated are sums,
+// complements or smoothings of each other, and discovery treats them as one
+// arithmetic group rather than as findings.
 // Labels is informational; nothing branches on it.
 type MetricSample struct {
 	NodeID        string            `json:"node_id"`
@@ -294,6 +299,7 @@ type MetricSample struct {
 	Unit          string            `json:"unit,omitempty"`
 	Range         *[2]float64       `json:"range,omitempty"`
 	Source        string            `json:"source,omitempty"`
+	Chart         string            `json:"chart,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
@@ -341,10 +347,12 @@ type TuneAdjustment struct {
 
 // PropertyReading is one observed property value as the proposer sees it. Range is
 // the producer's declared range, nil when none was declared: the proposer's variation
-// gate measures movement against it and cannot without it.
+// gate measures movement against it and cannot without it. Chart is the sample's
+// chart: properties of one chart and one subject may form an arithmetic group.
 type PropertyReading struct {
 	ID      string
 	Subject string
+	Chart   string
 	Value   float64
 	At      time.Time
 	Range   *[2]float64
@@ -358,6 +366,10 @@ const (
 	// move together because something drives both (the same cron, the same client),
 	// not because either drives the other.
 	CandidateKindSameMetric = "same-metric"
+	// CandidateKindSameSubject marks two metrics of one subject, such as a capped
+	// pod's CPU and its throttling: one workload's own quantities often move together
+	// by construction, so the pair is more likely accounting than a finding.
+	CandidateKindSameSubject = "same-subject"
 )
 
 // Pair classes, as DiscoveryCounts reports them.
@@ -388,6 +400,27 @@ type DiscoveryCounts struct {
 	// Displaced counts pairs dropped, since the start, to make room for more
 	// variable ones.
 	Displaced uint64 `json:"displaced"`
+	// Groups are the arithmetic groups found: properties of one chart and one
+	// subject whose pairs stay at |r| ≥ 0.99. Only each group's representative is
+	// paired outside it.
+	Groups []ArithmeticGroup `json:"groups,omitempty"`
+	// FDR is the false-discovery rate the candidate bar holds to, 0 when
+	// uncorrected; PBar is the bar a p-value must be at or under now, over the
+	// PValuesTested pairs being tested (arithmetic links aside), counting those
+	// without enough readings yet as tests that found nothing.
+	FDR           float64 `json:"fdr"`
+	PBar          float64 `json:"p_bar"`
+	PValuesTested int     `json:"p_values_tested"`
+}
+
+// ArithmeticGroup is properties of one chart and one subject that move as one: each
+// is linked to another member by a tested pair at |r| ≥ 0.99. Representative, the
+// most variable member when the group last changed, is the only one paired outside.
+type ArithmeticGroup struct {
+	Chart          string   `json:"chart"`
+	Subject        string   `json:"subject,omitempty"`
+	Representative string   `json:"representative"`
+	Members        []string `json:"members"`
 }
 
 type CandidateEdge struct {
@@ -409,14 +442,23 @@ type CandidateEdge struct {
 	// definition (a subject's metric against the node's total of the same metric),
 	// so the correlation is accounting rather than something learned; "same-metric"
 	// for two subjects' readings of one metric, where a shared driver is the likely
-	// explanation; empty otherwise.
+	// explanation; "same-subject" for two metrics of one subject, which often hold
+	// together by construction; empty otherwise.
 	Kind string
+	// PBar is the p-value bar the candidate passed at its last update: corrected for
+	// how many pairs were being tested (Benjamini–Hochberg at the proposer's
+	// false-discovery rate), or 0 when the proposer applies no correction.
+	PBar float64
 	// Caveats states what the proposer could not check for this candidate, such as a
 	// variation gate skipped because an endpoint declared no range.
 	Caveats []string
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
 	// pending cap chose it as the weakest, "untested" when its pair was displaced
-	// from the pair budget and its numbers stopped being updated, "operator" when
+	// from the pair budget and its numbers stopped being updated, "grouped" when an
+	// end joined an arithmetic group it does not represent, "bar" when its p-value
+	// no longer clears the corrected bar as more pairs came to be tested, "weakened"
+	// when its |r| fell below the candidate threshold by more than its sampling
+	// error, "operator" when
 	// Defer was called. The proposer's own deferrals are provisional and re-enter
 	// when the evidence holds again; an operator's is not overturned.
 	Reason string

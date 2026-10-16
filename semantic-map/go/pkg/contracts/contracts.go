@@ -118,7 +118,9 @@ type RelationshipLookup interface {
 // fed, inside a time tolerance. Any two properties may pair. A scoped property
 // (non-empty subject) pairs with an unscoped one directed scoped -> unscoped; two
 // unscoped properties, or two scoped ones, pair undirected, since correlation does
-// not say which drives which. How many pairs are tested at once is the
+// not say which drives which, except that properties of one chart and one subject
+// that stay perfectly correlated are an arithmetic group, paired among themselves and
+// represented outside it by one member. How many pairs are tested at once is the
 // implementation's budget, and Discovery reports it. Observe is the explicit path
 // for a caller that already knows the pair; ObserveConstruct is the explicit
 // construct-pairing path kept for callers that drive it directly.
@@ -135,8 +137,15 @@ type RelationshipLookup interface {
 //     or an operator's Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
 //     proposed again. A cap deferral, or an untested one (its pair displaced from
-//     the budget), is the proposer's own and provisional: it re-enters when the
-//     evidence holds again.
+//     the budget), or a grouped one (an end joined an arithmetic group it does not
+//     represent), one the corrected bar tightened past, or one whose correlation
+//     weakened below the threshold by more than its sampling error, is the proposer's own and provisional: it
+//     re-enters when the evidence holds again.
+//   - Current evidence: a pending candidate's numbers are those of its pair's
+//     latest fold, so a pending one can show an |r| inside the sampling-error
+//     margin under the threshold; a pair that falls below that margin, or past the
+//     bar, takes its candidate out of the queue. A pending candidate whose PBar is non-zero had a
+//     p-value at or under it when last updated.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.

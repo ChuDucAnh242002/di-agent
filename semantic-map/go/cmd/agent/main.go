@@ -108,6 +108,11 @@ func main() {
 		"least movement, as a share of its declared range, each end of a pair must show "+
 			"over the window to become a candidate. Correlation is scale-free: without "+
 			"this, a series that barely moves can correlate perfectly. 0 disables it")
+	proposerFDR := flag.Float64("proposer-fdr", minimal.DefaultFDR,
+		"false-discovery rate of the candidate bar: a pair becomes a candidate only when "+
+			"its p-value clears the Benjamini-Hochberg bar at this rate over every pair "+
+			"tested, so the more pairs are tested the more evidence a candidate needs. "+
+			"0 disables the correction")
 	proposerMaxPairs := flag.Int("proposer-max-pairs", 0,
 		"how many property pairs discovery tests at once, across every pair class. 0 "+
 			"derives it from the machine: 1% of its memory and 1% of each collection "+
@@ -296,8 +301,8 @@ func main() {
 				maxPairs, float64(mem)/(1<<30), cores, *collectInterval)
 		}
 	}
-	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f max-pairs=%d",
-		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, maxPairs)
+	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f fdr=%.3f max-pairs=%d",
+		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, *proposerFDR, maxPairs)
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
 		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
@@ -324,6 +329,7 @@ func main() {
 		ProposerThreshold:    *proposerThreshold,
 		ProposerMinPairs:     *proposerMinPairs,
 		ProposerMinSpread:    proposerMinSpread,
+		ProposerFDR:          proposerFDR,
 		ProposerMaxPairs:     maxPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one

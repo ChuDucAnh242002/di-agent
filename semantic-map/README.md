@@ -363,7 +363,7 @@ collector uses.
  "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
 ```
 
-Four more fields are optional and let a producer describe what it is reporting:
+Five more fields are optional and let a producer describe what it is reporting:
 
 | Field     | Type          | Meaning                                                                 |
 | --------- | ------------- | ------------------------------------------------------------------------ |
@@ -371,6 +371,7 @@ Four more fields are optional and let a producer describe what it is reporting:
 | `unit`    | `str`         | The unit the value is expressed in                                       |
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
 | `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
+| `chart`   | `str`         | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line). Series of one chart and one subject that stay at \|r\| ≥ 0.99 are an arithmetic group: discovery reports them once instead of proposing them |
 
 A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
 `metric_type` need not be one of the values the domain specification routes: an
@@ -418,19 +419,29 @@ def push(base, node, subject, source, metric, unit, rng, value):
 
 ### `GET /candidates`
 
-Lists Proposer candidate edges pending review.
+Lists Proposer candidate edges pending review. `?status=all` lists every candidate the
+proposer has emitted, first-seen first, each with its current `Status` and, when deferred,
+its `Reason`; `?status=confirmed`, `rejected` or `deferred` lists one status of them
+(`mapctl candidates --status all`). Any other value is `400`. Without the history, a
+candidate an operator rejected and one never proposed look the same.
 
 ```json
 [{"CandidateID":"cpu_utilization@pod:a->cpu_pressure_ratio","FromID":"cpu_utilization@pod:a","ToID":"cpu_pressure_ratio",
-  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Direction":0,"MIScore":0.91,"PValue":0.002,"PBar":0.011,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
   "Undirected":false,"Kind":"","Caveats":null},
  {"CandidateID":"cpu_pressure_ratio<->cpu_utilization","FromID":"cpu_pressure_ratio","ToID":"cpu_utilization",
-  "Direction":0,"MIScore":0.88,"PValue":0.004,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Direction":0,"MIScore":0.88,"PValue":0.004,"PBar":0.011,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
   "Undirected":true,"Kind":"","Caveats":null}]
 ```
 
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
-candidate carries `Reason`: `untested` when its pair was displaced from the pair budget, so
+candidate carries `Reason`: `grouped` when an arithmetic group took it over (its pair links
+the group, or an end joined a group it does not represent); `bar` when its p-value no
+longer clears the corrected bar, because more pairs came to be tested beside it; `weakened`
+when its `|r|` fell below the threshold by more than one standard error of Fisher's z
+(about 0.82 for the 0.85 default over a full window), so the evidence it was emitted on no
+longer holds; a pending candidate inside that margin stays pending and shows its current `|r|`;
+`untested` when its pair was displaced from the pair budget, so
 its numbers stopped being updated (it re-enters if the pair is tested again and still clears
 the threshold); `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
@@ -439,9 +450,14 @@ stands). `Direction` is `0` for positive, `1` for negative: the sign, not the or
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
 lexicographic order and the id uses `<->`. `Kind` is `composition` when the source is part
-of the target by definition (a pod's CPU against node CPU), and `same-metric` for two
-subjects' readings of one metric, where a shared driver is the likelier explanation.
+of the target by definition (a pod's CPU against node CPU), `same-metric` for two
+subjects' readings of one metric, where a shared driver is the likelier explanation, and
+`same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
+which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
+`PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
+`-proposer-fdr` over every pair being tested, so the more pairs are tested the more
+evidence a candidate needs. It is `0` when the correction is off.
 
 How many pairs are being tested is in `GET /state`, not here: an empty list means only
 that no *tested* pair has cleared the threshold.
@@ -449,15 +465,20 @@ that no *tested* pair has cleared the threshold.
 ```json
 "discovery": {"budget": 7989, "properties": 39, "eligible_pairs": 741, "tested_pairs": 741, "idle_pairs": 0,
   "tested_by_class": {"node<->node": 36, "subject->node": 270, "subject<->subject": 435},
-  "displaced": 0}
+  "displaced": 0, "groups": [{"chart": "system.cpu", "representative": "user", "members": ["system", "user"]}],
+  "fdr": 0.05, "p_bar": 0.0021, "p_values_tested": 741}
 ```
 
 `budget` is `-proposer-max-pairs` as resolved at start (`0`: no limit). When
 `tested_pairs` is below `eligible_pairs` the budget is rationing: the most variable
 properties get pairs first, and `displaced` counts pairs dropped to make room.
 `idle_pairs` are tested pairs with an end not observed within the pair window: they still
-hold budget, are displaced first, and go when the property retires. The block is absent
-when the proposer is off.
+hold budget, are displaced first, and go when the property retires. `groups` are the
+arithmetic groups found; only each `representative` is paired outside its group. `p_bar`
+is the bar a candidate's p-value must be at or under now, at false-discovery rate `fdr`
+over the `p_values_tested` pairs being tested — arithmetic links aside, and counting a
+pair without enough readings yet as a test that found nothing. The block is absent when the
+proposer is off.
 
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
 candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
@@ -476,7 +497,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
 | POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
-| GET  | `/candidates`                       | —                                                        | existing |
+| GET  | `/candidates`                       | `?status=all\|pending\|confirmed\|rejected\|deferred` (default pending) | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |
 | GET  | `/edges`                            | `?from=&to=`                                             | Phase 1  |
 | GET  | `/constructs`                       | —                                                        | Phase 1  |
@@ -840,6 +861,7 @@ the shape of the real thing.
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
 | `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
+| `-proposer-fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
 | `-proposer-max-pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
