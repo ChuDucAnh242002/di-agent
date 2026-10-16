@@ -55,14 +55,13 @@ func collectNetdata(t *testing.T, opts minimal.NetdataOptions) map[string]*types
 	return out
 }
 
-// TestNetdataDefaultSelection: the curated default reads the node's CPU, memory, I/O,
-// network and pressure, and each disk, interface and core as a subject; it leaves the
-// rest of what Netdata offers (load, link state, apps, cgroups) out.
+// TestNetdataDefaultSelection: the curated default reads the node's CPU, memory, I/O
+// and network, and each disk, interface and core as a subject; it leaves the rest of
+// what Netdata offers (pressure, load, link state, apps, cgroups) out.
 func TestNetdataDefaultSelection(t *testing.T) {
 	got := collectNetdata(t, minimal.NetdataOptions{})
 	for _, id := range []string{
 		"system.cpu.user", "system.cpu.iowait", "system.ram.used", "system.io.in", "system.net.InOctets",
-		"system.cpu_some_pressure_stall_time.time",
 		"disk.io.reads@disk:sda", "disk.util.utilization@disk:sda", "disk.await.writes@disk:sda",
 		"net.net.received@net:enp0s1", "cpu.cpu.user@cpu:cpu0", "cpu.cpu.user@cpu:cpu1",
 	} {
@@ -71,7 +70,8 @@ func TestNetdataDefaultSelection(t *testing.T) {
 		}
 	}
 	for id := range got {
-		for _, out := range []string{"system.load", "net_carrier", "net.carrier", "app.", "k8s.", "systemd.", "mem.available"} {
+		for _, out := range []string{"system.load", "net_carrier", "net.carrier", "app.", "k8s.", "systemd.", "mem.available",
+			"system.cpu_some_pressure"} {
 			if len(id) >= len(out) && id[:len(out)] == out {
 				t.Errorf("%s collected; the default list does not include it", id)
 			}

@@ -91,11 +91,13 @@ type NetdataOptions struct {
 	Logf func(format string, args ...any)
 }
 
-// DefaultNetdataInclude is the curated default: CPU, memory, pressure, I/O, network
-// and disk, for the node and per disk, interface and core.
+// DefaultNetdataInclude is the curated default: CPU, memory, I/O, network and disk,
+// for the node and per disk, interface and core. Pressure is not in it: beside the
+// cgroup collector Netdata's stall-time charts are the same quantity read twice,
+// which discovery reports as a near-perfect pair (0.97–0.99 on the VM) that says
+// nothing, and alone the collapse reads them into the pressure types regardless.
 var DefaultNetdataInclude = []string{
 	"system.cpu", "system.ram", "system.io", "system.net",
-	"system.*_some_pressure_stall_time",
 	"disk.io", "disk.util", "disk.await",
 	"net.net",
 	"cpu.cpu",
