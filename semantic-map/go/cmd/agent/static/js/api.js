@@ -82,8 +82,9 @@ export const api = {
 
   // ── discovery queue ──────────────────────────────────────────────────────
   candidates: () => send('GET', '/candidates'),
-  reviewCandidate: (id, verdict) =>
-    send('POST', `/candidates/${encodeURIComponent(id)}/${verdict}`, { body: {} }),
+  // from names the end an undirected candidate runs from; omitted otherwise.
+  reviewCandidate: (id, verdict, from) =>
+    send('POST', `/candidates/${encodeURIComponent(id)}/${verdict}`, { body: from ? { from } : {} }),
 
   // ── the declared backbone, kept readable beside what was learned ─────────
   graph: () => send('GET', '/graph'),

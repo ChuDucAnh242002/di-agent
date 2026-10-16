@@ -108,6 +108,10 @@ type Config struct {
 	ProposerMinPairs int
 	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
 	ProposerBufSize int
+	// ProposerMinSpread is the variation gate: the least movement over the window, as
+	// a share of each end's declared range, for a pair to become a candidate. nil
+	// keeps minimal.DefaultMinSpread; 0 disables the gate.
+	ProposerMinSpread *float64
 
 	// DomainSpec is the loaded domain model: constructs, metric routing,
 	// propositions, adjustment policy and operator vocabulary. Nil runs the agent
@@ -325,8 +329,12 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		if bufSize == 0 {
 			bufSize = 120
 		}
-		proposer = minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
+		mi := minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
 			time.Duration(cfg.PairWindowSeconds)*time.Second)
+		if cfg.ProposerMinSpread != nil {
+			mi.SetMinSpread(*cfg.ProposerMinSpread)
+		}
+		proposer = mi
 	} else {
 		proposer = minimal.NewDisabledProposer()
 	}

@@ -30,18 +30,24 @@ func newCandidatesCmd(deps *Deps) *cobra.Command {
 		},
 	})
 
-	parent.AddCommand(&cobra.Command{
+	var from string
+	confirm := &cobra.Command{
 		Use:   "confirm <candidate-id>",
 		Short: "Confirm a candidate edge (POST /candidates/{id}/confirm)",
-		Args:  cobra.ExactArgs(1),
+		Long: "Confirm a candidate edge. An undirected candidate (two node-level properties, " +
+			"Kind \"undirected\" in the list) needs --from naming the end the relationship " +
+			"runs from: correlation does not say which drives which.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := deps.Client().ConfirmCandidate(deps.Ctx, args[0]); err != nil {
+			if err := deps.Client().ConfirmCandidate(deps.Ctx, args[0], from); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "confirmed %s\n", args[0])
 			return nil
 		},
-	})
+	}
+	confirm.Flags().StringVar(&from, "from", "", "the end an undirected candidate runs from")
+	parent.AddCommand(confirm)
 
 	parent.AddCommand(&cobra.Command{
 		Use:   "reject <candidate-id>",
@@ -101,10 +107,24 @@ func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 			fmt.Sprintf("%.3g", c.PValue),
 			fmt.Sprintf("%d", c.NObservations),
 			fmt.Sprintf("%d", c.DeploymentsSeen),
+			kindLabel(c),
 			statusLabel(c.Status, c.Reason),
 		})
 	}
-	render.Table(w, []string{"ID", "From", "To", "Dir", "MI", "p-value", "N", "Deploys", "Status"}, rows)
+	render.Table(w, []string{"ID", "From", "To", "Dir", "MI", "p-value", "N", "Deploys", "Kind", "Status"}, rows)
+}
+
+// kindLabel says what kind of claim a candidate would make: "undirected" when the
+// operator must choose which end it runs from, "composition" when the source is part
+// of the target by definition, empty for an ordinary directed candidate.
+func kindLabel(c client.CandidateEdge) string {
+	switch {
+	case c.Undirected:
+		return "undirected"
+	case c.Kind != "":
+		return c.Kind
+	}
+	return ""
 }
 
 // directionLabel maps the int Direction to its wire-readable form, matching

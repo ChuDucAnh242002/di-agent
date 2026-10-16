@@ -48,10 +48,18 @@ import (
 // dropped so a later reappearance (a reused pod UID, say) starts clean. There
 // is no "gone" event — absence is silence, not a signal.
 //
-// cpu_pressure_ratio is the PSI "some" stall share of the window, from cpu.pressure,
-// declared as "fraction" on [0,1]. It is absent where the kernel exposes no PSI.
+// cpu_pressure_ratio, io_pressure_ratio and memory_pressure_ratio are the PSI "some"
+// stall share of the window, from cpu.pressure, io.pressure and memory.pressure,
+// declared as "fraction" on [0,1]: the share of the window in which at least one task
+// waited for that resource. Each is absent where the kernel exposes no PSI for it.
 //
-// CPU metrics (cpu_utilization, cpu_throttle_ratio, cpu_pressure_ratio) require two consecutive
+// cpu_steal_ratio is node-level only: the share of CPU time in the window the
+// hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
+// declared as "fraction" on [0,1]. It is zero on bare metal and is what separates
+// "this VM is busy" from "the host is busy" when pressure rises with nothing local
+// to explain it.
+//
+// The windowed metrics (CPU, throttling, the three pressures, steal) require two consecutive
 // Collect() calls per subject to establish a measurement window. The first
 // call a subject is seen, it contributes only memory_utilization (which is
 // instantaneous); CPU samples follow from the second call onward.
@@ -117,10 +125,25 @@ type cpuSnapshot struct {
 	usageUsec   uint64
 	nrPeriods   uint64
 	nrThrottled uint64
-	// stallUsec is cpu.pressure's cumulative "some" stall time; hasStall is false
-	// when the file is absent (a kernel booted with psi=0, or a cgroup without it).
-	stallUsec uint64
-	hasStall  bool
+	// stall holds each PSI file's cumulative "some" stall time, in psiResources
+	// order; hasStall is false where the file is absent (a kernel booted with psi=0,
+	// or a cgroup without it).
+	stall    [len(psiResources)]uint64
+	hasStall [len(psiResources)]bool
+	// stealTicks and cpuTicks are /proc/stat's cumulative steal and total CPU time,
+	// read for the node only; hasSteal is false when /proc/stat could not be read.
+	stealTicks, cpuTicks uint64
+	hasSteal             bool
+}
+
+// psiResources are the pressure files read per cgroup, and the metric each becomes.
+var psiResources = [...]struct {
+	file   string
+	metric types.MetricType
+}{
+	{"cpu.pressure", types.CPUPressureRatio},
+	{"io.pressure", types.IOPressureRatio},
+	{"memory.pressure", types.MemoryPressureRatio},
 }
 
 var cgroupAvailMetrics = []types.MetricType{
@@ -128,6 +151,9 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.MemoryUtilization,
 	types.CPUThrottleRatio,
 	types.CPUPressureRatio,
+	types.IOPressureRatio,
+	types.MemoryPressureRatio,
+	types.CPUStealRatio,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -276,10 +302,16 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		return nil, err
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
-	stall, stallErr := readCPUStallUsec(filepath.Join(dir, "cpu.pressure"))
+	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
+	for i, r := range psiResources {
+		v, err := readStallUsec(filepath.Join(dir, r.file))
+		snap.stall[i], snap.hasStall[i] = v, err == nil
+	}
+	if subject == "" {
+		snap.stealTicks, snap.cpuTicks, snap.hasSteal = readCPUSteal(filepath.Join(c.opts.ProcRoot, "stat"))
+	}
 	prev := c.prev[subject]
-	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled,
-		stallUsec: stall, hasStall: stallErr == nil}
+	c.prev[subject] = snap
 
 	var samples []*types.MetricSample
 	switch {
@@ -314,16 +346,25 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		throttle := clamp(float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods), 0, 1)
 		samples = append(samples, c.sample(types.CPUThrottleRatio, unitPeriodShare, throttle, now, prev.ts, subject, labels))
 	}
-	// CPU pressure is the share of the window in which at least one runnable task in
-	// this cgroup waited for a CPU: the delta of PSI's cumulative "some" stall time
-	// over the elapsed time. The cumulative counter is used rather than avg10 so the
+	// Pressure is the share of the window in which at least one task in this cgroup
+	// waited for the resource: the delta of PSI's cumulative "some" stall time over
+	// the elapsed time. The cumulative counter is used rather than avg10 so the
 	// reading covers exactly the collection window, whatever the interval. Without
 	// it nothing live observes cpu_pressure_ratio, and every construct and
 	// proposition it feeds stays unknown on a real node. Guarded against a counter
 	// reset like the others.
-	if stallErr == nil && prev.hasStall && stall >= prev.stallUsec {
-		pressure := clamp(float64(stall-prev.stallUsec)/float64(elapsedUs), 0, 1)
-		samples = append(samples, c.sample(types.CPUPressureRatio, unitNodeShare, pressure, now, prev.ts, subject, labels))
+	for i, r := range psiResources {
+		if snap.hasStall[i] && prev.hasStall[i] && snap.stall[i] >= prev.stall[i] {
+			pressure := clamp(float64(snap.stall[i]-prev.stall[i])/float64(elapsedUs), 0, 1)
+			samples = append(samples, c.sample(r.metric, unitNodeShare, pressure, now, prev.ts, subject, labels))
+		}
+	}
+	// Steal is a share of CPU time, so it is measured in /proc/stat's own ticks on
+	// both sides of the ratio rather than against wall time, which would need
+	// USER_HZ and the CPU count to agree with the kernel's.
+	if snap.hasSteal && prev.hasSteal && snap.cpuTicks > prev.cpuTicks && snap.stealTicks >= prev.stealTicks {
+		steal := clamp(float64(snap.stealTicks-prev.stealTicks)/float64(snap.cpuTicks-prev.cpuTicks), 0, 1)
+		samples = append(samples, c.sample(types.CPUStealRatio, unitNodeShare, steal, now, prev.ts, subject, labels))
 	}
 	return samples, nil
 }
@@ -494,12 +535,12 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 	return stat, nil
 }
 
-// readCPUStallUsec returns the cumulative "some" stall time, in microseconds, from a
-// cgroup v2 cpu.pressure file:
+// readStallUsec returns the cumulative "some" stall time, in microseconds, from a
+// cgroup v2 PSI file (cpu.pressure, io.pressure, memory.pressure):
 //
 //	some avg10=0.35 avg60=0.28 avg300=0.34 total=11060241
 //	full avg10=0.00 avg60=0.00 avg300=0.00 total=0
-func readCPUStallUsec(path string) (uint64, error) {
+func readStallUsec(path string) (uint64, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
@@ -516,6 +557,44 @@ func readCPUStallUsec(path string) (uint64, error) {
 		}
 	}
 	return 0, fmt.Errorf("%s has no some total", path)
+}
+
+// readCPUSteal returns the cumulative steal and total CPU time from /proc/stat's
+// aggregate line, in the kernel's ticks:
+//
+//	cpu  user nice system idle iowait irq softirq steal guest guest_nice
+//
+// The total is the first eight columns: guest and guest_nice are already counted in
+// user and nice. Reports false when the line is missing or has no steal column
+// (kernels before 2.6.11), since a steal of zero would then be a guess.
+func readCPUSteal(path string) (steal, total uint64, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 || fields[0] != "cpu" {
+			continue
+		}
+		if len(fields) < 9 {
+			return 0, 0, false
+		}
+		for i, f := range fields[1:9] {
+			v, err := strconv.ParseUint(f, 10, 64)
+			if err != nil {
+				return 0, 0, false
+			}
+			total += v
+			if i == 7 {
+				steal = v
+			}
+		}
+		return steal, total, true
+	}
+	return 0, 0, false
 }
 
 // readMemoryCurrent returns the cgroup's memory.current in bytes. memory.max is not

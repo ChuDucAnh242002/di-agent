@@ -1,6 +1,7 @@
 package minimal_test
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -105,7 +106,7 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 	}
 	// Confirm returns the proposition rather than adding it: the caller applies it
 	// through the facade, which is the only path that reaches the state model too.
-	prop, err := p.Confirm(cs[0].CandidateID)
+	prop, err := p.Confirm(cs[0].CandidateID, "")
 	if err != nil {
 		t.Fatalf("Confirm error: %v", err)
 	}
@@ -306,9 +307,9 @@ func feedScoped(p *minimal.MICorrelationProposer, n int, gap time.Duration) {
 	for i := 0; i < n; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%20) / 20
-		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
-		_ = p.ObserveProperty("cpu_utilization@pod:b", "pod:b", 1-x, at)
-		_ = p.ObserveProperty("cpu_pressure_ratio", "", 0.9*x+0.05, at.Add(gap))
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization@pod:b", Subject: "pod:b", Value: 1 - x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_pressure_ratio", Subject: "", Value: 0.9*x + 0.05, At: at.Add(gap)})
 	}
 }
 
@@ -401,10 +402,10 @@ func feedPendingCap(p *minimal.MICorrelationProposer) {
 	for i := 0; i < 30; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%10) / 10
-		_ = p.ObserveProperty("m@pod:1", "pod:1", x, at)
-		_ = p.ObserveProperty("m@pod:2", "pod:2", x*0.9, at)
-		_ = p.ObserveProperty("m@pod:3", "pod:3", x*0.7+0.1+0.35*math.Sin(float64(i)), at)
-		_ = p.ObserveProperty("node", "", x, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:1", Subject: "pod:1", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:2", Subject: "pod:2", Value: x * 0.9, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:3", Subject: "pod:3", Value: x*0.7 + 0.1 + 0.35*math.Sin(float64(i)), At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "node", Subject: "", Value: x, At: at})
 	}
 }
 
@@ -468,10 +469,10 @@ func buildCapScenario(affine bool) *minimal.MICorrelationProposer {
 		if affine {
 			x2, x3 = x*0.9, x*0.7+0.1
 		}
-		_ = p.ObserveProperty("m@pod:1", "pod:1", x, at)
-		_ = p.ObserveProperty("m@pod:2", "pod:2", x2, at)
-		_ = p.ObserveProperty("m@pod:3", "pod:3", x3, at)
-		_ = p.ObserveProperty("node", "", x, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:1", Subject: "pod:1", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:2", Subject: "pod:2", Value: x2, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "m@pod:3", Subject: "pod:3", Value: x3, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "node", Subject: "", Value: x, At: at})
 	}
 	return p
 }
@@ -531,7 +532,7 @@ func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
 	if cid == "" {
 		t.Fatal("expected a candidate for cpu_utilization@pod:a before confirming")
 	}
-	if _, err := p.Confirm(cid); err != nil {
+	if _, err := p.Confirm(cid, ""); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 
@@ -541,16 +542,16 @@ func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		at := t1.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%20) / 20
-		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
-		_ = p.ObserveProperty("cpu_pressure_ratio", "", 0.9*x+0.05, at.Add(2*time.Second))
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_pressure_ratio", Subject: "", Value: 0.9*x + 0.05, At: at.Add(2 * time.Second)})
 	}
 	// Then a sign-flipped stream for the same pair.
 	t2 := time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 40; i++ {
 		at := t2.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%20) / 20
-		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
-		_ = p.ObserveProperty("cpu_pressure_ratio", "", -(0.9*x + 0.05), at.Add(2*time.Second))
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_pressure_ratio", Subject: "", Value: -(0.9*x + 0.05), At: at.Add(2 * time.Second)})
 	}
 
 	hist, _ := p.GetHistory()
@@ -586,8 +587,8 @@ func TestPendingCandidateDirectionFollowsTheEvidence(t *testing.T) {
 		for i := 0; i < n; i++ {
 			at := start.Add(time.Duration(i) * 10 * time.Second)
 			x := float64(i%10) / 10
-			_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
-			_ = p.ObserveProperty("pressure", "", 0.5+slope*x, at)
+			_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: x, At: at})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Subject: "", Value: 0.5 + slope*x, At: at})
 		}
 	}
 	feed(t0, 12, 0.4)
@@ -617,8 +618,8 @@ func TestEachObservationPairsOnce(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i) / 10
-		_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
-		_ = p.ObserveProperty("pressure", "", x, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: x, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Subject: "", Value: x, At: at})
 	}
 	cs := mustCandidates(t, p)
 	if len(cs) != 1 {
@@ -643,9 +644,9 @@ func TestCapDeferralIsRecordedAndReentersWhenItOutranksThePending(t *testing.T) 
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%10) / 10
 		for _, pod := range pods {
-			_ = p.ObserveProperty("m@"+pod, pod, x, at)
+			_ = p.ObserveProperty(types.PropertyReading{ID: "m@" + pod, Subject: pod, Value: x, At: at})
 		}
-		_ = p.ObserveProperty("node", "", x, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "node", Subject: "", Value: x, At: at})
 	}
 	byID := func() map[string]*types.CandidateEdge {
 		h, _ := p.GetHistory()
@@ -716,7 +717,7 @@ func TestSettledCandidatesCannotBeRejectedOrDeferred(t *testing.T) {
 		t.Fatal("no candidate to confirm")
 	}
 	id := cs[0].CandidateID
-	if _, err := p.Confirm(id); err != nil {
+	if _, err := p.Confirm(id, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Reject(id); err == nil {
@@ -733,30 +734,209 @@ func TestSettledCandidatesCannotBeRejectedOrDeferred(t *testing.T) {
 	}
 }
 
-// TestObserveProperty_NeverPairsTwoUnscopedProperties: node-level properties are the
-// backbone's business; two of them that correlate perfectly must not become a
-// candidate through the property path.
-func TestObserveProperty_NeverPairsTwoUnscopedProperties(t *testing.T) {
+// TestObserveProperty_PairsNodePropertiesUndirected: two node-level properties that
+// correlate become one undirected candidate, whichever arrives first, and a subject
+// still pairs with each of them, directed.
+func TestObserveProperty_PairsNodePropertiesUndirected(t *testing.T) {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 20; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%10) / 10
-		_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
-		_ = p.ObserveProperty("pressure", "", x, at)
-		_ = p.ObserveProperty("load", "", 0.5*x, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: x, At: at})
+		// Alternate arrival order: the pair must still fold into one buffer.
+		if i%2 == 0 {
+			_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Value: x, At: at})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "load", Value: 0.5 * x, At: at})
+		} else {
+			_ = p.ObserveProperty(types.PropertyReading{ID: "load", Value: 0.5 * x, At: at})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Value: x, At: at})
+		}
 	}
 	h, _ := p.GetHistory()
-	var scoped int
+	var scoped, undirected int
 	for _, c := range h {
-		if !strings.Contains(c.FromID, "@") && !strings.Contains(c.ToID, "@") {
-			t.Errorf("two unscoped properties were paired: %s", c.CandidateID)
-		}
-		if strings.Contains(c.FromID, "@") {
+		switch {
+		case c.Undirected:
+			undirected++
+			if c.CandidateID != "load<->pressure" || c.FromID != "load" || c.ToID != "pressure" {
+				t.Errorf("undirected candidate %s (%s, %s); want load<->pressure in lexicographic order", c.CandidateID, c.FromID, c.ToID)
+			}
+			if c.NObservations != 20 {
+				t.Errorf("n=%d; both arrival orders must fold into one buffer of 20 pairs", c.NObservations)
+			}
+		case strings.Contains(c.FromID, "@"):
 			scoped++
 		}
 	}
+	if undirected != 1 {
+		t.Errorf("%d undirected candidates; want exactly one for the node pair", undirected)
+	}
 	if scoped != 2 {
 		t.Errorf("%d scoped candidates; want pod:a paired with both node properties", scoped)
+	}
+}
+
+// coveredOneWay covers exactly from -> to with the given sign.
+type coveredOneWay struct {
+	from, to string
+	sign     int
+}
+
+func (c coveredOneWay) Covered(from, to string, sign int) bool {
+	return from == c.from && to == c.to && sign == c.sign
+}
+
+var unit = [2]float64{0, 1}
+
+// feedNodePair drives two node-level properties with the given series.
+func feedNodePair(p *minimal.MICorrelationProposer, n int, a, b func(i int) float64, rngA, rngB *[2]float64) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < n; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "a", Value: a(i), At: at, Range: rngA})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "b", Value: b(i), At: at, Range: rngB})
+	}
+}
+
+// TestVariationGate: correlation is scale-free, so a series that moves 0.05% of its
+// declared range still correlates perfectly. The gate holds such a pair back, lets a
+// pair that moves through it, and states that it could not check an end with no
+// declared range rather than passing it silently.
+func TestVariationGate(t *testing.T) {
+	big := func(i int) float64 { return float64(i%10) / 10 }       // moves 90% of [0,1]
+	tiny := func(i int) float64 { return 0.5 + float64(i%10)/2e4 } // moves 0.045% of [0,1]
+
+	for _, tc := range []struct {
+		name       string
+		a, b       func(int) float64
+		rngA, rngB *[2]float64
+		want       bool
+		caveats    int
+	}{
+		{"both move", big, big, &unit, &unit, true, 0},
+		{"one barely moves", big, tiny, &unit, &unit, false, 0},
+		{"range undeclared: not checked, and said so", big, tiny, &unit, nil, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+			feedNodePair(p, 20, tc.a, tc.b, tc.rngA, tc.rngB)
+			cs, _ := p.GetCandidates()
+			if got := len(cs) == 1; got != tc.want {
+				t.Fatalf("candidates=%d; want proposed=%v", len(cs), tc.want)
+			}
+			if tc.want && len(cs[0].Caveats) != tc.caveats {
+				t.Errorf("caveats %q; want %d", cs[0].Caveats, tc.caveats)
+			}
+		})
+	}
+
+	t.Run("0 disables the gate", func(t *testing.T) {
+		p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+		p.SetMinSpread(0)
+		feedNodePair(p, 20, big, tiny, &unit, &unit)
+		if cs, _ := p.GetCandidates(); len(cs) != 1 {
+			t.Errorf("candidates=%d with the gate off; want 1", len(cs))
+		}
+	})
+}
+
+// TestCompositionFlag: a subject's metric against the node total of the same metric
+// is part against whole. It is still proposed, marked as such, and a different metric
+// is not marked.
+// Readings of one tick arrive one after another while the previous tick's are still
+// inside the pair window. After a missed reading the first arrival of the next tick
+// finds the other's previous value unpaired and folds it; the same-tick reading that
+// follows must replace that pair, or the window stays one interval out of step for
+// good — and on an alternating series a one-interval lag reads as r = -1.
+func TestPairsReadingsOfTheSameTickAfterAGap(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i % 2)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: x, At: at})
+		if i != 5 { // one failed read
+			_ = p.ObserveProperty(types.PropertyReading{ID: "memory", Value: x, At: at})
+		}
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu", Value: x, At: at})
+	}
+	h, _ := p.GetHistory()
+	if len(h) == 0 {
+		t.Fatal("no candidates")
+	}
+	for _, c := range h {
+		if c.Direction != types.Positive || c.MIScore < 0.99 {
+			t.Errorf("%s: direction %v |r|=%.3f; same-tick readings must pair, giving r = +1", c.CandidateID, c.Direction, c.MIScore)
+		}
+		if c.NObservations < 19 {
+			t.Errorf("%s: n=%d; want one pair per tick with both readings", c.CandidateID, c.NObservations)
+		}
+	}
+}
+
+func TestCompositionFlag(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: x, At: at, Range: &unit})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_utilization", Value: 0.2 + 0.5*x, At: at, Range: &unit})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu_pressure_ratio", Value: 0.1 + 0.3*x, At: at, Range: &unit})
+	}
+	cs, _ := p.GetCandidates()
+	kinds := map[string]string{}
+	for _, c := range cs {
+		kinds[c.CandidateID] = c.Kind
+	}
+	if k, ok := kinds["cpu_utilization@pod:a->cpu_utilization"]; !ok || k != types.CandidateKindComposition {
+		t.Errorf("pod CPU -> node CPU: kind %q (proposed=%v); want %q", k, ok, types.CandidateKindComposition)
+	}
+	if k, ok := kinds["cpu_utilization@pod:a->cpu_pressure_ratio"]; !ok || k != "" {
+		t.Errorf("pod CPU -> node pressure: kind %q (proposed=%v); want an ordinary candidate", k, ok)
+	}
+	prop, err := p.Confirm("cpu_utilization@pod:a->cpu_utilization", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prop.Description, "composition") {
+		t.Errorf("confirmed composition's description %q does not say so", prop.Description)
+	}
+}
+
+// TestUndirectedPairCoveredEitherWay: a relationship declared b -> a covers the a<->b
+// candidate, since the candidate claims no direction; a directed candidate is still
+// covered only by its own direction.
+func TestUndirectedPairCoveredEitherWay(t *testing.T) {
+	x := func(i int) float64 { return float64(i%10) / 10 }
+	p := minimal.NewMICorrelationProposer(coveredOneWay{"b", "a", 1}, 0.5, 5, 60, 15*time.Second)
+	feedNodePair(p, 20, x, x, &unit, &unit)
+	if cs, _ := p.GetCandidates(); len(cs) != 0 {
+		t.Errorf("b -> a is declared; the undirected a<->b was still proposed: %v", cs[0].CandidateID)
+	}
+}
+
+// TestConfirmOrientation: a directed candidate is confirmed as proposed and refuses
+// its target as the source; an undirected one runs from whichever end is named.
+func TestConfirmOrientation(t *testing.T) {
+	x := func(i int) float64 { return float64(i%10) / 10 }
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	feedNodePair(p, 20, x, x, &unit, &unit)
+	if _, err := p.Confirm("a<->b", "b"); err != nil {
+		t.Fatalf("undirected confirm from b: %v", err)
+	}
+
+	q := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	feedScoped(q, 40, 0)
+	cs, _ := q.GetCandidates()
+	if len(cs) == 0 {
+		t.Fatal("no scoped candidate to confirm")
+	}
+	if _, err := q.Confirm(cs[0].CandidateID, cs[0].ToID); !errors.Is(err, contracts.ErrBadConfirmation) {
+		t.Errorf("directed candidate confirmed from its target: %v; want ErrBadConfirmation", err)
+	}
+	if _, err := q.Confirm(cs[0].CandidateID, cs[0].FromID); err != nil {
+		t.Errorf("directed candidate confirmed from its source: %v", err)
 	}
 }

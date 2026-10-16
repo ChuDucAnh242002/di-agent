@@ -140,7 +140,7 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 			// retired and the candidate was forgotten, so a return proposes it afresh
 			// and confirming it again is the revival the lifecycle promises.
 			if _, want := expected[key]; want {
-				if err := sm.ConfirmCandidate(c.CandidateID); err != nil {
+				if err := sm.ConfirmCandidate(c.CandidateID, ""); err != nil {
 					t.Fatalf("tick %d: confirm %s: %v", i, key, err)
 				}
 				r.confirmed[key] = true

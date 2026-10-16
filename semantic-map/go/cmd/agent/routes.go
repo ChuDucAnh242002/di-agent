@@ -27,7 +27,8 @@ package main
 // /ontology/proposition             POST    AddPropositionRequest          204
 // /agent/reset                      POST    ResetRequest                   204
 // /agent/tune                       POST    TuneRequest                    200 TuneResponse
-// /candidates/{id}/confirm          POST    —                              204
+// /candidates/{id}/confirm          POST    ConfirmRequest (optional)      204
+//                                                                          400 (orientation missing or wrong)
 // /candidates/{id}/reject           POST    —                              204
 // /candidates/{id}/defer            POST    —                              204
 // /peers                            GET     —                              200 []PeerDTO
@@ -48,9 +49,11 @@ package main
 // endpoints excepted).
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime"
@@ -581,11 +584,33 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Path-only candidate review actions. No body, no requireJSON.
+	// Candidate review actions. Reject and defer are path-only. Confirm takes an
+	// optional body naming the end an undirected candidate runs from; when a body is
+	// sent it must be JSON, which keeps the CSRF guard the other POSTs have.
 	mux.HandleFunc("POST /candidates/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.ConfirmCandidate(id); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req ConfirmRequest
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := requireJSON(r); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if err := sm.ConfirmCandidate(id, req.From); err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, contracts.ErrBadConfirmation) {
+				code = http.StatusBadRequest
+			}
+			writeError(w, code, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

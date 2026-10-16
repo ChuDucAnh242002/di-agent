@@ -49,6 +49,12 @@ type AddPropositionRequest struct {
 	PriorStrength float64 `json:"prior_strength"`
 }
 
+// ConfirmRequest is the optional body of POST /candidates/{id}/confirm. From names
+// the end an undirected candidate runs from; a directed candidate needs no body.
+type ConfirmRequest struct {
+	From string `json:"from"`
+}
+
 // ResetRequest is the body of POST /agent/reset.
 type ResetRequest struct {
 	From string `json:"from"`

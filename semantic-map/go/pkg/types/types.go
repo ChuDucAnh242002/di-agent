@@ -237,6 +237,8 @@ type OutcomeSimulation struct {
 //	BlockIOUtil          block I/O bandwidth consumed
 //	CPUPressureRatio     PSI cpu.some stall fraction
 //	IOPressureRatio      PSI io.some stall fraction
+//	MemoryPressureRatio  PSI memory.some stall fraction
+//	CPUStealRatio        share of CPU time the hypervisor gave to others (node-level)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -258,6 +260,8 @@ const (
 	BlockIOUtil         MetricType = "block_io_util"
 	CPUPressureRatio    MetricType = "cpu_pressure_ratio"
 	IOPressureRatio     MetricType = "io_pressure_ratio"
+	MemoryPressureRatio MetricType = "memory_pressure_ratio"
+	CPUStealRatio       MetricType = "cpu_steal_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
@@ -335,6 +339,20 @@ type TuneAdjustment struct {
 
 // ── Proposer types ────────────────────────────────────────────────────────────
 
+// PropertyReading is one observed property value as the proposer sees it. Range is
+// the producer's declared range, nil when none was declared: the proposer's variation
+// gate measures movement against it and cannot without it.
+type PropertyReading struct {
+	ID      string
+	Subject string
+	Value   float64
+	At      time.Time
+	Range   *[2]float64
+}
+
+// CandidateKindComposition marks a candidate whose source is part of its target.
+const CandidateKindComposition = "composition"
+
 type CandidateEdge struct {
 	CandidateID     string
 	FromID          string
@@ -345,6 +363,18 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+	// Undirected is true when nothing says which end drives the other: both are
+	// node-level, and correlation is symmetric. FromID and ToID are then the pair in
+	// lexicographic order, not a claim, and confirming one requires the operator to
+	// name the end the relationship runs from.
+	Undirected bool
+	// Kind is "composition" when the source is a component of the target by
+	// definition (a subject's metric against the node's total of the same metric),
+	// so the correlation is accounting rather than something learned; empty otherwise.
+	Kind string
+	// Caveats states what the proposer could not check for this candidate, such as a
+	// variation gate skipped because an endpoint declared no range.
+	Caveats []string
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
 	// pending cap chose it as the weakest, "operator" when Defer was called. A
 	// cap deferral is provisional and re-enters when it outranks a pending one; an

@@ -14,8 +14,6 @@
 package contracts
 
 import (
-	"time"
-
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -117,15 +115,21 @@ type RelationshipLookup interface {
 // ProposerContract detects statistical patterns suggesting new relationships.
 //
 // ObserveProperty is the entry point from IngestSample: every observed property is
-// fed, and the implementation pairs a scoped property (non-empty subject) only with
-// unscoped ones, direction scoped -> unscoped, inside a time tolerance. Observe is
-// the explicit path for a caller that already knows the pair; ObserveConstruct is
-// the explicit construct-pairing path kept for callers that drive it directly.
+// fed, inside a time tolerance. The implementation pairs a scoped property
+// (non-empty subject) with each unscoped one, directed scoped -> unscoped, and two
+// unscoped properties with each other as an undirected pair, since correlation does
+// not say which drives which. Two scoped properties are not paired. Observe is the
+// explicit path for a caller that already knows the pair; ObserveConstruct is the
+// explicit construct-pairing path kept for callers that drive it directly.
 //
 // Guarantees:
 //   - Read-only observation: no Observe* method modifies the model.
 //   - Confirm never writes: it returns the proposition and the facade applies it,
 //     which is what makes "never modifies the backbone directly" true.
+//   - Orientation: Confirm(id, "") accepts a directed candidate as proposed. An
+//     undirected candidate needs from, one of its two ends, and the proposition
+//     runs from it. Anything else fails with ErrBadConfirmation and leaves the
+//     candidate Pending.
 //   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
 //     or an operator's Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
@@ -137,14 +141,20 @@ type RelationshipLookup interface {
 type ProposerContract interface {
 	Observe(fromID, toID string, valueA, valueB float64) error
 	ObserveConstruct(constructID string, value float64) error
-	ObserveProperty(id, subject string, value float64, at time.Time) error
+	ObserveProperty(r types.PropertyReading) error
 	Forget(propertyID string) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	Confirm(candidateID string) (*types.Proposition, error)
+	Confirm(candidateID, from string) (*types.Proposition, error)
 	Reject(candidateID string) error
 	Defer(candidateID string) error
 	GetHistory() ([]*types.CandidateEdge, error)
 }
+
+// ErrBadConfirmation is returned by Confirm when the orientation given does not fit
+// the candidate: an undirected candidate confirmed without naming an end, an end
+// that is not one of the pair, or a directed candidate confirmed from its target.
+// It is the operator's input that is wrong, not the proposer.
+const ErrBadConfirmation = contractError("the confirmation does not fit the candidate")
 
 // ── Tuner ─────────────────────────────────────────────────────────────────────
 
