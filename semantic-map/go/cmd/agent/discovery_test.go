@@ -30,7 +30,7 @@ func TestNodePairDiscoveredAndConfirmedWithADirection(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explain.NewDisabled())
-	registerStateRoutes(mux, state)
+	registerStateRoutes(mux, state, sm.Discovery)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -100,4 +100,56 @@ func TestNodePairDiscoveredAndConfirmedWithADirection(t *testing.T) {
 		}
 	}
 	t.Error("no cpu_utilization -> cpu_pressure_ratio relationship after the confirm")
+}
+
+// TestStateReportsHowFarDiscoveryWasRationed: GET /state carries the proposer's
+// counts, so an empty candidate list can be told apart from a budget too small to
+// look. An agent without a proposer reports no discovery block at all.
+func TestStateReportsHowFarDiscoveryWasRationed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		proposer bool
+	}{{"budget of one", true}, {"no proposer", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newTestState(t)
+			sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+				StateMap: state, EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+				UseRuleBasedTuner: true, UseProposer: tc.proposer, ProposerMaxPairs: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			registerStateRoutes(mux, state, sm.Discovery)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			rng := [2]float64{0, 1}
+			at := time.Now().Add(-time.Minute).Unix()
+			for i, mt := range []types.MetricType{types.CPUUtilization, types.MemoryUtilization, types.CPUPressureRatio} {
+				s := &types.MetricSample{MetricType: mt, Value: 0.1 * float64(i+1), Unit: "fraction", Range: &rng,
+					TimestampUnix: at, EventID: string(mt)}
+				if err := sm.IngestSample(s); err != nil {
+					t.Fatalf("ingest %s: %v", mt, err)
+				}
+			}
+			var v stateResponse
+			if code := getState(t, srv.URL+"/state", &v); code != 200 {
+				t.Fatalf("GET /state: %d", code)
+			}
+			if !tc.proposer {
+				if v.Discovery != nil {
+					t.Errorf("discovery %+v reported with the proposer off", v.Discovery)
+				}
+				return
+			}
+			d := v.Discovery
+			if d == nil {
+				t.Fatal("no discovery block in /state")
+			}
+			if d.Budget != 1 || d.Properties != 3 || d.EligiblePairs != 3 || d.TestedPairs != 1 || d.TestedByClass[types.PairNodeNode] != 1 {
+				t.Errorf("discovery %+v; want budget 1, 3 properties, 3 eligible, 1 node<->node tested", d)
+			}
+		})
+	}
 }

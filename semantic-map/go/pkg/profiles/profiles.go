@@ -22,6 +22,9 @@ import (
 // headroom for a stalled peer without making the reasoner block forever.
 const defaultPeerTimeout = 2 * time.Second
 
+// DefaultProposerBufSize is the window, in pairs, each tested pair keeps.
+const DefaultProposerBufSize = 120
+
 // Config holds profile-specific tuning parameters.
 type Config struct {
 	// EMAAlphaSlow is the decay factor for the established layer. Zero takes the
@@ -106,8 +109,12 @@ type Config struct {
 	// ProposerMinPairs is the minimum number of paired observations required
 	// before correlation is evaluated. Defaults to 30.
 	ProposerMinPairs int
-	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
+	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to
+	// DefaultProposerBufSize.
 	ProposerBufSize int
+	// ProposerMaxPairs is the pair budget: how many property pairs the proposer
+	// tests at once. 0 means no limit; the agent derives a default from the machine.
+	ProposerMaxPairs int
 	// ProposerMinSpread is the variation gate: the least movement over the window, as
 	// a share of each end's declared range, for a pair to become a candidate. nil
 	// keeps minimal.DefaultMinSpread; 0 disables the gate.
@@ -327,13 +334,14 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		}
 		bufSize := cfg.ProposerBufSize
 		if bufSize == 0 {
-			bufSize = 120
+			bufSize = DefaultProposerBufSize
 		}
 		mi := minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
 			time.Duration(cfg.PairWindowSeconds)*time.Second)
 		if cfg.ProposerMinSpread != nil {
 			mi.SetMinSpread(*cfg.ProposerMinSpread)
 		}
+		mi.SetMaxPairs(cfg.ProposerMaxPairs)
 		proposer = mi
 	} else {
 		proposer = minimal.NewDisabledProposer()

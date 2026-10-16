@@ -201,16 +201,57 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		for _, c := range history {
 			fromScoped, toScoped := strings.Contains(c.FromID, "@"), strings.Contains(c.ToID, "@")
 			switch {
-			case fromScoped && toScoped:
-				t.Errorf("two subjects were paired: %s", c.CandidateID)
+			case fromScoped && toScoped && !c.Undirected:
+				t.Errorf("two subjects make an undirected candidate; %s claims a direction", c.CandidateID)
+			case fromScoped && toScoped && c.FromID > c.ToID:
+				t.Errorf("an undirected candidate carries its pair in lexicographic order: %s", c.CandidateID)
 			case !fromScoped && toScoped:
 				t.Errorf("direction must be scoped -> unscoped: %s", c.CandidateID)
-			case fromScoped && c.Undirected:
+			case fromScoped && !toScoped && c.Undirected:
 				t.Errorf("a subject -> node candidate is directed: %s", c.CandidateID)
 			case !fromScoped && !toScoped && !c.Undirected:
 				t.Errorf("two node-level properties make an undirected candidate; %s claims a direction", c.CandidateID)
 			case !fromScoped && !toScoped && c.FromID > c.ToID:
 				t.Errorf("an undirected candidate carries its pair in lexicographic order: %s", c.CandidateID)
+			}
+		}
+	})
+
+	t.Run("DiscoveryAccountsForWhatIsTested", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a", "pod:b"})
+		d, err := p.Discovery()
+		if err != nil {
+			t.Fatalf("Discovery: %v", err)
+		}
+		if d == nil {
+			if history, _ := p.GetHistory(); len(history) != 0 {
+				t.Fatal("an implementation that proposes candidates must report what it tests")
+			}
+			t.Skip("implementation tests no pairs — nothing to account for")
+		}
+		if d.Budget > 0 && d.TestedPairs+d.IdlePairs > d.Budget {
+			t.Errorf("tested %d pairs and held %d idle with a budget of %d", d.TestedPairs, d.IdlePairs, d.Budget)
+		}
+		if d.TestedPairs > d.EligiblePairs {
+			t.Errorf("tested %d pairs of %d eligible", d.TestedPairs, d.EligiblePairs)
+		}
+		var sum int
+		for _, n := range d.TestedByClass {
+			sum += n
+		}
+		if sum != d.TestedPairs {
+			t.Errorf("tested by class sums to %d; tested pairs is %d", sum, d.TestedPairs)
+		}
+		// Four properties, all observed this tick: six pairs, every class among them.
+		if d.Properties != 4 || d.EligiblePairs != 6 {
+			t.Errorf("properties=%d eligible=%d; want 4 and 6", d.Properties, d.EligiblePairs)
+		}
+		if d.Budget == 0 {
+			for _, class := range []string{types.PairSubjectNode, types.PairNodeNode, types.PairSubjectSubject} {
+				if d.TestedByClass[class] == 0 {
+					t.Errorf("no %s pair tested with no budget limit", class)
+				}
 			}
 		}
 	})

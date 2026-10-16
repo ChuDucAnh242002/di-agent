@@ -351,6 +351,12 @@ func (m *SemanticMap) router() MetricRouter {
 
 // ── Graph extension ───────────────────────────────────────────────────────────
 
+// Discovery reports how far the proposer rationed the pairs it tests; nil when it
+// tests none.
+func (m *SemanticMap) Discovery() (*types.DiscoveryCounts, error) {
+	return m.proposer.Discovery()
+}
+
 func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetCandidates()
 }

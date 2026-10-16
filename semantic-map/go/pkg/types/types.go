@@ -350,8 +350,45 @@ type PropertyReading struct {
 	Range   *[2]float64
 }
 
-// CandidateKindComposition marks a candidate whose source is part of its target.
-const CandidateKindComposition = "composition"
+// Candidate kinds: what is known about a pair before any correlation is read.
+const (
+	// CandidateKindComposition marks a candidate whose source is part of its target.
+	CandidateKindComposition = "composition"
+	// CandidateKindSameMetric marks two subjects' readings of one metric. They often
+	// move together because something drives both (the same cron, the same client),
+	// not because either drives the other.
+	CandidateKindSameMetric = "same-metric"
+)
+
+// Pair classes, as DiscoveryCounts reports them.
+const (
+	PairSubjectNode    = "subject->node"
+	PairNodeNode       = "node<->node"
+	PairSubjectSubject = "subject<->subject"
+)
+
+// DiscoveryCounts says how far discovery was rationed: how many pairs could be
+// tested, how many are, and how many were displaced to make room. Without it an
+// empty candidate list cannot be told apart from a budget too small to look.
+type DiscoveryCounts struct {
+	// Budget is how many pairs may be tested at once; 0 means no limit.
+	Budget int `json:"budget"`
+	// Properties is how many properties were observed within the pair window of the
+	// latest reading: the ones a pair can be formed from now.
+	Properties    int `json:"properties"`
+	EligiblePairs int `json:"eligible_pairs"`
+	// TestedPairs is the pairs being tested whose ends were both observed within the
+	// pair window; IdlePairs those with an end gone quiet. Both hold budget: an idle
+	// pair is displaced first when a new pair needs room, and dropped when its
+	// property retires.
+	TestedPairs int `json:"tested_pairs"`
+	IdlePairs   int `json:"idle_pairs"`
+	// TestedByClass splits TestedPairs by pair class.
+	TestedByClass map[string]int `json:"tested_by_class"`
+	// Displaced counts pairs dropped, since the start, to make room for more
+	// variable ones.
+	Displaced uint64 `json:"displaced"`
+}
 
 type CandidateEdge struct {
 	CandidateID     string
@@ -364,21 +401,24 @@ type CandidateEdge struct {
 	DeploymentsSeen int
 	Status          CandidateStatus
 	// Undirected is true when nothing says which end drives the other: both are
-	// node-level, and correlation is symmetric. FromID and ToID are then the pair in
+	// node-level or both belong to subjects, and correlation is symmetric. FromID and ToID are then the pair in
 	// lexicographic order, not a claim, and confirming one requires the operator to
 	// name the end the relationship runs from.
 	Undirected bool
 	// Kind is "composition" when the source is a component of the target by
 	// definition (a subject's metric against the node's total of the same metric),
-	// so the correlation is accounting rather than something learned; empty otherwise.
+	// so the correlation is accounting rather than something learned; "same-metric"
+	// for two subjects' readings of one metric, where a shared driver is the likely
+	// explanation; empty otherwise.
 	Kind string
 	// Caveats states what the proposer could not check for this candidate, such as a
 	// variation gate skipped because an endpoint declared no range.
 	Caveats []string
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
-	// pending cap chose it as the weakest, "operator" when Defer was called. A
-	// cap deferral is provisional and re-enters when it outranks a pending one; an
-	// operator's is not overturned.
+	// pending cap chose it as the weakest, "untested" when its pair was displaced
+	// from the pair budget and its numbers stopped being updated, "operator" when
+	// Defer was called. The proposer's own deferrals are provisional and re-enter
+	// when the evidence holds again; an operator's is not overturned.
 	Reason string
 }
 

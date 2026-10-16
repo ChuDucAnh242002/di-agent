@@ -11,7 +11,16 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
+
+// stateResponse is GET /state: the view, and how far discovery was rationed. The
+// census counts the whole map; Discovery counts the pairs the proposer could and
+// did test, which no filter narrows.
+type stateResponse struct {
+	statemap.StateView
+	Discovery *types.DiscoveryCounts `json:"discovery,omitempty"`
+}
 
 // registerStateRoutes exposes the state model: what the system exhibits, how its
 // properties relate, and why the agent answered as it did.
@@ -19,7 +28,10 @@ import (
 // The surface is deliberately query-shaped rather than dump-shaped. An operator
 // debugging a decision asks "what did it think was going on", and the answer needs
 // to be one request naming a property, not a graph export they then have to read.
-func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
+//
+// discovery, when non-nil, supplies the proposer's rationing counts for GET /state:
+// an empty candidate list means nothing only if the pairs were actually tested.
+func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() (*types.DiscoveryCounts, error)) {
 	if sm == nil {
 		return
 	}
@@ -62,7 +74,16 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			}
 			q.MinConfidence = f
 		}
-		writeJSON(w, sm.State(q))
+		view := stateResponse{StateView: sm.State(q)}
+		if discovery != nil {
+			d, err := discovery()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			view.Discovery = d
+		}
+		writeJSON(w, view)
 	})
 
 	// GET /state/properties/{id} — one property, or its explanation as text when

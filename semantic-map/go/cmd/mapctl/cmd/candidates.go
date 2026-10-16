@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -116,15 +117,17 @@ func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 
 // kindLabel says what kind of claim a candidate would make: "undirected" when the
 // operator must choose which end it runs from, "composition" when the source is part
-// of the target by definition, empty for an ordinary directed candidate.
+// of the target by definition, "same-metric" for two subjects' readings of one
+// metric; both when both hold, empty for an ordinary directed candidate.
 func kindLabel(c client.CandidateEdge) string {
-	switch {
-	case c.Undirected:
-		return "undirected"
-	case c.Kind != "":
-		return c.Kind
+	var parts []string
+	if c.Undirected {
+		parts = append(parts, "undirected")
 	}
-	return ""
+	if c.Kind != "" {
+		parts = append(parts, c.Kind)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // directionLabel maps the int Direction to its wire-readable form, matching

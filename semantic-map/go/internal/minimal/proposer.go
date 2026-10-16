@@ -20,3 +20,4 @@ func (p *DisabledProposer) Defer(candidateID string) error                  { re
 func (p *DisabledProposer) GetHistory() ([]*types.CandidateEdge, error)     { return nil, nil }
 func (p *DisabledProposer) ObserveProperty(types.PropertyReading) error     { return nil }
 func (p *DisabledProposer) Forget(_ string) error                           { return nil }
+func (p *DisabledProposer) Discovery() (*types.DiscoveryCounts, error)      { return nil, nil }

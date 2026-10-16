@@ -362,6 +362,7 @@ Full inventory, so you can reason about it before deploying.
 | --------------- | ---- | --- |
 | `/sys/fs/cgroup/**` | Every `-collect-interval` | CPU, memory, throttling and CPU, I/O and memory pressure (`cpu.stat`, `memory.current`, `cpu.pressure`, `io.pressure`, `memory.pressure`). Read-only. Disable with `-cgroup-root ""`. |
 | `/proc/meminfo`, `/proc/stat` | Every `-collect-interval`, with the cgroup collector | The node's memory in use (a cgroup v2 root has no memory files) and CPU steal time. Read-only. |
+| `/proc/meminfo`, the agent's own `/sys/fs/cgroup/memory.max` and `cpu.max` | Once at start, with the proposer on and `-proposer-max-pairs=0` | The memory and CPUs the agent may use, from which the pair budget is derived. A container limit lower than the host counts. Read-only. |
 | `$NETDATA_URL/api/v1/data` | Every `-collect-interval` | Host metrics. Disable with `-netdata-url ""`. |
 | `-priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
 | `-explain-prompt` files | Once, at startup | Only when the explain layer is enabled. |
