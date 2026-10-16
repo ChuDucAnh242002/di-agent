@@ -694,3 +694,46 @@ func TestIOAndMemoryPressureAndSteal(t *testing.T) {
 		t.Errorf("a subject reported cpu_steal_ratio %v; steal is the node's alone", s.Value)
 	}
 }
+
+// TestPodsAreNamedFromTheKubeletsLogDirectory: a pod's subject is its UID, which is
+// stable and unique but says nothing to an operator. The kubelet keeps one directory
+// per pod under /var/log/pods named <namespace>_<name>_<uid>, so the collector labels
+// each pod with its namespace and name from there; a pod created after the first
+// tick is named on its first tick, and one with no directory is left unnamed.
+func TestPodsAreNamedFromTheKubeletsLogDirectory(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	logs := t.TempDir()
+	for _, d := range []string{"default_cycler_" + testUID, "junk", "kube-system_coredns-54f859f7dc-4tjdt_99999999-9999-9999-9999-999999999999"} {
+		if err := os.Mkdir(filepath.Join(logs, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot, PodLogRoot: logs})
+	const uidB = "11111111-2222-3333-4444-555555555555"
+	labels := func() map[string]map[string]string {
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]map[string]string{}
+		for s, ms := range bySubject(samples) {
+			for _, m := range ms {
+				out[s] = m.Labels
+			}
+		}
+		return out
+	}
+	got := labels()
+	if a := got["pod:"+testUID]; a["namespace"] != "default" || a["pod"] != "cycler" {
+		t.Errorf("pod A labels %v; want namespace=default pod=cycler", a)
+	}
+	if b := got["pod:"+uidB]; b["pod"] != "" || b["namespace"] != "" {
+		t.Errorf("pod B labels %v; a pod with no log directory has no name", b)
+	}
+	if err := os.Mkdir(filepath.Join(logs, "web_api-7d4b9_"+uidB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if b := labels()["pod:"+uidB]; b["namespace"] != "web" || b["pod"] != "api-7d4b9" {
+		t.Errorf("pod B labels %v after its directory appeared; want namespace=web pod=api-7d4b9", b)
+	}
+}

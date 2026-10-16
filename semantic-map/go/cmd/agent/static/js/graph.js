@@ -21,7 +21,7 @@
 // Properties scoped to a subject are enclosed and labelled with that subject, so
 // the picture answers "which workloads are running" before anything is clicked.
 
-import { effective, subjectOf, shortLabel, fmt, escapeHTML } from './model.js';
+import { effective, subjectOf, subjectName, shortLabel, fmt, escapeHTML } from './model.js';
 import { Force, footprint, HULL_PAD, HULL_LABEL } from './force.js';
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -290,6 +290,7 @@ export class GraphView {
     if (!needle) return model.properties;
     return model.properties.filter((p) => p.id.toLowerCase().includes(needle)
       || (p.subject || '').toLowerCase().includes(needle)
+      || (subjectName(p) || '').toLowerCase().includes(needle)
       || (p.unit || '').toLowerCase().includes(needle));
   }
 
@@ -385,7 +386,8 @@ export class GraphView {
     for (const [subject, memberIDs] of bySubject) {
       const g = el('g', { class: 'hull', 'data-hull': subject, style: 'cursor:grab' });
       const title = el('title');
-      title.textContent = `${subject} — drag to move the box · double-click to release it`;
+      const name = model.nameOf(subject);
+      title.textContent = `${name === subject ? subject : `${name} (${subject})`} — drag to move the box · double-click to release it`;
       g.append(title);
       const rect = el('rect', {
         rx: 16, fill: 'var(--surface-2)', 'fill-opacity': 0.55,
@@ -397,7 +399,7 @@ export class GraphView {
         stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke',
         'stroke-linejoin': 'round',
       });
-      label.textContent = subject;
+      label.textContent = name;
       g.append(rect, label);
       // Pinned when the operator put the box somewhere: every member stays.
       let pin = null;
@@ -733,11 +735,11 @@ function propertyTip(p, model) {
     ['observations', fmt.int(p.n_observations)],
     ['status', p.status],
   ];
-  if (p.subject) rows.unshift(['subject', p.subject]);
+  if (p.subject) rows.unshift(['subject', subjectName(p) ? `${subjectName(p)} (${p.subject})` : p.subject]);
   if (p.kind === 'derived' && p.members?.length) rows.push(['members', p.members.length]);
   const inbound = model.influencesOn(p.id).length;
   if (inbound) rows.push(['influenced by', inbound]);
-  return { title: p.id, kind: p.kind, rows };
+  return { title: model.display(p.id), kind: p.kind, rows };
 }
 
 function relationshipTip(r) {

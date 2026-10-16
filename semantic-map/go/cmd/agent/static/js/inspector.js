@@ -102,7 +102,7 @@ export class Inspector {
     const frag = node(`
       <div class="inspector-head">
         <div class="title">
-          <div class="eyebrow">${p.kind} property${p.subject ? ` · ${escapeHTML(p.subject)}` : ''}</div>
+          <div class="eyebrow">${p.kind} property${p.subject ? ` · <span title="${escapeHTML(p.subject)}">${escapeHTML(model.nameOf(p.subject))}</span>` : ''}</div>
           <h2>${escapeHTML(p.id)}</h2>
         </div>
         <button class="btn ghost small" data-act="close" aria-label="close">✕</button>
@@ -298,7 +298,7 @@ export class Inspector {
             <span class="muted" style="font-size:11px">…or were not here at all</span>
             <select data-act="add-without" style="width:auto;max-width:170px">
               <option value="">leave something out…</option>
-              ${subjects.map((s) => `<option value="${escapeHTML(s.id)}">subject ${escapeHTML(s.id)}</option>`).join('')}
+              ${subjects.map((s) => `<option value="${escapeHTML(s.id)}">subject ${escapeHTML(s.name || s.id)}</option>`).join('')}
               ${assumable.map((x) => `<option value="${escapeHTML(x.id)}">property ${escapeHTML(x.id)}</option>`).join('')}
             </select>
           </div>

@@ -99,6 +99,10 @@ func main() {
 	cgroupCmdLabel := flag.Bool("cgroup-cmd-label", false,
 		"stamp cmd=<argv0> from each subject's first process (label only; needs /proc "+
 			"visibility, i.e. hostPID or privileged)")
+	cgroupPodLogs := flag.String("cgroup-pod-logs", minimal.DefaultPodLogRoot,
+		"the kubelet's pod log directory (<namespace>_<name>_<uid> per pod); each pod "+
+			"subject is labelled with its namespace and name from it. Empty names none; "+
+			"in a container, mount the host's directory here")
 	proposerThreshold := flag.Float64("proposer-threshold", 0.85,
 		"|Pearson r| above which the proposer emits a candidate")
 	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
@@ -303,8 +307,8 @@ func main() {
 	}
 	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f fdr=%.3f max-pairs=%d",
 		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, *proposerFDR, maxPairs)
-	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
-		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
+	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v pod-logs=%q",
+		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel, *cgroupPodLogs)
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -321,6 +325,7 @@ func main() {
 		CgroupUnitGlobs:      splitCSV(*cgroupUnits),
 		CgroupMaxSubjects:    *cgroupMaxSubjects,
 		CgroupCmdLabel:       *cgroupCmdLabel,
+		CgroupPodLogRoot:     *cgroupPodLogs,
 		ScriptPath:           *script,
 		NetdataURL:           *netdataURL,
 		CollectInterval:      *collectInterval,
