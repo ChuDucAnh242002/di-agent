@@ -1205,6 +1205,29 @@ func feedChart(p *minimal.MICorrelationProposer, chart string, from, to int, cou
 
 func always(int) bool { return true }
 
+// TestChartSurvivesAReadingWithoutOne: a property fed by two producers, one naming its
+// chart and one not, keeps the chart. Taking each reading's chart as given made the
+// property leave and rejoin its group every tick.
+func TestChartSurvivesAReadingWithoutOne(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 60; i++ {
+		feedChart(p, "system.cpu", i, i+1, always)
+		// The second producer's reading of busy, a second later and with no chart.
+		x := float64(i%10) / 10
+		at := t0.Add(time.Duration(i)*10*time.Second + time.Second)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "busy", Value: x, At: at, Range: &[2]float64{0, 1}})
+	}
+	if d, _ := p.Discovery(); len(d.Groups) != 1 || d.Groups[0].Chart != "system.cpu" {
+		t.Errorf("groups %+v with busy also read without a chart; want the system.cpu group to stand", d.Groups)
+	}
+	for _, c := range mustCandidates(t, p) {
+		if c.CandidateID == "busy<->busy_avg" {
+			t.Error("busy<->busy_avg proposed: a fold after the chartless reading took the group's link for an ordinary pair")
+		}
+	}
+}
+
 // TestArithmeticGroupIsReportedOnceAndRepresented: two properties of one chart that
 // move as one are a group, not a candidate. The more variable of them stands for the
 // group: it is paired with load, and the other is not. Without a chart nothing says

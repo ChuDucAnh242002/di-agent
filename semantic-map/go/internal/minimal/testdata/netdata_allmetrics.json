@@ -1,0 +1,488 @@
+{
+ "app.netdata_cpu_utilization": {
+  "context": "app.cpu_utilization",
+  "dimensions": {
+   "system": {
+    "name": "system",
+    "value": 0.0
+   },
+   "user": {
+    "name": "user",
+    "value": 0.9895
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "app.netdata_cpu_utilization",
+  "units": "percentage"
+ },
+ "cgroup_k8s_kubepods_burstable_pod8f3c1234-aaaa-bbbb-cccc-1234567890ab_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.cpu": {
+  "context": "k8s.cgroup.cpu",
+  "dimensions": {
+   "system": {
+    "name": "system",
+    "value": 0.0
+   },
+   "user": {
+    "name": "user",
+    "value": 0.0
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "cgroup_k8s_kubepods_burstable_pod8f3c1234-aaaa-bbbb-cccc-1234567890ab_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.cpu",
+  "units": "percentage"
+ },
+ "cpu.cpu0": {
+  "context": "cpu.cpu",
+  "dimensions": {
+   "guest": {
+    "name": "guest",
+    "value": 0.0
+   },
+   "guest_nice": {
+    "name": "guest_nice",
+    "value": 0.0
+   },
+   "idle": {
+    "name": "idle",
+    "value": 73.2673267
+   },
+   "iowait": {
+    "name": "iowait",
+    "value": 0.0
+   },
+   "irq": {
+    "name": "irq",
+    "value": 0.0
+   },
+   "nice": {
+    "name": "nice",
+    "value": 0.0
+   },
+   "softirq": {
+    "name": "softirq",
+    "value": 0.0
+   },
+   "steal": {
+    "name": "steal",
+    "value": 0.0
+   },
+   "system": {
+    "name": "system",
+    "value": 0.990099
+   },
+   "user": {
+    "name": "user",
+    "value": 25.7425743
+   }
+  },
+  "family": "utilization",
+  "last_updated": 1792186110,
+  "name": "cpu.cpu0",
+  "units": "percentage"
+ },
+ "cpu.cpu0_interrupts": {
+  "context": "cpu.interrupts",
+  "dimensions": {
+   "10": {
+    "name": "arch_timer_10",
+    "value": 717.8614352
+   },
+   "46": {
+    "name": "virtio0_46",
+    "value": 9.4046645
+   },
+   "51": {
+    "name": "virtio2-req.0_51",
+    "value": 0.0
+   },
+   "56": {
+    "name": "virtio1-request_56",
+    "value": 7.0534984
+   },
+   "IPI0": {
+    "name": "IPI0",
+    "value": 45.8971538
+   },
+   "IPI1": {
+    "name": "IPI1",
+    "value": 115.0068059
+   }
+  },
+  "family": "interrupts",
+  "last_updated": 1792186110,
+  "name": "cpu.cpu0_interrupts",
+  "units": "interrupts/s"
+ },
+ "cpu.cpu1": {
+  "context": "cpu.cpu",
+  "dimensions": {
+   "guest": {
+    "name": "guest",
+    "value": 0.0
+   },
+   "guest_nice": {
+    "name": "guest_nice",
+    "value": 0.0
+   },
+   "idle": {
+    "name": "idle",
+    "value": 63.7254902
+   },
+   "iowait": {
+    "name": "iowait",
+    "value": 0.0
+   },
+   "irq": {
+    "name": "irq",
+    "value": 0.0
+   },
+   "nice": {
+    "name": "nice",
+    "value": 0.9803922
+   },
+   "softirq": {
+    "name": "softirq",
+    "value": 0.0
+   },
+   "steal": {
+    "name": "steal",
+    "value": 0.0
+   },
+   "system": {
+    "name": "system",
+    "value": 0.9803922
+   },
+   "user": {
+    "name": "user",
+    "value": 34.3137255
+   }
+  },
+  "family": "utilization",
+  "last_updated": 1792186110,
+  "name": "cpu.cpu1",
+  "units": "percentage"
+ },
+ "disk.sda": {
+  "context": "disk.io",
+  "dimensions": {
+   "reads": {
+    "name": "reads",
+    "value": 0.0
+   },
+   "writes": {
+    "name": "writes",
+    "value": -2759.3644987
+   }
+  },
+  "family": "sda",
+  "last_updated": 1792186110,
+  "name": "disk.sda",
+  "units": "KiB/s"
+ },
+ "disk_await.sda": {
+  "context": "disk.await",
+  "dimensions": {
+   "reads": {
+    "name": "reads",
+    "value": 0.0
+   },
+   "writes": {
+    "name": "writes",
+    "value": -0.0
+   }
+  },
+  "family": "sda",
+  "last_updated": 1792186110,
+  "name": "disk_await.sda",
+  "units": "milliseconds/operation"
+ },
+ "disk_space._boot": {
+  "context": "disk.space",
+  "dimensions": {
+   "avail": {
+    "name": "avail",
+    "value": 0.749897
+   },
+   "reserved_for_root": {
+    "name": "reserved for root",
+    "value": 0.0606918
+   },
+   "used": {
+    "name": "used",
+    "value": 0.0587616
+   }
+  },
+  "family": "/boot",
+  "last_updated": 1792186110,
+  "name": "disk_space._boot",
+  "units": "GiB"
+ },
+ "disk_util.sda": {
+  "context": "disk.util",
+  "dimensions": {
+   "utilization": {
+    "name": "utilization",
+    "value": 0.0
+   }
+  },
+  "family": "sda",
+  "last_updated": 1792186110,
+  "name": "disk_util.sda",
+  "units": "% of time working"
+ },
+ "mem.available": {
+  "context": "mem.available",
+  "dimensions": {
+   "MemAvailable": {
+    "name": "avail",
+    "value": 2949.9726562
+   }
+  },
+  "family": "overview",
+  "last_updated": 1792186110,
+  "name": "mem.available",
+  "units": "MiB"
+ },
+ "net.enp0s1": {
+  "context": "net.net",
+  "dimensions": {
+   "received": {
+    "name": "received",
+    "value": 11.669601
+   },
+   "sent": {
+    "name": "sent",
+    "value": -278.2646299
+   }
+  },
+  "family": "enp0s1",
+  "last_updated": 1792186110,
+  "name": "net.enp0s1",
+  "units": "kilobits/s"
+ },
+ "net_carrier.enp0s1": {
+  "context": "net.carrier",
+  "dimensions": {
+   "down": {
+    "name": "down",
+    "value": 0.0
+   },
+   "up": {
+    "name": "up",
+    "value": 1.0
+   }
+  },
+  "family": "enp0s1",
+  "last_updated": 1792186110,
+  "name": "net_carrier.enp0s1",
+  "units": "state"
+ },
+ "system.cpu": {
+  "context": "system.cpu",
+  "dimensions": {
+   "guest": {
+    "name": "guest",
+    "value": 0.0
+   },
+   "guest_nice": {
+    "name": "guest_nice",
+    "value": 0.0
+   },
+   "idle": {
+    "name": "idle",
+    "value": 68.8118812
+   },
+   "iowait": {
+    "name": "iowait",
+    "value": 0.0
+   },
+   "irq": {
+    "name": "irq",
+    "value": 0.0
+   },
+   "nice": {
+    "name": "nice",
+    "value": 0.4950495
+   },
+   "softirq": {
+    "name": "softirq",
+    "value": 0.4950495
+   },
+   "steal": {
+    "name": "steal",
+    "value": 0.0
+   },
+   "system": {
+    "name": "system",
+    "value": 0.4950495
+   },
+   "user": {
+    "name": "user",
+    "value": 29.7029703
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "system.cpu",
+  "units": "percentage"
+ },
+ "system.cpu_some_pressure": {
+  "context": "system.cpu_some_pressure",
+  "dimensions": {
+   "some 10": {
+    "name": "some 10",
+    "value": 50.15
+   },
+   "some 300": {
+    "name": "some 300",
+    "value": 40.21
+   },
+   "some 60": {
+    "name": "some 60",
+    "value": 36.51
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "system.cpu_some_pressure",
+  "units": "percentage"
+ },
+ "system.cpu_some_pressure_stall_time": {
+  "context": "system.cpu_some_pressure_stall_time",
+  "dimensions": {
+   "time": {
+    "name": "time",
+    "value": 421.9839
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "system.cpu_some_pressure_stall_time",
+  "units": "ms"
+ },
+ "system.io": {
+  "context": "system.io",
+  "dimensions": {
+   "in": {
+    "name": "in",
+    "value": 0.0
+   },
+   "out": {
+    "name": "out",
+    "value": -3600.0
+   }
+  },
+  "family": "disk",
+  "last_updated": 1792186110,
+  "name": "system.io",
+  "units": "KiB/s"
+ },
+ "system.io_some_pressure_stall_time": {
+  "context": "system.io_some_pressure_stall_time",
+  "dimensions": {
+   "time": {
+    "name": "time",
+    "value": 0.9726532
+   }
+  },
+  "family": "disk",
+  "last_updated": 1792186110,
+  "name": "system.io_some_pressure_stall_time",
+  "units": "ms"
+ },
+ "system.load": {
+  "context": "system.load",
+  "dimensions": {
+   "load1": {
+    "name": "load1",
+    "value": 2.23
+   },
+   "load15": {
+    "name": "load15",
+    "value": 2.37
+   },
+   "load5": {
+    "name": "load5",
+    "value": 2.4
+   }
+  },
+  "family": "load",
+  "last_updated": 1792186110,
+  "name": "system.load",
+  "units": "load"
+ },
+ "system.memory_some_pressure_stall_time": {
+  "context": "system.memory_some_pressure_stall_time",
+  "dimensions": {
+   "time": {
+    "name": "time",
+    "value": 0.0
+   }
+  },
+  "family": "ram",
+  "last_updated": 1792186110,
+  "name": "system.memory_some_pressure_stall_time",
+  "units": "ms"
+ },
+ "system.net": {
+  "context": "system.net",
+  "dimensions": {
+   "InOctets": {
+    "name": "received",
+    "value": 11.6597292
+   },
+   "OutOctets": {
+    "name": "sent",
+    "value": -1.6716
+   }
+  },
+  "family": "network",
+  "last_updated": 1792186110,
+  "name": "system.net",
+  "units": "kilobits/s"
+ },
+ "system.ram": {
+  "context": "system.ram",
+  "dimensions": {
+   "buffers": {
+    "name": "buffers",
+    "value": 86.4453125
+   },
+   "cached": {
+    "name": "cached",
+    "value": 2210.171875
+   },
+   "free": {
+    "name": "free",
+    "value": 837.8085938
+   },
+   "used": {
+    "name": "used",
+    "value": 767.046875
+   }
+  },
+  "family": "ram",
+  "last_updated": 1792186110,
+  "name": "system.ram",
+  "units": "MiB"
+ },
+ "systemd_containerd.cpu_utilization": {
+  "context": "systemd.service.cpu.utilization",
+  "dimensions": {
+   "system": {
+    "name": "system",
+    "value": 0.0353258
+   },
+   "user": {
+    "name": "user",
+    "value": 0.2252
+   }
+  },
+  "family": "cpu",
+  "last_updated": 1792186110,
+  "name": "systemd_containerd.cpu_utilization",
+  "units": "percentage"
+ }
+}

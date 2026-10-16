@@ -314,7 +314,14 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	if prev, ok := p.latestProps[id]; ok && !at.After(prev.at) {
 		return nil
 	}
-	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: r.Chart, rng: r.Range}
+	chart := r.Chart
+	if chart == "" {
+		// A producer that names no chart does not unname it: with two collectors
+		// feeding one property, taking each reading's chart as given made the property
+		// leave and rejoin its arithmetic group every tick.
+		chart = p.latestProps[id].chart
+	}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
