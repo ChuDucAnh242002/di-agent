@@ -65,7 +65,7 @@ func edgeFromRelationship(r statemap.Relationship) *types.EdgeDescriptor {
 		Assertion:     r.Assertion,
 		Effective:     effectivePtr(r),
 		Basis:         r.Basis(),
-		EMAWeight:     r.Strength,
+		EMAWeight:     r.Recent,
 		Confidence:    r.Confidence,
 		NObservations: r.NObservations,
 		// A retired relationship is the state model's form of a withdrawn claim, which

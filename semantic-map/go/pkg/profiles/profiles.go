@@ -22,6 +22,9 @@ import (
 // headroom for a stalled peer without making the reasoner block forever.
 const defaultPeerTimeout = 2 * time.Second
 
+// DefaultProposerBufSize is the window, in pairs, each tested pair keeps.
+const DefaultProposerBufSize = 120
+
 // Config holds profile-specific tuning parameters.
 type Config struct {
 	// EMAAlphaSlow is the decay factor for the established layer. Zero takes the
@@ -106,12 +109,22 @@ type Config struct {
 	// ProposerMinPairs is the minimum number of paired observations required
 	// before correlation is evaluated. Defaults to 30.
 	ProposerMinPairs int
-	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
+	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to
+	// DefaultProposerBufSize.
 	ProposerBufSize int
+	// ProposerMaxPairs is the pair budget: how many property pairs the proposer
+	// tests at once. 0 means no limit; the agent derives a default from the machine.
+	ProposerMaxPairs int
+	// ProposerMinSpread is the variation gate: the least movement over the window, as
+	// a share of each end's declared range, for a pair to become a candidate. nil
+	// keeps minimal.DefaultMinSpread; 0 disables the gate.
+	ProposerMinSpread *float64
 
 	// DomainSpec is the loaded domain model: constructs, metric routing,
-	// propositions, adjustment policy and operator vocabulary. Required — a
-	// profile without one has no graph to reason over. See pkg/domain.
+	// propositions, adjustment policy and operator vocabulary. Nil runs the agent
+	// without one: the state model still admits every property it observes and
+	// discovers relationships, while cost and tuning return
+	// contracts.ErrNoDomainModel. See pkg/domain.
 	DomainSpec *domain.Spec
 
 	// UseRuleBasedTuner enables the RuleBasedTuner instead of the DisabledTuner.
@@ -240,12 +253,6 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	if err := validateKD(pw, cfg.KD); err != nil {
 		return nil, nil, err
 	}
-	// A profile without a domain model has no graph to reason over. Fail here
-	// rather than constructing an agent whose /graph is empty, which would look
-	// identical to an agent whose telemetry has not arrived yet.
-	if cfg.DomainSpec == nil {
-		return nil, nil, fmt.Errorf("no domain spec: pass -domain <path> to load one")
-	}
 	switch profileName {
 	case "edge-minimal":
 		// A caller that did not supply a state model gets one. Everything this profile
@@ -262,8 +269,10 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 		}
 		// Seed the state model here, where both the specification and the calibration are
 		// in hand: relationships get this cluster's priors instead of a placeholder.
-		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
-			return nil, nil, err
+		if cfg.DomainSpec != nil {
+			if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
+				return nil, nil, err
+			}
 		}
 		sm, coll, err := buildEdgeMinimal(cfg, pw)
 		if err != nil {
@@ -325,10 +334,15 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		}
 		bufSize := cfg.ProposerBufSize
 		if bufSize == 0 {
-			bufSize = 120
+			bufSize = DefaultProposerBufSize
 		}
-		proposer = minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
+		mi := minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
 			time.Duration(cfg.PairWindowSeconds)*time.Second)
+		if cfg.ProposerMinSpread != nil {
+			mi.SetMinSpread(*cfg.ProposerMinSpread)
+		}
+		mi.SetMaxPairs(cfg.ProposerMaxPairs)
+		proposer = mi
 	} else {
 		proposer = minimal.NewDisabledProposer()
 	}

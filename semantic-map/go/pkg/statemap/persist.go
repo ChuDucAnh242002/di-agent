@@ -35,7 +35,8 @@ import (
 // case-insensitively but not "NObservations" to "n_observations" — so the values would
 // arrive and the observation counts and timestamps would not. That is the silent
 // partial restore this field exists to prevent, so the version moved with the format.
-const SnapshotVersion = 2
+// Version 3 renamed a relationship's recent layer from "strength" to "recent".
+const SnapshotVersion = 3
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {

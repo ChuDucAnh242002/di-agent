@@ -251,7 +251,7 @@ func TestIngestSample_FeedsProposerAndForgetsOnRetirement(t *testing.T) {
 		ts := t0 + int64(i)*10
 		x := float64(i%20) / 20
 		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: ts,
-			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "share-of-node-capacity", Range: &[2]float64{0, 1}})
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "fraction", Range: &[2]float64{0, 1}})
 		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: ts + 1,
 			EventID: "n" + strconv.Itoa(i)})
 	}
@@ -371,7 +371,7 @@ func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) 
 		t.Fatal("setup: no candidate")
 	}
 	before, _ := sm.Propositions()
-	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := sm.Propositions()
@@ -420,7 +420,7 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sm.ConfirmCandidate(cs[0].CandidateID); err == nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err == nil {
 		t.Fatal("confirming against an opposite-sign edge succeeded")
 	}
 	after, _ := sm.PendingCandidates()
@@ -459,7 +459,7 @@ func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) 
 	if len(cs) != 1 || cs[0].Direction != types.Negative {
 		t.Fatalf("candidates %+v; want one Negative", cs)
 	}
-	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err != nil {
 		t.Fatal(err)
 	}
 	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))

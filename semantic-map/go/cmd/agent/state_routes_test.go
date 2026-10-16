@@ -30,7 +30,7 @@ func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 		t.Fatalf("seed: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerStateRoutes(mux, sm)
+	registerStateRoutes(mux, sm, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return sm, srv
@@ -434,5 +434,60 @@ func TestState_UnknownSubjectIsEmptyNotAnError(t *testing.T) {
 	}
 	if v.Counts.Subjects != 2 {
 		t.Errorf("census subjects=%d; want 2 — the census is the whole map, not the filtered (empty) selection", v.Counts.Subjects)
+	}
+}
+
+// TestState_StatusAndKindFilters: status and kind take a closed set of values,
+// repeated or comma-separated. A value outside the set is a 400 that names the
+// allowed values; matched against nothing, it would return an empty selection that
+// reads as "there are none".
+func TestState_StatusAndKindFilters(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Now()
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.4, At: now, Subject: "pod:a"})
+	_ = sm.Record(statemap.Observation{ID: "cpu@pod:b", Value: 0.5, At: now, Subject: "pod:b"})
+	if err := sm.RetireProperty("cpu@pod:b", "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"status=active", 1},
+		{"status=active,retired", 2},
+		{"status=active&status=retired", 2},
+		{"status=active,%20retired", 2},
+		{"kind=observed,derived&status=retired", 1},
+	} {
+		var v statemap.StateView
+		if code := getState(t, srv.URL+"/state?"+tc.query, &v); code != 200 {
+			t.Errorf("%s: code=%d, want 200", tc.query, code)
+			continue
+		}
+		pods := 0 // the fixture's spec also declares node-level properties
+		for _, p := range v.Properties {
+			if p.Subject != "" {
+				pods++
+			}
+		}
+		if pods != tc.want {
+			t.Errorf("%s: %d pod properties, want %d", tc.query, pods, tc.want)
+		}
+	}
+
+	for _, query := range []string{"status=bogus", "status=active,retird", "kind=measured"} {
+		resp, err := http.Get(srv.URL + "/state?" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: code=%d, want 400 rather than an empty selection", query, resp.StatusCode)
+		}
+		if !strings.Contains(string(b), "is not one of") {
+			t.Errorf("%s: error %q does not name the allowed values", query, b)
+		}
 	}
 }

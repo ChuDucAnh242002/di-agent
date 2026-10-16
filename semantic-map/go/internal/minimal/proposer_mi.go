@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,9 +36,11 @@ import (
 //
 // p-values are computed via the Fisher z-transform (two-tailed).
 //
-// ObserveProperty, the property path with the scope rule, is the entry point
-// from ingestion: a scoped property (non-empty subject) pairs only with
-// unscoped ones, direction scoped -> unscoped, inside a time tolerance.
+// ObserveProperty, the property path, is the entry point from ingestion. Inside a
+// time tolerance any two properties may pair: a scoped property (non-empty subject)
+// with an unscoped one directed scoped -> unscoped, and two unscoped or two scoped
+// properties as an undirected pair. How many pairs are tested at once is the pair
+// budget (SetMaxPairs); see rationLocked for how it is shared out.
 // Observe is the explicit path for a caller that already knows the pair and
 // supplies both values; ObserveConstruct is the explicit construct path that
 // pairs each construct value with the latest of every other construct,
@@ -50,15 +53,31 @@ type MICorrelationProposer struct {
 	// lastPair remembers, per buffer key, the timestamps of the last pair folded, so
 	// a reading takes part in at most one pair per counterpart: without it each tick
 	// at a shared cadence folded (x_i, y_{i-1}) on x's arrival and (x_i, y_i) on
-	// y's, counting every reading twice.
+	// y's, counting every reading twice. When the later arrival is the closer
+	// partner it replaces the pair just folded rather than being refused: after a
+	// missed reading the first arrival of a tick folds the other's previous value,
+	// and refusing the same-tick reading would keep the window one interval out of
+	// step from then on.
 	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
 
 	latestConstructs map[string]float64     // explicit construct path: id → last value
 	latestProps      map[string]latestValue // property path: id → last value, time, scope
+	recent           map[string]*valueRing  // property path: id → its last bufSize values, for its spread
+
+	// The pair budget. slots holds every pair the property path tests, keyed like
+	// buffers; partners indexes them by property, so a reading folds into its own
+	// pairs without walking every other property.
+	maxPairs  int // 0 = no limit
+	slots     map[string]*pairSlot
+	partners  map[string]map[string]struct{}
+	displaced uint64
+	lastPass  time.Time // reading time of the last rationing pass
+	latestAt  time.Time // the latest reading time seen
 
 	threshold  float64
+	minSpread  float64 // the variation gate: least spread, as a share of the declared range
 	minPairs   int
 	bufSize    int
 	pairWindow time.Duration
@@ -67,10 +86,47 @@ type MICorrelationProposer struct {
 	seq        uint64 // identity for pairs that carry no timestamps
 }
 
+// pairSlot is one tested pair of the property path. score is |r|·n at the last fold
+// that had enough pairs to compute it, which is what displacement ranks by.
+type pairSlot struct {
+	from, to string
+	class    string
+	n        int
+	r        float64
+}
+
+// valueRing is a property's recent values, kept to measure how far it moves.
+type valueRing struct {
+	vs   []float64
+	next int
+}
+
+func (v *valueRing) push(x float64, capacity int) {
+	if len(v.vs) < capacity {
+		v.vs = append(v.vs, x)
+		return
+	}
+	v.vs[v.next] = x
+	v.next = (v.next + 1) % capacity
+}
+
 type latestValue struct {
 	value  float64
 	at     time.Time
 	scoped bool
+	rng    *[2]float64 // declared range; nil when the producer declared none
+}
+
+// pairMeta is what the property path knows about a pair beyond its values. The
+// explicit paths pass the zero value: a caller-supplied pair is directed, and its
+// caller has declared no ranges to check movement against.
+type pairMeta struct {
+	property   bool // formed by ObserveProperty: the variation gate and caveats apply
+	undirected bool
+	kind       string
+	replace    bool // overwrite the last folded pair: this one shares a reading with it and is closer in time
+	xRange     *[2]float64
+	yRange     *[2]float64
 }
 
 // NewMICorrelationProposer builds the proposer. lookup answers "already known";
@@ -93,13 +149,49 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		candidates:       make(map[string]*types.CandidateEdge),
 		latestConstructs: make(map[string]float64),
 		latestProps:      make(map[string]latestValue),
+		recent:           make(map[string]*valueRing),
+		slots:            make(map[string]*pairSlot),
+		partners:         make(map[string]map[string]struct{}),
 		threshold:        threshold,
+		minSpread:        DefaultMinSpread,
 		minPairs:         minPairs,
 		bufSize:          bufSize,
 		pairWindow:       pairWindow,
 		maxPending:       64,
 	}
 }
+
+// DefaultMinSpread is the variation gate's default: over the window, each end of a
+// pair must have moved by at least 1% of its declared range.
+const DefaultMinSpread = 0.01
+
+// SetMinSpread sets the variation gate: a candidate is emitted only when each end
+// with a declared range moved, over the window, by at least this share of that
+// range. 0 disables the gate; a negative value is ignored.
+func (p *MICorrelationProposer) SetMinSpread(share float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if share >= 0 {
+		p.minSpread = share
+	}
+}
+
+// SetMaxPairs sets the pair budget: how many pairs the property path tests at once,
+// across every pair class. 0 or less removes the limit, and every eligible pair is
+// tested. Lowering it below the pairs already tested takes effect as pairs are
+// displaced or settle; nothing is dropped here.
+func (p *MICorrelationProposer) SetMaxPairs(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	p.maxPairs = n
+}
+
+// matureAt is how many pairs a tested pair holds before it can be displaced: enough
+// that a low |r| is evidence rather than a short window.
+const matureAt = 30
 
 // SetMaxPending bounds the number of Pending candidates; the excess is deferred,
 // weakest (|r|·n) first, and stays visible in history.
@@ -118,7 +210,7 @@ func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB floa
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.seq++
-	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10))
+	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10), pairMeta{})
 }
 
 // ObserveConstruct is the explicit construct-pairing path: it pairs the value with
@@ -138,52 +230,392 @@ func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float
 			fromID, toID, valA, valB = otherID, constructID, otherVal, value
 		}
 		p.seq++
-		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10)); err != nil && firstErr == nil {
+		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10), pairMeta{}); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-// ObserveProperty is the entry point from ingestion. The scope rule: a scoped
-// property (non-empty subject) pairs only with unscoped ones, never with another
-// scoped one, and the direction is scoped -> unscoped — a subject is a component of
-// the node, so the modelling assumption is component influences whole. Readings
-// further apart than pairWindow do not form a pair.
-func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float64, at time.Time) error {
+// ObserveProperty is the entry point from ingestion. The pairing rule:
+//
+//   - a scoped property (non-empty subject) pairs with each unscoped one, directed
+//     scoped -> unscoped: a subject is a component of the node, so the modelling
+//     assumption is component influences whole;
+//   - two unscoped properties pair as an undirected candidate, ordered
+//     lexicographically, because nothing says which node-level quantity drives the
+//     other and the operator chooses on confirm;
+//   - two scoped properties pair the same way, undirected. Two subjects' readings of
+//     one metric are marked same-metric: they often share a driver.
+//
+// Readings further apart than pairWindow do not form a pair. A reading no newer than
+// its property's last is a repeat or arrives out of order, and is not paired: that
+// one timestamp per property is what keeps a replayed batch from folding twice, so
+// a tested pair carries no set of identities. A reading folds into
+// the pairs already tested for its property. While the budget has room it also
+// starts testing every pair it can form; once the budget is full, new pairs wait for
+// the rationing pass, which runs at most once per pair window of reading time.
+func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	id, at := r.ID, r.At
 	if at.IsZero() {
 		at = time.Now()
 	}
-	me := latestValue{value: value, at: at, scoped: subject != ""}
-	p.latestProps[id] = me
-	for otherID, other := range p.latestProps {
-		if otherID == id || other.scoped == me.scoped {
-			continue
-		}
-		gap := at.Sub(other.at)
-		if gap < 0 {
-			gap = -gap
-		}
-		if gap > p.pairWindow {
-			continue
-		}
-		from, to, x, y := id, otherID, value, other.value
-		xAt, yAt := at.UnixNano(), other.at.UnixNano()
-		if !me.scoped {
-			from, to, x, y = otherID, id, other.value, value
-			xAt, yAt = other.at.UnixNano(), at.UnixNano()
-		}
-		key := from + "→" + to
-		if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
-			continue // that reading already took part in a pair with this counterpart
-		}
-		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
-		_ = p.observeLocked(from, to, x, y, identity) // never non-nil; the contract keeps the error return
-		p.lastPair[key] = [2]int64{xAt, yAt}
+	if prev, ok := p.latestProps[id]; ok && !at.After(prev.at) {
+		return nil
+	}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, scoped: r.Subject != "", rng: r.Range}
+	ring := p.recent[id]
+	if ring == nil {
+		ring = &valueRing{}
+		p.recent[id] = ring
+	}
+	ring.push(r.Value, p.bufSize)
+	if at.After(p.latestAt) {
+		p.latestAt = at
+	}
+	for otherID := range p.partners[id] {
+		p.foldLocked(id, otherID)
+	}
+	if p.roomLocked() {
+		p.admitAllLocked(id, at)
+	} else if at.Sub(p.lastPass) >= p.pairWindow {
+		p.lastPass = at
+		p.rationLocked(at)
 	}
 	return nil
+}
+
+func (p *MICorrelationProposer) roomLocked() bool {
+	return p.maxPairs <= 0 || len(p.slots) < p.maxPairs
+}
+
+// orient puts a pair the way its buffer and candidate are keyed: the scoped end
+// first when exactly one end is scoped (directed), otherwise lexicographic
+// (undirected).
+func (p *MICorrelationProposer) orient(a, b string) (from, to string, undirected bool, class string) {
+	sa, sb := p.latestProps[a].scoped, p.latestProps[b].scoped
+	switch {
+	case sa && !sb:
+		return a, b, false, types.PairSubjectNode
+	case sb && !sa:
+		return b, a, false, types.PairSubjectNode
+	}
+	class = types.PairNodeNode
+	if sa {
+		class = types.PairSubjectSubject
+	}
+	if b < a {
+		a, b = b, a
+	}
+	return a, b, true, class
+}
+
+func candidateID(from, to string, undirected bool) string {
+	if undirected {
+		return from + "<->" + to
+	}
+	return from + "->" + to
+}
+
+// worthTestingLocked reports whether a pair could still produce anything: not
+// settled by an operator, and not already a relationship either sign or way round.
+func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected bool) bool {
+	if c, ok := p.candidates[candidateID(from, to, undirected)]; ok && settled(c) {
+		return false
+	}
+	if p.lookup == nil {
+		return true
+	}
+	for _, sign := range []int{1, -1} {
+		if p.lookup.Covered(from, to, sign) || (undirected && p.lookup.Covered(to, from, sign)) {
+			return false
+		}
+	}
+	return true
+}
+
+// settled is a candidate evidence cannot change: confirmed, rejected, or deferred by
+// an operator. The proposer's own deferrals (cap, untested) can still re-enter.
+func settled(c *types.CandidateEdge) bool {
+	return c.Status == types.Confirmed || c.Status == types.Rejected ||
+		(c.Status == types.Deferred && c.Reason == deferredByOperator)
+}
+
+// admitAllLocked starts testing every pair id can form now, while the budget has
+// room. When there is less room than pairs, they are taken in id order so the choice
+// does not follow map iteration.
+func (p *MICorrelationProposer) admitAllLocked(id string, at time.Time) {
+	var others []string
+	for otherID, other := range p.latestProps {
+		if otherID == id || p.paired(id, otherID) || absDur(at.Sub(other.at)) > p.pairWindow {
+			continue
+		}
+		others = append(others, otherID)
+	}
+	if p.maxPairs > 0 && p.maxPairs-len(p.slots) < len(others) {
+		sort.Strings(others)
+	}
+	for _, otherID := range others {
+		if !p.roomLocked() {
+			return
+		}
+		if p.admitLocked(id, otherID) {
+			p.foldLocked(id, otherID)
+		}
+	}
+}
+
+func (p *MICorrelationProposer) paired(a, b string) bool {
+	_, ok := p.partners[a][b]
+	return ok
+}
+
+// admitLocked starts testing a pair, if it is worth testing.
+func (p *MICorrelationProposer) admitLocked(a, b string) bool {
+	from, to, undirected, class := p.orient(a, b)
+	if !p.worthTestingLocked(from, to, undirected) {
+		return false
+	}
+	p.slots[from+"→"+to] = &pairSlot{from: from, to: to, class: class}
+	for _, e := range [][2]string{{a, b}, {b, a}} {
+		if p.partners[e[0]] == nil {
+			p.partners[e[0]] = make(map[string]struct{})
+		}
+		p.partners[e[0]][e[1]] = struct{}{}
+	}
+	return true
+}
+
+// dropLocked stops testing a pair and forgets its window.
+func (p *MICorrelationProposer) dropLocked(key string) {
+	sl, ok := p.slots[key]
+	if !ok {
+		return
+	}
+	delete(p.slots, key)
+	delete(p.buffers, key)
+	delete(p.lastPair, key)
+	delete(p.partners[sl.from], sl.to)
+	delete(p.partners[sl.to], sl.from)
+}
+
+// foldLocked folds id's latest reading with otherID's, if they are close enough in
+// time and neither reading already took part in this pair as closely.
+func (p *MICorrelationProposer) foldLocked(id, otherID string) {
+	me, other := p.latestProps[id], p.latestProps[otherID]
+	if absDur(me.at.Sub(other.at)) > p.pairWindow {
+		return
+	}
+	from, to, undirected, _ := p.orient(id, otherID)
+	fv, tv := p.latestProps[from], p.latestProps[to]
+	xAt, yAt := fv.at.UnixNano(), tv.at.UnixNano()
+	key := from + "→" + to
+	replace := false
+	if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
+		if absNano(xAt-yAt) >= absNano(lp[0]-lp[1]) {
+			return // that reading already took part in a pair with this counterpart, as closely
+		}
+		replace = true // a closer partner arrived for a reading already paired: swap it in
+	}
+	meta := pairMeta{property: true, undirected: undirected, replace: replace, xRange: fv.rng, yRange: tv.rng}
+	switch {
+	case !undirected && metricOf(from) == to:
+		meta.kind = types.CandidateKindComposition
+	case fv.scoped && tv.scoped && metricOf(from) == metricOf(to):
+		meta.kind = types.CandidateKindSameMetric
+	}
+	// No identity: ObserveProperty refuses a reading that is not newer than its
+	// property's last, which is the dedup this path needs.
+	_ = p.observeLocked(from, to, fv.value, tv.value, "", meta) // never non-nil; the contract keeps the error return
+	p.lastPair[key] = [2]int64{xAt, yAt}
+}
+
+// rationLocked shares a full budget out. It runs when the budget is full, at most
+// once per pair window of reading time:
+//
+//   - pairs whose candidate an operator settled, or that became a relationship, stop
+//     being tested: nothing they show can change anything;
+//   - properties compete only if they were observed within the pair window and
+//     moved, over their recent values, by at least minSpread of their declared range
+//     (of their largest magnitude when they declare none);
+//   - the most variable properties get pairs first, whatever the pair's class: a
+//     pair ranks by its less variable end, because the variation gate needs both;
+//   - a new pair takes a free slot, or displaces a tested pair that ranks below it:
+//     first one with an end gone quiet (not observed within the pair window), then
+//     one that has held matureAt pairs and stays below the candidate threshold,
+//     weakest |r|·n first. A live pair at or above the threshold is never
+//     displaced, and a pair is never displaced by one that ranks no higher, so the
+//     budget settles instead of rotating.
+func (p *MICorrelationProposer) rationLocked(now time.Time) {
+	for key, sl := range p.slots {
+		if !p.worthTestingLocked(sl.from, sl.to, sl.class != types.PairSubjectNode) {
+			p.dropLocked(key)
+		}
+	}
+
+	type competitor struct {
+		id string
+		v  float64
+	}
+	var comp []competitor
+	rank := map[string]float64{} // a competing property's variability; absent ranks 0
+	fresh := map[string]bool{}
+	for id, lv := range p.latestProps {
+		if absDur(now.Sub(lv.at)) > p.pairWindow {
+			continue
+		}
+		fresh[id] = true
+		if v := p.variability(id, lv); v > 0 && v >= p.minSpread {
+			comp = append(comp, competitor{id, v})
+			rank[id] = v
+		}
+	}
+	sort.Slice(comp, func(i, j int) bool {
+		if comp[i].v != comp[j].v {
+			return comp[i].v > comp[j].v
+		}
+		return comp[i].id < comp[j].id
+	})
+
+	mature := matureAt
+	if mature > p.bufSize {
+		mature = p.bufSize
+	}
+	type victim struct {
+		key   string
+		quiet bool
+		score float64
+		rank  float64
+	}
+	var victims []victim
+	for key, sl := range p.slots {
+		quiet := !fresh[sl.from] || !fresh[sl.to]
+		if quiet || (sl.n >= mature && math.Abs(sl.r) < p.threshold) {
+			victims = append(victims, victim{key, quiet, math.Abs(sl.r) * float64(sl.n), math.Min(rank[sl.from], rank[sl.to])})
+		}
+	}
+	sort.Slice(victims, func(i, j int) bool {
+		a, b := victims[i], victims[j]
+		if a.quiet != b.quiet {
+			return a.quiet
+		}
+		if a.score != b.score {
+			return a.score < b.score
+		}
+		return a.key > b.key
+	})
+
+	// Pair (i, j) with i < j ranks by comp[j].v, so walking j upward visits pairs in
+	// descending rank. A pair that finds no victim ranked below it ends the pass: every
+	// later pair ranks no higher.
+	for j := 1; j < len(comp); j++ {
+		for i := 0; i < j; i++ {
+			a, b := comp[i].id, comp[j].id
+			if p.paired(a, b) {
+				continue
+			}
+			if from, to, undirected, _ := p.orient(a, b); !p.worthTestingLocked(from, to, undirected) {
+				continue
+			}
+			if !p.roomLocked() {
+				k := slices.IndexFunc(victims, func(v victim) bool { return v.rank < comp[j].v })
+				if k < 0 {
+					return
+				}
+				p.displaceLocked(victims[k].key)
+				victims = slices.Delete(victims, k, k+1)
+			}
+			p.admitLocked(a, b)
+		}
+	}
+}
+
+// displaceLocked stops testing a pair to make room for another. A pending candidate
+// it backed is deferred as untested: nothing updates its numbers any more, so it
+// should not ask an operator to confirm them, nor hold a place under the pending cap.
+// It re-enters if the pair is tested again and its evidence still holds.
+func (p *MICorrelationProposer) displaceLocked(key string) {
+	sl := p.slots[key]
+	if sl == nil {
+		return
+	}
+	if c := p.candidates[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)]; c != nil && c.Status == types.Pending {
+		c.Status, c.Reason = types.Deferred, deferredUntested
+	}
+	p.dropLocked(key)
+	p.displaced++
+}
+
+// variability is how far a property moved over its recent values: spread as a share
+// of its declared range, or of its largest magnitude when it declares none.
+func (p *MICorrelationProposer) variability(id string, lv latestValue) float64 {
+	ring := p.recent[id]
+	if ring == nil || len(ring.vs) < 2 {
+		return 0
+	}
+	lo, hi, mag := ring.vs[0], ring.vs[0], 0.0
+	for _, x := range ring.vs {
+		lo, hi, mag = math.Min(lo, x), math.Max(hi, x), math.Max(mag, math.Abs(x))
+	}
+	scale := mag
+	if lv.rng != nil {
+		scale = lv.rng[1] - lv.rng[0]
+	}
+	if scale <= 0 {
+		return 0
+	}
+	return (hi - lo) / scale
+}
+
+// Discovery reports the budget and how far it rationed the pairs.
+func (p *MICorrelationProposer) Discovery() (*types.DiscoveryCounts, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	d := &types.DiscoveryCounts{
+		Budget:        p.maxPairs,
+		TestedByClass: map[string]int{types.PairSubjectNode: 0, types.PairNodeNode: 0, types.PairSubjectSubject: 0},
+		Displaced:     p.displaced,
+	}
+	fresh := map[string]bool{}
+	for id, lv := range p.latestProps {
+		if absDur(p.latestAt.Sub(lv.at)) <= p.pairWindow {
+			fresh[id] = true
+		}
+	}
+	d.Properties = len(fresh)
+	d.EligiblePairs = d.Properties * (d.Properties - 1) / 2
+	for _, sl := range p.slots {
+		if fresh[sl.from] && fresh[sl.to] {
+			d.TestedPairs++
+			d.TestedByClass[sl.class]++
+		} else {
+			d.IdlePairs++
+		}
+	}
+	return d, nil
+}
+
+func absDur(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+func absNano(d int64) int64 {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// metricOf is the metric a property id names: "cpu_utilization@pod:a" and
+// "cpu_utilization" both name cpu_utilization.
+func metricOf(id string) string {
+	m, _, _ := strings.Cut(id, "@")
+	return m
 }
 
 // Forget drops the buffers, latest values and candidates involving a property.
@@ -192,6 +624,13 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 	defer p.mu.Unlock()
 	delete(p.latestProps, propertyID)
 	delete(p.latestConstructs, propertyID)
+	delete(p.recent, propertyID)
+	for key, sl := range p.slots {
+		if sl.from == propertyID || sl.to == propertyID {
+			p.dropLocked(key)
+		}
+	}
+	delete(p.partners, propertyID)
 	for key := range p.buffers {
 		from, to, _ := strings.Cut(key, "→")
 		if from == propertyID || to == propertyID {
@@ -212,20 +651,27 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 	return nil
 }
 
-func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string) error {
+func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string, meta pairMeta) error {
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
 		buf = stats.NewPairWindow(p.bufSize)
 		p.buffers[key] = buf
 	}
-	if !buf.Fold(identity, valueA, valueB) {
+	folded := buf.Fold
+	if meta.replace {
+		folded = buf.ReplaceLast
+	}
+	if !folded(identity, valueA, valueB) {
 		return nil
 	}
 	if buf.Len() < p.minPairs {
 		return nil
 	}
 	r, ok := buf.Pearson()
+	if sl := p.slots[key]; sl != nil {
+		sl.n, sl.r = buf.Len(), r // r is 0 when undefined, which ranks the pair weakest
+	}
 	if !ok || math.Abs(r) < p.threshold {
 		return nil
 	}
@@ -233,10 +679,11 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if r < 0 {
 		direction, sign = types.Negative, -1
 	}
-	if p.lookup != nil && p.lookup.Covered(fromID, toID, sign) {
-		return nil
+	if p.lookup != nil && (p.lookup.Covered(fromID, toID, sign) ||
+		(meta.undirected && p.lookup.Covered(toID, fromID, sign))) {
+		return nil // an undirected pair is covered by a relationship either way round
 	}
-	candID := fromID + "->" + toID
+	candID := candidateID(fromID, toID, meta.undirected)
 	if existing, ok := p.candidates[candID]; ok {
 		switch existing.Status {
 		case types.Confirmed:
@@ -244,7 +691,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		case types.Rejected:
 			return nil // permanent suppression within the session
 		case types.Deferred:
-			if existing.Reason != deferredByCap {
+			if existing.Reason == deferredByOperator {
 				return nil // an operator's deferral is not overturned by evidence
 			}
 			existing.Direction, existing.MIScore = direction, math.Abs(r)
@@ -263,14 +710,46 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			return nil
 		}
 	}
+	var caveats []string
+	if meta.property {
+		var moved bool
+		if moved, caveats = p.movedEnoughLocked(fromID, toID, buf, meta); !moved {
+			return nil
+		}
+	}
 	p.candidates[candID] = &types.CandidateEdge{
 		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
 		MIScore: math.Abs(r), PValue: stats.FisherPValue(r, buf.Len()),
 		NObservations: buf.Len(), Status: types.Pending,
+		Undirected: meta.undirected, Kind: meta.kind, Caveats: caveats,
 	}
 	p.order = append(p.order, candID)
 	p.enforceCapLocked()
 	return nil
+}
+
+// movedEnoughLocked is the variation gate. Correlation is scale-free: a pod whose
+// memory steps between 572 KB and 1 MB correlates with node memory at r = 0.995 while
+// moving 0.01% of the node. So each end with a declared range must have moved, over
+// the window, by at least minSpread of that range. An end without a declared range
+// cannot be checked, and the candidate says so instead of passing silently.
+func (p *MICorrelationProposer) movedEnoughLocked(fromID, toID string, buf *stats.PairWindow, meta pairMeta) (bool, []string) {
+	xs, ys := buf.Spread()
+	var caveats []string
+	for _, end := range []struct {
+		id     string
+		spread float64
+		rng    *[2]float64
+	}{{fromID, xs, meta.xRange}, {toID, ys, meta.yRange}} {
+		if end.rng == nil {
+			caveats = append(caveats, fmt.Sprintf("%s declares no range, so whether it moved enough to matter was not checked", end.id))
+			continue
+		}
+		if width := end.rng[1] - end.rng[0]; end.spread < p.minSpread*width {
+			return false, nil
+		}
+	}
+	return true, caveats
 }
 
 // enforceCapLocked defers the weakest pending candidates until at most maxPending
@@ -310,6 +789,9 @@ func (p *MICorrelationProposer) log(format string, args ...any) {
 const (
 	deferredByCap      = "cap"
 	deferredByOperator = "operator"
+	// deferredUntested is a pending candidate whose pair was displaced from the
+	// budget: its numbers stopped being updated.
+	deferredUntested = "untested"
 )
 
 func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }
@@ -381,6 +863,8 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 }
 
 // Confirm marks a Pending candidate accepted and returns the proposition it represents.
+// from orients it: "" or the candidate's FromID for a directed candidate; either end
+// for an undirected one, which has no orientation until an operator gives it.
 // The synthesized PropositionID is
 //
 //	"P-" + hex(sha256(CandidateID))[:8]
@@ -396,7 +880,7 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // The candidate is marked Confirmed here, before the facade applies the proposition.
 // If applying fails the facade calls Reopen, so the candidate returns to Pending rather
 // than standing in history as confirmed with nothing behind it.
-func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition, error) {
+func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
@@ -406,15 +890,38 @@ func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition,
 	if c.Status != types.Pending {
 		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
+	src, dst := c.FromID, c.ToID
+	switch {
+	case c.Undirected && from == "":
+		return nil, fmt.Errorf("%w: %s is undirected; name the end it runs from (%s or %s)",
+			contracts.ErrBadConfirmation, candidateID, c.FromID, c.ToID)
+	case c.Undirected && from == c.ToID:
+		src, dst = c.ToID, c.FromID
+	case from != "" && from != c.FromID:
+		if c.Undirected {
+			return nil, fmt.Errorf("%w: %q is not an end of %s", contracts.ErrBadConfirmation, from, candidateID)
+		}
+		return nil, fmt.Errorf("%w: %s runs from %s; a directed candidate is confirmed as proposed",
+			contracts.ErrBadConfirmation, candidateID, c.FromID)
+	}
 
 	prop := &types.Proposition{
 		PropositionID:   "P-" + synthesizePropSuffix(candidateID),
-		FromConstruct:   c.FromID,
-		ToConstruct:     c.ToID,
+		FromConstruct:   src,
+		ToConstruct:     dst,
 		Direction:       c.Direction,
 		PriorStrength:   c.MIScore,
 		Description:     fmt.Sprintf("Auto-proposed by MICorrelationProposer (|r|=%.3f, n=%d)", c.MIScore, c.NObservations),
 		EvidenceSources: []string{"proposer-mi"},
+	}
+	if c.Undirected {
+		prop.Description += "; direction chosen by the operator"
+	}
+	switch c.Kind {
+	case types.CandidateKindComposition:
+		prop.Description += "; composition: the source is part of the target"
+	case types.CandidateKindSameMetric:
+		prop.Description += "; same metric on two subjects: a shared driver is likely"
 	}
 	c.Status = types.Confirmed
 	return prop, nil
@@ -501,6 +1008,7 @@ func synthesizePropSuffix(candidateID string) string {
 
 func copyCandidate(c *types.CandidateEdge) *types.CandidateEdge {
 	cp := *c
+	cp.Caveats = append([]string(nil), c.Caveats...)
 	return &cp
 }
 

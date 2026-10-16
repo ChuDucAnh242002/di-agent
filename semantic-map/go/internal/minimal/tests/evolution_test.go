@@ -138,7 +138,7 @@ func snap(t *testing.T, state *statemap.Map, propID string) edgeSnap {
 			To:            r.To,
 			Direction:     dir,
 			Prior:         established(r),
-			EMA:           r.Strength,
+			EMA:           r.Recent,
 			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,
@@ -769,7 +769,7 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	}
 
 	// Confirm.
-	if err := a.sm.ConfirmCandidate(cand.CandidateID); err != nil {
+	if err := a.sm.ConfirmCandidate(cand.CandidateID, ""); err != nil {
 		t.Fatalf("Confirm error: %v", err)
 	}
 

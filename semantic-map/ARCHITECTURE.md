@@ -132,7 +132,12 @@ than a convenience.
 proposition identifier. `domain_spec.json` declares the constructs, the
 propositions over them with their directions, the metric-to-construct routing,
 the adjustment floor and ceiling, and the tuner's intent vocabulary; the daemon
-loads it via `-domain` and refuses to start without one. Two consequences: the
+loads it via `-domain`. It is optional: a node may have no specification to give
+it, and the state model needs none — it admits whatever a node exhibits and
+discovers how those properties relate. Without one, only the operations defined
+over declared constructs are unavailable (cost and its recommendations, tuning),
+and they return `contracts.ErrNoDomainModel` (`501`) rather than a cost computed
+over constructs nobody declared. Two consequences of keeping it data: the
 graph a given deployment ran can be reconstructed from an artefact rather than
 from a binary, and a property that appears while the cluster is running is
 admitted by adding a construct and a route rather than by rebuilding. The
@@ -431,7 +436,8 @@ Subjects and discovery added guarantees to two of the five contracts:
 
 - **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
 - **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
-- **Proposer** — the scope rule: `ObserveProperty` pairs a scoped property (non-empty subject) only with unscoped ones, direction scoped → unscoped, inside a time tolerance.
+- **Proposer** — the pairing rule: `ObserveProperty` pairs any two properties inside a time tolerance — a scoped property (non-empty subject) with an unscoped one directed scoped → unscoped, two unscoped or two scoped properties as an undirected candidate. How many pairs are tested at once is the implementation's budget; `Discovery()` reports the budget, the pairs eligible, tested and displaced, so a short candidate list cannot be mistaken for nothing to find.
+- **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate pending.
 - **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
 
 Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
@@ -653,7 +659,7 @@ Each `MetricSample` carries:
 | `timestamp_unix` | `int`        | Unix timestamp of the observation                        |
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
-| `unit`           | `str`        | What the value means (`share-of-node-capacity`, `items`, …); stamped on the property at admission |
+| `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
 | `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Required with `unit` on every sample (a contract MUST) |
 | `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
@@ -687,8 +693,10 @@ fraction.
 | `network_latency_ms`    | CO        | worse    | **inverted at ingestion** — RTT to a peer, against a budget |
 | `pod_startup_ms`        | PS        | worse    | creation timestamp → Running, normalized against a budget  |
 | `scheduling_latency_ms` | PS        | worse    | Pending → Scheduled, likewise                              |
-| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall fraction                              |
-| `io_pressure_ratio`     | PS        | worse    | PSI `io.some` stall fraction                               |
+| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall share of the window (cgroup `cpu.pressure`) |
+| `io_pressure_ratio`     | —         | worse    | PSI `io.some` stall share of the window (cgroup `io.pressure`); route removed (§2) |
+| `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
+| `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is
@@ -825,7 +833,9 @@ so the estimator resumes from what it concluded rather than from what it was mid
 through concluding. The snapshot carries a format version and an owner, and a mismatch
 in either is refused rather than guessed at — a version 1 file half-loads under version
 2's field names, and a snapshot copied from another host would install that machine's
-observations as this one's history at full confidence.
+observations as this one's history at full confidence. A relationship serialises its
+recent layer as `recent` and adds the derived `effective` and `basis`, so a reader is
+handed the answer rather than three layers and a precedence rule.
 
 #### The three paces
 
@@ -996,8 +1006,8 @@ The cost function was the last place in the daemon that knew a construct by name
 follows from the model: derived properties recompute from their members, and the estimator
 folds the observation into the relationships incident to whatever moved. Every observed
 property, routed or not, is then fed to the Proposer through `ObserveProperty`, which
-looks for relations between subjects and node-level properties that nothing declared
-(§6).
+looks for relations that nothing declared, between a subject and the node and between
+two node-level properties (§6).
 
 The order matters and is the substantive part: the state model records the observation
 **before** the routing table is consulted. The routing table says what this agent knows how
@@ -1014,7 +1024,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `fraction` `[0,1]` (a fraction of node capacity) (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1032,10 +1042,29 @@ share of its limit, a different quantity, and the estimator normalises by what a
 declares. A root that *does* carry memory files — the daemon
 itself running inside a container, whose cgroup is its root — keeps the subject rule
 and is measured against `MemTotal`, so the ratio is still against the machine and not
-the container's limit. The declared unit `fraction` (of node capacity) names exactly that
-quantity, not a fraction of any per-process or per-container ceiling; the one reading
+the container's limit. Every CPU and memory share, node or subject, is declared as
+`fraction` of the node — never a fraction of any per-process or per-container ceiling.
+The label is the domain spec's: the node's readings land on routed properties the spec
+declares as `fraction`, the map holds a declared unit fixed and refuses a reading that
+contradicts it, and the Collector contract keeps a type's unit stable across subjects.
+(An earlier `share-of-node-capacity` label named the same quantity and had every
+node-level reading refused as a conflict.) The one reading
 that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
-elapsed periods), is declared as `share-of-periods` instead. The two sources
+elapsed periods), is declared as `share-of-periods` instead. `cpu_pressure_ratio` is
+the share of the collection window in which at least one runnable task in the cgroup
+waited for a CPU: the delta of PSI's cumulative `some` stall time over the elapsed
+time, rather than the kernel's `avg10`, so it covers exactly the window whatever the
+interval. It is declared as `fraction` on `[0,1]`, matching the spec's route into PS.
+Before it was collected, no live producer observed PS at all, so on a real node both
+propositions stayed unknown however long the agent ran; only replay supplied it. A
+kernel without PSI (`psi=0`) yields no pressure sample rather than a zero.
+`io_pressure_ratio` and `memory_pressure_ratio` are the same measurement over
+`io.pressure` and `memory.pressure`, unrouted: they are properties the proposer can
+pair, not members of a construct. `cpu_steal_ratio` is the node's share of CPU time the
+hypervisor gave to someone else, the steal column of `/proc/stat` over the total of its
+first eight columns, in the kernel's own ticks on both sides so no `USER_HZ` or CPU
+count enters. It is zero on bare metal, and on a VM it separates "this machine is busy"
+from "the host is busy" when pressure rises with nothing local to explain it. The two sources
 account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
 cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
 subjects' figures are not the same quantity and are not expected to add up.
@@ -1112,33 +1141,65 @@ The Proposer contract supports discovering relationships the loaded specificatio
 ```
 Telemetry accumulates in the evidence layer
         ↓
-Proposer pairs each scoped property with the node-level properties it co-occurs
-with — one pair per reading (the scope rule below)
+Proposer pairs any two properties that co-occur — subject → node, node ↔ node,
+subject ↔ subject — one pair per reading, as many pairs at once as the pair budget
+allows (the pairing rule below)
         ↓
-If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND the map does not
-already hold the pair:
+If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND each end moved by
+-proposer-min-spread of its declared range AND the map does not already hold the
+pair (either way round, for an undirected one):
     → Emit CandidateEdge (visible via GET /candidates)
         ↓
 Operator reviews: confirm / reject / defer
         ↓
-Confirm → a Discovered relationship in the state map (scoped pair), declared by
-          the facade; a sign that contradicts an existing edge is refused and the
-          candidate reopened. A construct pair goes through
+Confirm → a Discovered relationship in the state map (a pair of properties),
+          declared by the facade; an undirected candidate runs from the end the
+          operator names. A sign that contradicts an existing edge is refused and
+          the candidate reopened. A construct pair goes through
           OntologyContract.AddValidatedProposition() instead.
 Reject  → Suppressed for this deployment session
 Defer   → out of the pending list; an operator's deferral stands, the cap's
           re-enters when it outranks a pending candidate
 ```
 
-The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a scoped pair becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
+The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a pair of state-map properties becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
 
 The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `-proposer-min-pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, rejected, or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
 
-### The scope rule and Discovered provenance
+### The pairing rule and Discovered provenance
 
-The proposer is fed every observed property. It pairs a **scoped** property (one with a subject) only with **unscoped** node-level properties — never two subjects, never two node-level properties (the backbone's business) — in the direction scoped → unscoped: a subject is a component of the node, so the stated assumption is component influences whole. Readings further apart than the pair window do not form a pair; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+The proposer is fed every observed property, and pairs them inside the pair window:
 
-Confirming such a candidate declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
+| Pair | Candidate | Why |
+| --- | --- | --- |
+| subject → node | directed, subject → node | a subject is a component of the node, so the stated assumption is component influences whole |
+| node ↔ node | **undirected**, the pair in lexicographic order, id `a<->b` | correlation is symmetric and nothing says which node-level quantity drives the other; the operator names the end it runs from on confirm (`{"from": ...}`), and a relationship declared either way round covers it |
+| subject ↔ subject | **undirected**, as node ↔ node | two workloads can drive each other or share a driver. Two subjects' readings of one metric (`cpu_utilization@pod:a <-> cpu_utilization@pod:b`) carry `Kind: "same-metric"`: they are proposed like any other pair, and the kind says a shared driver (the same cron, the same client) is the likelier explanation |
+
+Readings further apart than the pair window do not form a pair, and a reading no newer than its property's last one is a repeat and is not paired; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+
+### The pair budget
+
+The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `-proposer-max-pairs`, is shared by all three classes.
+
+- **Default from the machine.** `0` (the default) derives it at start from 1% of the agent's memory (`MemTotal`, or its own cgroup's `memory.max` when lower) at ~2.6 KB per tested pair, and 1% of each collection tick across its CPUs (`cpu.max` when lower) at 5 µs per pair per tick — ten times what an Apple M-series core measured, so a Raspberry Pi-class core is not overcommitted — whichever allows fewer. A 2 GiB VM gets about 8 000 pairs; an 8 GiB, 4-core Raspberry Pi about 32 000. Fixed at start rather than adapting while the agent runs, so a run's budget is one number in its log and in `/state`. When the memory cannot be read (not Linux), 4 096. An explicit value always wins.
+- **While there is room** every pair a reading can form is tested, so a node within its budget behaves as if there were none.
+- **When it is full**, a rationing pass runs at most once per pair window of reading time:
+  - pairs whose candidate was confirmed, rejected or deferred by an operator, or that became a relationship, stop being tested;
+  - only properties observed within the pair window that moved by at least `-proposer-min-spread` of their declared range (of their largest magnitude when they declare none) compete;
+  - the most variable properties get pairs first, whatever the class — a pair ranks by its less variable end, because the variation gate needs both;
+  - a new pair takes a free slot or displaces a tested pair that ranks below it: first one with an end gone quiet (not observed within the pair window), then one that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A live pair at or above the threshold is never displaced, and a pair is never displaced by one that ranks no higher, so the budget settles instead of rotating;
+  - a pending candidate whose pair is displaced is deferred with `Reason: "untested"`: nothing updates its numbers, so it should not ask for confirmation or hold a place under the pending cap. It re-enters if the pair is tested again and still clears the threshold.
+- **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `idle_pairs` (tested, with an end gone quiet), `tested_by_class`, `displaced` — and the console's Discovery pane says how many of the eligible pairs are being tested.
+
+The per-pair cost is what made the budget affordable: each pair window used to keep a set of up to four windows' worth of pair identities against replays, ~23 KB of a pair's ~26 KB. The property path now refuses a reading no newer than its property's last instead, one timestamp per property, and its windows keep no identities.
+
+Two gates shape what is proposed:
+
+- **Variation.** Correlation is scale-free: a pod whose memory stepped between 572 KB and 1 MB correlated with node memory at r = 0.995 while moving 0.01% of the node. A candidate is emitted only when each end moved, over the window, by at least `-proposer-min-spread` (default 0.01) of its declared range. An end whose producer declared no range cannot be checked; the candidate is still emitted and its `Caveats` say so.
+- **Composition.** A subject's metric against the node total of the same metric (`cpu_utilization@pod:a → cpu_utilization`) is part against whole, so its correlation is accounting rather than something learned. It is still proposed, because how much of the node one workload accounts for is what `without=` answers from, and carries `Kind: "composition"` so it is not read as a discovery.
+
+Confirming a candidate between properties declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Whether a confirmation goes to the state map or the ontology is decided by its ends, not their scope: two node-level properties are unscoped and still not constructs. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
 
 ---
 
@@ -1255,7 +1316,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/ontology/construct`             | `AddConstructRequest`                                                  | `204 No Content`              | Append a new construct (append-only; constructs are domain-stable)                                     |
 | POST | `/ontology/proposition`           | `AddPropositionRequest` (`direction` is `"+"` or `"-"`)                | `204 No Content`              | Add a validated proposition; `ValidateProposition` rejects direction contradictions                    |
 | POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Discard what a `(from, to)` pair learned: both layers cleared, confidence to zero, pair window emptied, discard count journalled. Keeps the claim and any assertion; does not delete the relationship |
-| POST | `/candidates/{id}/confirm`        | path only                                                              | `204 No Content`              | Promote a proposer candidate to a validated proposition                                                |
+| POST | `/candidates/{id}/confirm`        | optional `ConfirmRequest{from}`; required for an undirected candidate  | `204 No Content`; `400` when the orientation is missing or wrong | Promote a proposer candidate: a Discovered relationship between properties, or a validated proposition between constructs |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session                                                    |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |

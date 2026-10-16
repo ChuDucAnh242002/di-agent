@@ -120,6 +120,11 @@ type AddPropositionRequest struct {
 	PriorStrength float64 `json:"prior_strength"`
 }
 
+// ConfirmRequest is the optional body of POST /candidates/{id}/confirm.
+type ConfirmRequest struct {
+	From string `json:"from"`
+}
+
 // ResetRequest is the body of POST /agent/reset.
 type ResetRequest struct {
 	From string `json:"from"`
@@ -167,16 +172,19 @@ type OutcomeSimulation struct {
 
 // CandidateEdge mirrors types.CandidateEdge for the GET /candidates response.
 type CandidateEdge struct {
-	CandidateID     string  `json:"CandidateID"`
-	FromID          string  `json:"FromID"`
-	ToID            string  `json:"ToID"`
-	Direction       int     `json:"Direction"`
-	MIScore         float64 `json:"MIScore"`
-	PValue          float64 `json:"PValue"`
-	NObservations   int     `json:"NObservations"`
-	DeploymentsSeen int     `json:"DeploymentsSeen"`
-	Status          string  `json:"Status"`
-	Reason          string  `json:"Reason,omitempty"`
+	CandidateID     string   `json:"CandidateID"`
+	FromID          string   `json:"FromID"`
+	ToID            string   `json:"ToID"`
+	Direction       int      `json:"Direction"`
+	MIScore         float64  `json:"MIScore"`
+	PValue          float64  `json:"PValue"`
+	NObservations   int      `json:"NObservations"`
+	DeploymentsSeen int      `json:"DeploymentsSeen"`
+	Status          string   `json:"Status"`
+	Undirected      bool     `json:"Undirected"`
+	Kind            string   `json:"Kind"`
+	Caveats         []string `json:"Caveats"`
+	Reason          string   `json:"Reason,omitempty"`
 }
 
 // ── Peer coordination DTOs ────────────────────────────────────────────────────

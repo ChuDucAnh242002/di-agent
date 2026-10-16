@@ -208,7 +208,7 @@ func TestRootMemoryComesFromMeminfoOnCgroupV2(t *testing.T) {
 		t.Errorf("root memory share %v; want (MemTotal − MemAvailable) / MemTotal = %v", s.Value, fakeMemShare)
 	}
 	if s.Unit != "fraction" || s.Range == nil {
-		t.Errorf("root memory sample %+v; want the declared unit and range", s)
+		t.Errorf("root memory sample %+v; want the unit the spec declares for the node's memory (fraction) and a range", s)
 	}
 }
 
@@ -555,5 +555,142 @@ func TestSubjectWithUnreadableCPUStatIsAbsentThisTick(t *testing.T) {
 	}
 	if bySubject(samples)["pod:"+testUID] == nil {
 		t.Error("the readable subject beside it went missing too")
+	}
+}
+
+func writePressure(t *testing.T, dir string, someTotalUsec uint64) {
+	t.Helper()
+	writePSI(t, dir, "cpu.pressure", someTotalUsec)
+}
+
+// TestCPUPressureIsTheStallShareOfTheWindow: cpu_pressure_ratio is the delta of
+// PSI's cumulative "some" stall time over the elapsed window, for the node and for
+// each subject, declared as "fraction" on [0,1]. A cgroup without cpu.pressure
+// (a kernel booted with psi=0) yields no sample rather than a zero.
+func TestCPUPressureIsTheStallShareOfTheWindow(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	writePressure(t, root, 5_000_000)
+	writePressure(t, podA, 1_000_000)
+	// podB deliberately has no cpu.pressure.
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, root, 5_000_000+2_500_000) // stalled 2.5 s of 10 s
+	writePressure(t, podA, 1_000_000+500_000)   // stalled 0.5 s of 10 s
+	advance(t, podB, 600_000, 0, 0)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	for subject, want := range map[string]float64{"": 0.25, "pod:" + testUID: 0.05} {
+		s := got[subject][types.CPUPressureRatio]
+		if s == nil {
+			t.Errorf("subject %q: no cpu_pressure_ratio after two collects", subject)
+			continue
+		}
+		if d := s.Value - want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: cpu_pressure_ratio %v, want %v", subject, s.Value, want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: unit %q range %v, want fraction on [0,1]: the spec declares cpu_pressure_ratio so",
+				subject, s.Unit, s.Range)
+		}
+	}
+	if s := got["pod:11111111-2222-3333-4444-555555555555"][types.CPUPressureRatio]; s != nil {
+		t.Errorf("pod without cpu.pressure reported %v; want no sample rather than a zero", s.Value)
+	}
+
+	// A counter that went backwards (the cgroup was recreated) yields no sample.
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, podA, 10)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := bySubject(samples)["pod:"+testUID][types.CPUPressureRatio]; s != nil {
+		t.Errorf("cpu_pressure_ratio %v across a counter reset; want no sample", s.Value)
+	}
+}
+
+// writePSI writes a cgroup v2 PSI file of the given name with a "some" total.
+func writePSI(t *testing.T, dir, file string, someTotalUsec uint64) {
+	t.Helper()
+	body := fmt.Sprintf("some avg10=0.00 avg60=0.00 avg300=0.00 total=%d\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", someTotalUsec)
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeProcStat writes /proc/stat's aggregate cpu line with the given steal and a
+// total that the eight counted columns add up to.
+func writeProcStat(t *testing.T, procRoot string, steal, total uint64) {
+	t.Helper()
+	// user carries the rest; guest (counted inside user) is set to show it is not
+	// added a second time.
+	user := total - steal - 400
+	body := fmt.Sprintf("cpu  %d 0 100 200 50 25 25 %d 77 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n", user, steal)
+	if err := os.WriteFile(filepath.Join(procRoot, "stat"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIOAndMemoryPressureAndSteal: io.pressure and memory.pressure are read like
+// cpu.pressure, for the node and for each subject; steal is the node's share of CPU
+// time the hypervisor spent elsewhere, read from /proc/stat, and no subject gets one.
+func TestIOAndMemoryPressureAndSteal(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	writePSI(t, root, "io.pressure", 1_000_000)
+	writePSI(t, root, "memory.pressure", 0)
+	writePSI(t, podA, "io.pressure", 0)
+	writeProcStat(t, procRoot, 1_000, 100_000)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePSI(t, root, "io.pressure", 1_000_000+4_000_000) // 4 s of 10 s
+	writePSI(t, root, "memory.pressure", 1_000_000)       // 1 s of 10 s
+	writePSI(t, podA, "io.pressure", 2_000_000)           // 2 s of 10 s
+	writeProcStat(t, procRoot, 1_000+150, 100_000+1_000)  // 150 of 1 000 ticks stolen
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	pod := "pod:" + testUID
+	for _, tc := range []struct {
+		subject string
+		metric  types.MetricType
+		want    float64
+	}{
+		{"", types.IOPressureRatio, 0.4},
+		{"", types.MemoryPressureRatio, 0.1},
+		{"", types.CPUStealRatio, 0.15},
+		{pod, types.IOPressureRatio, 0.2},
+	} {
+		s := got[tc.subject][tc.metric]
+		if s == nil {
+			t.Errorf("subject %q: no %s after two collects", tc.subject, tc.metric)
+			continue
+		}
+		if d := s.Value - tc.want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: %s = %v, want %v", tc.subject, tc.metric, s.Value, tc.want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: %s unit %q range %v, want fraction on [0,1]", tc.subject, tc.metric, s.Unit, s.Range)
+		}
+	}
+	if s := got[pod][types.MemoryPressureRatio]; s != nil {
+		t.Errorf("pod without memory.pressure reported %v; want no sample rather than a zero", s.Value)
+	}
+	if s := got[pod][types.CPUStealRatio]; s != nil {
+		t.Errorf("a subject reported cpu_steal_ratio %v; steal is the node's alone", s.Value)
 	}
 }

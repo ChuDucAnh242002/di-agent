@@ -261,9 +261,15 @@ func (c *Client) ResetEdge(ctx context.Context, from, to string) error {
 		ResetRequest{From: from, To: to}, nil)
 }
 
-// ConfirmCandidate confirms a candidate edge (POST /candidates/{id}/confirm).
-func (c *Client) ConfirmCandidate(ctx context.Context, id string) error {
-	return c.postJSON(ctx, "/candidates/"+url.PathEscape(id)+"/confirm", nil, nil)
+// ConfirmCandidate confirms a candidate edge (POST /candidates/{id}/confirm). from
+// names the end an undirected candidate runs from; "" confirms a directed one as
+// proposed.
+func (c *Client) ConfirmCandidate(ctx context.Context, id, from string) error {
+	var body any
+	if from != "" {
+		body = ConfirmRequest{From: from}
+	}
+	return c.postJSON(ctx, "/candidates/"+url.PathEscape(id)+"/confirm", body, nil)
 }
 
 // RejectCandidate rejects a candidate edge.

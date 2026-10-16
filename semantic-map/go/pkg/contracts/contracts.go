@@ -14,8 +14,6 @@
 package contracts
 
 import (
-	"time"
-
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -97,6 +95,13 @@ var (
 	ErrInsufficientTrust = contractError("no peer meets the minimum trust threshold")
 )
 
+// ErrNoDomainModel is returned by an operation that is defined over a domain model
+// (cost, which names a resource and a pressure construct; tuning, which adjusts
+// propositions) when the agent runs without one. The map itself needs no domain
+// model: it admits every property it observes and discovers relationships between
+// them. Only the operations that reason over declared constructs are unavailable.
+var ErrNoDomainModel = contractError("this agent runs without a domain model")
+
 // ── Proposer ──────────────────────────────────────────────────────────────────
 
 // RelationshipLookup answers whether a relationship already runs from -> to with a
@@ -110,34 +115,52 @@ type RelationshipLookup interface {
 // ProposerContract detects statistical patterns suggesting new relationships.
 //
 // ObserveProperty is the entry point from IngestSample: every observed property is
-// fed, and the implementation pairs a scoped property (non-empty subject) only with
-// unscoped ones, direction scoped -> unscoped, inside a time tolerance. Observe is
-// the explicit path for a caller that already knows the pair; ObserveConstruct is
-// the explicit construct-pairing path kept for callers that drive it directly.
+// fed, inside a time tolerance. Any two properties may pair. A scoped property
+// (non-empty subject) pairs with an unscoped one directed scoped -> unscoped; two
+// unscoped properties, or two scoped ones, pair undirected, since correlation does
+// not say which drives which. How many pairs are tested at once is the
+// implementation's budget, and Discovery reports it. Observe is the explicit path
+// for a caller that already knows the pair; ObserveConstruct is the explicit
+// construct-pairing path kept for callers that drive it directly.
 //
 // Guarantees:
 //   - Read-only observation: no Observe* method modifies the model.
 //   - Confirm never writes: it returns the proposition and the facade applies it,
 //     which is what makes "never modifies the backbone directly" true.
+//   - Orientation: Confirm(id, "") accepts a directed candidate as proposed. An
+//     undirected candidate needs from, one of its two ends, and the proposition
+//     runs from it. Anything else fails with ErrBadConfirmation and leaves the
+//     candidate Pending.
 //   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
 //     or an operator's Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
-//     proposed again. A cap deferral is the proposer's own and provisional: it
-//     re-enters when it outranks a pending candidate.
+//     proposed again. A cap deferral, or an untested one (its pair displaced from
+//     the budget), is the proposer's own and provisional: it re-enters when the
+//     evidence holds again.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.
+//   - Rationing is visible: Discovery reports the budget, the pairs eligible, the
+//     pairs tested (never more than a non-zero budget) and the pairs displaced. An
+//     implementation that tests nothing returns nil.
 type ProposerContract interface {
 	Observe(fromID, toID string, valueA, valueB float64) error
 	ObserveConstruct(constructID string, value float64) error
-	ObserveProperty(id, subject string, value float64, at time.Time) error
+	ObserveProperty(r types.PropertyReading) error
 	Forget(propertyID string) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	Confirm(candidateID string) (*types.Proposition, error)
+	Confirm(candidateID, from string) (*types.Proposition, error)
 	Reject(candidateID string) error
 	Defer(candidateID string) error
 	GetHistory() ([]*types.CandidateEdge, error)
+	Discovery() (*types.DiscoveryCounts, error)
 }
+
+// ErrBadConfirmation is returned by Confirm when the orientation given does not fit
+// the candidate: an undirected candidate confirmed without naming an end, an end
+// that is not one of the pair, or a directed candidate confirmed from its target.
+// It is the operator's input that is wrong, not the proposer.
+const ErrBadConfirmation = contractError("the confirmation does not fit the candidate")
 
 // ── Tuner ─────────────────────────────────────────────────────────────────────
 

@@ -34,7 +34,8 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 
 ```bash
 # 1. Start the daemon (edge-minimal profile, in-memory).
-# -domain is required: the binary embeds no domain model.
+# -domain loads the domain model; without it (and with no domain_spec.json found
+# above the working directory) the agent runs with none. See §3.
 cd semantic-map/go
 go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json &
 ```
@@ -87,8 +88,9 @@ semantic-map/
 │
 ├── domain_spec.json            THE DOMAIN MODEL — constructs, propositions, metric routing,
 │                               adjustment policy, tuner intent rules. The daemon loads this
-│                               at startup (-domain) and refuses to run without it; no
-│                               construct or proposition identifier exists in any binary.
+│                               at startup (-domain) and runs without a domain model when
+│                               there is none; no construct or proposition identifier
+│                               exists in any binary.
 │
 │  ── Python layer (the calibration pipeline — a build-time step) ──
 │
@@ -190,6 +192,7 @@ semantic-map/
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
+    │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via -tuner=true)
     │       └── tests/
@@ -217,6 +220,7 @@ semantic-map/
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
+    │   ├── machine.go          The memory and CPUs the agent may use (host, or its cgroup limit)
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
     │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
@@ -417,16 +421,48 @@ def push(base, node, subject, source, metric, unit, rng, value):
 Lists Proposer candidate edges pending review.
 
 ```json
-[{"CandidateID":"cpu_utilization@pod:a->pressure","FromID":"cpu_utilization@pod:a","ToID":"pressure",
-  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending"}]
+[{"CandidateID":"cpu_utilization@pod:a->cpu_pressure_ratio","FromID":"cpu_utilization@pod:a","ToID":"cpu_pressure_ratio",
+  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Undirected":false,"Kind":"","Caveats":null},
+ {"CandidateID":"cpu_pressure_ratio<->cpu_utilization","FromID":"cpu_pressure_ratio","ToID":"cpu_utilization",
+  "Direction":0,"MIScore":0.88,"PValue":0.004,"NObservations":40,"DeploymentsSeen":0,"Status":"pending",
+  "Undirected":true,"Kind":"","Caveats":null}]
 ```
 
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
-candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (provisional;
+candidate carries `Reason`: `untested` when its pair was displaced from the pair budget, so
+its numbers stopped being updated (it re-enters if the pair is tested again and still clears
+the threshold); `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
-stands). `Direction` is `0` for positive, `1` for negative.
+stands). `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
 
-Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. A confirmation whose
+`Undirected` is `true` for two node-level properties or two subjects' properties:
+correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
+lexicographic order and the id uses `<->`. `Kind` is `composition` when the source is part
+of the target by definition (a pod's CPU against node CPU), and `same-metric` for two
+subjects' readings of one metric, where a shared driver is the likelier explanation.
+`Caveats` lists what the proposer could not check, such as an end with no declared range.
+
+How many pairs are being tested is in `GET /state`, not here: an empty list means only
+that no *tested* pair has cleared the threshold.
+
+```json
+"discovery": {"budget": 7989, "properties": 39, "eligible_pairs": 741, "tested_pairs": 741, "idle_pairs": 0,
+  "tested_by_class": {"node<->node": 36, "subject->node": 270, "subject<->subject": 435},
+  "displaced": 0}
+```
+
+`budget` is `-proposer-max-pairs` as resolved at start (`0`: no limit). When
+`tested_pairs` is below `eligible_pairs` the budget is rationing: the most variable
+properties get pairs first, and `displaced` counts pairs dropped to make room.
+`idle_pairs` are tested pairs with an end not observed within the pair window: they still
+hold budget, are displaced first, and go when the property retires. The block is absent
+when the proposer is off.
+
+Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
+candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
+(`mapctl candidates confirm <id> --from cpu_utilization`); without one, or with a property
+that is not an end, the answer is `400` and the candidate stays pending. A confirmation whose
 declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
 a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
 
@@ -455,7 +491,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-"}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
 | POST | `/agent/tune`                       | `TuneRequest{intent, operator?}`                         | Step 7   | Map natural-language intent to proposition strength adjustments |
-| POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
+| POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
@@ -465,7 +501,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
@@ -526,6 +562,9 @@ every sample, queryable and traceable.
 # what is this system doing right now
 curl -s localhost:8080/state | jq '.counts'
 
+# how many property pairs discovery is testing, of how many it could
+curl -s localhost:8080/state | jq '.discovery'
+
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 
@@ -545,13 +584,14 @@ curl -s 'localhost:8080/state/journal?limit=10' | jq '.held, .dropped'
 # does the graph assert a direction this machine keeps contradicting?
 curl -s localhost:8080/state | jq '.counts.relationships_sign_suspect'
 curl -s localhost:8080/state \
-  | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, strength, sign_conflicts, sign_agreements}'
+  | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, effective, basis, sign_conflicts, sign_agreements}'
 ```
 
-**The three strength layers.** A relationship reports `recent` (the fast EMA, as
-`ema_weight`), `established` (the long-run learned baseline), `assertion` (an operator's
-override), the `effective` value the agent reasons with, and `basis` naming which of the
-three that came from. `effective` and the two pointer layers are **absent rather than
+**The three strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
+calls it `ema_weight`), `established` (the long-run learned baseline), `assertion` (an
+operator's override), the `effective` value the agent reasons with, and `basis` naming
+which of the three that came from. Read `effective`: `recent` is the fastest-moving
+layer and answers only when neither of the others exists. `effective` and the two pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
 nothing and absence is not that claim.
 
@@ -697,13 +737,17 @@ this estimator and one that moved an edge on any single sample; only this readin
 defensible, so the choice went. See ARCHITECTURE.md §5 for what it does and does not
 claim.
 
-`-domain` is mandatory. The daemon carries no constructs, propositions, metric
-routes, adjustment bounds or tuner keywords of its own, so without a
-specification there is no graph to serve and it exits with
-`no domain spec: pass -domain <path> to load one` rather than starting on a
-built-in default. Deploy the specification alongside the binary and treat it as
-part of the release: two daemons on the same binary and different specifications
-are different agents. The daemon also rejects positional arguments, because Go's
+`-domain` is optional. The daemon carries no constructs, propositions, metric
+routes, adjustment bounds or tuner keywords of its own. Without `-domain` it
+searches upward from the working directory for `domain_spec.json`, and if there is
+none it runs **without a domain model**: every observed property is still admitted,
+subjects are still modelled, relationships are still discovered and estimates still
+answered, but nothing is routed into a construct, and `GET /cost`, `POST /recommend`,
+`POST /simulate` and `POST /agent/tune` answer `501` saying so. The startup log
+states which mode the agent is in. A `-domain` path that does not load is an error,
+not a fallback. When you do deploy a specification, treat it as part of the
+release: two daemons on the same binary and different specifications are different
+agents. The daemon also rejects positional arguments, because Go's
 `flag` package stops parsing at the first one — `-proposer false` (a space
 instead of `=`) silently discarded every flag after it and cost this project a
 full round of invalid measurements.
@@ -792,9 +836,11 @@ the shape of the real thing.
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
-| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
+| `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
+| `-proposer-max-pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
@@ -820,7 +866,7 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
 | `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default, `10m`, is five default stale windows — long enough that a restarting collector is not mistaken for a departed subject — and does not follow `-stale-after`. `0` leaves retirement to an operator. Retirement is soft. |
 | `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
-| `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
+| `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. With no domain model and no restored `-state-file`, nothing is declared, so the agent refuses to start rather than drop every sample. |
 | `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |
 | `-pair-window-seconds`   | `15`    | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `-pair-support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |

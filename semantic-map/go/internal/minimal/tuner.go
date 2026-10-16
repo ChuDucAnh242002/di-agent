@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -72,7 +73,8 @@ func isNegativeDirection(lower string) bool {
 
 func (t *RuleBasedTuner) ParseIntent(text string) ([]*types.TuneIntent, error) {
 	if t.spec == nil {
-		return nil, fmt.Errorf("tuner: no domain spec loaded")
+		return nil, fmt.Errorf("%w: tuning adjusts propositions, and none are declared",
+			contracts.ErrNoDomainModel)
 	}
 	lower := strings.ToLower(text)
 	sign := 1.0

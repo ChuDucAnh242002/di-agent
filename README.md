@@ -26,6 +26,10 @@ The agent reasons against the **Semantic Map**, a live model of one system's sta
 
 The code is built on five swappable contracts (Collector, Ontology, Reasoner, Proposer, Tuner) with a compliance suite for each. The shipped profile is `edge-minimal`: a single static Go binary with no runtime dependencies.
 
+![The operator console on a single-node k0s VM: five pods admitted as subjects, the RC and PS constructs, and one discovered relationship](docs/images/real-node/console-overview.png)
+
+*The console on a single-node k0s VM. [`docs/real-node-run.md`](docs/real-node-run.md) walks through the run.*
+
 ---
 
 ## Research context
@@ -100,6 +104,7 @@ The parquet replay tool (`./dev.sh replay …`) replays the dissertation's Netda
 | -------- | ----------- |
 | [`TESTING.md`](TESTING.md) | **Trying it out?** A guided walkthrough from a fresh clone, what is in and out of scope, and how to report issues. |
 | [`DEVELOPING.md`](DEVELOPING.md) | **Changing code?** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
+| [`docs/real-node-run.md`](docs/real-node-run.md) | **What does it look like?** One run on a real Linux node with screenshots: what was admitted, discovered and learned, the counterfactual answers, and the problems the run exposed. |
 | [`OPERATING.md`](OPERATING.md) | **Deploying it?** Security posture (read this first — there is no auth), resource footprint, systemd unit, health checks, monitoring, multi-node setup, upgrades, what it touches on your system. |
 | [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the five contracts and why, multigraph backbone, coordination, the natural-language layer. |
 | [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, structural initialization, PoC quickstart. |

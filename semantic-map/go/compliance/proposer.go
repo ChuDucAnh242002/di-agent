@@ -1,6 +1,7 @@
 package compliance
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -175,22 +176,22 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 	// ── GetHistory ───────────────────────────────────────────────────────────
 
 	// feedProperties drives ObserveProperty with two subjects that report identical
-	// series and two node-level properties that follow them, so every pairing the
-	// scope rule forbids would correlate perfectly if it were formed.
+	// series and two node-level properties that follow them, so every pairing would
+	// correlate perfectly if it were formed: the history shows which ones were.
 	feedProperties := func(p contracts.ProposerContract, subjects []string) {
 		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		for i := 0; i < 120; i++ {
 			at := t0.Add(time.Duration(i) * 10 * time.Second)
 			x := float64(i%20) / 20
 			for _, sub := range subjects {
-				_ = p.ObserveProperty("cpu@"+sub, sub, x, at)
+				_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@" + sub, Subject: sub, Value: x, At: at})
 			}
-			_ = p.ObserveProperty("pressure", "", 0.9*x+0.05, at)
-			_ = p.ObserveProperty("load", "", 0.8*x+0.1, at)
+			_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Value: 0.9*x + 0.05, At: at})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "load", Value: 0.8*x + 0.1, At: at})
 		}
 	}
 
-	t.Run("ObservePropertyPairsScopedWithUnscopedOnly", func(t *testing.T) {
+	t.Run("ObservePropertyFollowsThePairingRule", func(t *testing.T) {
 		p := factory(t)
 		feedProperties(p, []string{"pod:a", "pod:b"})
 		history, err := p.GetHistory()
@@ -200,13 +201,89 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		for _, c := range history {
 			fromScoped, toScoped := strings.Contains(c.FromID, "@"), strings.Contains(c.ToID, "@")
 			switch {
-			case fromScoped && toScoped:
-				t.Errorf("two subjects were paired: %s", c.CandidateID)
-			case !fromScoped && !toScoped:
-				t.Errorf("two node-level properties were paired through ObserveProperty: %s", c.CandidateID)
+			case fromScoped && toScoped && !c.Undirected:
+				t.Errorf("two subjects make an undirected candidate; %s claims a direction", c.CandidateID)
+			case fromScoped && toScoped && c.FromID > c.ToID:
+				t.Errorf("an undirected candidate carries its pair in lexicographic order: %s", c.CandidateID)
 			case !fromScoped && toScoped:
 				t.Errorf("direction must be scoped -> unscoped: %s", c.CandidateID)
+			case fromScoped && !toScoped && c.Undirected:
+				t.Errorf("a subject -> node candidate is directed: %s", c.CandidateID)
+			case !fromScoped && !toScoped && !c.Undirected:
+				t.Errorf("two node-level properties make an undirected candidate; %s claims a direction", c.CandidateID)
+			case !fromScoped && !toScoped && c.FromID > c.ToID:
+				t.Errorf("an undirected candidate carries its pair in lexicographic order: %s", c.CandidateID)
 			}
+		}
+	})
+
+	t.Run("DiscoveryAccountsForWhatIsTested", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a", "pod:b"})
+		d, err := p.Discovery()
+		if err != nil {
+			t.Fatalf("Discovery: %v", err)
+		}
+		if d == nil {
+			if history, _ := p.GetHistory(); len(history) != 0 {
+				t.Fatal("an implementation that proposes candidates must report what it tests")
+			}
+			t.Skip("implementation tests no pairs — nothing to account for")
+		}
+		if d.Budget > 0 && d.TestedPairs+d.IdlePairs > d.Budget {
+			t.Errorf("tested %d pairs and held %d idle with a budget of %d", d.TestedPairs, d.IdlePairs, d.Budget)
+		}
+		if d.TestedPairs > d.EligiblePairs {
+			t.Errorf("tested %d pairs of %d eligible", d.TestedPairs, d.EligiblePairs)
+		}
+		var sum int
+		for _, n := range d.TestedByClass {
+			sum += n
+		}
+		if sum != d.TestedPairs {
+			t.Errorf("tested by class sums to %d; tested pairs is %d", sum, d.TestedPairs)
+		}
+		// Four properties, all observed this tick: six pairs, every class among them.
+		if d.Properties != 4 || d.EligiblePairs != 6 {
+			t.Errorf("properties=%d eligible=%d; want 4 and 6", d.Properties, d.EligiblePairs)
+		}
+		if d.Budget == 0 {
+			for _, class := range []string{types.PairSubjectNode, types.PairNodeNode, types.PairSubjectSubject} {
+				if d.TestedByClass[class] == 0 {
+					t.Errorf("no %s pair tested with no budget limit", class)
+				}
+			}
+		}
+	})
+
+	t.Run("UndirectedConfirmNeedsAnEnd", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a"})
+		pending, _ := p.GetCandidates()
+		var c *types.CandidateEdge
+		for _, x := range pending {
+			if x.Undirected {
+				c = x
+				break
+			}
+		}
+		if c == nil {
+			t.Skip("implementation generated no undirected candidate — orientation check skipped")
+		}
+		for _, from := range []string{"", "not-an-end"} {
+			if _, err := p.Confirm(c.CandidateID, from); !errors.Is(err, contracts.ErrBadConfirmation) {
+				t.Errorf("Confirm(%q, %q) = %v; want ErrBadConfirmation", c.CandidateID, from, err)
+			}
+		}
+		if still, _ := p.GetCandidates(); !containsCandidate(still, c.CandidateID) {
+			t.Fatalf("a refused confirmation must leave %s pending", c.CandidateID)
+		}
+		prop, err := p.Confirm(c.CandidateID, c.ToID)
+		if err != nil {
+			t.Fatalf("Confirm from the second end: %v", err)
+		}
+		if prop.FromConstruct != c.ToID || prop.ToConstruct != c.FromID {
+			t.Errorf("confirmed from %s, got %s -> %s", c.ToID, prop.FromConstruct, prop.ToConstruct)
 		}
 	})
 
@@ -224,8 +301,8 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		}
 		// The buffers are gone too: one more tick cannot re-emit from the old pairs.
 		at := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
-		_ = p.ObserveProperty("cpu@pod:a", "pod:a", 0.5, at)
-		_ = p.ObserveProperty("pressure", "", 0.5, at)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: 0.5, At: at})
+		_ = p.ObserveProperty(types.PropertyReading{ID: "pressure", Subject: "", Value: 0.5, At: at})
 		pending, _ := p.GetCandidates()
 		for _, c := range pending {
 			if c.FromID == "cpu@pod:a" {
@@ -253,4 +330,13 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			}
 		}
 	})
+}
+
+func containsCandidate(cs []*types.CandidateEdge, id string) bool {
+	for _, c := range cs {
+		if c.CandidateID == id {
+			return true
+		}
+	}
+	return false
 }

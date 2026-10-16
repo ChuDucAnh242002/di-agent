@@ -46,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
@@ -103,6 +104,15 @@ func main() {
 	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
 		"co-observations a pair needs inside the pair window before it can become a "+
 			"candidate — the pace at which structure appears")
+	proposerMinSpread := flag.Float64("proposer-min-spread", minimal.DefaultMinSpread,
+		"least movement, as a share of its declared range, each end of a pair must show "+
+			"over the window to become a candidate. Correlation is scale-free: without "+
+			"this, a series that barely moves can correlate perfectly. 0 disables it")
+	proposerMaxPairs := flag.Int("proposer-max-pairs", 0,
+		"how many property pairs discovery tests at once, across every pair class. 0 "+
+			"derives it from the machine: 1% of its memory and 1% of each collection "+
+			"tick's CPU, whichever allows fewer. When the budget is full the most "+
+			"variable properties get pairs first, and /state reports how far it rationed")
 	nodeID := flag.String("node-id", "",
 		"the machine this agent models. Used both to stamp its own MetricSamples and "+
 			"as its identity: the map is node-local, so samples labelled with another "+
@@ -174,9 +184,12 @@ func main() {
 			"than withheld.")
 	domainPath := flag.String("domain", "",
 		"path to domain_spec.json: the constructs, metric routing, propositions, "+
-			"adjustment policy and operator vocabulary the agent reasons over. "+
-			"Required — the binary carries no built-in model. When empty the daemon "+
-			"searches upward from the working directory.")
+			"adjustment policy and operator vocabulary the agent reasons over. When "+
+			"empty the daemon searches upward from the working directory, and runs "+
+			"without a domain model if none is found: every observed property is still "+
+			"recorded and relationships are still discovered, but cost, recommendations "+
+			"and tuning are unavailable. A path that does not load is an error, and so "+
+			"is -no-admit with no domain model and no restored state, which would record nothing.")
 	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
@@ -233,23 +246,34 @@ func main() {
 		}
 	}
 
-	// The domain model is data, not code: the binary ships with no constructs,
-	// propositions or routing of its own. An agent without a model has nothing to
-	// reason over, so this fails loud rather than serving an empty graph.
-	var (
-		spec    *domain.Spec
-		specErr error
-	)
-	if *domainPath != "" {
-		spec, specErr = domain.Load(*domainPath)
+	// The domain model is data, not code, and it is optional: the binary ships with
+	// no constructs, propositions or routing of its own, and a node may have none to
+	// give it. Without one the map still records every property the node exhibits
+	// and discovers how they relate; what it cannot do is reason over constructs
+	// nobody declared. A path that was named and does not load is still an error,
+	// because silently running without the model someone asked for is worse.
+	var spec *domain.Spec
+	switch {
+	case *domainPath != "":
+		var err error
+		if spec, err = domain.Load(*domainPath); err != nil {
+			log.Fatalf("domain spec: %v", err)
+		}
+	default:
+		if p, err := domain.FindSpec(""); err == nil {
+			if spec, err = domain.Load(p); err != nil {
+				log.Fatalf("domain spec: %v", err)
+			}
+		}
+	}
+	if spec != nil {
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
+			len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	} else {
-		spec, specErr = domain.LoadFound()
+		log.Printf("domain model: none (no -domain and no domain_spec.json found): every " +
+			"observed property is recorded and relationships are discovered; cost, " +
+			"recommendations and tuning return 501")
 	}
-	if specErr != nil {
-		log.Fatalf("domain spec: %v (pass -domain <path>)", specErr)
-	}
-	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
 	switch *ingestScope {
 	case "self":
 		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
@@ -261,7 +285,19 @@ func main() {
 	}
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
 		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
-	log.Printf("proposer: threshold=%.2f min-pairs=%d", *proposerThreshold, *proposerMinPairs)
+	maxPairs := *proposerMaxPairs
+	if maxPairs <= 0 && useProposer {
+		mem, cores := machineMemory(), machineCores()
+		maxPairs = minimal.DerivePairBudget(mem, cores, *collectInterval, profiles.DefaultProposerBufSize)
+		if mem == 0 {
+			log.Printf("proposer: machine memory unreadable; pair budget %d (fallback)", maxPairs)
+		} else {
+			log.Printf("proposer: pair budget %d derived from %.1f GiB and %d cores at a %s tick",
+				maxPairs, float64(mem)/(1<<30), cores, *collectInterval)
+		}
+	}
+	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f max-pairs=%d",
+		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, maxPairs)
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
 		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
@@ -287,6 +323,8 @@ func main() {
 		UseProposer:          useProposer,
 		ProposerThreshold:    *proposerThreshold,
 		ProposerMinPairs:     *proposerMinPairs,
+		ProposerMinSpread:    proposerMinSpread,
+		ProposerMaxPairs:     maxPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then
@@ -344,6 +382,10 @@ func main() {
 		}
 	}
 
+	if err := checkCanRecord(spec != nil, *noAdmit, state.Census().PropertiesTotal); err != nil {
+		log.Fatal(err)
+	}
+
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
 	// the specification, so relationships get this cluster's priors rather than a
 	// placeholder.
@@ -388,7 +430,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
-	registerStateRoutes(mux, state)
+	registerStateRoutes(mux, state, sm.Discovery)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
@@ -686,6 +728,19 @@ func checkNoPositionalArgs(n int, first string) error {
 	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
 		"the form -flag=false (not -flag false), otherwise every flag after it "+
 		"is silently ignored", first)
+}
+
+// checkCanRecord refuses a configuration that can never record anything: without a
+// domain model nothing is declared, and -no-admit refuses whatever is not, so unless
+// a restored snapshot supplies properties every sample would be dropped while /state
+// stays empty, which looks the same as telemetry that has not arrived yet.
+func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
+	if hasSpec || !noAdmit || restored > 0 {
+		return nil
+	}
+	return fmt.Errorf("-no-admit without a domain model records nothing: no property " +
+		"is declared, so every observation would be refused. Give -domain, restore a " +
+		"snapshot with -state-file, or drop -no-admit")
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

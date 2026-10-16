@@ -263,7 +263,7 @@ func TestClient_CandidateActions(t *testing.T) {
 	})
 	c, cleanup := newCannedServer(t, mux)
 	defer cleanup()
-	if err := c.ConfirmCandidate(context.Background(), "cand-1"); err != nil {
+	if err := c.ConfirmCandidate(context.Background(), "cand-1", ""); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 	if err := c.RejectCandidate(context.Background(), "cand-2"); err != nil {

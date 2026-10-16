@@ -153,9 +153,9 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	r.SignSuspectFlag = r.SignSuspect()
 
 	if r.NObservations == 0 {
-		r.Strength = strength
+		r.Recent = strength
 	} else {
-		r.Strength = m.cfg.Alpha*strength + (1-m.cfg.Alpha)*r.Strength
+		r.Recent = m.cfg.Alpha*strength + (1-m.cfg.Alpha)*r.Recent
 	}
 	r.NObservations++
 	foldEstablished(r, strength, m.cfg.AlphaSlow)

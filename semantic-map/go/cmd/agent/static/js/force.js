@@ -43,13 +43,15 @@ export class Force {
       const existing = this.nodes.get(n.id);
       if (existing) {
         existing.r = n.r;
+        existing.hw = n.hw ?? n.r;
+        existing.below = n.below ?? 0;
         existing.group = n.group;
         continue;
       }
       topologyChanged = true;
       const seed = this.seedFor(n.group);
       this.nodes.set(n.id, {
-        id: n.id, r: n.r, group: n.group,
+        id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
         x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: false,
       });
     }
@@ -109,6 +111,9 @@ export class Force {
 
     const cx = this.width / 2;
     const cy = this.height / 2;
+    const ratio = Math.min(4, Math.max(0.25, this.width / Math.max(1, this.height)));
+    const aspectX = ratio < 1 ? 1 / ratio : 1;
+    const aspectY = ratio > 1 ? ratio : 1;
 
     // Group centroids, computed once per tick rather than per node.
     const groups = new Map();
@@ -140,8 +145,12 @@ export class Force {
         fy += (dy / d) * f;
       }
 
-      fx += (cx - a.x) * CENTER;
-      fy += (cy - a.y) * CENTER;
+      // The pull toward the middle follows the canvas's shape. Equal on both axes,
+      // it settles the graph into a disc, and a disc fitted into a wide, short
+      // canvas is drawn small in the middle third with edges threading through
+      // nodes. Pulling harder along the short axis lays it out the canvas's way.
+      fx += (cx - a.x) * CENTER * aspectX;
+      fy += (cy - a.y) * CENTER * aspectY;
 
       if (a.group) {
         const g = groups.get(a.group);
@@ -175,21 +184,32 @@ export class Force {
       a.fx = a.fy = 0;
     }
 
-    // Separate overlapping discs so a label always has somewhere to sit.
+    // Separate overlapping footprints so a label always has somewhere to sit.
+    //
+    // A footprint is the disc AND its two label lines, as a box: a label such as
+    // cpu_pressure_ratio is several discs wide, so separating circles left
+    // neighbours whose discs cleared each other printing their names on top of
+    // one another. Each overlapping pair is pushed apart along the axis it
+    // overlaps least, which is the smallest move that clears it.
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         const a = nodes[i], b = nodes[j];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const d = Math.hypot(dx, dy) || 1;
-        // Padded well beyond the discs: each node carries two lines of label
-        // below it, and discs that merely avoid touching still collide as text.
-        const min = a.r + b.r + 34;
-        if (d < min) {
-          const push = (min - d) / 2;
-          const ux = (dx / d) * push, uy = (dy / d) * push;
-          if (!a.pinned) { a.x -= ux; a.y -= uy; }
-          if (!b.pinned) { b.x += ux; b.y += uy; }
-        }
+        const gap = separation(a, b);
+        const dx = b.x - a.x;
+        const dy = (b.y + boxShift(b)) - (a.y + boxShift(a));
+        const ox = a.hw + b.hw + gap - Math.abs(dx);
+        const oy = boxHalfHeight(a) + boxHalfHeight(b) + gap - Math.abs(dy);
+        if (ox <= 0 || oy <= 0) continue;
+        let px = 0, py = 0;
+        // Each overlap is weighted by the canvas's aspect, so collisions resolve
+        // along its long axis — sideways on a wide canvas, downwards on a tall one —
+        // and the graph spreads into the space it is drawn in rather than stacking.
+        if (ox * aspectX < oy * aspectY) px = (dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx)) * ox;
+        else py = (dy === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dy)) * oy;
+        // A pinned node does not move, so the other one takes the whole push.
+        const share = a.pinned || b.pinned ? 1 : 0.5;
+        if (!a.pinned) { a.x -= px * share; a.y -= py * share; }
+        if (!b.pinned) { b.x += px * share; b.y += py * share; }
       }
     }
 
@@ -205,9 +225,42 @@ export class Force {
     if (!ns.length) return null;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of ns) {
-      x0 = Math.min(x0, n.x - n.r); y0 = Math.min(y0, n.y - n.r);
-      x1 = Math.max(x1, n.x + n.r); y1 = Math.max(y1, n.y + n.r);
+      const f = footprint(n);
+      x0 = Math.min(x0, f.x0); y0 = Math.min(y0, f.y0);
+      x1 = Math.max(x1, f.x1); y1 = Math.max(y1, f.y1);
     }
     return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
   }
 }
+
+/**
+ * The box a node occupies on screen: its disc, widened to its label, and
+ * extended below it by the label lines. Fitting, hulls and collision all use it,
+ * so what is framed is what is drawn.
+ */
+export function footprint(n) {
+  const hw = n.hw ?? n.r;
+  return { x0: n.x - hw, x1: n.x + hw, y0: n.y - n.r, y1: n.y + n.r + (n.below ?? 0) };
+}
+
+const boxHalfHeight = (n) => (2 * n.r + (n.below ?? 0)) / 2;
+// The box's centre sits below the disc's, by half the label block.
+const boxShift = (n) => (n.below ?? 0) / 2;
+
+// Clearance between two footprints. Properties of different subjects are kept
+// further apart than the subject enclosure's padding, so a property does not sit
+// inside the padding around a neighbour of another subject; inside one subject
+// they sit close. This is pairwise only: an enclosure is the box around all its
+// members, so a foreign property can still settle in the gap between two members
+// of a spread-out subject and fall inside that box.
+const HULL_PAD = 26;
+const HULL_LABEL = 10;
+function separation(a, b) {
+  if (a.group && a.group === b.group) return 10;
+  // HULL_LABEL is the strip above an enclosure that carries the subject's name.
+  if (a.group && b.group) return 2 * HULL_PAD + HULL_LABEL + 6;   // two enclosures
+  if (a.group || b.group) return HULL_PAD + HULL_LABEL + 6;
+  return 14;
+}
+
+export { HULL_PAD, HULL_LABEL };
