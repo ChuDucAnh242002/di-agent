@@ -113,8 +113,11 @@ export class GraphView {
       if (nodeEl) return { type: 'property', id: nodeEl.dataset.node };
       const edgeEl = target.closest?.('[data-edge]');
       if (edgeEl) return { type: 'relationship', id: edgeEl.dataset.edge };
+      const hullEl = target.closest?.('[data-hull]');
+      if (hullEl) return { type: 'hull', id: hullEl.dataset.hull };
       return null;
     };
+    const membersOf = (subject) => [...this.force.nodes.values()].filter((n) => n.group === subject);
 
     svg.addEventListener('pointerdown', (e) => {
       const hit = hitAt(e.target);
@@ -126,6 +129,12 @@ export class GraphView {
           dragging = { n, wasPinned: n.pinned };
           n.pinned = true;
         }
+      } else if (hit?.type === 'hull') {
+        // A subject's box moves as one: every member goes with it, and stays where
+        // it is put. The other boxes and properties make way.
+        const members = membersOf(hit.id);
+        dragging = { members, was: members.map((n) => n.pinned), at: this.toWorld(e.clientX, e.clientY) };
+        for (const n of members) n.pinned = true;
       } else {
         panning = { x: e.clientX, y: e.clientY, tx: this.transform.x, ty: this.transform.y };
         svg.classList.add('dragging');
@@ -145,7 +154,13 @@ export class GraphView {
       if (dragging) {
         if (!press?.moved) return;         // a tremor is not a drag
         const pt = this.toWorld(e.clientX, e.clientY);
-        dragging.n.x = pt.x; dragging.n.y = pt.y;
+        if (dragging.members) {
+          const dx = pt.x - dragging.at.x, dy = pt.y - dragging.at.y;
+          for (const n of dragging.members) { n.x += dx; n.y += dy; }
+          dragging.at = pt;
+        } else {
+          dragging.n.x = pt.x; dragging.n.y = pt.y;
+        }
         this.viewTouched = true;
         this.force.reheat(0.25);
         this.start();
@@ -166,10 +181,17 @@ export class GraphView {
       if (dragging) {
         // A node dragged deliberately stays put; one that was merely clicked keeps
         // whatever pinned state it already had.
-        if (!press?.moved) dragging.n.pinned = dragging.wasPinned;
+        if (!press?.moved) {
+          if (dragging.members) dragging.members.forEach((n, i) => { n.pinned = dragging.was[i]; });
+          else dragging.n.pinned = dragging.wasPinned;
+        } else if (dragging.members && this.lastModel) {
+          this.render(this.lastModel);   // draw the box's pin
+        }
         dragging = null;
       }
-      if (press && !press.moved) this.select(press.hit);
+      // A box is not something to inspect: clicking one clears the selection, as
+      // clicking the canvas does.
+      if (press && !press.moved) this.select(press.hit?.type === 'hull' ? null : press.hit);
       press = null;
       panning = null;
       svg.classList.remove('dragging');
@@ -181,6 +203,13 @@ export class GraphView {
 
     svg.addEventListener('dblclick', (e) => {
       const hit = hitAt(e.target);
+      if (hit?.type === 'hull') {
+        // Release the box: its members go back to the layout.
+        for (const n of membersOf(hit.id)) n.pinned = false;
+        this.force.reheat(0.4);
+        this.render(this.lastModel);
+        return;
+      }
       if (hit?.type !== 'property') return;
       const n = this.force.at(hit.id);
       if (n) { n.pinned = !n.pinned; this.render(this.lastModel); }
@@ -354,7 +383,10 @@ export class GraphView {
       bySubject.get(s).push(p.id);
     }
     for (const [subject, memberIDs] of bySubject) {
-      const g = el('g', { class: 'hull' });
+      const g = el('g', { class: 'hull', 'data-hull': subject, style: 'cursor:grab' });
+      const title = el('title');
+      title.textContent = `${subject} — drag to move the box · double-click to release it`;
+      g.append(title);
       const rect = el('rect', {
         rx: 16, fill: 'var(--surface-2)', 'fill-opacity': 0.55,
         stroke: 'var(--border-strong)', 'stroke-width': 1, 'stroke-dasharray': '4 3',
@@ -367,8 +399,14 @@ export class GraphView {
       });
       label.textContent = subject;
       g.append(rect, label);
+      // Pinned when the operator put the box somewhere: every member stays.
+      let pin = null;
+      if (memberIDs.every((id) => this.force.at(id)?.pinned)) {
+        pin = el('circle', { r: 3, fill: 'var(--ink-muted)' });
+        g.append(pin);
+      }
       this.gHulls.append(g);
-      this.hullEls.push({ subject, memberIDs, rect, label });
+      this.hullEls.push({ subject, memberIDs, rect, label, pin });
     }
 
     // Membership: a derived property is recomputed from these. Hairline and
@@ -502,7 +540,8 @@ export class GraphView {
       valueText.textContent = p.n_observations ? fmt.num(p.value, 3) : 'unobserved';
       g.append(valueText);
 
-      if (this.force.at(p.id)?.pinned) {
+      const boxPinned = subjectOf(p) && props.every((q) => subjectOf(q) !== subjectOf(p) || this.force.at(q.id)?.pinned);
+      if (this.force.at(p.id)?.pinned && !boxPinned) {
         g.append(el('circle', { r: 2.5, cx: r - 3, cy: -(r - 3), fill: 'var(--ink-muted)' }));
       }
 
@@ -581,6 +620,7 @@ export class GraphView {
       h.rect.setAttribute('height', y1 - y0 + pad * 2 + HULL_LABEL);
       h.label.setAttribute('x', x0 - pad + 10);
       h.label.setAttribute('y', y0 - pad + 4);
+      if (h.pin) { h.pin.setAttribute('cx', x1 + pad - 10); h.pin.setAttribute('cy', y0 - pad - HULL_LABEL + 10); }
     }
   }
 

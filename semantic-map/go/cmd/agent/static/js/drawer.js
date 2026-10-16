@@ -50,6 +50,48 @@ export class Drawer {
       const collapsed = this.root.classList.toggle('collapsed');
       document.getElementById('drawer-toggle').textContent = collapsed ? '▴' : '▾';
     });
+    this.wireResize();
+  }
+
+  /**
+   * Drag the drawer's top edge to give the record more or less of the page. The
+   * height is remembered per browser; double-click the edge for the default back.
+   * The canvas above is a flex sibling, so it takes whatever is left, and its
+   * ResizeObserver re-frames the graph.
+   */
+  wireResize() {
+    const handle = document.getElementById('drawer-resize');
+    const KEY = 'di-agent.drawer-height';
+    const clamp = (h) => Math.round(Math.min(window.innerHeight - 160, Math.max(80, h)));
+    const set = (h) => { this.root.style.height = `${clamp(h)}px`; };
+    try {
+      const saved = Number(localStorage.getItem(KEY));
+      if (saved > 0) set(saved);
+    } catch (_) { /* storage unavailable: start at the default */ }
+
+    let drag = null;
+    handle.addEventListener('pointerdown', (e) => {
+      drag = { y: e.clientY, h: this.root.getBoundingClientRect().height };
+      handle.classList.add('active');
+      handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (drag) set(drag.h + (drag.y - e.clientY));
+    });
+    const end = (e) => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove('active');
+      try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
+      try { localStorage.setItem(KEY, String(this.root.getBoundingClientRect().height)); } catch (_) { /* not remembered */ }
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    handle.addEventListener('dblclick', () => {
+      this.root.style.height = '';
+      try { localStorage.removeItem(KEY); } catch (_) { /* nothing to forget */ }
+    });
   }
 
   /** Returns the poll it starts, so a caller can wait for it. */

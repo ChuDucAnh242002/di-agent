@@ -191,27 +191,15 @@ export class Force {
     // neighbours whose discs cleared each other printing their names on top of
     // one another. Each overlapping pair is pushed apart along the axis it
     // overlaps least, which is the smallest move that clears it.
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const a = nodes[i], b = nodes[j];
-        const gap = separation(a, b);
-        const dx = b.x - a.x;
-        const dy = (b.y + boxShift(b)) - (a.y + boxShift(a));
-        const ox = a.hw + b.hw + gap - Math.abs(dx);
-        const oy = boxHalfHeight(a) + boxHalfHeight(b) + gap - Math.abs(dy);
-        if (ox <= 0 || oy <= 0) continue;
-        let px = 0, py = 0;
-        // Each overlap is weighted by the canvas's aspect, so collisions resolve
-        // along its long axis — sideways on a wide canvas, downwards on a tall one —
-        // and the graph spreads into the space it is drawn in rather than stacking.
-        if (ox * aspectX < oy * aspectY) px = (dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx)) * ox;
-        else py = (dy === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dy)) * oy;
-        // A pinned node does not move, so the other one takes the whole push.
-        const share = a.pinned || b.pinned ? 1 : 0.5;
-        if (!a.pinned) { a.x -= px * share; a.y -= py * share; }
-        if (!b.pinned) { b.x += px * share; b.y += py * share; }
-      }
-    }
+    collide(nodes, aspectX, aspectY, () => true);
+
+    // A few passes, because moving one enclosure out of another's way can push it
+    // into a third.
+    for (let pass = 0; pass < 3; pass++) separateEnclosures(nodes, aspectX, aspectY);
+    // Moving a node-level property out of a box can land it on another one, so those
+    // are separated once more; then the boxes again, which the last pass may touch.
+    collide(nodes, aspectX, aspectY, (a, b) => !a.group && !b.group);
+    separateEnclosures(nodes, aspectX, aspectY);
 
     this.alpha *= 0.975;
     return true;
@@ -243,6 +231,32 @@ export function footprint(n) {
   return { x0: n.x - hw, x1: n.x + hw, y0: n.y - n.r, y1: n.y + n.r + (n.below ?? 0) };
 }
 
+function collide(nodes, aspectX, aspectY, applies) {
+  const n = nodes.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = nodes[i], b = nodes[j];
+      if (!applies(a, b)) continue;
+      const gap = separation(a, b);
+      const dx = b.x - a.x;
+      const dy = (b.y + boxShift(b)) - (a.y + boxShift(a));
+      const ox = a.hw + b.hw + gap - Math.abs(dx);
+      const oy = boxHalfHeight(a) + boxHalfHeight(b) + gap - Math.abs(dy);
+      if (ox <= 0 || oy <= 0) continue;
+      let px = 0, py = 0;
+      // Each overlap is weighted by the canvas's aspect, so collisions resolve
+      // along its long axis — sideways on a wide canvas, downwards on a tall one —
+      // and the graph spreads into the space it is drawn in rather than stacking.
+      if (ox * aspectX < oy * aspectY) px = (dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx)) * ox;
+      else py = (dy === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dy)) * oy;
+      // A pinned node does not move, so the other one takes the whole push.
+      const share = a.pinned || b.pinned ? 1 : 0.5;
+      if (!a.pinned) { a.x -= px * share; a.y -= py * share; }
+      if (!b.pinned) { b.x += px * share; b.y += py * share; }
+    }
+  }
+}
+
 const boxHalfHeight = (n) => (2 * n.r + (n.below ?? 0)) / 2;
 // The box's centre sits below the disc's, by half the label block.
 const boxShift = (n) => (n.below ?? 0) / 2;
@@ -261,6 +275,80 @@ function separation(a, b) {
   if (a.group && b.group) return 2 * HULL_PAD + HULL_LABEL + 6;   // two enclosures
   if (a.group || b.group) return HULL_PAD + HULL_LABEL + 6;
   return 14;
+}
+
+/**
+ * Keep subject enclosures from overlapping, and node-level properties out of them.
+ *
+ * The pairwise clearance above cannot do this: an enclosure is the box around all
+ * its members, so two spread-out subjects interleave, and a node-level property
+ * settles in the gap between members and is drawn inside a pod's box. Here each
+ * enclosure is one box. Two that overlap are moved apart whole, along the axis they
+ * overlap least (weighted by the canvas's aspect, as above); a node-level property
+ * inside a box it does not belong to is moved out of it. An enclosure with a pinned
+ * member stays where the operator put it and the other side takes the whole move.
+ */
+const HULL_GAP = 16;
+export function enclosures(nodes) {
+  const boxes = new Map();
+  for (const n of nodes) {
+    if (!n.group) continue;
+    let b = boxes.get(n.group);
+    if (!b) {
+      b = { group: n.group, members: [], pinned: false, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      boxes.set(n.group, b);
+    }
+    const f = footprint(n);
+    b.members.push(n);
+    b.pinned ||= n.pinned;
+    b.x0 = Math.min(b.x0, f.x0); b.y0 = Math.min(b.y0, f.y0);
+    b.x1 = Math.max(b.x1, f.x1); b.y1 = Math.max(b.y1, f.y1);
+  }
+  for (const b of boxes.values()) {
+    b.x0 -= HULL_PAD; b.x1 += HULL_PAD; b.y0 -= HULL_PAD + HULL_LABEL; b.y1 += HULL_PAD;
+  }
+  return boxes;
+}
+
+function shiftBox(b, dx, dy) {
+  for (const n of b.members) { n.x += dx; n.y += dy; }
+  b.x0 += dx; b.x1 += dx; b.y0 += dy; b.y1 += dy;
+}
+
+// The move that clears box a from box b: along the axis of least overlap, away from
+// b's centre. Null when they do not overlap.
+function clearance(a, b, gap, aspectX, aspectY) {
+  const ox = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) + gap;
+  const oy = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) + gap;
+  if (ox <= 0 || oy <= 0) return null;
+  const away = (d) => (d === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(d));
+  if (ox * aspectX < oy * aspectY) return { dx: away((a.x0 + a.x1) - (b.x0 + b.x1)) * ox, dy: 0 };
+  return { dx: 0, dy: away((a.y0 + a.y1) - (b.y0 + b.y1)) * oy };
+}
+
+function separateEnclosures(nodes, aspectX, aspectY) {
+  const boxes = [...enclosures(nodes).values()];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.pinned && b.pinned) continue;
+      const m = clearance(a, b, HULL_GAP, aspectX, aspectY);
+      if (!m) continue;
+      const share = a.pinned || b.pinned ? 1 : 0.5;
+      if (!a.pinned) shiftBox(a, m.dx * share, m.dy * share);
+      if (!b.pinned) shiftBox(b, -m.dx * share, -m.dy * share);
+    }
+  }
+  for (const n of nodes) {
+    if (n.group) continue;
+    const f = footprint(n);
+    for (const b of boxes) {
+      const m = clearance(f, b, 10, aspectX, aspectY);
+      if (!m) continue;
+      if (!n.pinned) { n.x += m.dx; n.y += m.dy; f.x0 += m.dx; f.x1 += m.dx; f.y0 += m.dy; f.y1 += m.dy; }
+      else if (!b.pinned) shiftBox(b, -m.dx, -m.dy);
+    }
+  }
 }
 
 export { HULL_PAD, HULL_LABEL };
