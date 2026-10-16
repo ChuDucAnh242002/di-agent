@@ -14,6 +14,7 @@ const DAMPING = 0.82;
 const CENTER = 0.012;     // pull toward the middle, so nothing drifts off-screen
 const GROUP = 0.045;      // pull toward a subject's own centroid
 const MIN_ALPHA = 0.004;
+const RESOLVE_ROUNDS = 12; // bound on the separation rounds per tick
 
 export class Force {
   constructor() {
@@ -193,13 +194,18 @@ export class Force {
     // overlaps least, which is the smallest move that clears it.
     collide(nodes, aspectX, aspectY, () => true);
 
-    // A few passes, because moving one enclosure out of another's way can push it
-    // into a third.
-    for (let pass = 0; pass < 3; pass++) separateEnclosures(nodes, aspectX, aspectY);
-    // Moving a node-level property out of a box can land it on another one, so those
-    // are separated once more; then the boxes again, which the last pass may touch.
-    collide(nodes, aspectX, aspectY, (a, b) => !a.group && !b.group);
-    separateEnclosures(nodes, aspectX, aspectY);
+    // Then the enclosures, and both again until a round moves nothing. Moving one
+    // box out of another's way can push it into a third; clearing one pair can push
+    // a property into its neighbour; widening a box can reach the next one. A fixed
+    // number of passes left the last of those moves unchecked, and the layout
+    // settled with labels printed over each other, some inside a pod's box.
+    for (let round = 0; round < RESOLVE_ROUNDS; round++) {
+      const moved = separateEnclosures(nodes, aspectX, aspectY);
+      // The pairs the box pass leaves alone: two members of one box, and two
+      // node-level properties (both have no group).
+      const pairs = (a, b) => a.group === b.group;
+      if (!collide(nodes, aspectX, aspectY, pairs) && !moved) break;
+    }
 
     this.alpha *= 0.975;
     return true;
@@ -231,8 +237,10 @@ export function footprint(n) {
   return { x0: n.x - hw, x1: n.x + hw, y0: n.y - n.r, y1: n.y + n.r + (n.below ?? 0) };
 }
 
+// Pushes apart every overlapping pair that `applies` selects; true if any moved.
 function collide(nodes, aspectX, aspectY, applies) {
   const n = nodes.length;
+  let moved = false;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const a = nodes[i], b = nodes[j];
@@ -251,10 +259,11 @@ function collide(nodes, aspectX, aspectY, applies) {
       else py = (dy === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dy)) * oy;
       // A pinned node does not move, so the other one takes the whole push.
       const share = a.pinned || b.pinned ? 1 : 0.5;
-      if (!a.pinned) { a.x -= px * share; a.y -= py * share; }
-      if (!b.pinned) { b.x += px * share; b.y += py * share; }
+      if (!a.pinned) { a.x -= px * share; a.y -= py * share; moved = true; }
+      if (!b.pinned) { b.x += px * share; b.y += py * share; moved = true; }
     }
   }
+  return moved;
 }
 
 const boxHalfHeight = (n) => (2 * n.r + (n.below ?? 0)) / 2;
@@ -326,29 +335,31 @@ function clearance(a, b, gap, aspectX, aspectY) {
   return { dx: 0, dy: away((a.y0 + a.y1) - (b.y0 + b.y1)) * oy };
 }
 
+// One round of the above; true if anything moved. A node-level property takes part
+// as a box of its own, its footprint, so that it and the enclosures make room for
+// each other: moved out of a box on its own, a property wedged between two boxes
+// was pushed into the second and back, and settled inside one of them.
 function separateEnclosures(nodes, aspectX, aspectY) {
   const boxes = [...enclosures(nodes).values()];
+  for (const n of nodes) {
+    if (!n.group) boxes.push({ members: [n], pinned: n.pinned, ...footprint(n) });
+  }
+  let moved = false;
   for (let i = 0; i < boxes.length; i++) {
     for (let j = i + 1; j < boxes.length; j++) {
       const a = boxes[i], b = boxes[j];
       if (a.pinned && b.pinned) continue;
-      const m = clearance(a, b, HULL_GAP, aspectX, aspectY);
+      // Two node-level properties are the pairwise pass's to separate.
+      if (!a.group && !b.group) continue;
+      const m = clearance(a, b, a.group && b.group ? HULL_GAP : 10, aspectX, aspectY);
       if (!m) continue;
       const share = a.pinned || b.pinned ? 1 : 0.5;
       if (!a.pinned) shiftBox(a, m.dx * share, m.dy * share);
       if (!b.pinned) shiftBox(b, -m.dx * share, -m.dy * share);
+      moved = true;
     }
   }
-  for (const n of nodes) {
-    if (n.group) continue;
-    const f = footprint(n);
-    for (const b of boxes) {
-      const m = clearance(f, b, 10, aspectX, aspectY);
-      if (!m) continue;
-      if (!n.pinned) { n.x += m.dx; n.y += m.dy; f.x0 += m.dx; f.x1 += m.dx; f.y0 += m.dy; f.y1 += m.dy; }
-      else if (!b.pinned) shiftBox(b, -m.dx, -m.dy);
-    }
-  }
+  return moved;
 }
 
 export { HULL_PAD, HULL_LABEL };
