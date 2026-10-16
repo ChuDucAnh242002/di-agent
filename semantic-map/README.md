@@ -432,7 +432,8 @@ Lists Proposer candidate edges pending review.
 
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
 candidate carries `Reason`: `grouped` when an arithmetic group took it over (its pair links
-the group, or an end joined a group it does not represent); `untested` when its pair was displaced from the pair budget, so
+the group, or an end joined a group it does not represent); `bar` when its p-value no
+longer clears the corrected bar, because more pairs came to be tested beside it; `untested` when its pair was displaced from the pair budget, so
 its numbers stopped being updated (it re-enters if the pair is tested again and still clears
 the threshold); `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
@@ -465,7 +466,8 @@ properties get pairs first, and `displaced` counts pairs dropped to make room.
 hold budget, are displaced first, and go when the property retires. `groups` are the
 arithmetic groups found; only each `representative` is paired outside its group. `p_bar`
 is the bar a candidate's p-value must be at or under now, at false-discovery rate `fdr`
-over the `p_values_tested` pairs with enough readings. The block is absent when the
+over the `p_values_tested` pairs being tested — arithmetic links aside, and counting a
+pair without enough readings yet as a test that found nothing. The block is absent when the
 proposer is off.
 
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected

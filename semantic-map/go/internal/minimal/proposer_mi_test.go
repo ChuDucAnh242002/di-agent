@@ -1375,3 +1375,132 @@ func TestBarCorrectsForThePairsTested(t *testing.T) {
 		t.Errorf("x<->y with the correction off: %+v; want proposed with no bar", c)
 	}
 }
+
+// feedNoise feeds x and y, related, beside noise properties of pure noise, for ticks
+// [from, to). y follows x loosely enough that ten readings make it marginal.
+func feedNoise(p *minimal.MICorrelationProposer, seed int64, noise, from, to int, extra func(i int) []types.PropertyReading) {
+	rnd := rand.New(rand.NewSource(seed))
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := 0; i < to; i++ {
+		x := float64(i%10) / 10
+		rs := []types.PropertyReading{
+			{ID: "x", Value: x},
+			{ID: "y", Value: 0.3 + 0.4*x + 0.16*math.Sin(float64(i)*2.3)},
+		}
+		for k := 0; k < noise; k++ {
+			rs = append(rs, types.PropertyReading{ID: fmt.Sprintf("n%02d", k), Value: rnd.Float64()})
+		}
+		if extra != nil {
+			rs = append(rs, extra(i)...)
+		}
+		if i < from {
+			continue // the noise generator still advances, so a later window continues the series
+		}
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		for _, r := range rs {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+	}
+}
+
+// TestBarCountsEveryPairFromTheFirstRound: in the first round of folds most pairs
+// have no p-value yet. The bar must still count them, or the first pairs to reach
+// enough readings are judged as if they were the only tests, and noise gets through.
+func TestBarCountsEveryPairFromTheFirstRound(t *testing.T) {
+	var noisy int
+	for seed := int64(1); seed <= 20; seed++ {
+		p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+		feedNoise(p, seed, 30, 0, 10, nil)
+		for _, c := range mustCandidates(t, p) {
+			if strings.HasPrefix(c.FromID, "n") || strings.HasPrefix(c.ToID, "n") {
+				noisy++
+				t.Logf("seed %d: %s pending at p=%.3g, bar %.3g", seed, c.CandidateID, c.PValue, c.PBar)
+			}
+		}
+		if d, _ := p.Discovery(); d.PValuesTested != 496 || d.PBar > 0.001 {
+			t.Errorf("seed %d: bar %.3g over %d pairs; want every one of 496 counted", seed, d.PBar, d.PValuesTested)
+		}
+	}
+	if noisy > 1 {
+		t.Errorf("%d noise pairs pending over 20 runs; at a 5%% rate about one is expected", noisy)
+	}
+}
+
+// TestPendingCandidateLeavesWhenTheBarTightens: x<->y clears the bar while it is the
+// only pair tested. Once thirty noise properties are tested beside it, on the same ten
+// readings, it no longer does, and is deferred rather than left pending on numbers
+// that stopped being true.
+func TestPendingCandidateLeavesWhenTheBarTightens(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 10, 15*time.Second)
+	feedNoise(p, 7, 0, 0, 12, nil)
+	if len(mustCandidates(t, p)) != 1 {
+		t.Fatal("x<->y not proposed alone")
+	}
+	feedNoise(p, 7, 30, 12, 40, nil)
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == "x<->y" && (c.Status != types.Deferred || c.Reason != "bar") {
+			t.Errorf("x<->y is %v (%q) at p=%.3g, bar %.3g; want deferred by the bar", c.Status, c.Reason, c.PValue, c.PBar)
+		}
+	}
+}
+
+// TestArithmeticDoesNotLoosenTheBar: forty-five links inside one chart are p ≈ 0 by
+// construction. Counted as discoveries they would raise the bar for every real pair.
+func TestArithmeticDoesNotLoosenTheBar(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	charted := func(i int) []types.PropertyReading {
+		x := float64(i%7) / 7
+		var rs []types.PropertyReading
+		for k := 0; k < 10; k++ {
+			rs = append(rs, types.PropertyReading{ID: fmt.Sprintf("c%d", k), Chart: "c", Value: 0.05 + float64(k)*0.01 + 0.5*x})
+		}
+		return rs
+	}
+	feedNoise(p, 3, 30, 0, 12, charted)
+	d, _ := p.Discovery()
+	if len(d.Groups) != 1 || d.PBar > 0.001 {
+		t.Errorf("groups %d, bar %.3g over %d; the chart's links must not count as discoveries", len(d.Groups), d.PBar, d.PValuesTested)
+	}
+}
+
+// TestGroupBreaksWhenItsLinkIsDisplaced: under a full budget a member gone quiet loses
+// its link to displacement. The group must break with it; otherwise the member comes
+// back still barred from pairing outside its chart, with nothing left to test that
+// would ever break the group.
+func TestGroupBreaksWhenItsLinkIsDisplaced(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	p.SetMaxPairs(2)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := 0; i < 80; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		rs := []types.PropertyReading{
+			{ID: "busy", Chart: "cpu", Value: x},
+			{ID: "load", Value: 0.1 + 0.6*x + 0.05*math.Sin(float64(i)*1.3)},
+		}
+		if i < 30 || i >= 60 {
+			rs = append(rs, types.PropertyReading{ID: "busy_avg", Chart: "cpu", Value: 0.25 + 0.5*x})
+		}
+		if i >= 30 {
+			rs = append(rs, types.PropertyReading{ID: "extra", Value: 0.5 + 0.4*math.Sin(float64(i)*2.9)})
+		}
+		for _, r := range rs {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+		if i == 29 {
+			if d, _ := p.Discovery(); len(d.Groups) != 1 {
+				t.Fatalf("groups %+v before busy_avg went quiet; want one", d.Groups)
+			}
+		}
+		if i == 59 {
+			if d, _ := p.Discovery(); len(d.Groups) != 0 {
+				t.Errorf("groups %+v after busy_avg's link was displaced; want none", d.Groups)
+			}
+		}
+	}
+}

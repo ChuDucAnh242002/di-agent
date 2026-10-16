@@ -138,10 +138,10 @@ type RelationshipLookup interface {
 //     the session; Forget clears it, so a subject that departs and returns can be
 //     proposed again. A cap deferral, or an untested one (its pair displaced from
 //     the budget), or a grouped one (an end joined an arithmetic group it does not
-//     represent), is the proposer's own and provisional: it re-enters when the
-//     evidence holds again.
-//   - Corrected bar: a candidate whose PBar is non-zero had a p-value at or under it
-//     when last updated.
+//     represent), or one the corrected bar tightened past, is the proposer's own and
+//     provisional: it re-enters when the evidence holds again.
+//   - Corrected bar: a pending candidate whose PBar is non-zero had a p-value at or
+//     under it when last updated.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.

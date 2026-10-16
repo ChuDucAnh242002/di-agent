@@ -402,7 +402,8 @@ type DiscoveryCounts struct {
 	Groups []ArithmeticGroup `json:"groups,omitempty"`
 	// FDR is the false-discovery rate the candidate bar holds to, 0 when
 	// uncorrected; PBar is the bar a p-value must be at or under now, over the
-	// PValuesTested pairs that had enough readings to give one.
+	// PValuesTested pairs being tested (arithmetic links aside), counting those
+	// without enough readings yet as tests that found nothing.
 	FDR           float64 `json:"fdr"`
 	PBar          float64 `json:"p_bar"`
 	PValuesTested int     `json:"p_values_tested"`
@@ -449,7 +450,8 @@ type CandidateEdge struct {
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
 	// pending cap chose it as the weakest, "untested" when its pair was displaced
 	// from the pair budget and its numbers stopped being updated, "grouped" when an
-	// end joined an arithmetic group it does not represent, "operator" when
+	// end joined an arithmetic group it does not represent, "bar" when its p-value
+	// no longer clears the corrected bar as more pairs came to be tested, "operator" when
 	// Defer was called. The proposer's own deferrals are provisional and re-enter
 	// when the evidence holds again; an operator's is not overturned.
 	Reason string

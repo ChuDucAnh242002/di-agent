@@ -93,6 +93,7 @@ type MICorrelationProposer struct {
 	bar             float64
 	barValid        bool
 	folds, barFolds uint64
+	barTests        int // the m the bar was last computed over
 
 	threshold  float64
 	minSpread  float64 // the variation gate: least spread, as a share of the declared range
@@ -472,6 +473,12 @@ func (p *MICorrelationProposer) dropLocked(key string) {
 	delete(p.pvals, key)
 	delete(p.partners[sl.from], sl.to)
 	delete(p.partners[sl.to], sl.from)
+	if _, linked := p.links[key]; linked {
+		// An untested link can neither hold nor break a group: the group goes with it,
+		// and its members compete like any other property until it forms again.
+		delete(p.links, key)
+		p.regroupLocked()
+	}
 }
 
 // foldLocked folds id's latest reading with otherID's, if they are close enough in
@@ -745,15 +752,20 @@ func (p *MICorrelationProposer) groupsLocked() []types.ArithmeticGroup {
 }
 
 // barLocked is the p-value bar a candidate must be at or under: Benjamini–Hochberg at
-// rate fdr over every pair with a p-value. With m p-values sorted ascending, it is
-// k·fdr/m for the largest k whose p-value is at or under that, and fdr/m when none is
-// — so a candidate needs more evidence the more pairs are tested. It is recomputed
-// once per round of folds, which keeps its cost one sort per tick. 0 when fdr is 0.
+// rate fdr over the m pairs being tested, arithmetic links aside. A pair without
+// enough readings for a p-value yet still counts, as a test that has found nothing:
+// otherwise, in the first round, the first pairs to reach enough readings would be
+// judged as if they were the only tests. With the p-values sorted ascending, the bar
+// is k·fdr/m for the largest k whose p-value is at or under that, and fdr/m when none
+// is — so a candidate needs more evidence the more pairs are tested. It is recomputed
+// once per round of folds, or sooner when m has moved by a tenth, which keeps its
+// cost about one sort per tick. 0 when fdr is 0.
 func (p *MICorrelationProposer) barLocked() float64 {
 	if p.fdr <= 0 {
 		return 0
 	}
-	if p.barValid && p.folds-p.barFolds < uint64(len(p.pvals)) {
+	tests := len(p.buffers) - len(p.links)
+	if p.barValid && p.folds-p.barFolds < uint64(len(p.pvals)) && absInt(tests-p.barTests)*10 < p.barTests {
 		return p.bar
 	}
 	ps := make([]float64, 0, len(p.pvals))
@@ -761,7 +773,7 @@ func (p *MICorrelationProposer) barLocked() float64 {
 		ps = append(ps, v)
 	}
 	sort.Float64s(ps)
-	m, k := float64(len(ps)), 1
+	m, k := float64(max(tests, len(ps))), 1
 	for i := len(ps) - 1; i >= 0; i-- {
 		if ps[i] <= float64(i+1)*p.fdr/m {
 			k = i + 1
@@ -772,8 +784,15 @@ func (p *MICorrelationProposer) barLocked() float64 {
 	if m > 0 {
 		p.bar = float64(k) * p.fdr / m
 	}
-	p.barValid, p.barFolds = true, p.folds
+	p.barValid, p.barFolds, p.barTests = true, p.folds, tests
 	return p.bar
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // Discovery reports the budget and how far it rationed the pairs.
@@ -794,7 +813,8 @@ func (p *MICorrelationProposer) Discovery() (*types.DiscoveryCounts, error) {
 	d.Properties = len(fresh)
 	d.EligiblePairs = d.Properties * (d.Properties - 1) / 2
 	d.Groups = p.groupsLocked()
-	d.FDR, d.PBar, d.PValuesTested = p.fdr, p.barLocked(), len(p.pvals)
+	d.FDR, d.PBar = p.fdr, p.barLocked()
+	d.PValuesTested = max(len(p.buffers)-len(p.links), len(p.pvals))
 	for _, sl := range p.slots {
 		if fresh[sl.from] && fresh[sl.to] {
 			d.TestedPairs++
@@ -900,22 +920,31 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if ok {
 		pv = stats.FisherPValue(r, buf.Len())
 	}
-	p.pvals[key] = pv
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)
 	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= groupR) {
-		// Arithmetic, not a finding: the group is reported in Discovery instead.
+		// Arithmetic, not a finding: the group is reported in Discovery instead, and
+		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
+		delete(p.pvals, key)
 		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
 			c.Status, c.Reason = types.Deferred, deferredGrouped
 		}
 		return nil
 	}
+	p.pvals[key] = pv
 	if !ok || math.Abs(r) < p.threshold {
 		return nil
 	}
 	bar := p.barLocked()
 	if bar > 0 && pv > bar {
-		return nil // strong enough alone, not once the number of pairs tested is counted
+		// Strong enough alone, not once the number of pairs tested is counted. A pending
+		// candidate the bar has tightened past leaves the queue with the numbers that
+		// put it out; it re-enters if it clears the bar again.
+		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
+			c.MIScore, c.PValue, c.PBar, c.NObservations = math.Abs(r), pv, bar, buf.Len()
+			c.Status, c.Reason = types.Deferred, deferredByBar
+		}
+		return nil
 	}
 	direction, sign := types.Positive, 1
 	if r < 0 {
@@ -1036,6 +1065,9 @@ const (
 	// deferredGrouped is a candidate an arithmetic group took over: its pair links the
 	// group, or an end joined a group it does not represent.
 	deferredGrouped = "grouped"
+	// deferredByBar is a pending candidate whose p-value no longer clears the bar, as
+	// more pairs came to be tested beside it.
+	deferredByBar = "bar"
 )
 
 func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }
