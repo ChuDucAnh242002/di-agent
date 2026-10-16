@@ -1551,6 +1551,49 @@ func TestPendingCandidateLeavesWhenItWeakens(t *testing.T) {
 	}
 }
 
+// TestPendingCandidateHoldsThroughAJitter: a pending pair whose |r| dips under the
+// threshold by less than its own sampling error stays pending. Leaving at the
+// threshold itself, a pair sitting on it flapped between pending and weakened with
+// every few readings, each flip a change for an operator to look at. It leaves once
+// the dip is larger than the window's sampling error.
+func TestPendingCandidateHoldsThroughAJitter(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	feed := func(from, to int, noise float64) {
+		for i := from; i < to; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			y := 0.3 + 0.4*x + noise*math.Sin(float64(i)*2.9)
+			_ = p.ObserveProperty(types.PropertyReading{ID: "x", Value: x, At: at, Range: rng})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "y", Value: y, At: at, Range: rng})
+		}
+	}
+	status := func() (types.CandidateStatus, string, float64) {
+		h, _ := p.GetHistory()
+		for _, c := range h {
+			if c.CandidateID == "x<->y" {
+				return c.Status, c.Reason, c.MIScore
+			}
+		}
+		t.Fatal("x<->y never proposed")
+		return 0, "", 0
+	}
+	feed(0, 120, 0.05)
+	if s, _, _ := status(); s != types.Pending {
+		t.Fatalf("x<->y is %v while coupled; want pending", s)
+	}
+	// One SE of Fisher's z at n=120 puts the floor at |r| ≈ 0.765 for a 0.8 threshold.
+	feed(120, 240, 0.13)
+	if s, why, r := status(); s != types.Pending || r >= 0.8 || r < 0.765 {
+		t.Errorf("x<->y is %v (%q) at |r|=%.3f; want pending at an |r| just under the threshold", s, why, r)
+	}
+	feed(240, 360, 0.2)
+	if s, why, r := status(); s != types.Deferred || why != "weakened" || r >= 0.765 {
+		t.Errorf("x<->y is %v (%q) at |r|=%.3f; want deferred as weakened below the floor", s, why, r)
+	}
+}
+
 // TestSameSubjectFlag: two metrics of one subject that move together, such as a
 // capped pod's CPU and its throttling, are proposed and marked same-subject: one
 // workload's own quantities hold together by construction more often than by a

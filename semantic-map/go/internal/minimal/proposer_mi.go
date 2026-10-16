@@ -937,11 +937,15 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if !ok || math.Abs(r) < p.threshold {
 		// A pending candidate whose pair no longer holds leaves the queue with the
 		// numbers that put it out, rather than asking an operator to confirm an |r|
-		// it had once. It re-enters if the pair holds again.
+		// it had once. It re-enters if the pair holds again. A dip smaller than the
+		// window's sampling error is not a pair that stopped holding: leaving at the
+		// threshold itself, a pair sitting on it flapped in and out of the queue.
 		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
 			c.MIScore, c.NObservations = math.Abs(r), buf.Len()
 			c.PValue = pv
-			c.Status, c.Reason = types.Deferred, deferredWeakened
+			if !ok || math.Abs(r) < weakenedBelow(p.threshold, buf.Len()) {
+				c.Status, c.Reason = types.Deferred, deferredWeakened
+			}
 		}
 		return nil
 	}
@@ -1079,7 +1083,8 @@ const (
 	// more pairs came to be tested beside it.
 	deferredByBar = "bar"
 	// deferredWeakened is a pending candidate whose |r| fell below the candidate
-	// threshold: the evidence it was emitted on no longer holds.
+	// threshold by more than its sampling error (weakenedBelow): the evidence it
+	// was emitted on no longer holds.
 	deferredWeakened = "weakened"
 )
 
@@ -1327,4 +1332,16 @@ func (l ontologyLookup) Covered(from, to string, sign int) bool {
 		}
 	}
 	return false
+}
+
+// weakenedBelow is the |r| under which a pending candidate leaves the queue: the
+// threshold less one standard error of Fisher's z over n pairs, 1/√(n−3). Entering
+// takes the threshold itself, so a pair whose |r| jitters around it is proposed once
+// rather than at every crossing; the band narrows as the window fills (0.82 for a
+// 0.85 threshold at 120 pairs).
+func weakenedBelow(threshold float64, n int) float64 {
+	if n <= 3 || threshold >= 1 {
+		return threshold // no band to give
+	}
+	return math.Tanh(math.Atanh(threshold) - 1/math.Sqrt(float64(n-3)))
 }

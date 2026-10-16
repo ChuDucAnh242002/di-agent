@@ -438,7 +438,9 @@ candidate an operator rejected and one never proposed look the same.
 candidate carries `Reason`: `grouped` when an arithmetic group took it over (its pair links
 the group, or an end joined a group it does not represent); `bar` when its p-value no
 longer clears the corrected bar, because more pairs came to be tested beside it; `weakened`
-when its `|r|` fell below the threshold, so the evidence it was emitted on no longer holds;
+when its `|r|` fell below the threshold by more than one standard error of Fisher's z
+(about 0.82 for the 0.85 default over a full window), so the evidence it was emitted on no
+longer holds; a pending candidate inside that margin stays pending and shows its current `|r|`;
 `untested` when its pair was displaced from the pair budget, so
 its numbers stopped being updated (it re-enters if the pair is tested again and still clears
 the threshold); `cap` when the proposer's pending cap deferred it (provisional;
