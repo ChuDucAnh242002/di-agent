@@ -406,7 +406,7 @@ The rule we hold to: **no new contract without a second implementation that need
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit and range per type | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
+| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit, and range where the quantity has one, per type | Pure read; deterministic `event_id`; every type a `collect()` emits is in the `available_metrics()` that follows it; never raises on empty data |
 | **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; `Reject` permanently suppresses within session          |
@@ -660,14 +660,14 @@ Each `MetricSample` carries:
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
 | `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
-| `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Required with `unit` on every sample (a contract MUST) |
+| `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Declared where the quantity has one (a share, a percentage), absent for a rate or a count; the same on every sample of a type. Without one the map assumes [0,1] and says so |
 | `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
 | `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
 **`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
-**`available_metrics()` is static** — declared once at construction, never changes within a deployment session. It says what this collector can report without calling `collect()` first.
+**`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
 
 ### MetricType catalogue
 
@@ -1031,7 +1031,7 @@ association's strength.
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
-| `NetdataCollector`  | Netdata HTTP streaming API       | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go` | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps |
+| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`-netdata-include`; a curated default of CPU, memory, pressure, I/O, network and disk; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped; every sample carries its chart. When it is the only collector it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); beside the cgroup collector it does not, because the two measure CPU differently. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
 
 The `CgroupCollector` reports memory from two different places, because a cgroup v2
 root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
@@ -1644,17 +1644,17 @@ Peer mesh: each agent registers the other two via `POST /peers`. The server deri
 
 ### What the binary sees on each node
 
-The `NetdataCollector` polls one chart at a time via:
+The `NetdataCollector` reads every chart in one request:
 
 ```
-GET /api/v1/data?chart=CHART&points=1&after=-30&format=json
+GET /api/v1/allmetrics?format=json
 ```
 
-and maps:
-- `system.cpu idle %` → `CPUUtilization = 1 - idle/100` → RC-adjacent edges
+and keeps the charts its include list selects (§5). With Netdata as the only collector it also maps:
+- `system.cpu`, every dimension but idle and iowait → `CPUUtilization` → RC-adjacent edges
 - `system.ram used/(used+free+cached+buffers)` → `MemoryUtilization` → RC-adjacent edges
-- `system.net InOctets` (kb/s) → `NetworkRxBps` normalized to [0,1] vs 1 Gbps reference
-- `system.net OutOctets` (sign-flipped) → `NetworkTxBps` normalized similarly
+- `system.cpu_some_pressure_stall_time` (ms stalled per second) → `CPUPressureRatio`, and the I/O and memory equivalents
+- `system.net InOctets` / `OutOctets` (kb/s, outbound drawn negative) → `NetworkRxBps` / `NetworkTxBps` against a 1 Gbps reference
 
 At idle k0s, CPU utilization is ≈ 0.05, so the reported resource level is low and the pressure series is close to flat — which means the paired estimator forms few pairs and declines to move on what it does form, and confidence stays near zero. That is the estimator working rather than the demo failing; §"What determines the saturation point" is the general form. The bursty regime (α=0.30, N=200) reaches saturation sooner, so diag-1 accumulates confidence faster than the stable VMs (α=0.05, N=1000).
 
