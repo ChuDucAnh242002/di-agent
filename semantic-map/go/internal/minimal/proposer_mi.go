@@ -678,6 +678,17 @@ func (p *MICorrelationProposer) linkLocked(key string, linked bool) bool {
 	return linked
 }
 
+// linkFloorLocked is the |r| a pair of one chart needs to link a group: groupR to
+// form the link, and groupR less one standard error of Fisher's z to keep it, so a pair
+// hovering at the cut-off does not form and break its group at every crossing. The
+// band is the one weakenedBelow gives a pending candidate (0.988 at 120 pairs).
+func (p *MICorrelationProposer) linkFloorLocked(key string, n int) float64 {
+	if _, linked := p.links[key]; linked {
+		return weakenedBelow(groupR, n)
+	}
+	return groupR
+}
+
 // regroupLocked recomputes the arithmetic groups from their links: the members a
 // chain of links connects are one group. Its representative is the most variable
 // member, except that a member already representing part of the group keeps the
@@ -931,7 +942,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)
-	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= groupR) {
+	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= p.linkFloorLocked(key, buf.Len())) {
 		// Arithmetic, not a finding: the group is reported in Discovery instead, and
 		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
 		delete(p.pvals, key)

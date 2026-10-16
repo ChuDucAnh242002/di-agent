@@ -401,8 +401,9 @@ type DiscoveryCounts struct {
 	// variable ones.
 	Displaced uint64 `json:"displaced"`
 	// Groups are the arithmetic groups found: properties of one chart and one
-	// subject whose pairs stay at |r| ≥ 0.99. Only each group's representative is
-	// paired outside it.
+	// subject whose pairs reached |r| ≥ 0.99 and have not since fallen more than
+	// their sampling error below it. Only each group's representative is paired
+	// outside it.
 	Groups []ArithmeticGroup `json:"groups,omitempty"`
 	// FDR is the false-discovery rate the candidate bar holds to, 0 when
 	// uncorrected; PBar is the bar a p-value must be at or under now, over the
@@ -414,7 +415,8 @@ type DiscoveryCounts struct {
 }
 
 // ArithmeticGroup is properties of one chart and one subject that move as one: each
-// is linked to another member by a tested pair at |r| ≥ 0.99. Representative, the
+// is linked to another member by a tested pair that reached |r| ≥ 0.99 and holds
+// within one standard error of Fisher's z of it. Representative, the
 // most variable member when the group last changed, is the only one paired outside.
 type ArithmeticGroup struct {
 	Chart          string   `json:"chart"`

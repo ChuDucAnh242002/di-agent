@@ -1648,3 +1648,45 @@ func TestSameSubjectFlag(t *testing.T) {
 		t.Errorf("a pair across two subjects: kind %q (proposed %v); want proposed and unmarked", k, ok)
 	}
 }
+
+// TestGroupHoldsThroughAJitter: a link forms at groupR and holds until the pair falls
+// below it by more than one standard error of Fisher's z, so a pair whose |r| hovers at
+// the cut-off keeps its group rather than forming and breaking it at every crossing.
+func TestGroupHoldsThroughAJitter(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	noise := rand.New(rand.NewSource(7))
+	changes, grouped := 0, false
+	feed := func(from, to int, sd float64) {
+		for i := from; i < to; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			for _, r := range []types.PropertyReading{
+				{ID: "used", Value: x, Chart: "system.ram"},
+				{ID: "free", Value: 1 - x + sd*noise.NormFloat64(), Chart: "system.ram"},
+			} {
+				r.At, r.Range = at, rng
+				_ = p.ObserveProperty(r)
+			}
+			d, _ := p.Discovery()
+			if now := len(d.Groups) == 1; now != grouped {
+				changes++
+				grouped = now
+			}
+		}
+	}
+	feed(0, 120, 0.02)
+	if !grouped {
+		t.Fatal("used and free not grouped while they move as one")
+	}
+	changes = 0
+	feed(120, 600, 0.04) // |r| hovers at the cut-off
+	if changes != 0 || !grouped {
+		t.Errorf("the group changed %d times while |r| hovered at the cut-off; want it held", changes)
+	}
+	feed(600, 840, 0.15)
+	if grouped {
+		t.Error("used and free still grouped after they parted")
+	}
+}
