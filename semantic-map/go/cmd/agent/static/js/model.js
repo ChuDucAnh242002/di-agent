@@ -153,7 +153,8 @@ export class Model {
         status: props.some((p) => p.status === 'active') ? 'active'
           : props.some((p) => p.status === 'stale') ? 'stale' : 'retired',
       }))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      // By what is shown: sorted by UID, named pods would come out in no visible order.
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }
 
   /** Membership edges: a derived property is recomputed from these, never stored. */
