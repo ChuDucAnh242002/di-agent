@@ -433,7 +433,9 @@ Lists Proposer candidate edges pending review.
 `Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
 candidate carries `Reason`: `grouped` when an arithmetic group took it over (its pair links
 the group, or an end joined a group it does not represent); `bar` when its p-value no
-longer clears the corrected bar, because more pairs came to be tested beside it; `untested` when its pair was displaced from the pair budget, so
+longer clears the corrected bar, because more pairs came to be tested beside it; `weakened`
+when its `|r|` fell below the threshold, so the evidence it was emitted on no longer holds;
+`untested` when its pair was displaced from the pair budget, so
 its numbers stopped being updated (it re-enters if the pair is tested again and still clears
 the threshold); `cap` when the proposer's pending cap deferred it (provisional;
 it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it

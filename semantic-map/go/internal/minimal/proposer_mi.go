@@ -933,6 +933,14 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	p.pvals[key] = pv
 	if !ok || math.Abs(r) < p.threshold {
+		// A pending candidate whose pair no longer holds leaves the queue with the
+		// numbers that put it out, rather than asking an operator to confirm an |r|
+		// it had once. It re-enters if the pair holds again.
+		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
+			c.MIScore, c.NObservations = math.Abs(r), buf.Len()
+			c.PValue = pv
+			c.Status, c.Reason = types.Deferred, deferredWeakened
+		}
 		return nil
 	}
 	bar := p.barLocked()
@@ -1068,6 +1076,9 @@ const (
 	// deferredByBar is a pending candidate whose p-value no longer clears the bar, as
 	// more pairs came to be tested beside it.
 	deferredByBar = "bar"
+	// deferredWeakened is a pending candidate whose |r| fell below the candidate
+	// threshold: the evidence it was emitted on no longer holds.
+	deferredWeakened = "weakened"
 )
 
 func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }

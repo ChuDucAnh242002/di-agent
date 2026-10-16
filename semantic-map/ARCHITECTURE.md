@@ -1177,7 +1177,7 @@ The proposer is fed every observed property, and pairs them inside the pair wind
 | node ↔ node | **undirected**, the pair in lexicographic order, id `a<->b` | correlation is symmetric and nothing says which node-level quantity drives the other; the operator names the end it runs from on confirm (`{"from": ...}`), and a relationship declared either way round covers it |
 | subject ↔ subject | **undirected**, as node ↔ node | two workloads can drive each other or share a driver. Two subjects' readings of one metric (`cpu_utilization@pod:a <-> cpu_utilization@pod:b`) carry `Kind: "same-metric"`: they are proposed like any other pair, and the kind says a shared driver (the same cron, the same client) is the likelier explanation |
 
-Readings further apart than the pair window do not form a pair, and a reading no newer than its property's last one is a repeat and is not paired; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+Readings further apart than the pair window do not form a pair, and a reading no newer than its property's last one is a repeat and is not paired; a pending candidate carries its pair's latest numbers, and one whose `|r|` falls below the threshold is deferred with `Reason: "weakened"` (it re-enters if the pair holds again) — without that, a candidate emitted on one coincident spike stood in the queue at the `|r|` it had then; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
 
 ### The pair budget
 

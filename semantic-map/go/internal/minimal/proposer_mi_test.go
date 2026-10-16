@@ -1386,7 +1386,9 @@ func feedNoise(p *minimal.MICorrelationProposer, seed int64, noise, from, to int
 		x := float64(i%10) / 10
 		rs := []types.PropertyReading{
 			{ID: "x", Value: x},
-			{ID: "y", Value: 0.3 + 0.4*x + 0.16*math.Sin(float64(i)*2.3)},
+			// The noise repeats every ten ticks, as x does, so every window of ten
+			// readings holds the same |r|: what changes is only the bar.
+			{ID: "y", Value: 0.3 + 0.4*x + 0.11*math.Sin(float64(i%10)*2.3)},
 		}
 		for k := 0; k < noise; k++ {
 			rs = append(rs, types.PropertyReading{ID: fmt.Sprintf("n%02d", k), Value: rnd.Float64()})
@@ -1502,5 +1504,49 @@ func TestGroupBreaksWhenItsLinkIsDisplaced(t *testing.T) {
 				t.Errorf("groups %+v after busy_avg's link was displaced; want none", d.Groups)
 			}
 		}
+	}
+}
+
+// TestPendingCandidateLeavesWhenItWeakens: a pending candidate whose correlation
+// falls below the threshold leaves the queue with the numbers that put it out,
+// rather than standing on the |r| it had when it was emitted. It re-enters when the
+// pair holds again.
+func TestPendingCandidateLeavesWhenItWeakens(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 20, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	feed := func(from, to int, coupled bool) {
+		for i := from; i < to; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			y := 0.2 + 0.7*x
+			if !coupled {
+				y = 0.5 + 0.4*math.Sin(float64(i)*2.9)
+			}
+			_ = p.ObserveProperty(types.PropertyReading{ID: "x", Value: x, At: at, Range: rng})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "y", Value: y, At: at, Range: rng})
+		}
+	}
+	status := func() (types.CandidateStatus, string, float64) {
+		h, _ := p.GetHistory()
+		for _, c := range h {
+			if c.CandidateID == "x<->y" {
+				return c.Status, c.Reason, c.MIScore
+			}
+		}
+		t.Fatal("x<->y never proposed")
+		return 0, "", 0
+	}
+	feed(0, 30, true)
+	if s, _, _ := status(); s != types.Pending {
+		t.Fatalf("x<->y is %v while coupled; want pending", s)
+	}
+	feed(30, 60, false)
+	if s, why, r := status(); s != types.Deferred || why != "weakened" || r >= 0.8 {
+		t.Errorf("x<->y is %v (%q) at |r|=%.3f after parting; want deferred as weakened, with the |r| that put it out", s, why, r)
+	}
+	feed(60, 90, true)
+	if s, _, _ := status(); s != types.Pending {
+		t.Errorf("x<->y is %v after coupling again; want pending", s)
 	}
 }

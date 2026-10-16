@@ -451,7 +451,8 @@ type CandidateEdge struct {
 	// pending cap chose it as the weakest, "untested" when its pair was displaced
 	// from the pair budget and its numbers stopped being updated, "grouped" when an
 	// end joined an arithmetic group it does not represent, "bar" when its p-value
-	// no longer clears the corrected bar as more pairs came to be tested, "operator" when
+	// no longer clears the corrected bar as more pairs came to be tested, "weakened"
+	// when its |r| fell below the candidate threshold, "operator" when
 	// Defer was called. The proposer's own deferrals are provisional and re-enter
 	// when the evidence holds again; an operator's is not overturned.
 	Reason string
