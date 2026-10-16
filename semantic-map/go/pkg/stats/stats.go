@@ -44,6 +44,26 @@ func (w *PairWindow) Fold(identity string, x, y float64) bool {
 	return true
 }
 
+// ReplaceLast overwrites the most recently folded pair with (x, y) under identity,
+// for a caller that has found a better partner for one of its readings. It folds
+// instead when the window is empty, and returns false when identity was already
+// folded.
+func (w *PairWindow) ReplaceLast(identity string, x, y float64) bool {
+	if len(w.xs) == 0 {
+		return w.Fold(identity, x, y)
+	}
+	if _, dup := w.seen[identity]; dup {
+		return false
+	}
+	w.seen[identity] = struct{}{}
+	last := len(w.xs) - 1
+	if w.capacity > 0 && len(w.xs) == w.capacity {
+		last = (w.next - 1 + w.capacity) % w.capacity
+	}
+	w.xs[last], w.ys[last] = x, y
+	return true
+}
+
 func (w *PairWindow) Len() int { return len(w.xs) }
 
 // Spread returns max − min of each side over the window: how far each series moved.

@@ -844,6 +844,37 @@ func TestVariationGate(t *testing.T) {
 // TestCompositionFlag: a subject's metric against the node total of the same metric
 // is part against whole. It is still proposed, marked as such, and a different metric
 // is not marked.
+// Readings of one tick arrive one after another while the previous tick's are still
+// inside the pair window. After a missed reading the first arrival of the next tick
+// finds the other's previous value unpaired and folds it; the same-tick reading that
+// follows must replace that pair, or the window stays one interval out of step for
+// good — and on an alternating series a one-interval lag reads as r = -1.
+func TestPairsReadingsOfTheSameTickAfterAGap(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i % 2)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu@pod:a", Subject: "pod:a", Value: x, At: at})
+		if i != 5 { // one failed read
+			_ = p.ObserveProperty(types.PropertyReading{ID: "memory", Value: x, At: at})
+		}
+		_ = p.ObserveProperty(types.PropertyReading{ID: "cpu", Value: x, At: at})
+	}
+	h, _ := p.GetHistory()
+	if len(h) == 0 {
+		t.Fatal("no candidates")
+	}
+	for _, c := range h {
+		if c.Direction != types.Positive || c.MIScore < 0.99 {
+			t.Errorf("%s: direction %v |r|=%.3f; same-tick readings must pair, giving r = +1", c.CandidateID, c.Direction, c.MIScore)
+		}
+		if c.NObservations < 19 {
+			t.Errorf("%s: n=%d; want one pair per tick with both readings", c.CandidateID, c.NObservations)
+		}
+	}
+}
+
 func TestCompositionFlag(t *testing.T) {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

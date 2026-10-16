@@ -51,7 +51,11 @@ type MICorrelationProposer struct {
 	// lastPair remembers, per buffer key, the timestamps of the last pair folded, so
 	// a reading takes part in at most one pair per counterpart: without it each tick
 	// at a shared cadence folded (x_i, y_{i-1}) on x's arrival and (x_i, y_i) on
-	// y's, counting every reading twice.
+	// y's, counting every reading twice. When the later arrival is the closer
+	// partner it replaces the pair just folded rather than being refused: after a
+	// missed reading the first arrival of a tick folds the other's previous value,
+	// and refusing the same-tick reading would keep the window one interval out of
+	// step from then on.
 	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
@@ -83,6 +87,7 @@ type pairMeta struct {
 	property   bool // formed by ObserveProperty: the variation gate and caveats apply
 	undirected bool
 	kind       string
+	replace    bool // overwrite the last folded pair: this one shares a reading with it and is closer in time
 	xRange     *[2]float64
 	yRange     *[2]float64
 }
@@ -215,10 +220,14 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 		}
 		xAt, yAt := fv.at.UnixNano(), tv.at.UnixNano()
 		key := from + "→" + to
+		replace := false
 		if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
-			continue // that reading already took part in a pair with this counterpart
+			if absNano(xAt-yAt) >= absNano(lp[0]-lp[1]) {
+				continue // that reading already took part in a pair with this counterpart, as closely
+			}
+			replace = true // a closer partner arrived for a reading already paired: swap it in
 		}
-		meta := pairMeta{property: true, undirected: undirected, xRange: fv.rng, yRange: tv.rng}
+		meta := pairMeta{property: true, undirected: undirected, replace: replace, xRange: fv.rng, yRange: tv.rng}
 		if !undirected && metricOf(from) == to {
 			meta.kind = types.CandidateKindComposition
 		}
@@ -227,6 +236,13 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 		p.lastPair[key] = [2]int64{xAt, yAt}
 	}
 	return nil
+}
+
+func absNano(d int64) int64 {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // metricOf is the metric a property id names: "cpu_utilization@pod:a" and
@@ -269,7 +285,11 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		buf = stats.NewPairWindow(p.bufSize)
 		p.buffers[key] = buf
 	}
-	if !buf.Fold(identity, valueA, valueB) {
+	folded := buf.Fold
+	if meta.replace {
+		folded = buf.ReplaceLast
+	}
+	if !folded(identity, valueA, valueB) {
 		return nil
 	}
 	if buf.Len() < p.minPairs {
