@@ -106,13 +106,14 @@ func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 			directionLabel(c.Direction),
 			fmt.Sprintf("%.3f", c.MIScore),
 			fmt.Sprintf("%.3g", c.PValue),
+			barLabel(c.PBar),
 			fmt.Sprintf("%d", c.NObservations),
 			fmt.Sprintf("%d", c.DeploymentsSeen),
 			kindLabel(c),
 			statusLabel(c.Status, c.Reason),
 		})
 	}
-	render.Table(w, []string{"ID", "From", "To", "Dir", "MI", "p-value", "N", "Deploys", "Kind", "Status"}, rows)
+	render.Table(w, []string{"ID", "From", "To", "Dir", "MI", "p-value", "p-bar", "N", "Deploys", "Kind", "Status"}, rows)
 }
 
 // kindLabel says what kind of claim a candidate would make: "undirected" when the
@@ -147,4 +148,13 @@ func statusLabel(status, reason string) string {
 		return status + " (" + reason + ")"
 	}
 	return status
+}
+
+// barLabel is the corrected p-value bar a candidate cleared, "-" when the proposer
+// applies no correction.
+func barLabel(bar float64) string {
+	if bar == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.3g", bar)
 }

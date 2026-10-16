@@ -247,7 +247,7 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	// declared it: an assumed [0,1] would make the variation gate measure movement
 	// against a scale nobody stated. Advisory: its errors must not block telemetry.
 	if m.proposer != nil {
-		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Value: value,
+		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Chart: sample.Chart, Value: value,
 			At: time.Unix(sample.TimestampUnix, 0)}
 		if p, ok := m.state.Property(id); ok && p.RangeDeclared {
 			rng := p.Range

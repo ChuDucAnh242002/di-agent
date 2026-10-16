@@ -178,6 +178,7 @@ type CandidateEdge struct {
 	Direction       int      `json:"Direction"`
 	MIScore         float64  `json:"MIScore"`
 	PValue          float64  `json:"PValue"`
+	PBar            float64  `json:"PBar"`
 	NObservations   int      `json:"NObservations"`
 	DeploymentsSeen int      `json:"DeploymentsSeen"`
 	Status          string   `json:"Status"`

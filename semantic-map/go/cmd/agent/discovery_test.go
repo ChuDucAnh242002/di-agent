@@ -150,6 +150,9 @@ func TestStateReportsHowFarDiscoveryWasRationed(t *testing.T) {
 			if d.Budget != 1 || d.Properties != 3 || d.EligiblePairs != 3 || d.TestedPairs != 1 || d.TestedByClass[types.PairNodeNode] != 1 {
 				t.Errorf("discovery %+v; want budget 1, 3 properties, 3 eligible, 1 node<->node tested", d)
 			}
+			if d.FDR != 0.05 || d.PBar <= 0 {
+				t.Errorf("fdr %.3f, bar %.3g; want the default 5%% rate and the bar it gives", d.FDR, d.PBar)
+			}
 		})
 	}
 }

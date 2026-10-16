@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1175,5 +1176,202 @@ func TestDiscoveryCountsIdlePairsApart(t *testing.T) {
 	d, _ := p.Discovery()
 	if d.Properties != 1 || d.EligiblePairs != 0 || d.TestedPairs != 0 || d.IdlePairs != 6 {
 		t.Errorf("discovery %+v; want 1 property, 0 eligible, 0 tested, 6 idle", d)
+	}
+}
+
+// feedChart feeds two properties of one chart (busy, and busy_avg moving with it at
+// half the amplitude, as a smoothing would) and an unrelated load that follows busy
+// with noise. coupled reports, per tick, whether busy_avg still tracks busy.
+func feedChart(p *minimal.MICorrelationProposer, chart string, from, to int, coupled func(i int) bool) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := from; i < to; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		avg := 0.25 + 0.5*x
+		if !coupled(i) {
+			avg = 0.5 + 0.3*math.Sin(float64(i)*2.9)
+		}
+		for _, r := range []types.PropertyReading{
+			{ID: "busy", Chart: chart, Value: x},
+			{ID: "busy_avg", Chart: chart, Value: avg},
+			{ID: "load", Value: 0.1 + 0.6*x + 0.05*math.Sin(float64(i)*1.3)},
+		} {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+	}
+}
+
+func always(int) bool { return true }
+
+// TestArithmeticGroupIsReportedOnceAndRepresented: two properties of one chart that
+// move as one are a group, not a candidate. The more variable of them stands for the
+// group: it is paired with load, and the other is not. Without a chart nothing says
+// they are arithmetic, and their pair is proposed like any other.
+func TestArithmeticGroupIsReportedOnceAndRepresented(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	feedChart(p, "system.cpu", 0, 60, always)
+
+	d, _ := p.Discovery()
+	if len(d.Groups) != 1 {
+		t.Fatalf("groups %+v; want one", d.Groups)
+	}
+	g := d.Groups[0]
+	if g.Chart != "system.cpu" || g.Representative != "busy" || !slices.Equal(g.Members, []string{"busy", "busy_avg"}) {
+		t.Errorf("group %+v; want system.cpu {busy, busy_avg} represented by busy, the more variable", g)
+	}
+	if d.TestedPairs != 2 {
+		t.Errorf("%d pairs tested; want 2: busy<->busy_avg links the group, busy<->load represents it", d.TestedPairs)
+	}
+	pending := map[string]bool{}
+	for _, c := range mustCandidates(t, p) {
+		pending[c.CandidateID] = true
+	}
+	if !pending["busy<->load"] {
+		t.Errorf("busy<->load not proposed; pending %v", pending)
+	}
+	for _, id := range []string{"busy<->busy_avg", "busy_avg<->load"} {
+		if pending[id] {
+			t.Errorf("%s is pending; the group is reported once, through its representative", id)
+		}
+	}
+
+	q := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	feedChart(q, "", 0, 60, always)
+	if d, _ := q.Discovery(); len(d.Groups) != 0 {
+		t.Errorf("groups %+v; series of no chart are never grouped", d.Groups)
+	}
+	var found bool
+	for _, c := range mustCandidates(t, q) {
+		found = found || c.CandidateID == "busy<->busy_avg"
+	}
+	if !found {
+		t.Error("without a chart, busy<->busy_avg not proposed")
+	}
+}
+
+// TestGroupBreaksWhenItsMembersPartWays: once busy_avg stops tracking busy, the link
+// breaks after the window has turned over, and busy_avg is paired with load again.
+func TestGroupBreaksWhenItsMembersPartWays(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+	feedChart(p, "system.cpu", 0, 40, always)
+	if d, _ := p.Discovery(); len(d.Groups) != 1 {
+		t.Fatalf("groups %+v before parting; want one", d.Groups)
+	}
+	feedChart(p, "system.cpu", 40, 100, func(int) bool { return false })
+	d, _ := p.Discovery()
+	if len(d.Groups) != 0 {
+		t.Errorf("groups %+v after busy_avg parted from busy; want none", d.Groups)
+	}
+	if d.TestedPairs != 3 {
+		t.Errorf("%d pairs tested after the group broke; want all 3", d.TestedPairs)
+	}
+}
+
+// TestGroupDefersTheCandidatesItTakesOver: a pending candidate from a member that
+// stops representing its group is deferred as grouped, not left pending with numbers
+// nothing updates.
+func TestGroupDefersTheCandidatesItTakesOver(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := 0; i < 60; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		// busy_avg tracks load from the start; busy joins its chart only after 20
+		// ticks of noise, so busy_avg<->load is proposed before the group forms.
+		busy := 0.5 + 0.4*math.Sin(float64(i)*2.9)
+		if i >= 20 {
+			busy = x
+		}
+		for _, r := range []types.PropertyReading{
+			{ID: "busy", Chart: "system.cpu", Value: busy},
+			{ID: "busy_avg", Chart: "system.cpu", Value: 0.25 + 0.5*x},
+			{ID: "load", Value: 0.1 + 0.6*x + 0.05*math.Sin(float64(i)*1.3)},
+		} {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+		if i == 19 {
+			var found bool
+			for _, c := range mustCandidates(t, p) {
+				found = found || c.CandidateID == "busy_avg<->load"
+			}
+			if !found {
+				t.Fatal("busy_avg<->load not proposed before the group formed")
+			}
+		}
+	}
+	d, _ := p.Discovery()
+	if len(d.Groups) != 1 || d.Groups[0].Representative != "busy" {
+		t.Fatalf("groups %+v; want one represented by busy", d.Groups)
+	}
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == "busy_avg<->load" && (c.Status != types.Deferred || c.Reason != "grouped") {
+			t.Errorf("busy_avg<->load is %v (%q); want deferred as grouped", c.Status, c.Reason)
+		}
+	}
+}
+
+// TestBarCorrectsForThePairsTested: a pair that clears |r| on few readings is a
+// candidate when it is the only pair tested, and not when hundreds of pairs that
+// show nothing are tested beside it. A candidate that clears the bar reports it.
+func TestBarCorrectsForThePairsTested(t *testing.T) {
+	feed := func(p *minimal.MICorrelationProposer, noise int) {
+		rnd := rand.New(rand.NewSource(7))
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		rng := &[2]float64{0, 1}
+		for i := 0; i < 12; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			rs := []types.PropertyReading{
+				{ID: "x", Value: x},
+				{ID: "y", Value: 0.3 + 0.4*x + 0.16*math.Sin(float64(i)*2.3)},
+			}
+			for k := 0; k < noise; k++ {
+				rs = append(rs, types.PropertyReading{ID: fmt.Sprintf("n%02d", k), Value: rnd.Float64()})
+			}
+			for _, r := range rs {
+				r.At, r.Range = at, rng
+				_ = p.ObserveProperty(r)
+			}
+		}
+	}
+	xy := func(p *minimal.MICorrelationProposer) *types.CandidateEdge {
+		for _, c := range mustCandidates(t, p) {
+			if c.CandidateID == "x<->y" {
+				return c
+			}
+		}
+		return nil
+	}
+
+	alone := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	feed(alone, 0)
+	c := xy(alone)
+	if c == nil {
+		t.Fatal("x<->y not proposed when it is the only pair tested")
+	}
+	if c.PBar == 0 || c.PValue > c.PBar {
+		t.Errorf("x<->y p=%.3g bar=%.3g; a candidate reports the bar it cleared", c.PValue, c.PBar)
+	}
+
+	crowded := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	feed(crowded, 30)
+	d, _ := crowded.Discovery()
+	if c := xy(crowded); c != nil {
+		t.Errorf("x<->y proposed at p=%.3g among %d p-values; the bar is %.3g", c.PValue, d.PValuesTested, d.PBar)
+	}
+	if d.FDR != minimal.DefaultFDR || d.PValuesTested < 400 {
+		t.Errorf("discovery fdr=%.2f over %d p-values; want the default rate over every pair", d.FDR, d.PValuesTested)
+	}
+
+	uncorrected := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	uncorrected.SetFDR(0)
+	feed(uncorrected, 30)
+	if c := xy(uncorrected); c == nil || c.PBar != 0 {
+		t.Errorf("x<->y with the correction off: %+v; want proposed with no bar", c)
 	}
 }

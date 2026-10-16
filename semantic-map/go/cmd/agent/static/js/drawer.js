@@ -256,6 +256,8 @@ export class Drawer {
         Testing ${fmt.int(d.tested_pairs)} of ${fmt.int(d.eligible_pairs)} pairs among
         ${fmt.int(d.properties)} properties, with ${budget}${d.idle_pairs ? `; ${fmt.int(d.idle_pairs)} more held by properties gone quiet` : ''}${d.displaced ? `; ${fmt.int(d.displaced)} displaced so far` : ''}.
         ${short ? 'The most variable properties get pairs first, so a quiet pair may not have been looked at yet.' : ''}
+        ${d.fdr ? `A candidate's p must be at or under ${Number(d.p_bar).toPrecision(2)}: the bar at a ${fmt.num(d.fdr * 100, 1)}% false-discovery rate over the ${fmt.int(d.p_values_tested)} pairs with enough readings.` : 'The p-value bar is not corrected for how many pairs are tested.'}
+        ${(d.groups || []).length ? `${fmt.int(d.groups.length)} arithmetic group${d.groups.length > 1 ? 's' : ''}, each paired outside through one member: ${d.groups.map((g) => `<span class="mono" title="${escapeHTML(g.members.join(', '))}">${escapeHTML(g.representative)}</span> for ${fmt.int(g.members.length)} of ${escapeHTML(g.chart)}`).join('; ')}.` : ''}
       </p>`;
   }
 
@@ -268,7 +270,10 @@ export class Drawer {
         node's, the node's with each other, and subjects' with each other. It
         only emits a candidate once each end has moved enough to matter and the correlation
         clears the configured threshold over the configured minimum number of pairs
-        (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>).
+        (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>),
+        with a p-value under a bar that tightens as more pairs are tested
+        (<span class="mono">-proposer-fdr</span>). Series of one chart that move as one are
+        grouped rather than proposed.
         An empty queue means no tested pair has cleared both yet — not that the proposer is off.</span>
       </div>`;
       return;
@@ -301,7 +306,7 @@ export class Drawer {
             <td class="mono">${from} ${c.Undirected ? '↔' : '→'} ${to}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
             <td style="color:${sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)'}">${sign < 0 ? '↓ negative' : '↑ positive'}</td>
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
-            <td class="num">${fmt.num(c.PValue, 4)}</td>
+            <td class="num" title="${c.PBar ? `cleared the bar ${Number(c.PBar).toPrecision(2)}, corrected for the pairs tested` : 'no correction for the pairs tested'}">${fmt.num(c.PValue, 4)}</td>
             <td class="num">${fmt.int(c.NObservations)}</td>
             <td class="muted">${escapeHTML(String(c.Status ?? ''))}</td>
             <td class="nowrap">

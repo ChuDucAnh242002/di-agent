@@ -256,6 +256,39 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		}
 	})
 
+	t.Run("ArithmeticOfOneChartIsNotProposed", func(t *testing.T) {
+		p := factory(t)
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 120; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%20) / 20
+			// busy and idle are complements on one chart: arithmetic, not a finding.
+			_ = p.ObserveProperty(types.PropertyReading{ID: "busy", Chart: "cpu", Value: x, At: at})
+			_ = p.ObserveProperty(types.PropertyReading{ID: "idle", Chart: "cpu", Value: 1 - x, At: at})
+		}
+		cs, err := p.GetCandidates()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if containsCandidate(cs, "busy<->idle") {
+			t.Error("two series of one chart that stay perfectly correlated were proposed")
+		}
+	})
+
+	t.Run("CandidatesClearTheirBar", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a", "pod:b"})
+		cs, err := p.GetCandidates()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range cs {
+			if c.PBar > 0 && c.PValue > c.PBar {
+				t.Errorf("%s pending at p=%.3g over its bar %.3g", c.CandidateID, c.PValue, c.PBar)
+			}
+		}
+	})
+
 	t.Run("UndirectedConfirmNeedsAnEnd", func(t *testing.T) {
 		p := factory(t)
 		feedProperties(p, []string{"pod:a"})

@@ -119,6 +119,10 @@ type Config struct {
 	// a share of each end's declared range, for a pair to become a candidate. nil
 	// keeps minimal.DefaultMinSpread; 0 disables the gate.
 	ProposerMinSpread *float64
+	// ProposerFDR is the false-discovery rate of the candidate bar: a candidate's
+	// p-value must clear the Benjamini–Hochberg bar at this rate over every pair being
+	// tested. nil keeps minimal.DefaultFDR; 0 disables the correction.
+	ProposerFDR *float64
 
 	// DomainSpec is the loaded domain model: constructs, metric routing,
 	// propositions, adjustment policy and operator vocabulary. Nil runs the agent
@@ -340,6 +344,9 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 			time.Duration(cfg.PairWindowSeconds)*time.Second)
 		if cfg.ProposerMinSpread != nil {
 			mi.SetMinSpread(*cfg.ProposerMinSpread)
+		}
+		if cfg.ProposerFDR != nil {
+			mi.SetFDR(*cfg.ProposerFDR)
 		}
 		mi.SetMaxPairs(cfg.ProposerMaxPairs)
 		proposer = mi
