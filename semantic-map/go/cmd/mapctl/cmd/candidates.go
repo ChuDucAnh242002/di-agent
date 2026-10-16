@@ -123,7 +123,8 @@ func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 // kindLabel says what kind of claim a candidate would make: "undirected" when the
 // operator must choose which end it runs from, "composition" when the source is part
 // of the target by definition, "same-metric" for two subjects' readings of one
-// metric; both when both hold, empty for an ordinary directed candidate.
+// metric, "same-subject" for two metrics of one subject; both when both hold, empty
+// for an ordinary directed candidate.
 func kindLabel(c client.CandidateEdge) string {
 	var parts []string
 	if c.Undirected {

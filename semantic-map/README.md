@@ -448,8 +448,10 @@ stands). `Direction` is `0` for positive, `1` for negative: the sign, not the or
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
 lexicographic order and the id uses `<->`. `Kind` is `composition` when the source is part
-of the target by definition (a pod's CPU against node CPU), and `same-metric` for two
-subjects' readings of one metric, where a shared driver is the likelier explanation.
+of the target by definition (a pod's CPU against node CPU), `same-metric` for two
+subjects' readings of one metric, where a shared driver is the likelier explanation, and
+`same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
+which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `-proposer-fdr` over every pair being tested, so the more pairs are tested the more

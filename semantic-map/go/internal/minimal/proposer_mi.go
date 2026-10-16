@@ -506,6 +506,8 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 		meta.kind = types.CandidateKindComposition
 	case fv.scoped() && tv.scoped() && metricOf(from) == metricOf(to):
 		meta.kind = types.CandidateKindSameMetric
+	case fv.scoped() && fv.subject == tv.subject:
+		meta.kind = types.CandidateKindSameSubject
 	}
 	// No identity: ObserveProperty refuses a reading that is not newer than its
 	// property's last, which is the dedup this path needs.
@@ -1209,6 +1211,8 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Propos
 		prop.Description += "; composition: the source is part of the target"
 	case types.CandidateKindSameMetric:
 		prop.Description += "; same metric on two subjects: a shared driver is likely"
+	case types.CandidateKindSameSubject:
+		prop.Description += "; two metrics of one subject: they may hold together by construction"
 	}
 	c.Status = types.Confirmed
 	return prop, nil

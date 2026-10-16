@@ -1550,3 +1550,35 @@ func TestPendingCandidateLeavesWhenItWeakens(t *testing.T) {
 		t.Errorf("x<->y is %v after coupling again; want pending", s)
 	}
 }
+
+// TestSameSubjectFlag: two metrics of one subject that move together, such as a
+// capped pod's CPU and its throttling, are proposed and marked same-subject: one
+// workload's own quantities hold together by construction more often than by a
+// finding. Two subjects' readings stay unmarked unless they are of one metric.
+func TestSameSubjectFlag(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	for i := 0; i < 30; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		for _, r := range []types.PropertyReading{
+			{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: x},
+			{ID: "cpu_throttle_ratio@pod:a", Subject: "pod:a", Value: 0.1 + 0.8*x},
+			{ID: "io_pressure_ratio@pod:b", Subject: "pod:b", Value: 0.2 + 0.5*x},
+		} {
+			r.At, r.Range = at, rng
+			_ = p.ObserveProperty(r)
+		}
+	}
+	kinds := map[string]string{}
+	for _, c := range mustCandidates(t, p) {
+		kinds[c.CandidateID] = c.Kind
+	}
+	if k, ok := kinds["cpu_throttle_ratio@pod:a<->cpu_utilization@pod:a"]; !ok || k != types.CandidateKindSameSubject {
+		t.Errorf("pod:a's own pair: kind %q (proposed %v); want same-subject", k, ok)
+	}
+	if k, ok := kinds["cpu_utilization@pod:a<->io_pressure_ratio@pod:b"]; !ok || k != "" {
+		t.Errorf("a pair across two subjects: kind %q (proposed %v); want proposed and unmarked", k, ok)
+	}
+}

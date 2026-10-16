@@ -366,6 +366,10 @@ const (
 	// move together because something drives both (the same cron, the same client),
 	// not because either drives the other.
 	CandidateKindSameMetric = "same-metric"
+	// CandidateKindSameSubject marks two metrics of one subject, such as a capped
+	// pod's CPU and its throttling: one workload's own quantities often move together
+	// by construction, so the pair is more likely accounting than a finding.
+	CandidateKindSameSubject = "same-subject"
 )
 
 // Pair classes, as DiscoveryCounts reports them.
@@ -438,7 +442,8 @@ type CandidateEdge struct {
 	// definition (a subject's metric against the node's total of the same metric),
 	// so the correlation is accounting rather than something learned; "same-metric"
 	// for two subjects' readings of one metric, where a shared driver is the likely
-	// explanation; empty otherwise.
+	// explanation; "same-subject" for two metrics of one subject, which often hold
+	// together by construction; empty otherwise.
 	Kind string
 	// PBar is the p-value bar the candidate passed at its last update: corrected for
 	// how many pairs were being tested (Benjamini–Hochberg at the proposer's

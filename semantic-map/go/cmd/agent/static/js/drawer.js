@@ -300,6 +300,7 @@ export class Drawer {
           const notes = [
             c.Kind === 'composition' ? `<span class="muted" title="the source is part of the target by definition, so the correlation is accounting rather than something learned">composition</span>` : '',
             c.Kind === 'same-metric' ? `<span class="muted" title="two subjects' readings of one metric often move together because something drives both, not because either drives the other">same metric: a shared driver is likely</span>` : '',
+            c.Kind === 'same-subject' ? `<span class="muted" title="two metrics of one workload, such as a capped pod's CPU and its throttling, often move together by construction">same subject: may hold by construction</span>` : '',
             ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
           ].filter(Boolean).join('<br>');
           return `<tr>
