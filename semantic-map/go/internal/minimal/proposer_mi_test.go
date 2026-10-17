@@ -1693,8 +1693,8 @@ func TestGroupHoldsThroughAJitter(t *testing.T) {
 
 // TestSparseSpikesAreNotEvidence: two rates that sit at zero and spike together a few
 // times correlate at r ≈ 1 over the window, but the window holds only those few
-// readings' worth of evidence: idle pods' interfaces all carry the bridge's occasional
-// broadcast. A pair is tested only when each end leaves its commonest value in at
+// readings' worth of evidence, as idle pods' interfaces bursting at the same moments
+// showed. A pair is tested only when each end leaves its commonest value in at
 // least minPairs readings; past that, spikes are as good as any other movement.
 func TestSparseSpikesAreNotEvidence(t *testing.T) {
 	run := func(every int) bool {
