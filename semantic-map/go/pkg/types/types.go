@@ -290,6 +290,11 @@ const (
 // Series of one chart and one subject that stay perfectly correlated are sums,
 // complements or smoothings of each other, and discovery treats them as one
 // arithmetic group rather than as findings.
+// PartOf names the node-level metric type this subject's quantity is a part of, when
+// the producer knows it is summed into one: a physical disk's writes into the node's
+// I/O out, a core's user time into the node's. Discovery marks a candidate from it to
+// that type composition, as it does a subject's metric against the node's metric of
+// the same name, which is the case PartOf need not state.
 // Labels is informational; nothing branches on it.
 type MetricSample struct {
 	NodeID        string            `json:"node_id"`
@@ -302,6 +307,7 @@ type MetricSample struct {
 	Range         *[2]float64       `json:"range,omitempty"`
 	Source        string            `json:"source,omitempty"`
 	Chart         string            `json:"chart,omitempty"`
+	PartOf        string            `json:"part_of,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
@@ -350,11 +356,13 @@ type TuneAdjustment struct {
 // PropertyReading is one observed property value as the proposer sees it. Range is
 // the producer's declared range, nil when none was declared: the proposer's variation
 // gate measures movement against it and cannot without it. Chart is the sample's
-// chart: properties of one chart and one subject may form an arithmetic group.
+// chart: properties of one chart and one subject may form an arithmetic group. PartOf
+// is the node-level property the sample's producer said it is a part of.
 type PropertyReading struct {
 	ID      string
 	Subject string
 	Chart   string
+	PartOf  string
 	Value   float64
 	At      time.Time
 	Range   *[2]float64

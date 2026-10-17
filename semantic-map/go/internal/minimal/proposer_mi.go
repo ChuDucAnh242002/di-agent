@@ -134,6 +134,7 @@ type latestValue struct {
 	at      time.Time
 	subject string
 	chart   string
+	partOf  string      // the node-level property the producer said this is a part of
 	rng     *[2]float64 // declared range; nil when the producer declared none
 }
 
@@ -321,7 +322,11 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 		// leave and rejoin its arithmetic group every tick.
 		chart = p.latestProps[id].chart
 	}
-	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, rng: r.Range}
+	partOf := r.PartOf
+	if partOf == "" {
+		partOf = p.latestProps[id].partOf // likewise: a second collector does not unsay it
+	}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, partOf: partOf, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -509,7 +514,7 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 	meta := pairMeta{property: true, undirected: undirected, replace: replace, sameChart: p.sameChart(from, to),
 		xRange: fv.rng, yRange: tv.rng}
 	switch {
-	case !undirected && metricOf(from) == to:
+	case !undirected && (metricOf(from) == to || fv.partOf == to):
 		meta.kind = types.CandidateKindComposition
 	case fv.scoped() && tv.scoped() && metricOf(from) == metricOf(to):
 		meta.kind = types.CandidateKindSameMetric

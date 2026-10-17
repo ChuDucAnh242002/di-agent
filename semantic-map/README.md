@@ -373,6 +373,7 @@ Five more fields are optional and let a producer describe what it is reporting:
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
 | `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
 | `chart`   | `str`         | The series the producer computes together from one reading, as parts of one whole (a stacked Netdata chart, one `/proc/stat` line) — not series that are merely drawn together, such as received and sent. Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
+| `part_of` | `str`         | On a sample with a subject: the node-level metric type the subject's quantity is summed into (a physical disk's `disk.io.writes` into `system.io.out`). A candidate from it to that type is marked `composition`, as one against the node metric of the same name already is. `400` without a subject or when it is not a metric type |
 
 A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
 `metric_type` need not be one of the values the domain specification routes: an
@@ -451,7 +452,7 @@ stands). `Direction` is `0` for positive, `1` for negative: the sign, not the or
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
 lexicographic order and the id uses `<->`. `Kind` is `composition` when the source is part
-of the target by definition (a pod's CPU against node CPU), `same-metric` for two
+of the target by definition (a pod's CPU against node CPU, or a source whose producer declared it `part_of` the target), `same-metric` for two
 subjects' readings of one metric, where a shared driver is the likelier explanation, and
 `same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
 which often hold together by construction.

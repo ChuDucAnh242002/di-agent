@@ -56,7 +56,7 @@ func TestNetdataCollectorCompliance(t *testing.T) {
 }
 
 // netdataFakeHandler serves the minimal package's Netdata fixtures as the two
-// endpoints the collector reads: /api/v1/allmetrics, 22 charts as a Netdata 1.43 agent
+// endpoints the collector reads: /api/v1/allmetrics, 23 charts as a Netdata 1.43 agent
 // reported them, and /api/v1/charts, their types. The suite certifies the collector on
 // samples it really emits.
 func netdataFakeHandler(t *testing.T) http.Handler {
