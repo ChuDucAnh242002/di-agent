@@ -67,3 +67,17 @@ func TestPairWindowReplaceLast(t *testing.T) {
 		t.Error("ReplaceLast must refuse an identity already folded")
 	}
 }
+
+func TestDistinctCountsTheEvidenceInAMostlyFlatWindow(t *testing.T) {
+	w := NewPairWindow(10)
+	for i := 0; i < 10; i++ {
+		x, y := 0.0, float64(i)
+		if i == 3 || i == 7 {
+			x = 5
+		}
+		w.Fold("", x, y)
+	}
+	if x, y := w.Distinct(); x != 3 || y != 10 {
+		t.Errorf("distinct %d, %d; want 3 for two spikes off zero and 10 for ten values", x, y)
+	}
+}

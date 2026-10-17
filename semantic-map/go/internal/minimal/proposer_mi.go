@@ -933,6 +933,17 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		return nil
 	}
 	r, ok := buf.Pearson()
+	if ok && math.Abs(r) >= weakenedBelow(p.threshold, buf.Len()) {
+		// A strong r over a window that is mostly one value is a few shared spikes:
+		// idle interfaces all carrying the bridge's broadcast reach r = 1 on three
+		// readings. Each end must hold minPairs readings' worth of evidence — its
+		// readings off its commonest value, plus that value once — the least a pair
+		// is tested on, or its r is as undefined as a constant series'. Checked only
+		// where r could matter, since it costs a pass over the window.
+		if dx, dy := buf.Distinct(); dx < p.minPairs || dy < p.minPairs {
+			r, ok = 0, false
+		}
+	}
 	if sl := p.slots[key]; sl != nil {
 		sl.n, sl.r = buf.Len(), r // r is 0 when undefined, which ranks the pair weakest
 	}

@@ -1690,3 +1690,37 @@ func TestGroupHoldsThroughAJitter(t *testing.T) {
 		t.Error("used and free still grouped after they parted")
 	}
 }
+
+// TestSparseSpikesAreNotEvidence: two rates that sit at zero and spike together a few
+// times correlate at r ≈ 1 over the window, but the window holds only those few
+// readings' worth of evidence: idle pods' interfaces all carry the bridge's occasional
+// broadcast. A pair is tested only when each end leaves its commonest value in at
+// least minPairs readings; past that, spikes are as good as any other movement.
+func TestSparseSpikesAreNotEvidence(t *testing.T) {
+	run := func(every int) bool {
+		p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 30, 120, 15*time.Second)
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 240; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			v := 0.0
+			if i%every == 0 {
+				v = 300 + float64(i%7)
+			}
+			for _, r := range []types.PropertyReading{
+				{ID: "net.net.sent@net:veth1", Subject: "net:veth1", Value: v},
+				{ID: "net.net.sent@net:veth2", Subject: "net:veth2", Value: v * 1.1},
+			} {
+				r.At = at
+				_ = p.ObserveProperty(r)
+			}
+		}
+		h, _ := p.GetHistory()
+		return len(h) > 0
+	}
+	if run(40) {
+		t.Error("two series at zero but for 3 shared spikes in 120 readings were proposed")
+	}
+	if !run(3) {
+		t.Error("two series off zero in 40 of 120 readings, together, were not proposed")
+	}
+}
