@@ -372,7 +372,7 @@ Five more fields are optional and let a producer describe what it is reporting:
 | `unit`    | `str`         | The unit the value is expressed in                                       |
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
 | `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
-| `chart`   | `str`         | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line). Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
+| `chart`   | `str`         | The series the producer computes together from one reading, as parts of one whole (a stacked Netdata chart, one `/proc/stat` line) — not series that are merely drawn together, such as received and sent. Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
 
 A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
 `metric_type` need not be one of the values the domain specification routes: an

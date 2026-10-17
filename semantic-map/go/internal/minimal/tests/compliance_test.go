@@ -55,20 +55,26 @@ func TestNetdataCollectorCompliance(t *testing.T) {
 	})
 }
 
-// netdataFakeHandler serves the minimal package's Netdata fixture as
-// /api/v1/allmetrics, the one endpoint the collector reads: 22 charts as a Netdata 1.43
-// agent reported them, so the suite certifies the collector on samples it really emits.
+// netdataFakeHandler serves the minimal package's Netdata fixtures as the two
+// endpoints the collector reads: /api/v1/allmetrics, 22 charts as a Netdata 1.43 agent
+// reported them, and /api/v1/charts, their types. The suite certifies the collector on
+// samples it really emits.
 func netdataFakeHandler(t *testing.T) http.Handler {
 	t.Helper()
-	body, err := os.ReadFile("../testdata/netdata_allmetrics.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/allmetrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
-	})
+	for path, file := range map[string]string{
+		"/api/v1/allmetrics": "../testdata/netdata_allmetrics.json",
+		"/api/v1/charts":     "../testdata/netdata_charts.json",
+	} {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		})
+	}
 	return mux
 }
 

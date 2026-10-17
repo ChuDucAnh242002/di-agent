@@ -45,8 +45,16 @@ import (
 //     count has none; the map then assumes [0,1] and says so where it normalises.
 //   - Sign. Netdata draws the outgoing half of a rate chart (sent, writes, out) below
 //     the axis by negating it; a rate is taken as its magnitude.
-//   - Chart. Every sample carries its chart id, so dimensions of one chart that are
-//     arithmetic of each other can be grouped by the proposer.
+//   - Chart. The proposer groups series of one chart that stay perfectly correlated as
+//     arithmetic of each other, so a sample's chart is a claim that its series are parts
+//     of one reading, not that Netdata draws them together. A stacked chart (system.cpu,
+//     system.ram, disk.space) is a whole split into parts, and its dimensions share the
+//     chart id. Any other chart draws series that only share an axis — received and
+//     sent, reads and writes, which track each other when the traffic is request and
+//     response, and that is a finding — so each dimension is its own chart,
+//     <chart id>/<dimension>. The chart type comes from /api/v1/charts, read when a
+//     chart appears that it has not described and at most once a minute; until it has
+//     been read a chart counts as not stacked.
 //   - Computed series are skipped: a CPU chart's idle (the rest of the 100 %), and the
 //     60 s and 300 s averages of a counter whose shorter form is there (PSI "some 60",
 //     load5). They carry nothing the others lack.
@@ -71,7 +79,14 @@ type NetdataCollector struct {
 	avail    map[types.MetricType]bool        // every type emitted so far
 	declared map[types.MetricType]netdataDecl // unit and range, fixed at a type's first sample
 	warned   bool
+
+	stacked   map[string]bool // chart id → whether /api/v1/charts called it stacked
+	typesRead time.Time       // when /api/v1/charts was last asked
 }
+
+// netdataTypesEvery is how often an unknown chart may send the collector back to
+// /api/v1/charts, which describes every chart and runs to a megabyte on a busy node.
+const netdataTypesEvery = time.Minute
 
 type netdataDecl struct {
 	unit string
@@ -165,10 +180,7 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 	if !ok {
 		return nil, nil
 	}
-	contexts := map[string][]string{}
-	for id, c := range charts {
-		contexts[c.Context] = append(contexts[c.Context], id)
-	}
+	n.refreshTypes(charts)
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -199,7 +211,7 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 				continue
 			}
 			mt := types.MetricType(sanitiseMetric(c.Context + "." + d))
-			if s := n.sampleLocked(mt, conv.apply(*v), conv, c.LastUpdated, subject, id, labels); s != nil {
+			if s := n.sampleLocked(mt, conv.apply(*v), conv, c.LastUpdated, subject, n.chartLocked(id, d), labels); s != nil {
 				out = append(out, s)
 			}
 		}
@@ -208,6 +220,57 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 		out = append(out, n.collapseLocked(charts)...)
 	}
 	return out, nil
+}
+
+// chartLocked is the chart a dimension's samples carry: the chart id when the chart is
+// stacked, so its parts can group, and the dimension's own otherwise.
+func (n *NetdataCollector) chartLocked(id, dim string) string {
+	if n.stacked[id] {
+		return id
+	}
+	return id + "/" + sanitiseMetric(dim)
+}
+
+// refreshTypes reads the chart types again when an included chart has none yet and the
+// last read is a minute old. A failed read keeps what is known.
+func (n *NetdataCollector) refreshTypes(charts map[string]netdataChart) {
+	n.mu.Lock()
+	stale := n.typesRead.IsZero() || time.Since(n.typesRead) >= netdataTypesEvery
+	unknown := false
+	for id, c := range charts {
+		if _, ok := n.stacked[id]; !ok && n.included(c.Context) {
+			unknown = true
+			break
+		}
+	}
+	if !stale || !unknown {
+		n.mu.Unlock()
+		return
+	}
+	n.typesRead = time.Now()
+	n.mu.Unlock()
+
+	resp, err := n.httpClient.Get(n.baseURL + "/api/v1/charts")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Charts map[string]struct {
+			ChartType string `json:"chart_type"`
+		} `json:"charts"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&body) != nil {
+		n.warnOnce("netdata collector: %s/api/v1/charts unreadable; every chart's dimensions stay ungrouped", n.baseURL)
+		return
+	}
+	stacked := make(map[string]bool, len(body.Charts))
+	for id, c := range body.Charts {
+		stacked[id] = c.ChartType == "stacked"
+	}
+	n.mu.Lock()
+	n.stacked = stacked
+	n.mu.Unlock()
 }
 
 func (n *NetdataCollector) included(context string) bool {
@@ -223,8 +286,10 @@ func (n *NetdataCollector) included(context string) bool {
 func (n *NetdataCollector) collapseLocked(charts map[string]netdataChart) []*types.MetricSample {
 	var out []*types.MetricSample
 	frac := netdataConv{scale: 1, unit: "fraction", rng: &[2]float64{0, 1}}
-	add := func(mt types.MetricType, v float64, c netdataChart, chart string) {
-		if s := n.sampleLocked(mt, clamp(v, 0, 1), frac, c.LastUpdated, "", chart, nil); s != nil {
+	// Each carries the chart its source dimensions do, so it groups with what it is
+	// computed from: network_rx_bps with system.net.InOctets, not with OutOctets.
+	add := func(mt types.MetricType, v float64, c netdataChart, id, dim string) {
+		if s := n.sampleLocked(mt, clamp(v, 0, 1), frac, c.LastUpdated, "", n.chartLocked(id, dim), nil); s != nil {
 			out = append(out, s)
 		}
 	}
@@ -240,10 +305,10 @@ func (n *NetdataCollector) collapseLocked(charts map[string]netdataChart) []*typ
 			seen = true
 		}
 		if seen {
-			add(types.CPUUtilization, busy/100, c, "system.cpu")
+			add(types.CPUUtilization, busy/100, c, "system.cpu", "")
 		}
 		if s := c.dim("steal"); s != nil {
-			add(types.CPUStealRatio, *s/100, c, "system.cpu")
+			add(types.CPUStealRatio, *s/100, c, "system.cpu", "steal")
 		}
 	}
 	if c, ok := charts["system.ram"]; ok {
@@ -255,7 +320,7 @@ func (n *NetdataCollector) collapseLocked(charts map[string]netdataChart) []*typ
 			}
 		}
 		if used != nil && sum > 0 {
-			add(types.MemoryUtilization, *used/sum, c, "system.ram")
+			add(types.MemoryUtilization, *used/sum, c, "system.ram", "used")
 		}
 	}
 	for chart, mt := range map[string]types.MetricType{
@@ -265,7 +330,7 @@ func (n *NetdataCollector) collapseLocked(charts map[string]netdataChart) []*typ
 	} {
 		if c, ok := charts[chart]; ok {
 			if t := c.dim("time"); t != nil {
-				add(mt, *t/1000, c, chart) // milliseconds stalled per second
+				add(mt, *t/1000, c, chart, "time") // milliseconds stalled per second
 			}
 		}
 	}
@@ -273,10 +338,10 @@ func (n *NetdataCollector) collapseLocked(charts map[string]netdataChart) []*typ
 	if c, ok := charts["system.net"]; ok {
 		const refBps = 125_000_000.0
 		if v := c.dim("InOctets"); v != nil {
-			add(types.NetworkRxBps, math.Abs(*v)*125/refBps, c, "system.net")
+			add(types.NetworkRxBps, math.Abs(*v)*125/refBps, c, "system.net", "InOctets")
 		}
 		if v := c.dim("OutOctets"); v != nil {
-			add(types.NetworkTxBps, math.Abs(*v)*125/refBps, c, "system.net")
+			add(types.NetworkTxBps, math.Abs(*v)*125/refBps, c, "system.net", "OutOctets")
 		}
 	}
 	return out

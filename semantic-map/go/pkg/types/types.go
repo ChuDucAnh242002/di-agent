@@ -284,7 +284,9 @@ const (
 // producer says; the map never interprets it. Unit and Range are the producer's
 // declaration of what the value means; the map stamps them at admission.
 // Chart names the series a producer computes together from one reading of its
-// source (a Netdata chart, one line of /proc/stat); empty when it groups nothing.
+// source, as parts of one whole (a stacked Netdata chart, one line of /proc/stat);
+// empty when it groups nothing. Series drawn together but measured apart, such as an
+// interface's received and sent, are not one chart.
 // Series of one chart and one subject that stay perfectly correlated are sums,
 // complements or smoothings of each other, and discovery treats them as one
 // arithmetic group rather than as findings.

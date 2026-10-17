@@ -13,14 +13,30 @@ import (
 
 // netdataServer serves testdata/netdata_allmetrics.json as /api/v1/allmetrics: 22
 // charts as a Netdata 1.43 agent on an arm64 k0s VM reported them, with the pod and
-// container ids replaced.
+// container ids replaced; and testdata/netdata_charts.json as /api/v1/charts, those
+// charts' types as the same agent described them.
 func netdataServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return netdataServerWith(t, true)
+}
+
+func netdataServerWith(t *testing.T, describes bool) *httptest.Server {
 	t.Helper()
 	body, err := os.ReadFile("testdata/netdata_allmetrics.json")
 	if err != nil {
 		t.Fatal(err)
 	}
+	charts, err := os.ReadFile("testdata/netdata_charts.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := http.NewServeMux()
+	if describes {
+		mux.HandleFunc("/api/v1/charts", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(charts)
+		})
+	}
 	mux.HandleFunc("/api/v1/allmetrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("format") != "json" {
 			http.Error(w, "format", http.StatusBadRequest)
@@ -36,7 +52,12 @@ func netdataServer(t *testing.T) *httptest.Server {
 
 func collectNetdata(t *testing.T, opts minimal.NetdataOptions) map[string]*types.MetricSample {
 	t.Helper()
-	c := minimal.NewNetdataCollectorWithOptions("n1", netdataServer(t).URL, opts)
+	return collectFrom(t, netdataServer(t), opts)
+}
+
+func collectFrom(t *testing.T, srv *httptest.Server, opts minimal.NetdataOptions) map[string]*types.MetricSample {
+	t.Helper()
+	c := minimal.NewNetdataCollectorWithOptions("n1", srv.URL, opts)
 	samples, err := c.Collect()
 	if err != nil {
 		t.Fatal(err)
@@ -81,18 +102,23 @@ func TestNetdataDefaultSelection(t *testing.T) {
 
 // TestNetdataNamesSubjectsAndCharts: each dimension is <context>.<dimension>, a chart
 // that is one instance of its context is a subject named from whichever half of the
-// chart id tells it apart, and every sample carries its chart.
+// chart id tells it apart, and every sample carries its chart: the chart id for a
+// stacked chart, whose dimensions are parts of one whole, and its own
+// <chart id>/<dimension> for any other.
 func TestNetdataNamesSubjectsAndCharts(t *testing.T) {
 	got := collectNetdata(t, minimal.NetdataOptions{Include: []string{"*"}})
 	for id, chart := range map[string]string{
 		"system.cpu.user":                                         "system.cpu",
-		"disk.io.reads@disk:sda":                                  "disk.sda",
-		"disk.util.utilization@disk:sda":                          "disk_util.sda",
+		"disk.io.reads@disk:sda":                                  "disk.sda/reads",
+		"disk.util.utilization@disk:sda":                          "disk_util.sda/utilization",
 		"cpu.interrupts.IPI0@cpu:cpu0":                            "cpu.cpu0_interrupts",
 		"app.cpu_utilization.user@app:netdata":                    "app.netdata_cpu_utilization",
 		"systemd.service.cpu.utilization.user@systemd:containerd": "systemd_containerd.cpu_utilization",
 		"disk.space.used@disk:_boot":                              "disk_space._boot",
-		"system.cpu_some_pressure.some_10":                        "system.cpu_some_pressure",
+		"system.cpu_some_pressure.some_10":                        "system.cpu_some_pressure/some_10",
+		"net.net.received@net:enp0s1":                             "net.enp0s1/received",
+		"net.net.sent@net:enp0s1":                                 "net.enp0s1/sent",
+		"system.ram.used":                                         "system.ram",
 		"k8s.cgroup.cpu.user@container:0123456789ab":              "cgroup_k8s_kubepods_burstable_pod8f3c1234-aaaa-bbbb-cccc-1234567890ab_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.cpu",
 	} {
 		s := got[id]
@@ -210,5 +236,39 @@ func TestNetdataIncludePatternsAreValidated(t *testing.T) {
 	}
 	if err := minimal.ValidNetdataInclude(minimal.DefaultNetdataInclude); err != nil {
 		t.Errorf("the default list: %v", err)
+	}
+}
+
+// TestNetdataGroupsOnlyThePartsOfAWhole: received and sent share a Netdata chart but
+// not a reading — they track each other when the traffic is request and response, and
+// that is a finding — so they carry charts of their own and are never grouped; the
+// parts of system.ram share one. A collapsed type carries its source dimension's
+// chart, so it groups with what it is computed from. A Netdata that cannot describe
+// its charts leaves every dimension on its own chart.
+func TestNetdataGroupsOnlyThePartsOfAWhole(t *testing.T) {
+	got := collectNetdata(t, minimal.NetdataOptions{Collapse: true})
+	chart := func(id string) string {
+		t.Helper()
+		if got[id] == nil {
+			t.Fatalf("%s not collected", id)
+		}
+		return got[id].Chart
+	}
+	if chart("system.net.InOctets") == chart("system.net.OutOctets") {
+		t.Error("system.net InOctets and OutOctets share a chart; an area chart's dimensions only share an axis")
+	}
+	if chart("system.ram.used") != chart("system.ram.free") {
+		t.Error("system.ram used and free on different charts; a stacked chart's dimensions are parts of one whole")
+	}
+	if a, b := chart(string(types.NetworkRxBps)), chart("system.net.InOctets"); a != b {
+		t.Errorf("network_rx_bps on %q, system.net.InOctets on %q; a collapsed type carries its source's chart", a, b)
+	}
+	if a, b := chart(string(types.CPUUtilization)), chart("system.cpu.user"); a != b {
+		t.Errorf("cpu_utilization on %q, system.cpu.user on %q; want one chart", a, b)
+	}
+
+	blind := collectFrom(t, netdataServerWith(t, false), minimal.NetdataOptions{})
+	if a, b := blind["system.ram.used"].Chart, blind["system.ram.free"].Chart; a == b {
+		t.Errorf("without /api/v1/charts used and free share %q; an undescribed chart groups nothing", a)
 	}
 }
