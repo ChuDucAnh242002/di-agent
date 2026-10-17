@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
@@ -241,6 +242,28 @@ func main() {
 			"(Ollama `keep_alive`); empty disables the hint")
 	explainSessions := flag.Bool("explain-sessions", true,
 		"enable multi-turn session memory and the session-scoped tool cache for /explain")
+
+	autonomyLevel := flag.String("autonomy", "off",
+		"how much the agent reviews proposer candidates on its own: off (no reviewer), "+
+			"suggest (0: every tier suggests, nothing is applied), rules (1: tier 0 acts), "+
+			"bounded (2: model tiers confirm and defer above threshold; their rejections escalate), "+
+			"full (3: every tier acts above threshold); every review is a decision record")
+	autonomyInterval := flag.Duration("autonomy-interval", time.Minute, "how often the reviewer looks at the queue")
+	autonomyPerCycle := flag.Int("autonomy-per-cycle", 10, "candidates reviewed per cycle, strongest first")
+	autonomyURL := flag.String("autonomy-url", "http://localhost:11434",
+		"Ollama base URL for the model tiers: the decision endpoint is /v1/systemone, chat /v1/chat/completions")
+	autonomyDecision := flag.String("autonomy-decision-model", "nimble-v3:9b-nvfp4",
+		"tier 1 decision model (Ollama's typed-question endpoint); none disables the model tiers")
+	autonomyReasoning := flag.String("autonomy-reasoning-model", "qwen3.8:27b-nvfp4",
+		"tier 2 reasoning model with tool calling, whose analysis the decision model scores; none disables tier 2")
+	autonomyKeepAlive := flag.String("autonomy-keep-alive", "10m",
+		"how long Ollama keeps the reasoning model resident after a call")
+	autonomyConfirm := flag.Float64("autonomy-confirm", autonomy.DefaultThresholds.Confirm,
+		"probability a model tier needs to confirm a candidate (and to orient an undirected one)")
+	autonomyReject := flag.Float64("autonomy-reject", autonomy.DefaultThresholds.Reject,
+		"probability a model tier needs to reject a candidate")
+	autonomyDefer := flag.Float64("autonomy-defer", autonomy.DefaultThresholds.Defer,
+		"probability a model tier needs to defer a candidate")
 
 	flag.Parse()
 
@@ -448,7 +471,16 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
-	registerStateRoutes(mux, state, sm.Discovery)
+	reviewer, err := buildReviewer(sm, autonomyOptions{
+		Level: *autonomyLevel, Interval: *autonomyInterval, PerCycle: *autonomyPerCycle, URL: *autonomyURL,
+		DecisionModel: *autonomyDecision, ReasoningModel: *autonomyReasoning, KeepAlive: *autonomyKeepAlive,
+		Thresholds: autonomy.Thresholds{Confirm: *autonomyConfirm, Reject: *autonomyReject, Defer: *autonomyDefer},
+	})
+	if err != nil {
+		log.Fatalf("autonomy: %v", err)
+	}
+	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
+	registerAutonomyRoutes(mux, reviewer)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
@@ -475,6 +507,9 @@ func main() {
 	startPeerStateLoop(ctx, peerFetcher, *peerStatePoll)
 
 	startCollectionLoop(ctx, sm, collector, *collectInterval)
+	if reviewer != nil {
+		go reviewer.Run(ctx)
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

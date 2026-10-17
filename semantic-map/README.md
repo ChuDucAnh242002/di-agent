@@ -25,6 +25,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [6. Coordination](#6-coordination)
 - [7. PoC — Live Multi-VM Demo](#7-poc--live-multi-vm-demo)
 - [8. Natural-Language Explain (`/explain`)](#8-natural-language-explain-explain)
+- [9. Autonomous Candidate Review (`-autonomy`)](#9-autonomous-candidate-review--autonomy)
 
 ---
 
@@ -141,6 +142,12 @@ semantic-map/
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
+    │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
+    │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
+    │   │   ├── rules.go        Tier 0: what is settled without a model
+    │   │   ├── decider.go      Tier 1: Ollama decision models over /v1/systemone
+    │   │   ├── reasoner.go     Tier 2: a tool-calling model reading the map (read-only tools)
+    │   │   └── evidence.go     The candidate's evidence as the text a model is given
     │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
     │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
     │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
@@ -528,6 +535,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
+| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
@@ -929,6 +937,21 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | `-explain-sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
 | `-explain-api-key`         | `""`                             | Bearer token for the backend. `EXPLAIN_API_KEY` in the environment takes precedence. |
 
+**Autonomous review** (off by default). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
+
+| Flag                        | Default               | Meaning |
+| --------------------------- | --------------------- | ------- |
+| `-autonomy`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
+| `-autonomy-interval`        | `1m`                  | How often the reviewer looks at the queue. |
+| `-autonomy-per-cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
+| `-autonomy-url`             | `http://localhost:11434` | Ollama base URL; the decision endpoint is `/v1/systemone`, chat `/v1/chat/completions`. |
+| `-autonomy-decision-model`  | `nimble-v3:9b-nvfp4`  | Tier 1. `none` disables the model tiers: what rules cannot settle escalates. |
+| `-autonomy-reasoning-model` | `qwen3.8:27b-nvfp4`   | Tier 2. `none` disables it. |
+| `-autonomy-keep-alive`      | `10m`                 | How long Ollama keeps the reasoning model resident. |
+| `-autonomy-confirm`         | `0.85`                | Probability a model tier needs to confirm, and to orient an undirected candidate. |
+| `-autonomy-reject`          | `0.95`                | Probability a model tier needs to reject. |
+| `-autonomy-defer`           | `0.7`                 | Probability a model tier needs to defer. |
+
 ---
 
 ## 4. Compliance Tests
@@ -1317,3 +1340,50 @@ Every response carries a `usage` block so you can see what each feature costs:
 ```
 
 A missing planner or critic prompt disables that stage with a log line rather than failing startup.
+
+---
+
+## 9. Autonomous Candidate Review (`-autonomy`)
+
+The proposer's candidates wait for an operator. With `-autonomy` set, the agent reviews
+them itself, as far as the level allows, and every review is a decision record.
+
+```bash
+ollama pull nimble-v3:9b-nvfp4     # tier 1, 6.9 GB
+ollama pull qwen3.8:27b-nvfp4      # tier 2, 18 GB (optional: -autonomy-reasoning-model none)
+./agent -autonomy full
+curl -s localhost:8080/autonomy
+curl -s 'localhost:8080/candidates?status=all' | jq '.[] | {CandidateID, Status, Reason, Review}'
+curl -s localhost:8080/state/decisions/<Review.DecisionID>
+```
+
+A candidate goes up the tiers only as far as it has to:
+
+| Tier | Decider | What it does |
+| ---- | ------- | ------------ |
+| 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
+| 1 | decision model (`/v1/systemone`) | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. |
+| 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
+| — | operator | What no tier was sure of is escalated: it stays in `GET /candidates` with `Review.Action: "escalate"`. |
+
+The level decides who may act:
+
+| Level | Rules act | Model tiers act |
+| ----- | --------- | --------------- |
+| `suggest` (0) | no | no — every review is recorded as a suggestion (`Review.Applied: false`) |
+| `rules` (1) | yes | no |
+| `bounded` (2) | yes | confirm and defer; a model's rejection is escalated |
+| `full` (3) | yes | yes |
+
+An agent's rejection or deferral is not final: the pair is still tested, and the candidate
+returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
+not reviewed again until then, so the models are not asked the same question every cycle.
+A candidate whose end is stale waits. The decision record holds the candidate, both
+properties as read, the text each model was given, each model's answer, the tool calls,
+and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
+a reader of the map can see the level it was shaped under.
+
+The thresholds are uncalibrated defaults set by what each action costs to undo. The
+decision models were chosen for this Mac (24 GB); on an 8 GB node `tev1:4b` (4.4 GB)
+fits as the decision model with `-autonomy-reasoning-model none`.
+
