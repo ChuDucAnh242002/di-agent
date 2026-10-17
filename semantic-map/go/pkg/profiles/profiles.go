@@ -69,11 +69,13 @@ type Config struct {
 
 	// CgroupSubjects walks pod cgroups (and CgroupUnitGlobs-allowlisted units) as
 	// subjects. CgroupMaxSubjects bounds the walk (0 = 256). CgroupCmdLabel stamps a
-	// cmd= label from /proc (needs hostPID). See minimal.CgroupOptions.
+	// cmd= label from /proc (needs hostPID). CgroupPodLogRoot is the kubelet's pod log
+	// directory pods are named from (empty names none). See minimal.CgroupOptions.
 	CgroupSubjects    bool
 	CgroupUnitGlobs   []string
 	CgroupMaxSubjects int
 	CgroupCmdLabel    bool
+	CgroupPodLogRoot  string
 
 	// ScriptPath runs the synthetic system from a scenario file instead of any real
 	// collector — for driving a live daemon through a known story.
@@ -385,6 +387,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	cgOpts := minimal.CgroupOptions{
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
+		PodLogRoot: cfg.CgroupPodLogRoot,
 	}
 
 	if cfg.ScriptPath != "" {

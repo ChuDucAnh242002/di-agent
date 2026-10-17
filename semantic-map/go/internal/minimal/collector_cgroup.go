@@ -84,6 +84,8 @@ type CgroupCollector struct {
 	rootWarned   bool
 	noPodsWarned bool
 	lastSkipped  int
+
+	podNames map[string][2]string // pod UID → namespace, name; from PodLogRoot
 }
 
 func (c *CgroupCollector) log(format string, args ...any) {
@@ -93,6 +95,9 @@ func (c *CgroupCollector) log(format string, args ...any) {
 	}
 	log.Printf(format, args...)
 }
+
+// DefaultPodLogRoot is where the kubelet keeps one directory per pod.
+const DefaultPodLogRoot = "/var/log/pods"
 
 // CgroupOptions configures subject detection. The zero value walks nothing; the
 // daemon's defaults are Subjects on with MaxSubjects 256.
@@ -111,6 +116,10 @@ type CgroupOptions struct {
 	MemTotalBytes uint64
 	// ProcRoot is where /proc is mounted (tests point it at a fake tree).
 	ProcRoot string
+	// PodLogRoot is the kubelet's pod log directory, one <namespace>_<name>_<uid>
+	// entry per pod; each pod subject is labelled namespace=<namespace> and
+	// pod=<name> from it. Empty names nothing: the subject stays the UID either way.
+	PodLogRoot string
 	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
 	// advance it instead of sleeping.
 	Now func() time.Time
@@ -157,9 +166,9 @@ var cgroupAvailMetrics = []types.MetricType{
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
-// 256 at most, no units, no cmd label.
+// 256 at most, pods named from the kubelet's log directory, no units, no cmd label.
 func NewCgroupCollector(nodeID, cgroupRoot string) *CgroupCollector {
-	return NewCgroupCollectorWithOptions(nodeID, cgroupRoot, CgroupOptions{Subjects: true, MaxSubjects: 256})
+	return NewCgroupCollectorWithOptions(nodeID, cgroupRoot, CgroupOptions{Subjects: true, MaxSubjects: 256, PodLogRoot: DefaultPodLogRoot})
 }
 
 // NewCgroupCollectorWithOptions creates a collector reading from cgroupRoot.
@@ -231,7 +240,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	seen := map[string]bool{}
 	root := filepath.Clean(c.cgroupRoot)
-	var sawPods bool
+	var sawPods, rescanned bool
 	var skipped int
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || p == root {
@@ -260,6 +269,11 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			seen[info.subject] = true
 			labels := info.labels
+			if uid := labels["pod_uid"]; uid != "" {
+				if nn, ok := c.podNameLocked(uid, &rescanned); ok {
+					labels["namespace"], labels["pod"] = nn[0], nn[1]
+				}
+			}
 			if c.opts.CmdLabel {
 				if cmd := c.cmdLabel(p); cmd != "" {
 					labels["cmd"] = cmd
@@ -615,4 +629,37 @@ func clamp(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// podNameLocked is a pod's namespace and name, from the kubelet's log directory. The
+// directory is read again on the first pod of a tick that it does not name, not on
+// every pod: a pod's entry exists from before its containers start, so a miss is a
+// pod new since the last read, or one the kubelet keeps no logs for.
+func (c *CgroupCollector) podNameLocked(uid string, rescanned *bool) ([2]string, bool) {
+	if c.opts.PodLogRoot == "" {
+		return [2]string{}, false
+	}
+	if nn, ok := c.podNames[uid]; ok {
+		return nn, true
+	}
+	if *rescanned {
+		return [2]string{}, false
+	}
+	*rescanned = true
+	entries, err := os.ReadDir(c.opts.PodLogRoot)
+	if err != nil {
+		return [2]string{}, false
+	}
+	c.podNames = make(map[string][2]string, len(entries))
+	for _, e := range entries {
+		// Namespaces and pod names are DNS labels and subdomains, which never
+		// contain '_', so the split is unambiguous.
+		parts := strings.Split(e.Name(), "_")
+		if !e.IsDir() || len(parts) != 3 {
+			continue
+		}
+		c.podNames[strings.ToLower(parts[2])] = [2]string{parts[0], parts[1]}
+	}
+	nn, ok := c.podNames[uid]
+	return nn, ok
 }

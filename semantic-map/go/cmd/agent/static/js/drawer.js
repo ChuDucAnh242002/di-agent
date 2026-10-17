@@ -304,6 +304,7 @@ export class Drawer {
   }
 
   renderDiscovery() {
+    const model = this.ctx.model();
     if (!this.candidates.length) {
       this.panes.discovery.innerHTML = `<div class="empty">
         <strong>Nothing proposed right now</strong>
@@ -335,9 +336,12 @@ export class Drawer {
         <tbody>${this.candidates.map((c) => {
           const sign = directionSign(c.Direction);
           const from = escapeHTML(c.FromID), to = escapeHTML(c.ToID), id = escapeHTML(c.CandidateID);
+          // Shown by name; the ids stay in the buttons, which is what the agent takes.
+          const fromN = escapeHTML(model ? model.display(c.FromID) : c.FromID);
+          const toN = escapeHTML(model ? model.display(c.ToID) : c.ToID);
           const confirm = c.Undirected
-            ? `<button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${from}" title="confirm as ${from} → ${to}">Confirm →</button>
-               <button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${to}" title="confirm as ${to} → ${from}">Confirm ←</button>`
+            ? `<button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${from}" title="confirm as ${fromN} → ${toN}">Confirm →</button>
+               <button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${to}" title="confirm as ${toN} → ${fromN}">Confirm ←</button>`
             : `<button class="btn small primary" data-cand="${id}" data-verdict="confirm">Confirm</button>`;
           const notes = [
             c.Kind === 'composition' ? `<span class="muted" title="the source is part of the target by definition, so the correlation is accounting rather than something learned">composition</span>` : '',
@@ -346,7 +350,7 @@ export class Drawer {
             ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
           ].filter(Boolean).join('<br>');
           return `<tr>
-            <td class="mono">${from} ${c.Undirected ? '↔' : '→'} ${to}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
+            <td class="mono" title="${from} ${c.Undirected ? '↔' : '→'} ${to}">${fromN} ${c.Undirected ? '↔' : '→'} ${toN}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
             <td style="color:${sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)'}">${sign < 0 ? '↓ negative' : '↑ positive'}</td>
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
             <td class="num" title="${c.PBar ? `cleared the bar ${Number(c.PBar).toPrecision(2)}, corrected for the pairs tested` : 'no correction for the pairs tested'}">${fmt.num(c.PValue, 4)}</td>
@@ -407,7 +411,7 @@ export class Drawer {
           <th>status</th><th>properties held</th></tr></thead>
         <tbody>${subjects.map((s) => `
           <tr data-subject="${escapeHTML(s.id)}">
-            <td class="mono">${escapeHTML(s.identity)}</td>
+            <td class="mono" title="${escapeHTML(s.id)}">${escapeHTML(s.name || s.identity)}</td>
             <td class="muted">${escapeHTML(s.kind)}</td>
             <td class="num">${s.properties.length}</td>
             <td><span class="badge status-${s.status}">${s.status}</span></td>

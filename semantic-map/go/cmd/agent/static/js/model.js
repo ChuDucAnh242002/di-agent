@@ -29,6 +29,18 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 /** A property's subject, or null for a node-level property. */
 export const subjectOf = (p) => (p.subject && p.subject.length ? p.subject : null);
 
+/**
+ * What an operator calls a property's subject: a pod's namespace/name or a unit's
+ * name, from the labels its collector stamped, or null when it stamped none. The
+ * subject itself (pod:<uid>) stays the identity everywhere; this is only what is shown.
+ */
+export function subjectName(p) {
+  const l = p?.labels || {};
+  if (l.pod) return l.namespace ? `${l.namespace}/${l.pod}` : l.pod;
+  if (l.unit) return l.unit;
+  return null;
+}
+
 /** The scoped half of `metric@pod:a`, for a label that is not mostly subject. */
 export function shortLabel(id) {
   const at = id.indexOf('@');
@@ -101,6 +113,27 @@ export class Model {
   /** Relationships pointing OUT of a property — what it moves. */
   influencesOf(id) { return this.relationships.filter((r) => r.from === id); }
 
+  /** Each subject that has a name, by subject; see subjectName. */
+  names() {
+    const out = new Map();
+    for (const p of this.properties) {
+      const s = subjectOf(p), n = subjectName(p);
+      if (s && n && !out.has(s)) out.set(s, n);
+    }
+    return out;
+  }
+
+  /** A subject's name, or the subject itself when it has none. */
+  nameOf(subject) { return this.names().get(subject) || subject; }
+
+  /** A property id as shown: `metric@<name>` for a named subject, else unchanged. */
+  display(id) {
+    const at = id.indexOf('@');
+    if (at === -1) return id;
+    const s = id.slice(at + 1), n = this.names().get(s);
+    return n ? `${id.slice(0, at)}@${n}` : id;
+  }
+
   /** Subjects the map currently models, each with the properties scoped to it. */
   subjects() {
     const by = new Map();
@@ -115,11 +148,13 @@ export class Model {
         id,
         kind: id.includes(':') ? id.slice(0, id.indexOf(':')) : 'subject',
         identity: id.includes(':') ? id.slice(id.indexOf(':') + 1) : id,
+        name: props.map(subjectName).find(Boolean) || null,
         properties: props.sort((a, b) => a.id.localeCompare(b.id)),
         status: props.some((p) => p.status === 'active') ? 'active'
           : props.some((p) => p.status === 'stale') ? 'stale' : 'retired',
       }))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      // By what is shown: sorted by UID, named pods would come out in no visible order.
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }
 
   /** Membership edges: a derived property is recomputed from these, never stored. */
