@@ -314,7 +314,14 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	if prev, ok := p.latestProps[id]; ok && !at.After(prev.at) {
 		return nil
 	}
-	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: r.Chart, rng: r.Range}
+	chart := r.Chart
+	if chart == "" {
+		// A producer that names no chart does not unname it: with two collectors
+		// feeding one property, taking each reading's chart as given made the property
+		// leave and rejoin its arithmetic group every tick.
+		chart = p.latestProps[id].chart
+	}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -671,6 +678,17 @@ func (p *MICorrelationProposer) linkLocked(key string, linked bool) bool {
 	return linked
 }
 
+// linkFloorLocked is the |r| a pair of one chart needs to link a group: groupR to
+// form the link, and groupR less one standard error of Fisher's z to keep it, so a pair
+// hovering at the cut-off does not form and break its group at every crossing. The
+// band is the one weakenedBelow gives a pending candidate (0.988 at 120 pairs).
+func (p *MICorrelationProposer) linkFloorLocked(key string, n int) float64 {
+	if _, linked := p.links[key]; linked {
+		return weakenedBelow(groupR, n)
+	}
+	return groupR
+}
+
 // regroupLocked recomputes the arithmetic groups from their links: the members a
 // chain of links connects are one group. Its representative is the most variable
 // member, except that a member already representing part of the group keeps the
@@ -915,6 +933,17 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		return nil
 	}
 	r, ok := buf.Pearson()
+	if ok && math.Abs(r) >= weakenedBelow(p.threshold, buf.Len()) {
+		// A strong r over a window that is mostly one value is a few shared spikes:
+		// idle interfaces that burst at the same moments reached r = 1 on a VM on a
+		// handful of readings. Each end must hold minPairs readings' worth of evidence — its
+		// readings off its commonest value, plus that value once — the least a pair
+		// is tested on, or its r is as undefined as a constant series'. Checked only
+		// where r could matter, since it costs a pass over the window.
+		if dx, dy := buf.Distinct(); dx < p.minPairs || dy < p.minPairs {
+			r, ok = 0, false
+		}
+	}
 	if sl := p.slots[key]; sl != nil {
 		sl.n, sl.r = buf.Len(), r // r is 0 when undefined, which ranks the pair weakest
 	}
@@ -924,7 +953,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)
-	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= groupR) {
+	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= p.linkFloorLocked(key, buf.Len())) {
 		// Arithmetic, not a finding: the group is reported in Discovery instead, and
 		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
 		delete(p.pvals, key)

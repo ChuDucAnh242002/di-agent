@@ -172,6 +172,9 @@ func main() {
 			"physical systems")
 	netdataURL := flag.String("netdata-url", "",
 		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
+	netdataInclude := flag.String("netdata-include", strings.Join(minimal.DefaultNetdataInclude, ","),
+		"comma-separated patterns over Netdata chart contexts (path.Match: system.*, disk.io); "+
+			"each selected chart's dimensions become properties. '*' selects every chart Netdata has")
 	script := flag.String("script", "",
 		"run the synthetic system from this scenario file instead of real collectors; "+
 			"-collect-interval must equal the scenario's tick_seconds (the daemon refuses to start otherwise, "+
@@ -309,6 +312,9 @@ func main() {
 		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, *proposerFDR, maxPairs)
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v pod-logs=%q",
 		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel, *cgroupPodLogs)
+	if *netdataURL != "" {
+		log.Printf("netdata collector: url=%s include=%q", *netdataURL, *netdataInclude)
+	}
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -328,6 +334,7 @@ func main() {
 		CgroupPodLogRoot:     *cgroupPodLogs,
 		ScriptPath:           *script,
 		NetdataURL:           *netdataURL,
+		NetdataInclude:       splitCSV(*netdataInclude),
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,

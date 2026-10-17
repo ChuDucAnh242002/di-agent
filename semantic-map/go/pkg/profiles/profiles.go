@@ -83,8 +83,12 @@ type Config struct {
 
 	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
 	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
-	// When set together with CgroupRoot, both collectors run as a MultiCollector.
-	NetdataURL string
+	// When set together with CgroupRoot, both collectors run as a MultiCollector, and
+	// the cgroup collector alone supplies the node's own types (cpu_utilization and
+	// the rest): Netdata's system charts measure CPU differently. NetdataInclude is
+	// the chart-context patterns it selects (nil = minimal.DefaultNetdataInclude).
+	NetdataURL     string
+	NetdataInclude []string
 
 	// CollectInterval is how often the collection scheduler ticks. Zero
 	// disables the loop entirely. Callers (main.go) default to 10s.
@@ -384,6 +388,12 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	if err := minimal.ValidUnitGlobs(cfg.CgroupUnitGlobs); err != nil {
 		return nil, nil, err
 	}
+	if err := minimal.ValidNetdataInclude(cfg.NetdataInclude); err != nil {
+		return nil, nil, err
+	}
+	ndOpts := func(collapse bool) minimal.NetdataOptions {
+		return minimal.NetdataOptions{Include: cfg.NetdataInclude, Collapse: collapse}
+	}
 	cgOpts := minimal.CgroupOptions{
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
@@ -418,10 +428,10 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	switch {
 	case hasCgroup && hasNetdata:
 		cgroupC := minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
-		netdataC := minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+		netdataC := minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(false))
 		collector = minimal.NewMultiCollector(cgroupC, netdataC)
 	case hasNetdata:
-		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+		collector = minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(true))
 	case hasCgroup:
 		collector = minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		// else: collector stays nil — collection loop disabled

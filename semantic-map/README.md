@@ -183,7 +183,8 @@ semantic-map/
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
     │       ├── cgroup_recognise.go   Subject recognisers: pod cgroups (systemd + cgroupfs
     │       │                         drivers) and allowlisted system.slice units
-    │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
+    │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, include patterns
+    │       │                         over chart contexts)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
     │       │                                           propositions from domain_spec.json. No
@@ -371,7 +372,7 @@ Five more fields are optional and let a producer describe what it is reporting:
 | `unit`    | `str`         | The unit the value is expressed in                                       |
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
 | `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
-| `chart`   | `str`         | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line). Series of one chart and one subject that stay at \|r\| ≥ 0.99 are an arithmetic group: discovery reports them once instead of proposing them |
+| `chart`   | `str`         | The series the producer computes together from one reading, as parts of one whole (a stacked Netdata chart, one `/proc/stat` line) — not series that are merely drawn together, such as received and sent. Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
 
 A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
 `metric_type` need not be one of the values the domain specification routes: an
@@ -856,11 +857,12 @@ the shape of the real thing.
 | `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
 | `-cgroup-pod-logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
-| `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
+| `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
+| `-netdata-include`  | CPU, memory, I/O, network, disk | Comma-separated `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
 | `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
-| `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
+| `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
 | `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
 | `-proposer-fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
 | `-proposer-max-pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |

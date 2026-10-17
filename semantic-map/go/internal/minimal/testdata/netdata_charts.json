@@ -1,0 +1,70 @@
+{
+ "charts": {
+  "app.netdata_cpu_utilization": {
+   "chart_type": "stacked"
+  },
+  "cgroup_k8s_kubepods_burstable_pod8f3c1234-aaaa-bbbb-cccc-1234567890ab_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.cpu": {
+   "chart_type": "stacked"
+  },
+  "cpu.cpu0": {
+   "chart_type": "stacked"
+  },
+  "cpu.cpu0_interrupts": {
+   "chart_type": "stacked"
+  },
+  "cpu.cpu1": {
+   "chart_type": "stacked"
+  },
+  "disk.sda": {
+   "chart_type": "area"
+  },
+  "disk_await.sda": {
+   "chart_type": "line"
+  },
+  "disk_space._boot": {
+   "chart_type": "stacked"
+  },
+  "disk_util.sda": {
+   "chart_type": "area"
+  },
+  "mem.available": {
+   "chart_type": "area"
+  },
+  "net.enp0s1": {
+   "chart_type": "area"
+  },
+  "net_carrier.enp0s1": {
+   "chart_type": "line"
+  },
+  "system.cpu": {
+   "chart_type": "stacked"
+  },
+  "system.cpu_some_pressure": {
+   "chart_type": "line"
+  },
+  "system.cpu_some_pressure_stall_time": {
+   "chart_type": "line"
+  },
+  "system.io": {
+   "chart_type": "area"
+  },
+  "system.io_some_pressure_stall_time": {
+   "chart_type": "line"
+  },
+  "system.load": {
+   "chart_type": "line"
+  },
+  "system.memory_some_pressure_stall_time": {
+   "chart_type": "line"
+  },
+  "system.net": {
+   "chart_type": "area"
+  },
+  "system.ram": {
+   "chart_type": "stacked"
+  },
+  "systemd_containerd.cpu_utilization": {
+   "chart_type": "stacked"
+  }
+ }
+}

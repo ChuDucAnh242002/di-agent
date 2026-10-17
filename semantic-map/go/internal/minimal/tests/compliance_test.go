@@ -1,7 +1,6 @@
 package minimal_test
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,27 +55,26 @@ func TestNetdataCollectorCompliance(t *testing.T) {
 	})
 }
 
-// netdataFakeHandler returns an http.Handler that responds with canned Netdata JSON.
+// netdataFakeHandler serves the minimal package's Netdata fixtures as the two
+// endpoints the collector reads: /api/v1/allmetrics, 22 charts as a Netdata 1.43 agent
+// reported them, and /api/v1/charts, their types. The suite certifies the collector on
+// samples it really emits.
 func netdataFakeHandler(t *testing.T) http.Handler {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/data", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Query().Get("chart") {
-		// Netdata's /api/v1/data puts labels and data at the top level, not under a
-		// "result" object. The nested shape this fixture used to serve parsed into an
-		// empty response, so every Collect() returned nothing and the compliance suite
-		// certified a collector it never saw produce a sample.
-		case "system.cpu":
-			fmt.Fprint(w, `{"labels":["time","user","system","idle"],"data":[[1703123456,2.5,0.5,96.9]]}`)
-		case "system.ram":
-			fmt.Fprint(w, `{"labels":["time","free","used","cached","buffers"],"data":[[1703123456,4096.0,2048.0,1024.0,512.0]]}`)
-		case "system.net":
-			fmt.Fprint(w, `{"labels":["time","InOctets","OutOctets"],"data":[[1703123456,8.0,-6.0]]}`)
-		default:
-			http.NotFound(w, r)
+	for path, file := range map[string]string{
+		"/api/v1/allmetrics": "../testdata/netdata_allmetrics.json",
+		"/api/v1/charts":     "../testdata/netdata_charts.json",
+	} {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		})
+	}
 	return mux
 }
 

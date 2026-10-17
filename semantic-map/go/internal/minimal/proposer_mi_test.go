@@ -1205,6 +1205,29 @@ func feedChart(p *minimal.MICorrelationProposer, chart string, from, to int, cou
 
 func always(int) bool { return true }
 
+// TestChartSurvivesAReadingWithoutOne: a property fed by two producers, one naming its
+// chart and one not, keeps the chart. Taking each reading's chart as given made the
+// property leave and rejoin its group every tick.
+func TestChartSurvivesAReadingWithoutOne(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 60; i++ {
+		feedChart(p, "system.cpu", i, i+1, always)
+		// The second producer's reading of busy, a second later and with no chart.
+		x := float64(i%10) / 10
+		at := t0.Add(time.Duration(i)*10*time.Second + time.Second)
+		_ = p.ObserveProperty(types.PropertyReading{ID: "busy", Value: x, At: at, Range: &[2]float64{0, 1}})
+	}
+	if d, _ := p.Discovery(); len(d.Groups) != 1 || d.Groups[0].Chart != "system.cpu" {
+		t.Errorf("groups %+v with busy also read without a chart; want the system.cpu group to stand", d.Groups)
+	}
+	for _, c := range mustCandidates(t, p) {
+		if c.CandidateID == "busy<->busy_avg" {
+			t.Error("busy<->busy_avg proposed: a fold after the chartless reading took the group's link for an ordinary pair")
+		}
+	}
+}
+
 // TestArithmeticGroupIsReportedOnceAndRepresented: two properties of one chart that
 // move as one are a group, not a candidate. The more variable of them stands for the
 // group: it is paired with load, and the other is not. Without a chart nothing says
@@ -1623,5 +1646,81 @@ func TestSameSubjectFlag(t *testing.T) {
 	}
 	if k, ok := kinds["cpu_utilization@pod:a<->io_pressure_ratio@pod:b"]; !ok || k != "" {
 		t.Errorf("a pair across two subjects: kind %q (proposed %v); want proposed and unmarked", k, ok)
+	}
+}
+
+// TestGroupHoldsThroughAJitter: a link forms at groupR and holds until the pair falls
+// below it by more than one standard error of Fisher's z, so a pair whose |r| hovers at
+// the cut-off keeps its group rather than forming and breaking it at every crossing.
+func TestGroupHoldsThroughAJitter(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 120, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rng := &[2]float64{0, 1}
+	noise := rand.New(rand.NewSource(7))
+	changes, grouped := 0, false
+	feed := func(from, to int, sd float64) {
+		for i := from; i < to; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			for _, r := range []types.PropertyReading{
+				{ID: "used", Value: x, Chart: "system.ram"},
+				{ID: "free", Value: 1 - x + sd*noise.NormFloat64(), Chart: "system.ram"},
+			} {
+				r.At, r.Range = at, rng
+				_ = p.ObserveProperty(r)
+			}
+			d, _ := p.Discovery()
+			if now := len(d.Groups) == 1; now != grouped {
+				changes++
+				grouped = now
+			}
+		}
+	}
+	feed(0, 120, 0.02)
+	if !grouped {
+		t.Fatal("used and free not grouped while they move as one")
+	}
+	changes = 0
+	feed(120, 600, 0.04) // |r| hovers at the cut-off
+	if changes != 0 || !grouped {
+		t.Errorf("the group changed %d times while |r| hovered at the cut-off; want it held", changes)
+	}
+	feed(600, 840, 0.15)
+	if grouped {
+		t.Error("used and free still grouped after they parted")
+	}
+}
+
+// TestSparseSpikesAreNotEvidence: two rates that sit at zero and spike together a few
+// times correlate at r ≈ 1 over the window, but the window holds only those few
+// readings' worth of evidence, as idle pods' interfaces bursting at the same moments
+// showed. A pair is tested only when each end leaves its commonest value in at
+// least minPairs readings; past that, spikes are as good as any other movement.
+func TestSparseSpikesAreNotEvidence(t *testing.T) {
+	run := func(every int) bool {
+		p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 30, 120, 15*time.Second)
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 240; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			v := 0.0
+			if i%every == 0 {
+				v = 300 + float64(i%7)
+			}
+			for _, r := range []types.PropertyReading{
+				{ID: "net.net.sent@net:veth1", Subject: "net:veth1", Value: v},
+				{ID: "net.net.sent@net:veth2", Subject: "net:veth2", Value: v * 1.1},
+			} {
+				r.At = at
+				_ = p.ObserveProperty(r)
+			}
+		}
+		h, _ := p.GetHistory()
+		return len(h) > 0
+	}
+	if run(40) {
+		t.Error("two series at zero but for 3 shared spikes in 120 readings were proposed")
+	}
+	if !run(3) {
+		t.Error("two series off zero in 40 of 120 readings, together, were not proposed")
 	}
 }
