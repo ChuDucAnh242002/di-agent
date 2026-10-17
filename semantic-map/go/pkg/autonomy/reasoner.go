@@ -1,20 +1,14 @@
 package autonomy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
-
-	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
-// ReasonPrompt versions the reasoning model's instructions and tools.
+// ReasonPrompt versions the reasoning model's instructions.
 const ReasonPrompt = "review-reason-v1"
 
 const reasonSystem = `You review one candidate relationship in a machine's state model: two metrics of this
@@ -32,82 +26,31 @@ Rules:
 Answer with one JSON object and nothing else:
 {"analysis": "<at most 120 words>", "suggested_action": "confirm|reject|defer", "from": "<for an undirected candidate you would confirm: the end that drives the other, else empty>"}`
 
-// Chat is a Reasoner over an OpenAI-compatible chat completions endpoint with tool
-// calling, such as Ollama's /v1. Its tools read the map; none writes.
+func init() {
+	RegisterReasoner("openai-tools", func(s Spec, r Renderer, tools []Tool) (Reasoner, error) {
+		if s.Model == "" {
+			return nil, errors.New("no model named")
+		}
+		timeout := s.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Minute
+		}
+		return &Chat{client: newOpenAI(s, timeout), keepAlive: s.KeepAlive, render: r, tools: tools}, nil
+	})
+}
+
+// Chat is a Reasoner over any OpenAI-compatible chat completions endpoint with tool
+// calling: Ollama's /v1, llama.cpp's server, vLLM, or a hosted one the operator
+// names. Its tools are the configured read-only Tools.
 type Chat struct {
-	BaseURL   string // e.g. http://localhost:11434/v1
-	Model     string
-	KeepAlive string // Ollama: how long the model stays resident after a call
-	MaxCalls  int    // tool calls per review; 0 means 6
-	HTTP      *http.Client
-	m         Map
+	client    *openAI
+	keepAlive string
+	render    Renderer
+	tools     []Tool
+	MaxCalls  int // tool calls per review; 0 means 6
 }
 
-// NewChat builds a reasoning-model client reading m.
-func NewChat(m Map, baseURL, model string, timeout time.Duration) *Chat {
-	if timeout <= 0 {
-		timeout = 10 * time.Minute
-	}
-	return &Chat{BaseURL: strings.TrimRight(baseURL, "/"), Model: model, m: m, HTTP: &http.Client{Timeout: timeout}}
-}
-
-func (c *Chat) Name() string { return c.Model }
-
-type chatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-}
-
-type toolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Tools       []any         `json:"tools,omitempty"`
-	Temperature float64       `json:"temperature"`
-	Stream      bool          `json:"stream"`
-	KeepAlive   string        `json:"keep_alive,omitempty"`
-}
-
-type chatResponse struct {
-	Choices []struct {
-		Message chatMessage `json:"message"`
-	} `json:"choices"`
-}
-
-var reasonTools = []any{
-	tool("get_property", "One property of the machine: its value, range, observations, and the relationships "+
-		"already in the model into and out of it.", map[string]any{
-		"property": map[string]any{"type": "string", "description": "the property id, e.g. cpu_utilization@pod:a"},
-	}, "property"),
-	tool("get_state", "Every active property, or one subject's (a workload, a device), with its current value.",
-		map[string]any{
-			"subject": map[string]any{"type": "string", "description": "optional <kind>:<identity>, e.g. pod:<uid> or disk:sda"},
-		}),
-	tool("get_candidates", "Every candidate relationship touching a property, with its correlation, status and "+
-		"who reviewed it.", map[string]any{
-		"property": map[string]any{"type": "string"},
-	}, "property"),
-}
-
-func tool(name, desc string, props map[string]any, required ...string) any {
-	params := map[string]any{"type": "object", "properties": props}
-	if len(required) > 0 {
-		params["required"] = required
-	}
-	return map[string]any{"type": "function", "function": map[string]any{
-		"name": name, "description": desc, "parameters": params,
-	}}
-}
+func (c *Chat) Name() string { return c.client.model }
 
 // Reason runs the tool loop and returns the model's analysis.
 func (c *Chat) Reason(ctx context.Context, e Evidence) (*Analysis, error) {
@@ -115,68 +58,68 @@ func (c *Chat) Reason(ctx context.Context, e Evidence) (*Analysis, error) {
 	if maxCalls <= 0 {
 		maxCalls = 6
 	}
+	byName := map[string]Tool{}
+	var schemas []any
+	for _, t := range c.tools {
+		byName[t.Name()] = t
+		schemas = append(schemas, map[string]any{"type": "function", "function": map[string]any{
+			"name": t.Name(), "description": t.Description(), "parameters": t.Parameters(),
+		}})
+	}
 	msgs := []chatMessage{
 		{Role: "system", Content: reasonSystem},
-		{Role: "user", Content: stateText(e, "")},
+		{Role: "user", Content: c.render.Render(e, "")},
 	}
-	a := &Analysis{Model: c.Model, Prompt: ReasonPrompt}
+	a := &Analysis{Model: c.client.model, Prompt: ReasonPrompt + "/" + c.render.Name()}
 	for calls := 0; ; {
-		tools := reasonTools
+		tools := schemas
 		if calls >= maxCalls {
 			tools = nil // out of calls: the next turn has to answer
 			msgs = append(msgs, chatMessage{Role: "user", Content: "No more tool calls. Answer now with the JSON object."})
 		}
-		msg, err := c.chat(ctx, msgs, tools)
+		resp, err := c.client.chat(ctx, chatRequest{Messages: msgs, Tools: tools, KeepAlive: c.keepAlive})
 		if err != nil {
 			return nil, err
 		}
+		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			parseAnalysis(msg.Content, a)
 			if a.Text == "" {
-				return nil, errors.New(c.Model + " gave no analysis")
+				return nil, errors.New(c.client.model + " gave no analysis")
 			}
 			return a, nil
 		}
 		msgs = append(msgs, msg)
 		for _, tc := range msg.ToolCalls {
 			calls++
-			out, digest := c.dispatch(tc.Function.Name, tc.Function.Arguments)
+			out, digest := call(byName[tc.Function.Name], tc.Function.Name, tc.Function.Arguments)
 			a.Trace = append(a.Trace, digest)
 			msgs = append(msgs, chatMessage{Role: "tool", Content: out, ToolCallID: tc.ID})
 		}
 	}
 }
 
-func (c *Chat) chat(ctx context.Context, msgs []chatMessage, tools []any) (chatMessage, error) {
-	raw, err := json.Marshal(chatRequest{Model: c.Model, Messages: msgs, Tools: tools, KeepAlive: c.KeepAlive})
+// call runs one tool and returns its JSON result and a digest for the trace. A
+// failure goes back to the model as an error result, so it can try something else.
+func call(t Tool, name, rawArgs string) (string, string) {
+	fail := func(err error) (string, string) {
+		b, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return string(b), name + " " + rawArgs + ": " + err.Error()
+	}
+	if t == nil {
+		return fail(errors.New("no such tool"))
+	}
+	var args map[string]string
+	_ = json.Unmarshal([]byte(rawArgs), &args)
+	out, digest, err := t.Call(args)
 	if err != nil {
-		return chatMessage{}, err
+		return fail(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(raw))
+	b, err := json.Marshal(out)
 	if err != nil {
-		return chatMessage{}, err
+		return fail(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return chatMessage{}, fmt.Errorf("%s: %w", c.Model, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return chatMessage{}, fmt.Errorf("%s: %w", c.Model, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return chatMessage{}, fmt.Errorf("%s returned %d: %s", c.Model, resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var out chatResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return chatMessage{}, fmt.Errorf("%s: decode: %w", c.Model, err)
-	}
-	if len(out.Choices) == 0 {
-		return chatMessage{}, errors.New(c.Model + " returned no choices")
-	}
-	return out.Choices[0].Message, nil
+	return string(b), digest
 }
 
 // parseAnalysis reads the model's JSON answer, tolerating a code fence or prose
@@ -195,88 +138,4 @@ func parseAnalysis(content string, a *Analysis) {
 		}
 	}
 	a.Text = s
-}
-
-// dispatch runs one tool and returns its JSON result and a digest for the trace.
-func (c *Chat) dispatch(name, rawArgs string) (string, string) {
-	var args map[string]string
-	_ = json.Unmarshal([]byte(rawArgs), &args)
-	st := c.m.State()
-	fail := func(err error) (string, string) {
-		b, _ := json.Marshal(map[string]string{"error": err.Error()})
-		return string(b), name + " " + rawArgs + ": " + err.Error()
-	}
-	if st == nil {
-		return fail(errors.New("no state model"))
-	}
-	var out any
-	var digest string
-	switch name {
-	case "get_property":
-		id := args["property"]
-		p, ok := st.Property(id)
-		if !ok {
-			return fail(fmt.Errorf("property %q is not in the map", id))
-		}
-		text, _ := st.Explain(id)
-		out = map[string]any{
-			"property": compact(p), "explanation": text,
-			"influenced_by": st.Relationships("", id), "influences": st.Relationships(id, ""),
-		}
-		digest = fmt.Sprintf("get_property %s value=%s %s", id, num(p.Value), p.Status)
-	case "get_state":
-		view := st.State(statemap.Query{Subject: args["subject"], Statuses: []statemap.Status{statemap.Active}})
-		props := make([]map[string]any, 0, len(view.Properties))
-		for _, p := range view.Properties {
-			props = append(props, compact(p))
-		}
-		out = map[string]any{"revision": view.Revision, "properties": props}
-		digest = fmt.Sprintf("get_state subject=%q properties=%d", args["subject"], len(props))
-	case "get_candidates":
-		id := args["property"]
-		hist, err := c.m.CandidateHistory()
-		if err != nil {
-			return fail(err)
-		}
-		var rows []map[string]any
-		for _, h := range hist {
-			if h.FromID != id && h.ToID != id {
-				continue
-			}
-			row := map[string]any{"candidate": h.CandidateID, "abs_r": h.MIScore, "n": h.NObservations,
-				"status": h.Status.String(), "kind": h.Kind, "reason": h.Reason}
-			if h.Review != nil {
-				row["reviewed_by"], row["review_action"] = h.Review.By, h.Review.Action
-			}
-			rows = append(rows, row)
-		}
-		out = map[string]any{"property": id, "candidates": rows}
-		digest = fmt.Sprintf("get_candidates %s count=%d", id, len(rows))
-	default:
-		return fail(fmt.Errorf("unknown tool %q", name))
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return fail(err)
-	}
-	return string(b), digest
-}
-
-// compact is a property as a tool shows it: the values and lifecycle, not the
-// bookkeeping.
-func compact(p statemap.Property) map[string]any {
-	m := map[string]any{"id": p.ID, "value": p.Value, "n_observations": p.NObservations, "status": p.Status}
-	if p.Subject != "" {
-		m["subject"] = p.Subject
-	}
-	if p.Unit != "" {
-		m["unit"] = p.Unit
-	}
-	if p.RangeDeclared {
-		m["range"] = p.Range
-	}
-	if name := p.Labels["name"]; name != "" {
-		m["name"] = name
-	}
-	return m
 }

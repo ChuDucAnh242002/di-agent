@@ -123,6 +123,13 @@ func directed(id string, kind string) *types.CandidateEdge {
 func run(t *testing.T, m *fakeMap, cfg autonomy.Config) *autonomy.Reviewer {
 	t.Helper()
 	cfg.Logf = t.Logf
+	if cfg.Rules == nil {
+		parts, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Rules = parts.Rules
+	}
 	r, err := autonomy.New(m, cfg)
 	if err != nil {
 		t.Fatal(err)

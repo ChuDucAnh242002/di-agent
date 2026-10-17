@@ -2062,6 +2062,21 @@ only writes are the four review actions. No hosted model is contacted; the URL i
 operator's. Escalation ends at the operator: a tier 3 on a peer or a bigger model is not
 built, because where it should live is open.
 
+**Every part is substitutable.** The reviewer depends on interfaces — `Map` for the
+semantic map, `Rule` (tier 0), `Decider` (tier 1), `Reasoner` (tier 2), `Tool` (what tier 2
+may read) and `Renderer` (how evidence becomes text) — and the daemon builds each from a
+registry by the name a flag gives. Each tier has its own URL and model, so the decision
+model can sit on the node while the reasoning model sits on a peer with memory to spare.
+Two tier 1 backends exist because the calibrated signal can come from two places: a
+decision model's typed-question endpoint (`systemone`, Ollama only), or any
+OpenAI-compatible server returning token log-probabilities (`openai-logprobs`), where the
+question is asked as lettered options with a one-token answer and the distribution is the
+letters' probabilities, normalised. The second carries `OptionMass` — how much of the
+model's probability fell on any letter — and below one half the verdict escalates: a model
+that wanted to say something else has not answered the question. The verdict records the
+backend, model, question-set version and renderer, so substituting any of them leaves the
+records comparable.
+
 **Models.** On a 24 GB Apple-silicon machine, `nimble-v3:9b-nvfp4` (6.9 GB, MLX) as tier 1
 and `qwen3.8:27b-nvfp4` (18 GB) as tier 2; the two do not stay resident together, so a
 tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 with no tier
@@ -2069,6 +2084,7 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 
 | Test | Covers |
 | ---- | ------ |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates |
 | `pkg/autonomy/autonomy_test.go` | Which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model escalates and is counted |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
 

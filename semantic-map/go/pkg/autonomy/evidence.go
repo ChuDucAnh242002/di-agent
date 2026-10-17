@@ -9,9 +9,27 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// stateText renders a candidate's evidence as the text a model is given. It is
-// deterministic, so the same evidence is the same text, and the text is recorded in
-// the decision verbatim.
+// Renderer turns a candidate's evidence into the text a model is given. The text is
+// recorded in the decision verbatim, so a renderer should be deterministic: the same
+// evidence, the same text. Its name is recorded with every verdict.
+type Renderer interface {
+	Name() string
+	Render(e Evidence, analysis string) string
+}
+
+func init() {
+	RegisterRenderer("text", func() Renderer { return textRenderer{} })
+}
+
+// textRenderer is plain English for a model that has never seen this system: what
+// each metric is, the correlation and its false-discovery check, the direction, the
+// kind, the caveats, and the candidates sharing an end.
+type textRenderer struct{}
+
+func (textRenderer) Name() string { return "text-v1" }
+
+func (textRenderer) Render(e Evidence, analysis string) string { return stateText(e, analysis) }
+
 func stateText(e Evidence, analysis string) string {
 	c := e.Candidate
 	var b strings.Builder

@@ -250,14 +250,28 @@ func main() {
 			"full (3: every tier acts above threshold); every review is a decision record")
 	autonomyInterval := flag.Duration("autonomy-interval", time.Minute, "how often the reviewer looks at the queue")
 	autonomyPerCycle := flag.Int("autonomy-per-cycle", 10, "candidates reviewed per cycle, strongest first")
-	autonomyURL := flag.String("autonomy-url", "http://localhost:11434",
-		"Ollama base URL for the model tiers: the decision endpoint is /v1/systemone, chat /v1/chat/completions")
-	autonomyDecision := flag.String("autonomy-decision-model", "nimble-v3:9b-nvfp4",
-		"tier 1 decision model (Ollama's typed-question endpoint); none disables the model tiers")
-	autonomyReasoning := flag.String("autonomy-reasoning-model", "qwen3.8:27b-nvfp4",
-		"tier 2 reasoning model with tool calling, whose analysis the decision model scores; none disables tier 2")
-	autonomyKeepAlive := flag.String("autonomy-keep-alive", "10m",
-		"how long Ollama keeps the reasoning model resident after a call")
+	autonomyRules := flag.String("autonomy-rules", "composition",
+		"tier 0 rules, comma-separated, first match decides; none for no rules")
+	autonomyRenderer := flag.String("autonomy-renderer", "text", "how a candidate's evidence is written for the models")
+	autonomyDecisionBackend := flag.String("autonomy-decision-backend", "systemone",
+		"tier 1: systemone (Ollama decision models, /v1/systemone), openai-logprobs (any OpenAI-compatible "+
+			"server returning token log-probabilities: llama.cpp, vLLM, Ollama /v1), or none")
+	autonomyDecisionURL := flag.String("autonomy-decision-url", "http://localhost:11434",
+		"tier 1 base URL: Ollama's root for systemone, the /v1 base for openai-logprobs")
+	autonomyDecisionModel := flag.String("autonomy-decision-model", "tev1:4b", "tier 1 model")
+	autonomyDecisionKeepAlive := flag.String("autonomy-decision-keep-alive", "",
+		"Ollama keep_alive for the tier 1 model (openai-logprobs only); empty leaves the server default")
+	autonomyDecisionEffort := flag.String("autonomy-decision-reasoning-effort", "none",
+		"reasoning_effort sent by openai-logprobs, so a thinking model answers directly; empty omits it")
+	autonomyReasoningBackend := flag.String("autonomy-reasoning-backend", "none",
+		"tier 2: openai-tools (any OpenAI-compatible server with tool calling) or none")
+	autonomyReasoningURL := flag.String("autonomy-reasoning-url", "http://localhost:11434/v1",
+		"tier 2 /v1 base URL; may be another machine")
+	autonomyReasoningModel := flag.String("autonomy-reasoning-model", "qwen3.8:27b-nvfp4", "tier 2 model")
+	autonomyReasoningKeepAlive := flag.String("autonomy-reasoning-keep-alive", "10m",
+		"Ollama keep_alive for the tier 2 model; empty omits it")
+	autonomyReasoningTools := flag.String("autonomy-reasoning-tools", strings.Join(autonomy.DefaultTools, ","),
+		"read-only tools the tier 2 model may call, comma-separated")
 	autonomyConfirm := flag.Float64("autonomy-confirm", autonomy.DefaultThresholds.Confirm,
 		"probability a model tier needs to confirm a candidate (and to orient an undirected one)")
 	autonomyReject := flag.Float64("autonomy-reject", autonomy.DefaultThresholds.Reject,
@@ -472,9 +486,15 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
 	reviewer, err := buildReviewer(sm, autonomyOptions{
-		Level: *autonomyLevel, Interval: *autonomyInterval, PerCycle: *autonomyPerCycle, URL: *autonomyURL,
-		DecisionModel: *autonomyDecision, ReasoningModel: *autonomyReasoning, KeepAlive: *autonomyKeepAlive,
+		Level: *autonomyLevel, Interval: *autonomyInterval, PerCycle: *autonomyPerCycle,
 		Thresholds: autonomy.Thresholds{Confirm: *autonomyConfirm, Reject: *autonomyReject, Defer: *autonomyDefer},
+		Rules:      *autonomyRules, Renderer: *autonomyRenderer,
+		DecisionBackend: *autonomyDecisionBackend, DecisionURL: *autonomyDecisionURL,
+		DecisionModel: *autonomyDecisionModel, DecisionKeepAlive: *autonomyDecisionKeepAlive,
+		DecisionEffort:   *autonomyDecisionEffort,
+		ReasoningBackend: *autonomyReasoningBackend, ReasoningURL: *autonomyReasoningURL,
+		ReasoningModel: *autonomyReasoningModel, ReasoningKeepAlive: *autonomyReasoningKeepAlive,
+		ReasoningTools: *autonomyReasoningTools,
 	})
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)

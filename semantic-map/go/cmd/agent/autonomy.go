@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -10,19 +10,25 @@ import (
 	"github.com/DiyazY/di-agent/pkg/semmap"
 )
 
-// autonomyOptions bundles the -autonomy-* flags.
+// autonomyOptions bundles the -autonomy-* flags. Each part is named, and built from
+// the autonomy package's registries, so a backend, rule, tool or renderer is
+// swapped by a flag rather than by code.
 type autonomyOptions struct {
-	Level          string // "off" runs no reviewer
-	Interval       time.Duration
-	PerCycle       int
-	URL            string // Ollama's base URL, without /v1
-	DecisionModel  string // "none" disables the model tiers
-	ReasoningModel string // "none" disables tier 2
-	KeepAlive      string
-	Thresholds     autonomy.Thresholds
+	Level      string // "off" runs no reviewer
+	Interval   time.Duration
+	PerCycle   int
+	Thresholds autonomy.Thresholds
+	Rules      string // comma-separated rule names, or "none"
+	Renderer   string
+
+	DecisionBackend, DecisionURL, DecisionModel, DecisionKeepAlive, DecisionEffort string
+	ReasoningBackend, ReasoningURL, ReasoningModel, ReasoningKeepAlive             string
+	ReasoningTools                                                                 string
 }
 
 // buildReviewer constructs the candidate reviewer, or nil when -autonomy=off.
+// Bearer tokens come from AUTONOMY_DECISION_API_KEY and AUTONOMY_REASONING_API_KEY,
+// never from a flag, so they stay out of process listings.
 func buildReviewer(sm *semmap.SemanticMap, opt autonomyOptions) (*autonomy.Reviewer, error) {
 	if opt.Level == "" || opt.Level == "off" {
 		return nil, nil
@@ -31,20 +37,33 @@ func buildReviewer(sm *semmap.SemanticMap, opt autonomyOptions) (*autonomy.Revie
 	if err != nil {
 		return nil, err
 	}
-	base := strings.TrimRight(opt.URL, "/")
-	cfg := autonomy.Config{Level: level, Interval: opt.Interval, MaxPer: opt.PerCycle, Thresholds: opt.Thresholds}
-	if opt.DecisionModel != "" && opt.DecisionModel != "none" {
-		cfg.Decider = autonomy.NewSystemOne(base, opt.DecisionModel, 0)
+	cfg, err := autonomy.Build(sm, autonomy.Parts{
+		Renderer:        opt.Renderer,
+		Rules:           splitList(opt.Rules),
+		DecisionBackend: opt.DecisionBackend,
+		Decision: autonomy.Spec{URL: opt.DecisionURL, Model: opt.DecisionModel, KeepAlive: opt.DecisionKeepAlive,
+			APIKey:  os.Getenv("AUTONOMY_DECISION_API_KEY"),
+			Options: map[string]string{"reasoning_effort": opt.DecisionEffort}},
+		ReasoningBackend: opt.ReasoningBackend,
+		Reasoning: autonomy.Spec{URL: opt.ReasoningURL, Model: opt.ReasoningModel, KeepAlive: opt.ReasoningKeepAlive,
+			APIKey: os.Getenv("AUTONOMY_REASONING_API_KEY")},
+		Tools: splitList(opt.ReasoningTools),
+	})
+	if err != nil {
+		return nil, err
 	}
-	if opt.ReasoningModel != "" && opt.ReasoningModel != "none" {
-		if cfg.Decider == nil {
-			return nil, fmt.Errorf("-autonomy-reasoning-model %s needs a decision model to score its analysis", opt.ReasoningModel)
-		}
-		chat := autonomy.NewChat(sm, base+"/v1", opt.ReasoningModel, 0)
-		chat.KeepAlive = opt.KeepAlive
-		cfg.Reasoner = chat
-	}
+	cfg.Level, cfg.Interval, cfg.MaxPer, cfg.Thresholds = level, opt.Interval, opt.PerCycle, opt.Thresholds
 	return autonomy.New(sm, cfg)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // registerAutonomyRoutes exposes the reviewer's configuration and counts. With no

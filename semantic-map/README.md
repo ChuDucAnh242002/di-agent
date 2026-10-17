@@ -144,10 +144,14 @@ semantic-map/
     │   │   └── peers_test.go   Registry + httptest client coverage
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
     │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
-    │   │   ├── rules.go        Tier 0: what is settled without a model
-    │   │   ├── decider.go      Tier 1: Ollama decision models over /v1/systemone
-    │   │   ├── reasoner.go     Tier 2: a tool-calling model reading the map (read-only tools)
-    │   │   └── evidence.go     The candidate's evidence as the text a model is given
+    │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
+    │   │   ├── rules.go        Tier 0: Rule, and the composition rule
+    │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
+    │   │   ├── logprobs.go     Tier 1 openai-logprobs: a general model's letter probabilities
+    │   │   ├── reasoner.go     Tier 2 openai-tools: a tool-calling model reading the map
+    │   │   ├── tools.go        Tool, and the read-only tools over the map
+    │   │   ├── openai.go       The OpenAI-compatible chat client both share
+    │   │   └── evidence.go     Renderer, and the candidate's evidence as text
     │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
     │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
     │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
@@ -944,10 +948,18 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | `-autonomy`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
 | `-autonomy-interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `-autonomy-per-cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `-autonomy-url`             | `http://localhost:11434` | Ollama base URL; the decision endpoint is `/v1/systemone`, chat `/v1/chat/completions`. |
-| `-autonomy-decision-model`  | `nimble-v3:9b-nvfp4`  | Tier 1. `none` disables the model tiers: what rules cannot settle escalates. |
-| `-autonomy-reasoning-model` | `qwen3.8:27b-nvfp4`   | Tier 2. `none` disables it. |
-| `-autonomy-keep-alive`      | `10m`                 | How long Ollama keeps the reasoning model resident. |
+| `-autonomy-rules`           | `composition`         | Tier 0 rules, comma-separated, first match decides; `none` for none. |
+| `-autonomy-renderer`        | `text`                | How a candidate's evidence is written for the models. |
+| `-autonomy-decision-backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle escalates. |
+| `-autonomy-decision-url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
+| `-autonomy-decision-model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
+| `-autonomy-decision-keep-alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
+| `-autonomy-decision-reasoning-effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly. |
+| `-autonomy-reasoning-backend` | `none`              | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. |
+| `-autonomy-reasoning-url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
+| `-autonomy-reasoning-model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |
+| `-autonomy-reasoning-keep-alive` | `10m`            | Ollama `keep_alive` for the tier 2 model. |
+| `-autonomy-reasoning-tools` | `get_property,get_state,get_candidates` | Read-only tools the tier 2 model may call. |
 | `-autonomy-confirm`         | `0.85`                | Probability a model tier needs to confirm, and to orient an undirected candidate. |
 | `-autonomy-reject`          | `0.95`                | Probability a model tier needs to reject. |
 | `-autonomy-defer`           | `0.7`                 | Probability a model tier needs to defer. |
@@ -1349,9 +1361,18 @@ The proposer's candidates wait for an operator. With `-autonomy` set, the agent 
 them itself, as far as the level allows, and every review is a decision record.
 
 ```bash
-ollama pull nimble-v3:9b-nvfp4     # tier 1, 6.9 GB
-ollama pull qwen3.8:27b-nvfp4      # tier 2, 18 GB (optional: -autonomy-reasoning-model none)
+# A node (8 GB): a decision model only; what it is unsure of escalates to the operator.
+ollama pull tev1:4b
 ./agent -autonomy full
+
+# A machine with memory to spare: a stronger decision model and a reasoning tier.
+ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
+./agent -autonomy full -autonomy-decision-model nimble-v3:9b-nvfp4 -autonomy-reasoning-backend openai-tools
+
+# Any OpenAI-compatible server instead of Ollama (llama.cpp's llama-server, vLLM):
+./agent -autonomy full -autonomy-decision-backend openai-logprobs \
+  -autonomy-decision-url http://localhost:8081/v1 -autonomy-decision-model <model>
+
 curl -s localhost:8080/autonomy
 curl -s 'localhost:8080/candidates?status=all' | jq '.[] | {CandidateID, Status, Reason, Review}'
 curl -s localhost:8080/state/decisions/<Review.DecisionID>
@@ -1362,7 +1383,7 @@ A candidate goes up the tiers only as far as it has to:
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
 | 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
-| 1 | decision model (`/v1/systemone`) | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. |
+| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, escalating when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | operator | What no tier was sure of is escalated: it stays in `GET /candidates` with `Review.Action: "escalate"`. |
 
@@ -1383,7 +1404,13 @@ properties as read, the text each model was given, each model's answer, the tool
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
 a reader of the map can see the level it was shaped under.
 
-The thresholds are uncalibrated defaults set by what each action costs to undo. The
-decision models were chosen for this Mac (24 GB); on an 8 GB node `tev1:4b` (4.4 GB)
-fits as the decision model with `-autonomy-reasoning-model none`.
+Every part is chosen by name — the rules, the evidence renderer, each tier's backend, URL
+and model, and the reasoning tools — from registries in `pkg/autonomy`. Each tier has its
+own URL, so the decision model can run on the node and the reasoning model elsewhere. A
+new backend, rule, tool or renderer is a type implementing `Decider`, `Reasoner`, `Rule`,
+`Tool` or `Renderer`, registered under a name in an `init` function; nothing else changes.
+Bearer tokens for a backend come from `AUTONOMY_DECISION_API_KEY` and
+`AUTONOMY_REASONING_API_KEY`, never a flag.
+
+The thresholds are uncalibrated defaults set by what each action costs to undo.
 

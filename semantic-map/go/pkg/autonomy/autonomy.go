@@ -131,7 +131,9 @@ type Evidence struct {
 
 // Verdict is a decision model's answer.
 type Verdict struct {
-	Model  string `json:"model"`
+	Model   string `json:"model"`
+	Backend string `json:"backend"`
+	// Prompt names the question set and the renderer that wrote State.
 	Prompt string `json:"prompt"`
 	// State is the exact text the model was given.
 	State string `json:"state"`
@@ -140,7 +142,16 @@ type Verdict struct {
 	// Orientation holds, for an undirected candidate, a probability per end that
 	// the relationship runs from it, and for "unclear".
 	Orientation map[string]float64 `json:"orientation,omitempty"`
+	// OptionMass is, for a backend that reads probabilities off a general model's
+	// tokens, how much of its probability fell on the options at all; 0 when the
+	// backend answers over the options by construction.
+	OptionMass float64 `json:"option_mass,omitempty"`
 }
+
+// MinOptionMass is the share of a general model's probability that has to fall on
+// the options for its distribution over them to mean anything. Below it the model
+// wanted to say something else, and the verdict escalates.
+const MinOptionMass = 0.5
 
 // Decider is tier 1.
 type Decider interface {
@@ -172,6 +183,7 @@ type Reasoner interface {
 // Config configures a Reviewer.
 type Config struct {
 	Level      Level
+	Rules      []Rule        // tier 0, in order; the first that applies decides
 	Interval   time.Duration // between review cycles; 0 means one minute
 	MaxPer     int           // candidates reviewed per cycle; 0 means 10
 	Thresholds Thresholds    // zero means DefaultThresholds
@@ -186,6 +198,7 @@ type Status struct {
 	Level          string     `json:"level"`
 	Interval       string     `json:"interval"`
 	Thresholds     Thresholds `json:"thresholds"`
+	Rules          []string   `json:"rules"`
 	DecisionModel  string     `json:"decision_model,omitempty"`
 	ReasoningModel string     `json:"reasoning_model,omitempty"`
 	Cycles         int        `json:"cycles"`
@@ -238,7 +251,11 @@ func New(m Map, cfg Config) (*Reviewer, error) {
 		cfg.Now = time.Now
 	}
 	r := &Reviewer{m: m, cfg: cfg}
-	r.status = Status{Level: cfg.Level.String(), Interval: cfg.Interval.String(), Thresholds: cfg.Thresholds}
+	r.status = Status{Level: cfg.Level.String(), Interval: cfg.Interval.String(), Thresholds: cfg.Thresholds,
+		Rules: []string{}}
+	for _, rule := range cfg.Rules {
+		r.status.Rules = append(r.status.Rules, rule.Name())
+	}
 	if cfg.Decider != nil {
 		r.status.DecisionModel = cfg.Decider.Name()
 	}
@@ -396,7 +413,7 @@ func (r *Reviewer) endsActive(c *types.CandidateEdge) bool {
 
 // decide runs the tiers, recording what each read and answered.
 func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev Evidence) outcome {
-	if o, ok := rules(ev); ok {
+	if o, ok := r.rules(ev); ok {
 		return o
 	}
 	if r.cfg.Decider == nil {
@@ -443,6 +460,10 @@ func (r *Reviewer) choose(v *Verdict, ev Evidence, tier int, by, model string) o
 	top, p := argmax(v.Actions)
 	if top == "" {
 		o.why = "the model returned no probabilities"
+		return o
+	}
+	if v.OptionMass > 0 && v.OptionMass < MinOptionMass {
+		o.why = fmt.Sprintf("only %.2f of the model's probability fell on the options", v.OptionMass)
 		return o
 	}
 	if p < r.cfg.Thresholds.of(top) {
