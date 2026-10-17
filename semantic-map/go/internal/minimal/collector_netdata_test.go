@@ -13,8 +13,9 @@ import (
 
 // netdataServer serves testdata/netdata_allmetrics.json as /api/v1/allmetrics: 22
 // charts as a Netdata 1.43 agent on an arm64 k0s VM reported them, with the pod and
-// container ids replaced; and testdata/netdata_charts.json as /api/v1/charts, those
-// charts' types as the same agent described them.
+// container ids replaced and the interface copied as a pod's veth; and
+// testdata/netdata_charts.json as /api/v1/charts, those charts' types and labels as
+// the same agent described them.
 func netdataServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return netdataServerWith(t, true)
@@ -270,5 +271,31 @@ func TestNetdataGroupsOnlyThePartsOfAWhole(t *testing.T) {
 	blind := collectFrom(t, netdataServerWith(t, false), minimal.NetdataOptions{})
 	if a, b := blind["system.ram.used"].Chart, blind["system.ram.free"].Chart; a == b {
 		t.Errorf("without /api/v1/charts used and free share %q; an undescribed chart groups nothing", a)
+	}
+}
+
+// TestNetdataDeclaresWhatADeviceIsPartOf: a device Netdata sums into a node chart
+// declares the node type each dimension adds to, so discovery can mark the pair
+// composition; one it does not count — a pod's veth, which system.net leaves out —
+// declares nothing, and the node's own series declare nothing either.
+func TestNetdataDeclaresWhatADeviceIsPartOf(t *testing.T) {
+	got := collectNetdata(t, minimal.NetdataOptions{})
+	for id, want := range map[string]string{
+		"net.net.received@net:enp0s1":       "system.net.InOctets",
+		"net.net.sent@net:enp0s1":           "system.net.OutOctets",
+		"disk.io.writes@disk:sda":           "system.io.out",
+		"cpu.cpu.user@cpu:cpu0":             "system.cpu.user",
+		"net.net.received@net:veth0a1b2c3d": "",
+		"disk.await.reads@disk:sda":         "",
+		"system.net.InOctets":               "",
+	} {
+		s := got[id]
+		if s == nil {
+			t.Errorf("%s not collected", id)
+			continue
+		}
+		if s.PartOf != want {
+			t.Errorf("%s part of %q; want %q", id, s.PartOf, want)
+		}
 	}
 }

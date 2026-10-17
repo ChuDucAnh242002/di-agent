@@ -55,6 +55,12 @@ import (
 //     <chart id>/<dimension>. The chart type comes from /api/v1/charts, read when a
 //     chart appears that it has not described and at most once a minute; until it has
 //     been read a chart counts as not stacked.
+//   - Part of. A device chart Netdata sums into a node chart declares the node type each
+//     dimension adds to: a real interface's received is part of system.net.InOctets, a
+//     physical disk's writes of system.io.out, a core's user of system.cpu.user. The
+//     labels on /api/v1/charts say which are counted (system.net leaves veths and
+//     bridges out). On a node with one disk the disk is the node's I/O, and discovery
+//     marks the pair composition rather than offering it as a finding.
 //   - Computed series are skipped: a CPU chart's idle (the rest of the 100 %), and the
 //     60 s and 300 s averages of a counter whose shorter form is there (PSI "some 60",
 //     load5). They carry nothing the others lack.
@@ -80,8 +86,9 @@ type NetdataCollector struct {
 	declared map[types.MetricType]netdataDecl // unit and range, fixed at a type's first sample
 	warned   bool
 
-	stacked   map[string]bool // chart id → whether /api/v1/charts called it stacked
-	typesRead time.Time       // when /api/v1/charts was last asked
+	stacked   map[string]bool   // chart id → whether /api/v1/charts called it stacked
+	counted   map[string]string // chart id → the node chart Netdata sums it into
+	typesRead time.Time         // when /api/v1/charts was last asked
 }
 
 // netdataTypesEvery is how often an unknown chart may send the collector back to
@@ -212,6 +219,9 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			mt := types.MetricType(sanitiseMetric(c.Context + "." + d))
 			if s := n.sampleLocked(mt, conv.apply(*v), conv, c.LastUpdated, subject, n.chartLocked(id, d), labels); s != nil {
+				if subject != "" {
+					s.PartOf = n.partOfLocked(id, c.Context, d)
+				}
 				out = append(out, s)
 			}
 		}
@@ -229,6 +239,45 @@ func (n *NetdataCollector) chartLocked(id, dim string) string {
 		return id
 	}
 	return id + "/" + sanitiseMetric(dim)
+}
+
+// netdataTotals maps a per-device context to the node chart Netdata sums it into, the
+// label that says whether a chart is one of the devices summed, and the node chart's
+// name for each dimension. system.net counts real interfaces, not veths or bridges;
+// system.io counts physical disks; system.cpu every core.
+var netdataTotals = map[string]struct {
+	node, label, value string
+	dims               map[string]string
+}{
+	"net.net": {node: "system.net", label: "interface_type", value: "real",
+		dims: map[string]string{"received": "InOctets", "sent": "OutOctets"}},
+	"disk.io": {node: "system.io", label: "device_type", value: "physical",
+		dims: map[string]string{"reads": "in", "writes": "out"}},
+	"cpu.cpu": {node: "system.cpu"},
+}
+
+func netdataNodeTotal(context string, labels map[string]string) string {
+	t, ok := netdataTotals[context]
+	if !ok || (t.label != "" && labels[t.label] != t.value) {
+		return ""
+	}
+	return t.node
+}
+
+// partOfLocked is the node-level type a dimension of a device chart is summed into:
+// system.net.InOctets for a real interface's received, system.cpu.user for a core's
+// user. Empty for a chart Netdata does not count into a node total.
+func (n *NetdataCollector) partOfLocked(id, context, dim string) string {
+	node := n.counted[id]
+	if node == "" {
+		return ""
+	}
+	if name, ok := netdataTotals[context].dims[dim]; ok {
+		dim = name
+	} else if netdataTotals[context].dims != nil {
+		return ""
+	}
+	return sanitiseMetric(node + "." + dim)
 }
 
 // refreshTypes reads the chart types again when an included chart has none yet and the
@@ -257,7 +306,9 @@ func (n *NetdataCollector) refreshTypes(charts map[string]netdataChart) {
 	defer resp.Body.Close()
 	var body struct {
 		Charts map[string]struct {
-			ChartType string `json:"chart_type"`
+			Context   string            `json:"context"`
+			ChartType string            `json:"chart_type"`
+			Labels    map[string]string `json:"chart_labels"`
 		} `json:"charts"`
 	}
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&body) != nil {
@@ -265,11 +316,15 @@ func (n *NetdataCollector) refreshTypes(charts map[string]netdataChart) {
 		return
 	}
 	stacked := make(map[string]bool, len(body.Charts))
+	counted := map[string]string{}
 	for id, c := range body.Charts {
 		stacked[id] = c.ChartType == "stacked"
+		if node := netdataNodeTotal(c.Context, c.Labels); node != "" {
+			counted[id] = node
+		}
 	}
 	n.mu.Lock()
-	n.stacked = stacked
+	n.stacked, n.counted = stacked, counted
 	n.mu.Unlock()
 }
 

@@ -262,6 +262,23 @@
   "name": "net.enp0s1",
   "units": "kilobits/s"
  },
+ "net.veth0a1b2c3d": {
+  "context": "net.net",
+  "dimensions": {
+   "received": {
+    "name": "received",
+    "value": 11.669601
+   },
+   "sent": {
+    "name": "sent",
+    "value": -278.2646299
+   }
+  },
+  "family": "enp0s1",
+  "last_updated": 1792186110,
+  "name": "net.enp0s1",
+  "units": "kilobits/s"
+ },
  "net_carrier.enp0s1": {
   "context": "net.carrier",
   "dimensions": {

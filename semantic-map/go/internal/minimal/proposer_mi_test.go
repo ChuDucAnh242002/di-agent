@@ -1724,3 +1724,73 @@ func TestSparseSpikesAreNotEvidence(t *testing.T) {
 		t.Error("two series off zero in 40 of 120 readings, together, were not proposed")
 	}
 }
+
+// TestDeclaredPartIsComposition: a subject's reading its producer declared part of a
+// node-level property is composition against it, though the names differ: on a node
+// with one disk the disk's writes are the node's I/O out, which is not a finding.
+func TestDeclaredPartIsComposition(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 30; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		for _, r := range []types.PropertyReading{
+			{ID: "disk.io.writes@disk:sda", Subject: "disk:sda", PartOf: "system.io.out", Value: x},
+			{ID: "disk.await.writes@disk:sda", Subject: "disk:sda", Value: 0.2 + 0.5*x},
+			{ID: "system.io.out", Value: x},
+		} {
+			r.At = at
+			_ = p.ObserveProperty(r)
+		}
+	}
+	kinds := map[string]string{}
+	for _, c := range mustCandidates(t, p) {
+		kinds[c.CandidateID] = c.Kind
+	}
+	if k, ok := kinds["disk.io.writes@disk:sda->system.io.out"]; !ok || k != types.CandidateKindComposition {
+		t.Errorf("writes->system.io.out kind %q (proposed %v); want composition", k, ok)
+	}
+	if k := kinds["disk.await.writes@disk:sda->system.io.out"]; k != "" {
+		t.Errorf("await->system.io.out kind %q; an undeclared part is no composition", k)
+	}
+}
+
+func TestAPartOfFollowsTheLatestReading(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const id = "net.net.received@net:eth0->system.io.out"
+	observe := func(from, to int, partOf string) {
+		for i := from; i < to; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			for _, r := range []types.PropertyReading{
+				{ID: "net.net.received@net:eth0", Subject: "net:eth0", PartOf: partOf, Value: x},
+				{ID: "system.io.out", Value: x},
+			} {
+				r.At = at
+				_ = p.ObserveProperty(r)
+			}
+		}
+	}
+	kind := func() (string, bool) {
+		for _, c := range mustCandidates(t, p) {
+			if c.CandidateID == id {
+				return c.Kind, true
+			}
+		}
+		return "", false
+	}
+	for _, step := range []struct {
+		name, partOf, want string
+		from, to           int
+	}{
+		{"undeclared", "", "", 0, 30},
+		{"declared after the candidate formed", "system.io.out", types.CandidateKindComposition, 30, 31},
+		{"withdrawn", "", "", 31, 32}, // a wrong declaration, corrected
+	} {
+		observe(step.from, step.to, step.partOf)
+		if k, ok := kind(); !ok || k != step.want {
+			t.Errorf("%s: kind %q (proposed %v); want %q", step.name, k, ok, step.want)
+		}
+	}
+}
