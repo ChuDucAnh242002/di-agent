@@ -294,7 +294,8 @@ const (
 // the producer knows it is summed into one: a physical disk's writes into the node's
 // I/O out, a core's user time into the node's. Discovery marks a candidate from it to
 // that type composition, as it does a subject's metric against the node's metric of
-// the same name, which is the case PartOf need not state.
+// the same name, which is the case PartOf need not state. It holds per sample: a
+// sample without it withdraws what an earlier one declared.
 // Labels is informational; nothing branches on it.
 type MetricSample struct {
 	NodeID        string            `json:"node_id"`

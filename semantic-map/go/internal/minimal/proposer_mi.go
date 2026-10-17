@@ -134,7 +134,7 @@ type latestValue struct {
 	at      time.Time
 	subject string
 	chart   string
-	partOf  string      // the node-level property the producer said this is a part of
+	partOf  string      // the node-level property the latest reading said this is a part of
 	rng     *[2]float64 // declared range; nil when the producer declared none
 }
 
@@ -322,11 +322,10 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 		// leave and rejoin its arithmetic group every tick.
 		chart = p.latestProps[id].chart
 	}
-	partOf := r.PartOf
-	if partOf == "" {
-		partOf = p.latestProps[id].partOf // likewise: a second collector does not unsay it
-	}
-	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, partOf: partOf, rng: r.Range}
+	// Unlike the chart, a reading without part_of withdraws it: a producer states
+	// part_of on every reading it applies to, so its absence is how a wrong
+	// declaration, or a device that stopped counting into the node, is corrected.
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, partOf: r.PartOf, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -1014,6 +1013,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			}
 			existing.Direction, existing.MIScore = direction, math.Abs(r)
 			existing.PValue, existing.PBar, existing.NObservations = pv, bar, buf.Len()
+			existing.Kind = meta.kind
 			if p.outranksPendingLocked(existing) {
 				existing.Status, existing.Reason = types.Pending, ""
 				p.log("proposer: %s re-enters pending with |r|·n=%.1f; the cap defers the weakest instead", candID, score(existing))
@@ -1025,6 +1025,9 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			existing.MIScore = math.Abs(r)
 			existing.PValue, existing.PBar = pv, bar
 			existing.NObservations = buf.Len()
+			// The kind follows the latest readings too: a part_of declared after the
+			// candidate formed, or withdrawn since, changes what the candidate is.
+			existing.Kind = meta.kind
 			return nil
 		}
 	}
