@@ -1227,7 +1227,7 @@ The verbose output narrates pre-flight self-costs, the peer query, the rationale
 ### v1 scope and security
 
 * No auth on `/peers` or `/offload` yet. Intended for localhost / lab-network deployment. Production hardening (mTLS, bearer tokens, signed peer identities) is a P7 concern.
-* `peers.Registry` and `peers.Client` are concrete types in `pkg/peers/`, **not** a seventh contract. The contract surface stays at six (Storage, Ontology, Updater, Reasoner, Proposer, Collector). We promote when a second implementation arrives (e.g. SQLite-backed registry, gossip discovery).
+* `peers.Registry` and `peers.Client` are concrete types in `pkg/peers/`, **not** a seventh contract. The contract surface stays at six (Collector, Ontology, Reasoner, Proposer, Tuner, Runtime). We promote when a second implementation arrives (e.g. SQLite-backed registry, gossip discovery).
 
 ---
 

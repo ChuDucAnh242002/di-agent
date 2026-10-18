@@ -11,7 +11,7 @@ Design rationale and decision record. Update this file when a contract, profile,
   - [Component reference](#component-reference)
   - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
-  - [The five contracts](#the-five-contracts)
+  - [The six contracts](#the-six-contracts)
   - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
@@ -396,7 +396,7 @@ The Collector lives outside the SemanticMap facade — it feeds it. The three co
 
 ### What is deliberately not a contract
 
-The contract set has stayed at six since the first release. Three substantial components sit outside it on purpose:
+The contract set is the five in `pkg/contracts` plus Runtime (`pkg/runtime`, the sixth). Three substantial components sit outside it on purpose:
 
 | Component | Why it is concrete, not a contract |
 |---|---|
@@ -404,7 +404,7 @@ The contract set has stayed at six since the first release. Three substantial co
 | **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
 | **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `explain.provider: none`. |
 
-The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
+The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before. Runtime meets the rule: it is a contract because it has `dry-run` (in memory, what the loops are tested against) and `kubernetes` (planned) as two implementations the loops must not tell apart.
 
 ### The six contracts
 
@@ -437,7 +437,7 @@ assertion rather than a measurement.
 
 Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `go/compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
 
-Subjects and discovery added guarantees to two of the five contracts:
+Subjects and discovery added guarantees to two of the five `pkg/contracts` contracts:
 
 - **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
 - **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
@@ -445,7 +445,7 @@ Subjects and discovery added guarantees to two of the five contracts:
 - **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate pending.
 - **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
 
-Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
+Compliance suites exist for the five `pkg/contracts` contracts; Runtime, the sixth, is tested through its registry and the `dry-run` implementation (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
 
 ### End-to-end validation: integration scenarios
 
@@ -1240,7 +1240,7 @@ Confirming a candidate between properties declares a state-map relationship with
 
 ## 7. Adding a New Profile
 
-1. Create `go/internal/<profile-name>/` and implement all five contracts, or reuse existing implementations.
+1. Create `go/internal/<profile-name>/` and implement all five `pkg/contracts` contracts, or reuse existing implementations.
 2. Every implementation must pass its contract's compliance suite before being wired into a profile.
 3. Add a case to `go/pkg/profiles/profiles.go`:
 

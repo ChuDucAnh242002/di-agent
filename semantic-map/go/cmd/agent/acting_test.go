@@ -45,7 +45,10 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
 	var got []struct {
-		Subject string `json:"subject"`
+		Subject string              `json:"subject"`
+		Labels  map[string]string   `json:"labels"`
+		CPU     map[string]*float64 `json:"cpu"`
+		Can     map[string]string   `json:"can"`
 		Policy  struct {
 			Frozen bool `json:"frozen"`
 		} `json:"policy"`
@@ -59,6 +62,17 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 	frozen := map[string]bool{}
 	for _, w := range got {
 		frozen[w.Subject] = w.Policy.Frozen
+	}
+	for _, w := range got {
+		if w.Labels == nil || w.Can == nil || len(w.CPU) != 2 {
+			t.Errorf("%s: labels/can must be objects and cpu {request, limit}: %+v", w.Subject, w)
+		}
+		if w.Subject == "pod:a" && w.Labels["di-agent/freeze"] != "true" {
+			t.Errorf("pod:a labels = %v", w.Labels)
+		}
+		if _, ok := w.Can[runtime.ActionCPULimit]; !ok {
+			t.Errorf("%s: can = %v, want cpu.limit", w.Subject, w.Can)
+		}
 	}
 	if !frozen["pod:a"] || frozen["pod:b"] {
 		t.Errorf("frozen = %v, want pod:a frozen and pod:b not", frozen)

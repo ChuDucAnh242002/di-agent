@@ -41,6 +41,12 @@ func registerActingRoutes(mux *http.ServeMux, rt runtime.Runtime, pol *policy.Po
 		}
 		out := make([]workloadView, 0, len(ws))
 		for _, wl := range ws {
+			if wl.Labels == nil {
+				wl.Labels = map[string]string{}
+			}
+			if wl.Can == nil {
+				wl.Can = map[string]string{}
+			}
 			out = append(out, workloadView{
 				Subject: wl.Subject, Name: wl.Name, Labels: wl.Labels,
 				CPU:    resourceView{Request: wl.CPU.Request, Limit: wl.CPU.Limit},
