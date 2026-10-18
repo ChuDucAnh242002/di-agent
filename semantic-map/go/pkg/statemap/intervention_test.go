@@ -90,7 +90,7 @@ func TestTwoNullsRetireIt(t *testing.T) {
 	if r.Status != Retired || r.RetiredReason != "two interventions had no effect" {
 		t.Fatalf("relationship = %+v", r)
 	}
-	if r.Interventions == nil || r.Interventions.Null != 3 || r.Interventions.NullRun != 2 {
+	if r.Interventions == nil || r.Interventions.Null != 3 || r.Interventions.NullRun != 0 {
 		t.Fatalf("interventions = %+v", r.Interventions)
 	}
 }
@@ -133,5 +133,54 @@ func TestInterventionsSurviveARestart(t *testing.T) {
 	r, _ := m2.Relationship("cpu_limit->pressure")
 	if r.Interventions.Confounded != 1 || r.Interventions.Agreed != 2 {
 		t.Fatalf("interventions = %+v", r.Interventions)
+	}
+}
+
+func TestRetiredRelationshipIsRecreatedByFreshAgreement(t *testing.T) {
+	m := interventionMap(t)
+	mustRecord(t, m, outcome(true, false, "d1"))
+	mustRecord(t, m, outcome(true, false, "d2"))
+	mustRecord(t, m, outcome(false, false, "d3"))
+	mustRecord(t, m, outcome(false, false, "d4"))
+	mustRecord(t, m, outcome(true, false, "d5"))
+	id, changed := mustRecord(t, m, outcome(true, false, "d6"))
+	if changed != "created" {
+		t.Fatalf("changed %q", changed)
+	}
+	if r, _ := m.Relationship(id); r.Status != Active || r.Provenance != Intervened {
+		t.Fatalf("relationship = %+v", r)
+	}
+	if c := m.Census(); c.Intervened != 1 {
+		t.Fatalf("census intervened = %d", c.Intervened)
+	}
+}
+
+func TestRedeclaredEdgeSurvivesOneNull(t *testing.T) {
+	m := interventionMap(t)
+	mustRecord(t, m, outcome(true, false, "d1"))
+	mustRecord(t, m, outcome(true, false, "d2"))
+	mustRecord(t, m, outcome(false, false, "d3"))
+	mustRecord(t, m, outcome(false, false, "d4"))
+	if err := m.DeclareRelationship(Relationship{From: "cpu_limit", To: "pressure", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := mustRecord(t, m, outcome(false, false, "d5")); changed != "" {
+		t.Fatalf("changed %q", changed)
+	}
+	if r, _ := m.Relationship("cpu_limit->pressure"); r.Status != Active {
+		t.Fatalf("retired by one null")
+	}
+}
+
+func TestAssertionIsNeverOverwrittenByPromotion(t *testing.T) {
+	m := interventionMap(t)
+	if err := m.DeclareRelationship(Relationship{From: "cpu_limit", To: "pressure", Sign: 1, Provenance: Asserted}); err != nil {
+		t.Fatal(err)
+	}
+	mustRecord(t, m, outcome(true, false, "d1"))
+	_, changed := mustRecord(t, m, outcome(true, false, "d2"))
+	r, _ := m.Relationship("cpu_limit->pressure")
+	if changed != "" || r.Provenance != Asserted {
+		t.Fatalf("changed %q provenance %q", changed, r.Provenance)
 	}
 }

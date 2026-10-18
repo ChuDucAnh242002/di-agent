@@ -12,7 +12,10 @@ type Interventions struct {
 	Agreed     int `json:"agreed"`     // observed at least half of what was predicted
 	Null       int `json:"null"`       // observed less
 	Confounded int `json:"confounded"` // something else moved too; says nothing either way
-	// NullRun counts nulls since the last agreement; an agreement resets it.
+	// AgreedRun and NullRun count unconfounded outcomes since the last structural
+	// change or the opposite outcome; Agreed and Null are lifetime totals. Structure
+	// is decided by the runs: evidence since the map last changed its mind.
+	AgreedRun    int       `json:"agreed_run"`
 	NullRun      int       `json:"null_run"`
 	Last         time.Time `json:"last,omitzero"`
 	LastDecision string    `json:"last_decision,omitempty"`
@@ -89,6 +92,12 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	now := m.now()
 	iv.Last, iv.LastDecision = now, o.DecisionID
 
+	live := m.pairRelationshipLocked(o.From, o.To, false)
+	target := RelationshipID(o.From, o.To, "")
+	if live != nil {
+		target = live.ID
+	}
+
 	outcome := "null"
 	switch {
 	case o.Confounded:
@@ -96,23 +105,25 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		outcome = "confounded"
 	case o.Agreed:
 		iv.Agreed++
+		iv.AgreedRun++
 		iv.NullRun = 0
 		outcome = "agreed"
 	default:
 		iv.Null++
 		iv.NullRun++
+		iv.AgreedRun = 0
 	}
-	m.bump(EventIntervention, RelationshipID(o.From, o.To, ""), "intervention", map[string]any{
+	m.bump(EventIntervention, target, "intervention", map[string]any{
 		"outcome": outcome, "decision": o.DecisionID, "agreed": iv.Agreed, "null": iv.Null,
-		"confounded": iv.Confounded, "null_run": iv.NullRun,
+		"confounded": iv.Confounded, "agreed_run": iv.AgreedRun, "null_run": iv.NullRun,
 	}, now)
 
-	live := m.pairRelationshipLocked(o.From, o.To, false)
-	if live != nil {
-		id = live.ID
+	id = target
+	if live == nil {
+		id = ""
 	}
 	switch {
-	case outcome == "agreed" && iv.Agreed == 2 && live == nil:
+	case outcome == "agreed" && iv.AgreedRun >= 2 && live == nil:
 		// Declaring over a retired relationship revives it, so created means live.
 		decl := Relationship{From: o.From, To: o.To, Sign: 1, Provenance: Intervened}
 		old := m.pairRelationshipLocked(o.From, o.To, true)
@@ -122,32 +133,38 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		if err := m.declareRelationshipLocked(decl, true); err != nil {
 			return "", "", err
 		}
-		id = RelationshipID(decl.From, decl.To, decl.Label)
+		iv.AgreedRun, iv.NullRun = 0, 0
 		if old != nil {
 			m.promoteLocked(old, now)
 		}
-		return id, "created", nil
-	case outcome == "agreed" && iv.Agreed >= 2 && live != nil && live.Provenance != Intervened:
-		m.promoteLocked(live, now)
+		return RelationshipID(decl.From, decl.To, decl.Label), "created", nil
+	case outcome == "agreed" && iv.AgreedRun >= 2 && live.Provenance != Intervened:
+		if !m.promoteLocked(live, now) {
+			return id, "", nil
+		}
+		iv.AgreedRun, iv.NullRun = 0, 0
 		return id, "promoted", nil
 	case outcome == "null" && iv.NullRun >= 2 && live != nil:
-		r := live
-		r.Status = Retired
-		r.RetiredReason = "two interventions had no effect"
-		m.bump(EventRelationshipRetired, r.ID, "intervention", map[string]any{"reason": r.RetiredReason}, now)
+		m.retireRelationshipLocked(live, "two interventions had no effect", "intervention", now)
+		iv.AgreedRun, iv.NullRun = 0, 0
 		return id, "retired", nil
 	}
 	return id, "", nil
 }
 
-// promoteLocked marks a relationship as confirmed by intervention, journalled.
-func (m *Map) promoteLocked(r *Relationship, at time.Time) {
-	if r.Provenance == Intervened {
-		return
+// promoteLocked marks a seeded, learned or discovered relationship as confirmed by
+// intervention, journalled, and reports whether it did. An operator's assertion is
+// never overwritten.
+func (m *Map) promoteLocked(r *Relationship, at time.Time) bool {
+	switch r.Provenance {
+	case Seeded, Learned, Discovered:
+	default:
+		return false
 	}
 	was := r.Provenance
 	r.Provenance = Intervened
 	m.bump(EventIntervention, r.ID, "intervention", map[string]any{
 		"promoted": true, "provenance": string(Intervened), "was": string(was),
 	}, at)
+	return true
 }

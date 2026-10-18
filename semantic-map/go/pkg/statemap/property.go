@@ -1398,13 +1398,18 @@ func (m *Map) RetireRelationship(id, reason, actor string) error {
 	if !ok {
 		return fmt.Errorf("relationship %q not found", id)
 	}
+	m.retireRelationshipLocked(r, reason, actor, m.now())
+	return nil
+}
+
+// retireRelationshipLocked withdraws a relationship; a retired one is left alone.
+func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at time.Time) {
 	if r.Status == Retired {
-		return nil
+		return
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	m.bump(EventRelationshipRetired, id, actor, map[string]any{"reason": reason}, m.now())
-	return nil
+	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 
 // admitEventLocked reports whether an event identity is new, recording it if so.
