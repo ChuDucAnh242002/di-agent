@@ -255,3 +255,22 @@ func TestOnlyItsOwnUsageRanksAWorkloadByTheMap(t *testing.T) {
 		t.Fatalf("candidates %+v; want pod:q ranked on usage", cs)
 	}
 }
+
+func TestTheStepNeverGoesBelowTheRequest(t *testing.T) {
+	m := planFixture(t, 1)
+	w := limited(pod("pod:a"), 2)
+	req := 1.4
+	w.CPU.Request = &req
+	ws := []runtime.Workload{w}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	c.MinEffect = 0.001
+	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	if !ok {
+		t.Fatalf("no plan: %s", why)
+	}
+	// 0.4 of 4 cores = 1.6; the step alone would reach 1.2, but the request is 1.4.
+	if !near(p.FromCores, 1.6) || !near(p.ToCores, 1.4) {
+		t.Fatalf("plan %+v; want 1.6 → 1.4 cores", p)
+	}
+}

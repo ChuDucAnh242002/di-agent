@@ -109,6 +109,8 @@ semantic-map/
 │
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
+├── deploy/kubernetes/rbac.yaml ServiceAccount, ClusterRole and ClusterRoleBinding the `kubernetes` runtime needs (see §3)
+│
 ├── scenarios/                  Scenario files for SystemScript: a synthetic system
 │   │                           with known ground truth (subjects on a schedule + a
 │   │                           coupled node model), loaded by
@@ -149,6 +151,7 @@ semantic-map/
     │   │   └── spec_test.go    Defaults, overlay, validation, redaction, round trip
     │   ├── policy/             What the agent may touch: rules over workloads, freeze always wins (concrete, NOT a contract)
     │   ├── runtime/            Runtime contract: list workloads, cap CPU, undo; registry + `dry-run` implementation
+    │   │   └── kubernetes/     The `kubernetes` runtime: this node's pods, CPU limit changed in place through the pod `resize` subresource, undo kept in a pod annotation
     │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
     │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
@@ -654,7 +657,7 @@ Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the ol
 
 ### The runtime and the relief loop
 
-The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default); `runtime.kubeconfig` and `runtime.node` apply to a Kubernetes runtime and `node` defaults to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
+The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
 
 ```yaml
 # relief on dry-run: the loop decides, records and verifies; nothing is changed
@@ -672,6 +675,23 @@ loops:
 ```
 
 At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
+
+#### The `kubernetes` runtime
+
+```bash
+# once per cluster: the agent's ServiceAccount (`di-agent`, namespace kube-system), the ClusterRole and the binding
+kubectl apply -f deploy/kubernetes/rbac.yaml
+```
+
+```yaml
+node:
+  id: worker-1            # a pod with this node name; or set runtime.node
+runtime:
+  kind: kubernetes
+  kubeconfig: ""          # empty: in-cluster; else a kubeconfig path
+```
+
+It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (the downward API `metadata.uid`) marks the agent's own pod, which no rule may touch. The role grants `get`, `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
 
 ### The state model
 

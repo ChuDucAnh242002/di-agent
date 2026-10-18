@@ -2159,3 +2159,23 @@ The map answers what a system is doing; acting is the agent changing that system
 **The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below `floor.cpu_cores` or `floor.of_original` of its original limit, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
 
 **What is not here yet.** The loop acts on stated thresholds and its predictions come from the map as it is. Learning from outcomes, so that whether a prediction held changes what the agent does next, is the next stage and is not implemented. The thresholds are uncalibrated defaults, not measured.
+
+### The Kubernetes runtime (`pkg/runtime/kubernetes`)
+
+The runtime lists the pods scheduled on this node (`spec.nodeName`, the spec's `runtime.node` or else the node ID) and changes one pod's CPU limit in place through the pod `resize` subresource, so the container does not restart. It is built on the in-cluster service account, or the kubeconfig in `runtime.kubeconfig`; the factory error names that spec path.
+
+**Workloads.** Every pod on the node is listed, including those that are not running, each with its reason in `Can`, so a pod missing from the list is one that is really gone and the relief loop's "gone" path fires only then. The subject is `pod:<metadata.uid>`, so a pod recreated under a new UID is a different subject and the old one is gone. `Name` is the bare pod name; the namespace is the label `k8s/namespace`. The other labels are the pod's own, plus `k8s/priority-class` (`spec.priorityClassName`), `k8s/qos` (`status.qosClass`) and `k8s/owner-kind` (the first owner reference's kind). `cpu.request` and `cpu.limit` sum the containers; the limit is nil if any container has none. `Self` is the pod whose UID is in the `POD_UID` environment variable.
+
+**The annotation.** Each change is recorded on the pod as `di-agent/change`, the JSON of the `runtime.Undo`. The record lives and dies with the pod, a restarted agent recovers its changes with `Changed(nodeID)`, and a pod with another node's annotation is never reported or reverted by this one. A second `Apply` on a pod this node already changed keeps the first change's `Original`, read from the annotation. The limit is patched first and the annotation second; a failure between the two leaves a cap with no record, which the policy floor bounds.
+
+**What can be resized, and why.** These rules come from a spike on k0s v1.36.4 (cgroup v2), not from the documentation. Lowering and raising an existing limit is accepted and takes effect within seconds with no restart. A limit set below the request is refused, so the plan never goes below the request. The refusals, in the order they are reported:
+
+| `Can["cpu.limit"]` | Why |
+| --- | --- |
+| `not running` | Only a running pod has a cgroup to resize. |
+| `more than one container: the limit cannot be split by the agent` | One pod-level cap cannot be divided between containers without a rule for the division. |
+| `BestEffort: a limit would change the pod's QoS class` | Adding a limit to a BestEffort pod is refused by the API (`Pod QOS Class may not change as a result of resizing`). |
+| `no CPU limit: a limit the agent added could never be removed` | Adding a limit to a Burstable pod is accepted, but removing it again is refused (`resource limits cannot be removed`), so `Revert` could not restore "no limit". |
+| `Guaranteed: changing the limit alone would change the pod's QoS class` | A Guaranteed pod's limit equals its request; moving only the limit would change the class. |
+
+Because pods without a limit are refused, a revert never restores "no limit": an `Undo` whose `Original.Limit` is nil is an error on this runtime, not `ErrGone`. A pod deleted or recreated between `Apply` and `Revert` is `ErrGone`.

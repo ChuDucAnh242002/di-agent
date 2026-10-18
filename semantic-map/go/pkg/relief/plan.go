@@ -142,7 +142,7 @@ func influencedBy(res statemap.EstimateResult, subject string) bool {
 //
 // The step is Step below current usage, bounded by the policy floor: never
 // below Floor.CPUCores, never below Floor.OfOriginal of the original limit (of
-// current usage when there is none). A Basis "map" candidate is predicted by
+// current usage when there is none), and never below the workload's CPU request. A Basis "map" candidate is predicted by
 // assuming its usage scaled to the new limit; a Basis "usage" candidate, which
 // the map cannot predict, by its share of the node's pressure per unit of
 // usage. effect scales a map prediction by what acting on the subject has done
@@ -183,6 +183,10 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 			original = *w.CPU.Limit
 		}
 		to := math.Max(from*(1-c.Step), math.Max(eff.Settings.Floor.CPUCores, eff.Settings.Floor.OfOriginal*original))
+		if w.CPU.Request != nil {
+			// A limit below the request is refused by the orchestrator, so the request is a floor.
+			to = math.Max(to, *w.CPU.Request)
+		}
 		if to >= from {
 			reasons = append(reasons, fmt.Sprintf("%s: floor reached (%.3f cores in use, floor %.3f)", cand.Subject, from, to))
 			continue
