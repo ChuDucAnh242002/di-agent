@@ -290,8 +290,9 @@ func (r *Runtime) Apply(ctx context.Context, subject string, c runtime.Change) (
 
 // Revert resizes the pod back to the limit it had and removes the record. A limit
 // of nil is an error: the runtime never accepts a pod without one, so an undo
-// without one did not come from here. A pod whose record is not this node's (gone,
-// replaced or another node's) is left untouched and the revert is an error. A pod
+// without one did not come from here. A pod whose record is another node's or unreadable is left
+// untouched and the revert is an error; with no record at all the undo in hand is
+// authoritative and is restored. A pod
 // that has finished is gone.
 func (r *Runtime) Revert(ctx context.Context, u runtime.Undo) error {
 	if u.Original.Limit == nil {
@@ -304,11 +305,15 @@ func (r *Runtime) Revert(ctx context.Context, u runtime.Undo) error {
 	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 		return fmt.Errorf("%s/%s has finished: %w", p.Namespace, p.Name, runtime.ErrGone)
 	}
-	if rec, present, readable := decode(p); !present || !readable || rec.NodeID != r.env.NodeID {
-		return fmt.Errorf("revert %s: the pod carries no %s record of node %s; nothing restored", u.Subject, Annotation, r.env.NodeID)
+	rec, present, readable := decode(p)
+	if present && (!readable || rec.NodeID != r.env.NodeID) {
+		return fmt.Errorf("revert %s: the pod carries a %s record that is not node %s's; nothing restored", u.Subject, Annotation, r.env.NodeID)
 	}
 	if err := r.resize(ctx, p, millis(*u.Original.Limit)); err != nil {
 		return err
+	}
+	if !present {
+		return nil // no record to clear: the undo in hand is authoritative
 	}
 	return r.annotate(ctx, p, "")
 }

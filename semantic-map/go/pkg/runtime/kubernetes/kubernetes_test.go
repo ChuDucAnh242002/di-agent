@@ -483,3 +483,14 @@ func TestTheFactoryNamesTheSpecPath(t *testing.T) {
 		t.Fatalf("err %v; want it to name runtime.kubeconfig", err)
 	}
 }
+
+func TestRevertWithNoAnnotationRestoresTheOriginal(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "300m"))
+	u := runtime.Undo{NodeID: "n1", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(1)}}
+	if err := r.Revert(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("limit %s, want 1", got)
+	}
+}
