@@ -148,9 +148,9 @@ func influencedBy(res statemap.EstimateResult, subject string) bool {
 // current usage when there is none), and never below the workload's CPU request. A Basis "map" candidate is predicted by
 // assuming its usage scaled to the new limit; a Basis "usage" candidate, which
 // the map cannot predict, by its share of the node's pressure per unit of
-// usage. effect scales either prediction by what acting on the subject has done
-// before; 1 means no history.
-func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject string) float64) (p Plan, ok bool, why string) {
+// usage. effect scales a prediction by what acting on the subject has done before
+// against predictions of the same basis; 1 means no history.
+func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject, basis string) float64) (p Plan, ok bool, why string) {
 	return makePlan(m, cands, ws, pol, c, effect, nil)
 }
 
@@ -158,7 +158,7 @@ func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 // originals holds, for each, the limit it had before the agent first touched it,
 // which is what the of_original floor is a share of. A workload's current limit
 // is then the agent's own cap, and a step that would not go below it is no step.
-func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject string) float64, originals map[string]float64) (p Plan, ok bool, why string) {
+func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject, basis string) float64, originals map[string]float64) (p Plan, ok bool, why string) {
 	n, ok := coreCount(m)
 	if !ok {
 		return Plan{}, false, noCores
@@ -199,7 +199,7 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 			continue
 		}
 		plan := Plan{Subject: cand.Subject, FromCores: from, ToCores: to, Basis: cand.Basis, Rule: eff.Rule,
-			Effect: effect(cand.Subject)}
+			Effect: effect(cand.Subject, cand.Basis)}
 		switch cand.Basis {
 		case BasisMap:
 			res := m.Estimate(statemap.EstimateRequest{

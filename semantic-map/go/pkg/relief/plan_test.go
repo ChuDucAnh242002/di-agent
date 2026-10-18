@@ -79,7 +79,7 @@ func limited(w runtime.Workload, limit float64) runtime.Workload {
 	return w
 }
 
-func one(string) float64 { return 1 }
+func one(string, string) float64 { return 1 }
 
 // planFixture: node pressure 0.5 and usage 0.8 on 4 cores; pod:a uses 0.4 of
 // the node and drives pressure with strength s.

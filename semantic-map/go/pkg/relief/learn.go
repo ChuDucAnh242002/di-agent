@@ -1,6 +1,7 @@
 package relief
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -28,42 +29,51 @@ const (
 	// node CPU that confounds an outcome: below it, a relative change is a small
 	// pod's noise.
 	confoundAbs = 0.02
+	// bindRatio is how close to its cap a throttled workload's usage must be at
+	// verify for the cap to have bound: below it, the workload asked for less on
+	// its own, and the drop in pressure is its demand falling, not the cap.
+	bindRatio = 0.9
 )
 
-// effects is, per workload, what acting on it has done against what was
-// predicted: an EMA of observed/predicted drop in node pressure, starting from 1,
-// clamped to [0.1, 2]. Later predictions for the workload are scaled by it. It is
-// held in memory only and is lost on restart, when every workload starts again
-// from 1.
+// effects is, per workload and prediction basis, what acting on it has done
+// against what was predicted: an EMA of observed/predicted drop in node pressure,
+// starting from 1, clamped to [0.1, 2]. Later predictions for the workload on the
+// same basis are scaled by it; a usage-share prediction and a map prediction err
+// differently, so one's factor never scales the other. It is held in memory only
+// and is lost on restart, when every workload starts again from 1.
 type effects struct {
 	mu sync.Mutex
-	m  map[string]float64
+	m  map[effectKey]float64
 }
 
-// Observe folds one outcome's observed/predicted ratio into subject's effect. A
-// ratio that is not a number teaches nothing.
-func (e *effects) Observe(subject string, ratio float64) {
+type effectKey struct{ subject, basis string }
+
+// Observe folds one outcome's observed/predicted ratio into subject's effect for
+// predictions of basis. A ratio that is not a number teaches nothing.
+func (e *effects) Observe(subject, basis string, ratio float64) {
 	if math.IsNaN(ratio) || math.IsInf(ratio, 0) {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.m == nil {
-		e.m = map[string]float64{}
+		e.m = map[effectKey]float64{}
 	}
-	v, ok := e.m[subject]
+	k := effectKey{subject, basis}
+	v, ok := e.m[k]
 	if !ok {
 		v = 1
 	}
 	v = (1-effectAlpha)*v + effectAlpha*ratio
-	e.m[subject] = math.Min(effectMax, math.Max(effectMin, v))
+	e.m[k] = math.Min(effectMax, math.Max(effectMin, v))
 }
 
-// Of is subject's learned effect, 1 when nothing has been learned about it.
-func (e *effects) Of(subject string) float64 {
+// Of is subject's learned effect for predictions of basis, 1 when nothing has
+// been learned about it.
+func (e *effects) Of(subject, basis string) float64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if v, ok := e.m[subject]; ok {
+	if v, ok := e.m[effectKey{subject, basis}]; ok {
 		return v
 	}
 	return 1
@@ -84,28 +94,37 @@ func workloadShares(m *statemap.Map) map[string]float64 {
 // movedSince lists, sorted, the workloads other than throttled whose share of
 // node CPU has moved since at was taken by more than step relative to their
 // share then and by more than 0.02 absolute. A workload live now and absent from
-// at arrived since, from a share of nothing.
-func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) []string {
-	var out []string
-	for s, now := range workloadShares(m) {
+// at arrived since, from a share of nothing. left lists those that were using
+// more than 0.02 then and are not live now: their going took their load with
+// them.
+func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) (moved, left []string) {
+	live := workloadShares(m)
+	for s, now := range live {
 		if s == throttled {
 			continue
 		}
 		then := at[s]
 		d := math.Abs(now - then)
 		if d > step*then && d > confoundAbs {
-			out = append(out, s)
+			moved = append(moved, s)
 		}
 	}
-	sort.Strings(out)
-	return out
+	for s, then := range at {
+		if _, ok := live[s]; !ok && s != throttled && then > confoundAbs {
+			left = append(left, s)
+		}
+	}
+	sort.Strings(moved)
+	sort.Strings(left)
+	return moved, left
 }
 
-// confounded reports whether another workload moved while the throttled one's
-// outcome was being observed, so the change in node pressure cannot be put down
-// to the action alone.
+// confounded reports whether another workload moved, arrived or left while the
+// throttled one's outcome was being observed, so the change in node pressure
+// cannot be put down to the action alone.
 func confounded(m *statemap.Map, at map[string]float64, throttled string, step float64) bool {
-	return len(movedSince(m, at, throttled, step)) > 0
+	moved, left := movedSince(m, at, throttled, step)
+	return len(moved)+len(left) > 0
 }
 
 // learn makes a judged action evidence, when it is: an intervention recorded on
@@ -114,17 +133,36 @@ func confounded(m *statemap.Map, at map[string]float64, throttled string, step f
 // interventions created or promoted the relationship. What it fed, and why not
 // when it did not, goes into the verify decision b. Called under the pass lock,
 // with mu not held.
+//
+// An outcome is not evidence when the runtime changes nothing (a dry run), when a
+// resumed action's baseline was taken with its change already in force, when there
+// is no prediction, or when the cap did not bind: a workload using well under its
+// new limit at verify asked for less on its own, so the drop is not the cap's.
 func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, agreed bool, observed float64, now time.Time) {
-	moved := movedSince(l.cfg.Map, a.SharesAtAct, a.Subject, l.c.Step)
-	conf := len(moved) > 0
-	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved})
+	moved, left := movedSince(l.cfg.Map, a.SharesAtAct, a.Subject, l.c.Step)
+	conf := len(moved)+len(left) > 0
+	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved, "left": left})
+
+	ss := map[string]any{"at_act": nil, "at_verify": nil}
+	if v, ok := a.SharesAtAct[a.Subject]; ok {
+		ss["at_act"] = v
+	}
+	nowShare, haveShare := share(l.cfg.Map, a.Subject)
+	if haveShare {
+		ss["at_verify"] = nowShare
+	}
+	b.Input("subject_share", ss)
 
 	why := ""
 	switch {
 	case !l.cfg.Evidence:
 		why = "the runtime does not change the system (" + l.cfg.Runtime.Name() + "): pressure moved on its own"
+	case a.Resumed:
+		why = "resumed: its baseline was taken with the change already in force"
 	case a.Plan.Predicted <= 0:
 		why = "no prediction to judge the outcome against"
+	default:
+		why = l.unbound(a, nowShare, haveShare)
 	}
 	if why != "" {
 		b.Input("evidence", map[string]any{"fed": false, "why": why})
@@ -154,13 +192,30 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 		// Against the map's own prediction, before this workload's effect scaled it,
 		// so the effect converges on the workload's real response rather than on 1.
 		ratio := observed * effect / a.Plan.Predicted
-		l.effects.Observe(a.Subject, ratio)
-		b.Input("effect", map[string]any{"ratio": ratio, "now": l.effects.Of(a.Subject)})
+		l.effects.Observe(a.Subject, a.Plan.Basis, ratio)
+		b.Input("effect", map[string]any{"basis": a.Plan.Basis, "ratio": ratio, "now": l.effects.Of(a.Subject, a.Plan.Basis)})
 	}
 
 	if changed == "created" || changed == "promoted" {
 		l.settle(b, verifyID, from, now)
 	}
+}
+
+// unbound says why the cap could not have caused the outcome, or "" when it
+// bound: the workload's usage at verify, in cores, is at least 0.9 of its new
+// limit. With no current usage or no core count, binding cannot be shown.
+func (l *Loop) unbound(a *Action, nowShare float64, haveShare bool) string {
+	n, ok := coreCount(l.cfg.Map)
+	switch {
+	case !haveShare:
+		return "the cap's effect cannot be shown: " + a.Subject + " has no current usage"
+	case !ok:
+		return "the cap's effect cannot be shown: " + noCores
+	}
+	if used := nowShare * n; used < bindRatio*a.Plan.ToCores {
+		return fmt.Sprintf("the cap did not bind: usage %.3f cores under the %.3f-core limit", used, a.Plan.ToCores)
+	}
+	return ""
 }
 
 // settle confirms the pending candidate on from → cpu_pressure_ratio, if there is

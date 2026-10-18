@@ -36,7 +36,8 @@ type Status struct {
 // the first step's act decision, so an operator's handle on the change does not
 // move. Resumed marks one found on the runtime at start rather than made by this
 // loop: its prediction is only known if the journal still has the decision that
-// made it. SharesAtAct is every workload's share of node CPU when the action's
+// made it, and its outcome is never evidence, as its baseline was taken with the
+// change already in force. SharesAtAct is every workload's share of node CPU when the action's
 // baseline was taken, so its outcome can be told apart from another workload
 // moving at the same time.
 type Action struct {

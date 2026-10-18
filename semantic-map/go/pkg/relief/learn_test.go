@@ -3,6 +3,7 @@ package relief
 import (
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestOtherWorkloadsMovingConfoundTheOutcome(t *testing.T) {
 	if moved, _ := c["moved"].([]string); len(moved) != 1 || moved[0] != "pod:b" {
 		t.Errorf("moved %v; want [pod:b]", c["moved"])
 	}
-	if got := h.l.effects.Of("pod:a"); got != 1 {
+	if got := h.l.effects.Of("pod:a", BasisMap); got != 1 {
 		t.Errorf("effect %v; a confounded outcome must not teach the prediction", got)
 	}
 	if iv := interventionsOn(t, h.m, "pod:a"); iv == nil || iv.Confounded != 1 || iv.Agreed != 0 {
@@ -121,7 +122,7 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.3, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.02, t0)
 	at := map[string]float64{"pod:a": 0.4, "pod:c": 0.01}
-	if moved := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
+	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
 		t.Fatalf("moved %v; a pod going 0.01 → 0.02 of the node is not a confound", moved)
 	}
 	if confounded(m, at, "pod:a", 0.25) {
@@ -134,7 +135,7 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	// A workload that arrived since the act moved from nothing.
 	record(t, m, usage("pod:c"), "pod:c", 0.01, t0)
 	record(t, m, usage("pod:d"), "pod:d", 0.1, t0)
-	if moved := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
+	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
 		t.Fatalf("moved %v; want the newcomer pod:d", moved)
 	}
 }
@@ -143,7 +144,7 @@ func TestThePredictionLearnsTheWorkload(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
 	h.judged("pod:a", 0.44) // predicted 0.1, observed 0.06
 	want := 0.7*1 + 0.3*0.6
-	if got := h.l.effects.Of("pod:a"); !near(got, want) {
+	if got := h.l.effects.Of("pod:a", BasisMap); !near(got, want) {
 		t.Fatalf("effect %v after observing 0.6 of the prediction; want %v", got, want)
 	}
 	h.secondStep("pod:a", 0.3, 0.44)
@@ -158,10 +159,10 @@ func TestThePredictionLearnsTheWorkload(t *testing.T) {
 		t.Fatalf("action %+v; want kept", a)
 	}
 	want = 0.7*want + 0.3*0.6
-	if got := h.l.effects.Of("pod:a"); !near(got, want) {
+	if got := h.l.effects.Of("pod:a", BasisMap); !near(got, want) {
 		t.Fatalf("effect %v; want %v, learned against the unscaled prediction", got, want)
 	}
-	if h.l.effects.Of("pod:other") != 1 {
+	if h.l.effects.Of("pod:other", BasisMap) != 1 {
 		t.Error("an unknown workload's effect is not 1")
 	}
 }
@@ -169,14 +170,14 @@ func TestThePredictionLearnsTheWorkload(t *testing.T) {
 func TestEffectsAreClamped(t *testing.T) {
 	var e effects
 	for range 20 {
-		e.Observe("pod:a", 10)
-		e.Observe("pod:b", -3)
+		e.Observe("pod:a", BasisMap, 10)
+		e.Observe("pod:b", BasisMap, -3)
 	}
-	if a, b := e.Of("pod:a"), e.Of("pod:b"); a != 2 || b != 0.1 {
+	if a, b := e.Of("pod:a", BasisMap), e.Of("pod:b", BasisMap); a != 2 || b != 0.1 {
 		t.Fatalf("effects %v, %v; want clamped to 2 and 0.1", a, b)
 	}
-	e.Observe("pod:c", math.NaN())
-	if c := e.Of("pod:c"); c != 1 {
+	e.Observe("pod:c", BasisMap, math.NaN())
+	if c := e.Of("pod:c", BasisMap); c != 1 {
 		t.Fatalf("effect %v after a NaN ratio; want it ignored", c)
 	}
 }
@@ -294,7 +295,7 @@ func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
 		t.Fatalf("second step %+v; want kept", a)
 	}
-	if got := h.l.effects.Of("pod:a"); got != 1 {
+	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
 		t.Errorf("effect %v; want 1", got)
 	}
 	if rs := h.m.Relationships(usage("pod:a"), NodePressure); len(rs) != 0 {
@@ -318,7 +319,7 @@ func TestDryRunTeachesNothing(t *testing.T) {
 	if rs := h.m.Relationships(usage("pod:a"), NodePressure); len(rs) != 0 {
 		t.Errorf("relationships %+v; a dry run changes nothing, so it shows nothing", rs)
 	}
-	if got := h.l.effects.Of("pod:a"); got != 1 {
+	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
 		t.Errorf("effect %v; want 1", got)
 	}
 	if calls := cands.calls(); len(calls) != 0 {
@@ -352,7 +353,7 @@ func TestAResumedActionWithoutAPredictionTeachesNothing(t *testing.T) {
 	if iv := interventionsOn(t, h.m, "pod:a"); iv != nil {
 		t.Errorf("interventions %+v; a resumed action with no prediction is no evidence", iv)
 	}
-	if got := h.l.effects.Of("pod:a"); got != 1 {
+	if got := h.l.effects.Of("pod:a", BasisMap); got != 1 {
 		t.Errorf("effect %v; want 1", got)
 	}
 	ev, _ := h.lastVerify().Inputs["evidence"].(map[string]any)
@@ -361,19 +362,136 @@ func TestAResumedActionWithoutAPredictionTeachesNothing(t *testing.T) {
 	}
 }
 
-func TestAResumedActionWithAPredictionTeaches(t *testing.T) {
-	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true, noPressure: false})
+func TestAResumedActionWithAPredictionTeachesNothing(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	resumeWithPrediction(h)
+	h.step(0.5)
+	d := h.firstVerify(2*time.Minute, 0.44)
+	if d.Answer["verdict"] != "keep" {
+		t.Fatalf("verify %v; want the resumed change kept", d.Answer)
+	}
+	if iv := interventionsOn(t, h.m, "pod:a"); iv != nil {
+		t.Fatalf("interventions %+v; a resumed action's baseline was taken with its cap in force", iv)
+	}
+	if got := h.l.effects.Of("pod:a", BasisMap); got != 1 {
+		t.Errorf("effect %v; want 1", got)
+	}
+	ev, _ := d.Inputs["evidence"].(map[string]any)
+	if ev == nil || ev["fed"] != false || !strings.HasPrefix(ev["why"].(string), "resumed") {
+		t.Fatalf("evidence input %v; want not fed, as resumed", d.Inputs["evidence"])
+	}
+}
+
+func TestAFurtherStepAfterResumeTeaches(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	resumeWithPrediction(h)
+	h.step(0.5)
+	h.firstVerify(2*time.Minute, 0.44)
+	h.until(3*time.Minute, 0.44, "a further step", func() bool { return len(h.decisions("act")) > 1 }) // the journalled act, then this loop's
+	if a := h.action("pod:a"); a.Resumed || a.Outcome != "" {
+		t.Fatalf("action %+v; want the further step in flight, no longer resumed", a)
+	}
+	h.run(2*time.Minute, 0.38) // predicted 0.1 from 0.44, observed 0.06
+	if iv := interventionsOn(t, h.m, "pod:a"); iv == nil || iv.Agreed != 1 {
+		t.Fatalf("interventions %+v; want the further step's agreed outcome", iv)
+	}
+}
+
+// firstVerify steps at pressure p until the loop's first verify decision, and
+// returns it, failing after limit.
+func (h *harness) firstVerify(limit time.Duration, p float64) *statemap.Decision {
+	h.t.Helper()
+	h.until(limit, p, "a verify", func() bool { return len(h.decisions("verify")) > 0 })
+	ds := h.decisions("verify")
+	return ds[len(ds)-1]
+}
+
+// resumeWithPrediction puts a change on pod:a whose act the journal holds, for
+// the loop to take up at its first tick.
+func resumeWithPrediction(h *harness) {
 	b := h.m.Decide("relief-act-1-1", "earlier act")
-	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, FromCores: 1.6, ToCores: 1.2})
+	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, FromCores: 1.6, ToCores: 1.2, Basis: BasisMap})
 	b.Commit(nil)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
-	h.step(0.5)
-	h.run(2*time.Minute, 0.44)
+}
+
+// capBinds acts on pod:a (capped at 1.2 cores), has it use share of the node by
+// verify, and returns the verify decision.
+func capBinds(t *testing.T, share float64) (*harness, *statemap.Decision) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	h.act("pod:a")
+	record(t, h.m, usage("pod:a"), "pod:a", share, h.now)
+	d := h.firstVerify(2*time.Minute, 0.44)
+	if d.Answer["verdict"] != "keep" {
+		t.Fatalf("verify %v; the verdict is the cap's own, whatever it teaches", d.Answer)
+	}
+	return h, d
+}
+
+func TestACapThatDidNotBindTeachesNothing(t *testing.T) {
+	h, d := capBinds(t, 0.26) // 1.04 cores, under 0.9 × 1.2 = 1.08
+	ev, _ := d.Inputs["evidence"].(map[string]any)
+	if ev == nil || ev["fed"] != false || ev["why"] != "the cap did not bind: usage 1.040 cores under the 1.200-core limit" {
+		t.Fatalf("evidence input %v; want not fed, the cap not binding", d.Inputs["evidence"])
+	}
+	if iv := interventionsOn(t, h.m, "pod:a"); iv != nil {
+		t.Errorf("interventions %+v; want none", iv)
+	}
+	if got := h.l.effects.Of("pod:a", BasisMap); got != 1 {
+		t.Errorf("effect %v; want 1", got)
+	}
+	ss, _ := d.Inputs["subject_share"].(map[string]any)
+	if ss == nil || !near(ss["at_act"].(float64), 0.4) || !near(ss["at_verify"].(float64), 0.26) {
+		t.Errorf("subject_share %v; want 0.4 at act, 0.26 at verify", d.Inputs["subject_share"])
+	}
+}
+
+func TestACapThatBoundTeaches(t *testing.T) {
+	h, d := capBinds(t, 0.28) // 1.12 cores, at least 0.9 × 1.2
+	if ev, _ := d.Inputs["evidence"].(map[string]any); ev == nil || ev["fed"] != true {
+		t.Fatalf("evidence input %v; want fed", d.Inputs["evidence"])
+	}
 	if iv := interventionsOn(t, h.m, "pod:a"); iv == nil || iv.Agreed != 1 {
 		t.Fatalf("interventions %+v; want one agreed", iv)
 	}
-	if got := h.l.effects.Of("pod:a"); !near(got, 0.88) {
-		t.Errorf("effect %v; want 0.88", got)
+}
+
+func TestAWorkloadThatLeftConfounds(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1, "pod:c": 0.01}, evidence: true})
+	h.act("pod:a")
+	for _, s := range []string{"pod:b", "pod:c"} {
+		if err := h.m.RetireProperty(usage(s), "the pod was deleted", "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.run(2*time.Minute, 0.44)
+	c, _ := h.lastVerify().Inputs["confounded"].(map[string]any)
+	if c == nil || c["confounded"] != true {
+		t.Fatalf("confounded input %v; want true", h.lastVerify().Inputs["confounded"])
+	}
+	if left, _ := c["left"].([]string); len(left) != 1 || left[0] != "pod:b" {
+		t.Fatalf("left %v; want pod:b, and not pod:c, whose 0.01 is noise", c["left"])
+	}
+	if got := h.l.effects.Of("pod:a", BasisMap); got != 1 {
+		t.Errorf("effect %v; want 1", got)
+	}
+}
+
+func TestAUsageEffectDoesNotScaleAMapPrediction(t *testing.T) {
+	var e effects
+	for range 10 {
+		e.Observe("pod:a", BasisUsage, 0.2)
+	}
+	m := planFixture(t, 1)
+	ws := []runtime.Workload{pod("pod:a")}
+	pol, c := defaultPolicy(t, nil), reliefCfg()
+	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, e.Of)
+	if !ok || p.Basis != BasisMap || !near(p.Predicted, 0.1) || p.Effect != 1 {
+		t.Fatalf("plan %+v ok=%v why=%q; want the map's 0.1, unscaled by the usage factor", p, ok, why)
+	}
+	e.Observe("pod:a", BasisMap, 0.5)
+	if p, _, _ = MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, e.Of); !near(p.Predicted, 0.1*0.85) {
+		t.Fatalf("plan %+v; want the map factor 0.85 applied", p)
 	}
 }
