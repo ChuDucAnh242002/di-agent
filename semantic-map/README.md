@@ -147,6 +147,8 @@ semantic-map/
     │   ├── spec/               The agent's one configuration document, agent.yaml (concrete, NOT a contract)
     │   │   ├── spec.go         Spec types + Default(), Parse (defaults overlaid, ${VAR} expanded, unknown keys refused), Load, Validate, Redacted, YAML
     │   │   └── spec_test.go    Defaults, overlay, validation, redaction, round trip
+    │   ├── policy/             What the agent may touch: rules over workloads, freeze always wins (concrete, NOT a contract)
+    │   ├── runtime/            Runtime contract: list workloads, cap CPU, undo; registry + `dry-run` implementation
     │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
     │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
@@ -239,6 +241,7 @@ semantic-map/
     ├── cmd/agent/              Daemon binary
     │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
+    │   ├── acting.go           GET /workloads, GET /policy: what the runtime lists and the policy that governs each
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
@@ -551,6 +554,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
+| GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
+| GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |

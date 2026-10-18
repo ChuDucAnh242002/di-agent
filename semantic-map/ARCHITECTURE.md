@@ -387,6 +387,9 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
  registry       planner·critic       HTTP · mapctl · /ui
  + client       + validator          (§9)
    (§10)          (§13–14)
+
+  [policy] ──may touch?──▶ [Runtime] ──▶ orchestrator
+  (pkg/policy)             dry-run · kubernetes (planned)
 ```
 
 The Collector lives outside the SemanticMap facade — it feeds it. The three components below the facade are *consumers*: they read model state and expose it, but only the facade's own mutation methods can change it.
@@ -403,7 +406,7 @@ The contract set has stayed at six since the first release. Three substantial co
 
 The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
-### The five contracts
+### The six contracts
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -412,6 +415,7 @@ The rule we hold to: **no new contract without a second implementation that need
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; an operator's `Reject` permanently suppresses within session |
 | **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
+| **Runtime**   | The orchestrator-neutral way the agent changes the system it models: list the node's workloads, cap one's CPU, give the cap back | Every change returns an `Undo` carrying the resource as it was (including "no limit"), so a revert is exact; `Changed(nodeID)` lists only this node's unreverted changes, never another's; a workload that has gone is `ErrGone`. First implementation `dry-run` (in memory); `kubernetes` planned. Policy (`pkg/policy`) decides what the agent may touch; a Runtime only does what it is told |
 
 **Storage and Updater used to be here**, and their removal is the largest structural change
 the design has been through. Storage held a graph of construct edges; Updater incorporated

@@ -52,7 +52,9 @@ import (
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
@@ -300,6 +302,15 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
 	registerConfigRoute(mux, cfg)
+	rt, err := runtime.Build(cfg.Runtime.Kind, runtime.Env{NodeID: cfg.Node.ID, Spec: cfg.Runtime, Subjects: state.Subjects})
+	if err != nil {
+		log.Fatalf("runtime.kind in %s: %v", *configPath, err)
+	}
+	pol, err := policy.New(cfg.Policy)
+	if err != nil {
+		log.Fatalf("policy.rules in %s: %v", *configPath, err)
+	}
+	registerActingRoutes(mux, rt, pol)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
