@@ -1426,14 +1426,14 @@ modules under `static/js/`, embedded in the binary alongside `index.html` and
 
 | Module | Holds |
 | --- | --- |
-| `app.js` | the poll loop, the census strip, theme, toasts, the prompt dialog |
+| `app.js` | the poll loop (it reads `/relief`, `/relief/actions` and `/workloads` with `/state`), the census strip, theme, toasts, the prompt dialog |
 | `api.js` | every route the console calls, and how this agent reports failure |
-| `model.js` | effective-strength precedence, per-property value history, subject grouping |
+| `model.js` | effective-strength precedence, per-property value history, subject grouping, workload names and the throttled/frozen facts |
 | `force.js` | the force-directed layout |
 | `graph.js` | the SVG canvas |
 | `charts.js` | sparkline, strength layers, diverging contributions, census bar |
 | `inspector.js` | property and relationship detail, and the counterfactual studio |
-| `drawer.js` | journal, decisions, discovery, subjects, cluster, backbone, ask |
+| `drawer.js` | actions, journal, decisions, discovery, subjects, cluster, backbone, ask |
 
 **No external dependency.** The previous viewer pulled Cytoscape.js from
 `unpkg.com`. A CDN pin makes the operator surface of an offline, air-gapped or
@@ -1472,6 +1472,24 @@ relationships it read and, for a candidate review, the candidate. Everything els
 dimmed and the view zooms to what is pointed at.
 An end the canvas cannot draw — cleared by the search, or no longer in the map — is
 named in a toast rather than silently left out. Escape or a click on empty canvas lets go.
+
+**The console shows what the agent did.** `GET /relief`, `/relief/actions` and
+`/workloads` are read with every `/state` poll. The **Actions** pane is the drawer's
+default when `/relief` answers, and the pane it lands on is chosen once, not on each poll.
+Its strip is the loop's own counts (`predictions_held` is shown as a percentage and as
+"—" until something has been kept or reverted) plus the frozen workloads counted from
+`/workloads`. A row is one action, newest first: workload, cores before → after, predicted
+against observed drop, outcome. Opening it highlights `cpu_utilization@<subject>` and
+`cpu_pressure_ratio` and reads two decisions: the act (notice, attribution, plan, the
+change) and the verify, which is not named on the action and is found as the
+`relief-verify-` decision whose `inputs.act` is the act's id. The verify stage states the
+observed and predicted drop, whether another workload moved (confounded), and whether the
+outcome fed the map or why it did not. When the journal has evicted a decision the
+stage says so instead of inventing one. With relief off the `/relief*` routes are 404 and the
+pane says "Relief is not enabled in this agent's spec". A pod's box is labelled with the
+runtime's workload name when `/workloads` lists it (otherwise the collector's labels, then the
+subject), and carries `[throttled]` while an action is in flight or kept, and `[frozen]`
+while policy forbids touching it.
 
 **Honesty rules the console enforces.** These exist because the state model draws
 distinctions a naive renderer would flatten:

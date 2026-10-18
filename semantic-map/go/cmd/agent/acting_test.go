@@ -108,6 +108,21 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 	if !frozen["pod:a"] || frozen["pod:b"] {
 		t.Errorf("frozen = %v, want pod:a frozen and pod:b not", frozen)
 	}
+
+	// The settings a policy carries are snake_case like the rest of the API, not Go field names.
+	var raw []struct {
+		Policy struct {
+			Settings map[string]any `json:"settings"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"allow", "deny", "floor", "max_actions_per_hour", "cooldown"} {
+		if _, ok := raw[0].Policy.Settings[key]; !ok {
+			t.Errorf("policy.settings has no %q: %v", key, raw[0].Policy.Settings)
+		}
+	}
 }
 
 func TestPolicyRouteExplainsOne(t *testing.T) {

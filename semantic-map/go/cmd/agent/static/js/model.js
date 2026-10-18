@@ -56,7 +56,27 @@ export class Model {
     this.relChanged = new Set();// relationship ids that gained observations
     this.seenRevision = 0;
     this.firstSeen = new Map(); // property id → ms when this page first saw it
+    // What the agent may change and what it did: GET /relief, /relief/actions and
+    // /workloads. relief is null when the spec leaves the loop off.
+    this.acting = { relief: null, actions: [], workloads: [] };
+    this.workloadBy = new Map();
   }
+
+  /** Fold in the acting endpoints; a missing one is an empty one. */
+  setActing({ relief, actions, workloads }) {
+    this.acting = { relief: relief || null, actions: actions || [], workloads: workloads || [] };
+    this.workloadBy = new Map(this.acting.workloads.map((w) => [w.subject, w]));
+  }
+
+  /** The runtime's workload for a subject, or null when it does not list one. */
+  workloadOf(subject) { return this.workloadBy.get(subject) || null; }
+
+  /** An action is in force from the act until it ends: in flight (outcome '') or kept. */
+  throttled(subject) {
+    return this.acting.actions.some((a) => a.subject === subject && (a.outcome === '' || a.outcome === 'kept'));
+  }
+
+  frozen(subject) { return !!this.workloadOf(subject)?.policy?.frozen; }
 
   /** Fold a fresh /state response in, recording what moved. */
   ingest(view) {
@@ -116,9 +136,11 @@ export class Model {
   /** Relationships pointing OUT of a property — what it moves. */
   influencesOf(id) { return this.relationships.filter((r) => r.from === id); }
 
-  /** Each subject that has a name, by subject; see subjectName. */
+  /** Each subject that has a name, by subject; see subjectName and /workloads. */
   names() {
     const out = new Map();
+    // The runtime's own name for the workload wins over what a collector stamped.
+    for (const w of this.acting.workloads) if (w.name) out.set(w.subject, w.name);
     for (const p of this.properties) {
       const s = subjectOf(p), n = subjectName(p);
       if (s && n && !out.has(s)) out.set(s, n);

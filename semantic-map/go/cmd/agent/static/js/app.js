@@ -265,6 +265,8 @@ async function tick() {
     }
     lastRevision = view.revision;
 
+    // Before the graph draws: hull names and badges come from these.
+    await refreshActing();
     renderStats(model.counts);
     graph.render(model);
     inspector.refresh();
@@ -276,6 +278,24 @@ async function tick() {
   } finally {
     inflight = false;
   }
+}
+
+/**
+ * The acting endpoints, read with the state so a hull's name and badge match the
+ * Actions pane. A failure keeps what was last known rather than blanking the
+ * map's names; a 404 (relief off) is an ordinary empty answer.
+ */
+async function refreshActing() {
+  const [relief, actions, workloads] = await Promise.allSettled(
+    [api.relief(), api.reliefActions(), api.workloads()]);
+  const prev = model.acting;
+  const pick = (r, old) => (r.status === 'fulfilled' ? r.value : old);
+  model.setActing({
+    relief: pick(relief, prev.relief),
+    actions: pick(actions, prev.actions),
+    workloads: pick(workloads, prev.workloads),
+  });
+  model.actingError = [relief, actions, workloads].find((r) => r.status === 'rejected')?.reason?.message || '';
 }
 
 function setHealth(state, label) {

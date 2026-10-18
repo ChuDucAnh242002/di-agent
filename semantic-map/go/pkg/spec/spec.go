@@ -228,17 +228,17 @@ type CPURelief struct {
 // Floor is the least a limit may be cut to: an absolute number of cores, or a
 // share of the workload's original limit.
 type Floor struct {
-	CPUCores   float64 `yaml:"cpu_cores"`
-	OfOriginal float64 `yaml:"of_original"`
+	CPUCores   float64 `yaml:"cpu_cores" json:"cpu_cores"`
+	OfOriginal float64 `yaml:"of_original" json:"of_original"`
 }
 
 // Settings is what a policy permits. A rule's zero values inherit the defaults.
 type Settings struct {
-	Allow             []string      `yaml:"allow"`
-	Deny              []string      `yaml:"deny"`
-	Floor             *Floor        `yaml:"floor"`
-	MaxActionsPerHour int           `yaml:"max_actions_per_hour"`
-	Cooldown          time.Duration `yaml:"cooldown"`
+	Allow             []string      `yaml:"allow" json:"allow"`
+	Deny              []string      `yaml:"deny" json:"deny"`
+	Floor             *Floor        `yaml:"floor" json:"floor"`
+	MaxActionsPerHour int           `yaml:"max_actions_per_hour" json:"max_actions_per_hour"`
+	Cooldown          time.Duration `yaml:"cooldown" json:"cooldown"`
 }
 
 // Match selects workloads. Every field set must hold; a label matches when the
