@@ -12,8 +12,8 @@ import (
 	"github.com/DiyazY/di-agent/pkg/spec"
 )
 
-// TestConfigRouteRedactsSecrets pins that GET /config shows the agent's spec and
-// never a credential in it.
+// TestConfigRouteRedactsSecrets pins that GET /config shows the agent's spec in the
+// spec's own words (snake_case keys, human durations) and never a credential in it.
 func TestConfigRouteRedactsSecrets(t *testing.T) {
 	s := spec.Default()
 	s.Explain.APIKey = "k-secret"
@@ -31,15 +31,32 @@ func TestConfigRouteRedactsSecrets(t *testing.T) {
 	if strings.Contains(body, "k-secret") {
 		t.Errorf("a secret reached the response: %s", body)
 	}
-	if !strings.Contains(body, spec.Redaction) {
-		t.Errorf("response does not say a secret was withheld: %s", body)
-	}
-	var got spec.Spec
+	var got map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("response is not the spec as JSON: %v", err)
+		t.Fatalf("response is not JSON: %v", err)
 	}
-	if got.Node.Addr != s.Node.Addr {
-		t.Errorf("node.addr = %q, want %q", got.Node.Addr, s.Node.Addr)
+	if _, ok := got["node"].(map[string]any)["ingest_scope"]; !ok {
+		t.Errorf("node.ingest_scope missing; keys are not the spec's: %s", body)
+	}
+	if v := got["sources"].(map[string]any)["interval"]; v != "10s" {
+		t.Errorf("sources.interval = %v, want the string \"10s\"", v)
+	}
+	if v := got["explain"].(map[string]any)["api_key"]; v != spec.Redaction {
+		t.Errorf("explain.api_key = %v, want %q", v, spec.Redaction)
+	}
+}
+
+// TestPrintedSpecWithholdsSecrets pins that -print-config, which prints after ${VAR}
+// expansion, does not echo a credential to stdout.
+func TestPrintedSpecWithholdsSecrets(t *testing.T) {
+	s := spec.Default()
+	s.Explain.APIKey = "k-secret"
+	out, err := shownSpec(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "k-secret") || !strings.Contains(string(out), spec.Redaction) {
+		t.Errorf("printed spec does not withhold the key:\n%s", out)
 	}
 }
 

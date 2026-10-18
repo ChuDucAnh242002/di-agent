@@ -91,7 +91,7 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	if *printConfig {
-		out, err := cfg.YAML()
+		out, err := shownSpec(cfg)
 		if err != nil {
 			log.Fatalf("print-config: %v", err)
 		}
