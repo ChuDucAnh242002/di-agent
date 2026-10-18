@@ -759,8 +759,11 @@ evaluation constructs live here as derived properties over the metrics that evid
 them, which keeps prior knowledge without the graph being about the framework.
 
 **Edges are relationships**, each carrying its provenance: `seeded` when only its structure came from prior
-knowledge, `learned` from observing this system, `asserted` by an operator. An agent
-that cannot say why it believes an edge cannot be audited, so provenance is data.
+knowledge, `learned` from observing this system, `asserted` by an operator, `intervened` when an action
+the agent took and verified created or confirmed it. `intervened` ranks above `discovered`: a
+discovered edge rests on correlation, which a shared cause can produce, while the agent moved
+the cause end itself and saw the effect end respond. Only the map's intervention record can
+write it. An agent that cannot say why it believes an edge cannot be audited, so provenance is data.
 
 **Facts are the frame.** Beside its properties the map holds what the machine *is* — OS,
 kernel, CPU model and cores, memory, disk, boot time — read once at startup by a

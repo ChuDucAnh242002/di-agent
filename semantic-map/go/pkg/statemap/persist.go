@@ -36,7 +36,8 @@ import (
 // arrive and the observation counts and timestamps would not. That is the silent
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
-const SnapshotVersion = 3
+// Version 4 added the intervention counters.
+const SnapshotVersion = 4
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -51,6 +52,10 @@ type Snapshot struct {
 
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
+
+	// Interventions are the counters by pair "from->to", saved apart from the
+	// relationships because they exist before any relationship does.
+	Interventions map[string]Interventions `json:"interventions,omitempty"`
 
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
@@ -77,6 +82,12 @@ func (m *Map) Snapshot() Snapshot {
 	}
 	for _, r := range m.relationships {
 		s.Relationships = append(s.Relationships, *r)
+	}
+	for k, iv := range m.interventions {
+		if s.Interventions == nil {
+			s.Interventions = map[string]Interventions{}
+		}
+		s.Interventions[k] = *iv
 	}
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
@@ -189,6 +200,10 @@ func (m *Map) Load(path string) (bool, error) {
 			r.ID = RelationshipID(r.From, r.To, r.Label)
 		}
 		m.relationships[r.ID] = &r
+	}
+	for k, iv := range snap.Interventions {
+		iv := iv
+		m.interventions[k] = &iv
 	}
 	m.revision = snap.Revision
 	m.journal.restore(snap.Events, snap.JournalDropped)
