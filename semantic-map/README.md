@@ -241,7 +241,7 @@ semantic-map/
     ├── cmd/agent/              Daemon binary
     │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
-    │   ├── acting.go           GET /workloads, GET /policy: what the runtime lists and the policy that governs each
+    │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
@@ -556,6 +556,13 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
+| GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `cooling` | relief   |
+| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction, observed drop and `outcome` | relief   |
+| POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
+| POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
+| POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
+
+When `loops.relief.enabled` is false every `/relief*` route is `404` with `relief is not enabled in the spec`. The mutating relief routes refuse a body without `Content-Type: application/json` with `400`, as every other mutating route does.
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
@@ -644,6 +651,27 @@ loops:
 ```
 
 Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own; `facts` likewise names the fact sources outright (`facts: []` reads none).
+
+### The runtime and the relief loop
+
+The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default); `runtime.kubeconfig` and `runtime.node` apply to a Kubernetes runtime and `node` defaults to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
+
+```yaml
+# relief on dry-run: the loop decides, records and verifies; nothing is changed
+node:
+  id: node_1
+runtime:
+  kind: dry-run
+loops:
+  relief:
+    enabled: true
+    interval: 15s       # how often the loop looks
+    cpu:
+      enter: 0.25       # node CPU share that starts relief, held for enter_for
+      exit: 0.10        # share below which caps are given back, held for exit_for
+```
+
+At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
 
 ### The state model
 

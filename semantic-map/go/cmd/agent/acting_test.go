@@ -1,17 +1,30 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/policy"
+	"github.com/DiyazY/di-agent/pkg/relief"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 func actingMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+	mux, _, _ := actingMuxWith(t, false)
+	return mux
+}
+
+// actingMuxWith is the acting routes over a dry-run runtime, with a relief loop
+// when withLoop is set.
+func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *runtime.DryRun) {
 	t.Helper()
 	s := spec.Default()
 	rt, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1", Spec: s.Runtime})
@@ -28,9 +41,27 @@ func actingMux(t *testing.T) *http.ServeMux {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var loop *relief.Loop
+	if withLoop {
+		loop, err = relief.New(relief.Config{Relief: s.Loops.Relief, NodeID: "n1", Runtime: rt, Policy: pol,
+			Map: statemap.New(statemap.Config{Owner: "n1"}, nil)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	mux := http.NewServeMux()
-	registerActingRoutes(mux, rt, pol)
-	return mux
+	registerActingRoutes(mux, rt, pol, loop)
+	return mux, loop, dr
+}
+
+func post(mux *http.ServeMux, url string, json bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, url, nil)
+	if json {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func get(mux *http.ServeMux, url string) *httptest.ResponseRecorder {
@@ -97,5 +128,83 @@ func TestPolicyRouteExplainsOne(t *testing.T) {
 	}
 	if c := get(mux, "/policy?subject=pod:nope").Code; c != http.StatusNotFound {
 		t.Errorf("unknown subject: %d, want 404", c)
+	}
+}
+
+func TestReliefRoutesNeedTheLoop(t *testing.T) {
+	mux := actingMux(t)
+	for _, r := range []*httptest.ResponseRecorder{
+		get(mux, "/relief"), get(mux, "/relief/actions"),
+		post(mux, "/relief/pause", true), post(mux, "/relief/resume", true),
+		post(mux, "/relief/actions/x/revert", true),
+	} {
+		if r.Code != http.StatusNotFound || !strings.Contains(r.Body.String(), "relief is not enabled in the spec") {
+			t.Errorf("status %d body %s, want 404 naming the spec", r.Code, r.Body)
+		}
+	}
+}
+
+func TestPauseAndResume(t *testing.T) {
+	mux, _, _ := actingMuxWith(t, true)
+	paused := func() bool {
+		var st struct {
+			Paused bool `json:"paused"`
+		}
+		rec := get(mux, "/relief")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /relief = %d: %s", rec.Code, rec.Body)
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Paused
+	}
+	if paused() {
+		t.Fatal("a new loop is paused")
+	}
+	if rec := post(mux, "/relief/pause", true); rec.Code != http.StatusOK || !paused() {
+		t.Fatalf("pause: %d, paused=%v", rec.Code, paused())
+	}
+	if rec := post(mux, "/relief/resume", true); rec.Code != http.StatusOK || paused() {
+		t.Fatalf("resume: %d, paused=%v", rec.Code, paused())
+	}
+}
+
+func TestManualRevert(t *testing.T) {
+	mux, loop, dr := actingMuxWith(t, true)
+	limit := 0.5
+	dr.Put(runtime.Workload{Subject: "pod:c", Name: "c", CPU: runtime.Resource{Limit: &limit},
+		Can: map[string]string{runtime.ActionCPULimit: ""}})
+	dr.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:c", Action: runtime.ActionCPULimit,
+		Original: runtime.Resource{Limit: &limit}, Applied: 0.25, DecisionID: "act-1",
+		Expires: time.Now().Add(time.Hour)})
+	if err := loop.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var acts []relief.Action
+	if err := json.Unmarshal(get(mux, "/relief/actions").Body.Bytes(), &acts); err != nil || len(acts) != 1 {
+		t.Fatalf("actions = %v, err %v", acts, err)
+	}
+	if rec := post(mux, "/relief/actions/nope/revert", true); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown id = %d, want 404", rec.Code)
+	}
+	if rec := post(mux, "/relief/actions/"+acts[0].ID+"/revert", true); rec.Code != http.StatusOK {
+		t.Fatalf("revert = %d: %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(get(mux, "/relief/actions").Body.Bytes(), &acts); err != nil || acts[0].Outcome != relief.OutcomeManual {
+		t.Fatalf("outcome = %q, want manual (%v)", acts[0].Outcome, err)
+	}
+	if len(dr.Applied()) != 0 {
+		t.Error("the runtime still holds the change")
+	}
+}
+
+func TestMutatingReliefRoutesNeedJSON(t *testing.T) {
+	mux, _, _ := actingMuxWith(t, true)
+	for _, u := range []string{"/relief/pause", "/relief/resume", "/relief/actions/x/revert"} {
+		// The same refusal as every other mutating route: requireJSON, 400.
+		if rec := post(mux, u, false); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s without a JSON content type = %d, want 400", u, rec.Code)
+		}
 	}
 }

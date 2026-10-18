@@ -364,6 +364,9 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// ErrNoAction is Revert's answer for an id that is not an action in force.
+var ErrNoAction = errors.New("no such action in force")
+
 // Revert undoes an action by hand and cools its workload down, as an operator
 // overriding the loop. Only an action still in force can be reverted.
 func (l *Loop) Revert(ctx context.Context, id string) error {
@@ -378,7 +381,7 @@ func (l *Loop) Revert(ctx context.Context, id string) error {
 	}
 	l.mu.Unlock()
 	if a == nil {
-		return fmt.Errorf("no action %s is in force", id)
+		return fmt.Errorf("%w: %s", ErrNoAction, id)
 	}
 	return l.giveBack(ctx, l.cfg.Now(), a, OutcomeManual, "manual", a.cooldown)
 }

@@ -54,6 +54,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/relief"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
@@ -310,7 +311,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("policy.rules in %s: %v", *configPath, err)
 	}
-	registerActingRoutes(mux, rt, pol)
+	var reliefLoop *relief.Loop
+	if cfg.Loops.Relief.Enabled {
+		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, NodeID: cfg.Node.ID,
+			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf})
+		if err != nil {
+			log.Fatalf("loops.relief in %s: %v", *configPath, err)
+		}
+	}
+	registerActingRoutes(mux, rt, pol, reliefLoop)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
@@ -338,6 +347,10 @@ func main() {
 	// Lifecycle is time-based, so something has to advance it. Without this loop
 	// map.stale_after and map.retire_after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
+	if reliefLoop != nil {
+		log.Printf("relief: acting every %s through runtime %s", cfg.Loops.Relief.Interval, rt.Name())
+		go reliefLoop.Start(ctx)
+	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
