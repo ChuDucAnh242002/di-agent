@@ -303,7 +303,7 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
 	registerConfigRoute(mux, cfg)
-	rt, err := runtime.Build(cfg.Runtime.Kind, runtime.Env{NodeID: cfg.Node.ID, Spec: cfg.Runtime, Subjects: state.Subjects})
+	rt, err := runtime.Build(cfg.Runtime.Kind, runtime.Env{NodeID: cfg.Node.ID, Spec: cfg.Runtime, Subjects: workloadSubjects(state)})
 	if err != nil {
 		log.Fatalf("runtime.kind in %s: %v", *configPath, err)
 	}

@@ -215,3 +215,22 @@ func TestMutatingReliefRoutesNeedJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlyCPUConsumersAreWorkloads(t *testing.T) {
+	m := statemap.New(statemap.Config{Owner: "n1", AdmitUnknown: true}, nil)
+	unit := [2]float64{0, 1}
+	for _, o := range []statemap.Observation{
+		{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: 0.2},
+		{ID: "cpu.cpu.user@cpu:cpu0", Subject: "cpu:cpu0", Value: 0.3},
+		{ID: "disk.io.reads@disk:sda", Subject: "disk:sda", Value: 0.1},
+	} {
+		o.At, o.Range = time.Now(), &unit
+		if err := m.Record(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := workloadSubjects(m)()
+	if len(got) != 1 || got[0] != "pod:a" {
+		t.Errorf("workload subjects = %v, want [pod:a]", got)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/relief"
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 // targetOf is the workload as the policy sees it: its kind is the subject's part
@@ -15,6 +16,21 @@ import (
 func targetOf(w runtime.Workload) policy.Target {
 	kind, _, _ := strings.Cut(w.Subject, ":")
 	return policy.Target{Kind: kind, Name: w.Name, Labels: w.Labels, Self: w.Self}
+}
+
+// workloadSubjects is the subjects the map holds a CPU share for: the only ones
+// that run as a workload the agent could cap. A core, a disk or an interface is
+// a subject of the map too, and is not something to throttle.
+func workloadSubjects(m *statemap.Map) func() []string {
+	return func() []string {
+		var out []string
+		for _, s := range m.Subjects() {
+			if _, ok := m.Property(relief.NodeUsage + "@" + s); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
 }
 
 type resourceView struct {
