@@ -528,6 +528,15 @@ func TestEveryStepIsADecision(t *testing.T) {
 	if len(verify) != 1 || verify[0].Inputs["act"] != a.DecisionID {
 		t.Fatalf("verify decisions %+v; want one citing %s", verify, a.DecisionID)
 	}
+	if a.VerifyID != verify[0].ID {
+		t.Errorf("verify_id = %q; want %q", a.VerifyID, verify[0].ID)
+	}
+	if d, ok := h.m.Journal().Decision(a.VerifyID); !ok || d.Inputs["act"] != a.DecisionID {
+		t.Errorf("verify_id %q does not resolve to the verify decision: %+v", a.VerifyID, d)
+	}
+	if st := h.l.Status(); st.Runtime == "" {
+		t.Errorf("status carries no runtime name: %+v", st)
+	}
 }
 
 func TestNoCoresTheLoopRefusesOnce(t *testing.T) {

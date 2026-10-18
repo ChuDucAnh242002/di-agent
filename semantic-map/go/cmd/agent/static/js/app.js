@@ -265,8 +265,12 @@ async function tick() {
     }
     lastRevision = view.revision;
 
-    // Before the graph draws: hull names and badges come from these.
-    await refreshActing();
+    // Hull names and badges come from the acting endpoints; only the first tick waits.
+    const acting = refreshActing();
+    if (!actingAwaited) {
+      actingAwaited = true;
+      await Promise.race([acting, new Promise((r) => setTimeout(r, 1500))]);
+    }
     renderStats(model.counts);
     graph.render(model);
     inspector.refresh();
@@ -281,21 +285,58 @@ async function tick() {
 }
 
 /**
- * The acting endpoints, read with the state so a hull's name and badge match the
- * Actions pane. A failure keeps what was last known rather than blanking the
- * map's names; a 404 (relief off) is an ordinary empty answer.
+ * The acting endpoints, read alongside /state so a hull's name and badge match the
+ * Actions pane. They never hold the map back: only the first tick waits for them
+ * (briefly, so the drawer can choose its default pane); after that the last known
+ * answer is drawn and a changed one redraws when it lands.
+ *
+ * Polling is as light as the answers allow. /relief and /relief/actions every tick;
+ * /workloads (names and frozen state change slowly) every fourth tick, or at once
+ * when the map's set of subjects changed. A 404 from /relief means relief is off in
+ * the spec, and then none of the three is asked again until the page is reloaded.
+ * A failure keeps what was last known rather than blanking the names.
  */
+let actingTicks = 0;
+let actingBusy = false;
+let actingAwaited = false;
+let workloadsKey = null;
+
 async function refreshActing() {
-  const [relief, actions, workloads] = await Promise.allSettled(
-    [api.relief(), api.reliefActions(), api.workloads()]);
-  const prev = model.acting;
-  const pick = (r, old) => (r.status === 'fulfilled' ? r.value : old);
-  model.setActing({
-    relief: pick(relief, prev.relief),
-    actions: pick(actions, prev.actions),
-    workloads: pick(workloads, prev.workloads),
-  });
-  model.actingError = [relief, actions, workloads].find((r) => r.status === 'rejected')?.reason?.message || '';
+  if (model.actingState === 'off' || actingBusy) return;
+  actingBusy = true;
+  try {
+    const prev = model.acting;
+    let relief = prev.relief, actions = prev.actions, workloads = prev.workloads;
+    let state = model.actingState, error = '';
+    try {
+      const r = await api.relief();
+      if (r === null) {
+        state = 'off'; relief = null; actions = []; workloads = [];
+      } else {
+        state = 'on'; relief = r;
+        const key = model.subjects().map((s) => s.id).join(',');
+        const wantWorkloads = actingTicks % 4 === 0 || key !== workloadsKey;
+        const [a, w] = await Promise.allSettled([api.reliefActions(), wantWorkloads ? api.workloads() : null]);
+        if (a.status === 'fulfilled') actions = a.value || [];
+        else error = a.reason.message;
+        if (wantWorkloads && w.status === 'fulfilled') { workloads = w.value || []; workloadsKey = key; }
+        else if (wantWorkloads) error = error || w.reason.message;
+      }
+    } catch (err) {
+      error = err.message;        // /relief itself failed: not "off", just unanswered
+    }
+    actingTicks++;
+    const changed = JSON.stringify([relief, actions, workloads]) !== JSON.stringify([prev.relief, prev.actions, prev.workloads])
+      || state !== model.actingState;
+    model.actingState = state;
+    model.actingError = error;
+    if (changed) {
+      model.setActing({ relief, actions, workloads });
+      if (model.view) { graph.render(model); drawer.renderActive(); drawer.renderCounts(); }
+    }
+  } finally {
+    actingBusy = false;
+  }
 }
 
 function setHealth(state, label) {

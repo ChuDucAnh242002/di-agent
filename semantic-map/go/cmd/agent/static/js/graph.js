@@ -486,11 +486,11 @@ export class GraphView {
       // a cap is in force, frozen while policy forbids touching it.
       if (!machine) {
         for (const [on, text, colour] of [
-          [model.throttled(subject), 'throttled', 'var(--status-serious)'],
+          [model.throttled(subject), model.acting.relief?.runtime === 'dry-run' ? 'throttled (dry-run)' : 'throttled', 'var(--status-serious)'],
           [model.frozen(subject), 'frozen', 'var(--prov-asserted)'],
         ]) {
           if (!on) continue;
-          const tag = el('tspan', { fill: colour, 'font-weight': 600, class: `hull-badge ${text}` });
+          const tag = el('tspan', { fill: colour, 'font-weight': 600, class: `hull-badge ${text.split(' ')[0]}` });
           tag.textContent = `  [${text}]`;
           label.append(tag);
         }

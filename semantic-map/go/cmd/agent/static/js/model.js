@@ -60,12 +60,17 @@ export class Model {
     // /workloads. relief is null when the spec leaves the loop off.
     this.acting = { relief: null, actions: [], workloads: [] };
     this.workloadBy = new Map();
+    // 'unknown' until /relief has answered; 'on', or 'off' once it said 404.
+    this.actingState = 'unknown';
+    this.actingError = '';
+    this._names = null;         // names(), rebuilt only when /state or /workloads changes
   }
 
   /** Fold in the acting endpoints; a missing one is an empty one. */
   setActing({ relief, actions, workloads }) {
     this.acting = { relief: relief || null, actions: actions || [], workloads: workloads || [] };
     this.workloadBy = new Map(this.acting.workloads.map((w) => [w.subject, w]));
+    this._names = null;
   }
 
   /** The runtime's workload for a subject, or null when it does not list one. */
@@ -83,6 +88,7 @@ export class Model {
     const now = Date.now();
     this.prev = this.view;
     this.view = view;
+    this._names = null;
     this.changed.clear();
     this.relChanged.clear();
 
@@ -138,6 +144,7 @@ export class Model {
 
   /** Each subject that has a name, by subject; see subjectName and /workloads. */
   names() {
+    if (this._names) return this._names;
     const out = new Map();
     // The runtime's own name for the workload wins over what a collector stamped.
     for (const w of this.acting.workloads) if (w.name) out.set(w.subject, w.name);
@@ -145,6 +152,7 @@ export class Model {
       const s = subjectOf(p), n = subjectName(p);
       if (s && n && !out.has(s)) out.set(s, n);
     }
+    this._names = out;
     return out;
   }
 

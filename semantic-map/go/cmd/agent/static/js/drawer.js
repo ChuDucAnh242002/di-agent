@@ -127,9 +127,11 @@ export class Drawer {
     ]);
     // The acting data is read by the page with /state (the hulls need it too), so
     // by now it says whether relief exists. The first poll picks the default pane.
-    if (!this.defaultChosen) {
+    // An unanswered /relief decides nothing: the choice waits for the first answer.
+    const state = this.ctx.model()?.actingState;
+    if (!this.defaultChosen && state !== 'unknown') {
       this.defaultChosen = true;
-      if (this.ctx.model()?.acting.relief) this.activate('actions');
+      if (state === 'on') this.activate('actions');
     }
     this.renderActive();
     this.renderCounts();
@@ -186,10 +188,11 @@ export class Drawer {
     const model = this.ctx.model();
     const { relief, actions } = model.acting;
     if (!relief) {
+      const off = model.actingState === 'off';
       this.panes.actions.innerHTML = `<div class="empty">
-        <strong>Relief is not enabled in this agent's spec</strong>
-        <span class="why">${model.actingError
-          ? `The acting endpoints did not answer: ${escapeHTML(model.actingError)}.`
+        <strong>${off ? 'Relief is not enabled in this agent\'s spec' : 'The agent did not answer'}</strong>
+        <span class="why">${!off
+          ? `GET /relief failed${model.actingError ? `: ${escapeHTML(model.actingError)}` : ''}. This pane fills in when it answers.`
           : 'With <span class="mono">loops.relief.enabled</span> false the agent models the system and changes nothing, so there is nothing here to show.'}</span>
       </div>`;
       return;
@@ -205,7 +208,7 @@ export class Drawer {
       ['frozen workloads', frozen, 'policy forbids touching them'],
       ['refused', relief.refused, ''],
     ];
-    const state = `${relief.phase}${relief.paused ? ' · paused' : ''}`;
+    const state = `${relief.phase}${relief.paused ? ' · paused' : ''}${relief.runtime ? ` · ${relief.runtime}` : ''}`;
     const strip = `<div class="action-strip">
       ${tiles.map(([label, v, tip]) => `<div class="tile"${tip ? ` title="${escapeHTML(tip)}"` : ''}>
         <span class="label">${escapeHTML(label)}</span><span class="value">${escapeHTML(String(v))}</span></div>`).join('')}
@@ -255,29 +258,26 @@ export class Drawer {
     const a = this.ctx.model().acting.actions.find((x) => x.id === id);
     if (!a) return;
     const closing = this.openAction === id;
-    this.openAction = closing ? null : id;
+    // Pointing first: letting go of the canvas (point(), Escape) closes the open
+    // trace through unpoint(), so the row is marked open only afterwards.
     // Like a Discovery row: the capped workload's usage and the pressure it was
     // there to relieve. Opening points, closing lets go.
     if (closing ? this.isPointed('actions', id) : !this.isPointed('actions', id)) {
       this.point('actions', id, { nodes: [`cpu_utilization@${a.subject}`, 'cpu_pressure_ratio'] });
     }
     this.actionTrace = null;
+    this.openAction = closing ? null : id;
     this.renderActions();
     if (closing) return;
-    // The verify decision is not named on the action; it is the one that read this act.
-    const trace = { id, act: null, verify: null, error: '' };
+    const trace = { id, act: null, verify: null, error: '', verifyError: '' };
     this.actionTrace = trace;
-    try {
-      trace.act = await api.decision(a.decision_id);
-    } catch (err) {
-      trace.error = err.gone ? `${err.message} — the trace existed but has been evicted.` : err.message;
-    }
-    try {
-      const all = await api.decisions(500);
-      trace.verify = (all.decisions || []).find((x) => x.id.startsWith('relief-verify-') && x.inputs?.act === a.decision_id) || null;
-    } catch (err) {
-      trace.error = trace.error || err.message;
-    }
+    const read = async (decisionID) => {
+      try { return [await api.decision(decisionID), '']; } catch (err) {
+        return [null, err.gone ? 'evicted from the journal' : err.message];
+      }
+    };
+    [trace.act, trace.error] = await read(a.decision_id);
+    if (a.verify_id) [trace.verify, trace.verifyError] = await read(a.verify_id);
     if (this.openAction === id && this.active === 'actions') this.renderActions();
   }
 
@@ -446,6 +446,8 @@ export class Drawer {
   /** The canvas let go (Escape, a click on empty canvas, another row). */
   unpoint() {
     if (!this.pointed) return;
+    // Escape lets go of the row's part of the map, and of its trace with it.
+    if (this.pointed.pane === 'actions') { this.openAction = null; this.actionTrace = null; }
     this.pointed = null;
     this.renderActive();
   }
@@ -1064,7 +1066,7 @@ function actionTrace(a, t) {
   if (!t) return `<div class="muted" style="padding:10px 2px">Reading the decisions…</div>`;
   const act = t.act, ins = act?.inputs || {};
   const parts = [];
-  if (t.error) parts.push(`<div class="caveats" style="color:var(--status-serious)">${escapeHTML(t.error)}</div>`);
+  if (t.error) parts.push(`<div class="caveats" style="color:var(--status-serious)">The act decision: ${escapeHTML(t.error)}</div>`);
 
   const notice = ins.notice;
   parts.push(stage(1, 'Notice', notice
@@ -1112,10 +1114,13 @@ function actionTrace(a, t) {
         ${ev?.fed ? (ev.confounded ? 'Recorded as confounded evidence, which does not change what it learned.' : 'An intervention was recorded on the capped workload\'s usage → node pressure.') : escapeHTML(ev?.why || 'no reason recorded')}</p>
       ${(v.caveats || []).length ? `<ul class="caveats">${v.caveats.map((c) => `<li>${escapeHTML(c)}</li>`).join('')}</ul>` : ''}
       <div class="muted mono" style="margin-top:4px">${escapeHTML(v.id)}</div>`;
+  } else if (a.verify_id) {
+    verifyBody = `<p class="muted">The verify decision <span class="mono">${escapeHTML(a.verify_id)}</span> could not be shown: ${escapeHTML(t.verifyError || 'not read')}.</p>
+      ${a.observed !== undefined && a.observed !== null ? `<p>Observed drop ${fmt.num(a.observed, 4)} against ${fmt.num(p.predicted, 4)} predicted.</p>` : ''}`;
   } else if (a.outcome === '' || !a.outcome) {
-    verifyBody = `<p class="muted">Not judged yet: the loop waits for the settle time before comparing pressure with the prediction.</p>`;
-  } else if (a.observed !== undefined && a.observed !== null) {
-    verifyBody = `<p>Observed drop ${fmt.num(a.observed, 4)} against ${fmt.num(p.predicted, 4)} predicted. The verify decision is no longer held in the journal.</p>`;
+    verifyBody = `<p class="muted">Not verified yet: the loop waits for the settle time before comparing pressure with the prediction.</p>`;
+  } else if (a.resumed) {
+    verifyBody = `<p class="muted">Resumed after a restart: judged without a verdict of its own, and ended as <strong>${escapeHTML(a.outcome)}</strong>.</p>`;
   } else {
     verifyBody = `<p class="muted">This action ended as <strong>${escapeHTML(a.outcome)}</strong> without a verdict (released, expired, gone or reverted by an operator).</p>`;
   }

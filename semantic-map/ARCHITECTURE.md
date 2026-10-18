@@ -1481,11 +1481,15 @@ Its strip is the loop's own counts (`predictions_held` is shown as a percentage 
 `/workloads`. A row is one action, newest first: workload, cores before → after, predicted
 against observed drop, outcome. Opening it highlights `cpu_utilization@<subject>` and
 `cpu_pressure_ratio` and reads two decisions: the act (notice, attribution, plan, the
-change) and the verify, which is not named on the action and is found as the
-`relief-verify-` decision whose `inputs.act` is the act's id. The verify stage states the
+change) and the verify, named on the action as `verify_id` (the latest step's; after a
+further step is reverted it is the failed step's verify, the one that caused the revert). The verify stage states the
 observed and predicted drop, whether another workload moved (confounded), and whether the
 outcome fed the map or why it did not. When the journal has evicted a decision the
-stage says so instead of inventing one. With relief off the `/relief*` routes are 404 and the
+stage says "evicted from the journal" instead of inventing one. The page polls `/relief` and
+`/relief/actions` each tick and `/workloads` every fourth (or when the set of subjects changes),
+never holds the map's redraw back for them, and stops asking once `/relief` has said 404; a
+`/relief` that fails otherwise reads "The agent did not answer", not "not enabled". A
+`throttled` badge on a `dry-run` runtime (`runtime` on `GET /relief`) reads "throttled (dry-run)". With relief off the `/relief*` routes are 404 and the
 pane says "Relief is not enabled in this agent's spec". A pod's box is labelled with the
 runtime's workload name when `/workloads` lists it (otherwise the collector's labels, then the
 subject), and carries `[throttled]` while an action is in flight or kept, and `[frozen]`

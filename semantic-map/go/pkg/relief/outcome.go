@@ -113,7 +113,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	b.Commit(map[string]any{"verdict": verdict, "observed": observed, "predicted": a.Plan.Predicted})
 
 	l.mu.Lock()
-	a.Observed = &observed
+	a.Observed, a.VerifyID = &observed, id
 	if keep {
 		a.Outcome = OutcomeKept
 		l.inFlight = nil
@@ -171,9 +171,10 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 	l.mu.Lock()
 	l.nReverted++
 	if p := a.prev; p != nil {
-		id := a.ID
+		id, failed := a.ID, a.VerifyID
 		*a = *p
-		a.ID, a.Undo, a.Outcome, a.revertPending = id, undo, OutcomeKept, false
+		// The verify that caused the revert is the one an operator wants, not the earlier step's.
+		a.ID, a.Undo, a.Outcome, a.revertPending, a.VerifyID = id, undo, OutcomeKept, false, failed
 		if l.inFlight == a {
 			l.inFlight = nil
 		}

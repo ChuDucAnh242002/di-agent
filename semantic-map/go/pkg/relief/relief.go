@@ -21,6 +21,7 @@ import (
 type Status struct {
 	Phase           Phase                `json:"phase"`
 	Paused          bool                 `json:"paused"`
+	Runtime         string               `json:"runtime"` // what the changes go through: dry-run changes nothing
 	InFlight        *Action              `json:"in_flight,omitempty"`
 	Actions         int                  `json:"actions"`
 	Kept            int                  `json:"kept"`
@@ -50,6 +51,7 @@ type Action struct {
 	ActedAt       time.Time          `json:"acted_at"`
 	Observed      *float64           `json:"observed,omitempty"` // observed drop, after settle
 	Outcome       string             `json:"outcome"`
+	VerifyID      string             `json:"verify_id,omitempty"` // the decision that judged the latest step
 	Resumed       bool               `json:"resumed,omitempty"`
 	SharesAtAct   map[string]float64 `json:"shares_at_act,omitempty"`
 
@@ -180,7 +182,7 @@ func (l *Loop) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
-	st := Status{Phase: l.trigger.Phase(), Paused: l.paused,
+	st := Status{Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(),
 		Actions: l.nActs, Kept: l.nKept, Reverted: l.nReverted, Refused: l.nRefused}
 	if l.inFlight != nil {
 		a := copyAction(l.inFlight)
@@ -564,7 +566,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		a.prev = &before
 		l.kept = removeAction(l.kept, a)
 		l.history = appendHistory(removeAction(l.history, a), a)
-		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome = id, plan, undo, nil, ""
+		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome, a.VerifyID = id, plan, undo, nil, "", ""
 		a.PressureAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
 		a.SharesAtAct = shares
 	} else {
