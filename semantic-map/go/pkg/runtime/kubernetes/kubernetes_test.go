@@ -9,10 +9,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
@@ -212,16 +216,114 @@ func TestASecondChangeKeepsTheFirstOriginal(t *testing.T) {
 	}
 }
 
-func TestAnotherNodesChangeIsNotKept(t *testing.T) {
+func annotated(v string) podOpt {
+	return func(p *corev1.Pod) { p.Annotations = map[string]string{Annotation: v} }
+}
+
+func TestAnotherNodesChangeIsNeverOverwritten(t *testing.T) {
 	foreign, _ := json.Marshal(runtime.Undo{NodeID: "n2", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(9)}})
-	p := burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) { p.Annotations = map[string]string{Annotation: string(foreign)} })
-	r, _ := newRT("n1", p)
-	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5})
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated(string(foreign))))
+	if got := workload(t, r, "pod:ua").Can[runtime.ActionCPULimit]; got != "changed by another node: n2" {
+		t.Fatalf("Can = %q", got)
+	}
+	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5}); err == nil {
+		t.Fatal("applied over another node's change")
+	}
+	p := getPod(t, cs, "a")
+	if p.Annotations[Annotation] != string(foreign) || p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
+		t.Fatalf("pod touched: %v", p.Annotations)
+	}
+	err := r.Revert(context.Background(), runtime.Undo{NodeID: "n1", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(1)}})
+	if err == nil || errors.Is(err, runtime.ErrGone) || getPod(t, cs, "a").Annotations[Annotation] != string(foreign) {
+		t.Fatalf("revert err %v; want a plain error and the foreign record kept", err)
+	}
+}
+
+func TestAGarbledAnnotationIsLeftAlone(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated("{not json")))
+	if got := workload(t, r, "pod:ua").Can[runtime.ActionCPULimit]; got != "unreadable di-agent/change annotation" {
+		t.Fatalf("Can = %q", got)
+	}
+	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5}); err == nil {
+		t.Fatal("applied over a garbled record")
+	}
+	if got := getPod(t, cs, "a").Annotations[Annotation]; got != "{not json" {
+		t.Fatalf("annotation %q", got)
+	}
+	if ch, err := r.Changed(context.Background(), "n1"); err != nil || len(ch) != 0 {
+		t.Fatalf("changed %+v err %v", ch, err)
+	}
+}
+
+func failResize(cs *fake.Clientset, err error) {
+	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		if a.GetSubresource() == "resize" {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+}
+
+func TestAFailedResizeLeavesTheRecord(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	failResize(cs, errors.New("timeout"))
+	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
+		t.Fatal("want the resize error")
+	}
+	p := getPod(t, cs, "a")
+	if p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
+		t.Fatalf("limit changed: %v", p.Spec.Containers[0].Resources.Limits)
+	}
+	got, err := r.Changed(context.Background(), "n1")
+	if err != nil || len(got) != 1 || *got[0].Original.Limit != 1 {
+		t.Fatalf("changed %+v err %v; want the record", got, err)
+	}
+}
+
+func TestANotFoundAboutSomethingElseIsNotGone(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	failResize(cs, apierrors.NewNotFound(schema.GroupResource{Resource: "pods/resize"}, "other"))
+	_, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
+	if err == nil || errors.Is(err, runtime.ErrGone) {
+		t.Fatalf("err %v; a 404 not about this pod is not ErrGone", err)
+	}
+}
+
+func TestResizeLeavesMemoryAndRequestsAlone(t *testing.T) {
+	p := burstable("a", "n1", "ua", "100m", "1")
+	p.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("64Mi")
+	p.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("128Mi")
+	r, cs := newRT("n1", p)
+	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err != nil {
+		t.Fatal(err)
+	}
+	res := getPod(t, cs, "a").Spec.Containers[0].Resources
+	if res.Limits.Memory().String() != "128Mi" || res.Requests.Memory().String() != "64Mi" || res.Requests.Cpu().String() != "100m" {
+		t.Fatalf("resources %+v", res)
+	}
+}
+
+func TestAppliedIsTheValueSet(t *testing.T) {
+	r, _ := newRT("n1", burstable("a", "n1", "ua", "", "1"))
+	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.2999})
+	if err != nil || u.Applied != 0.299 {
+		t.Fatalf("applied %v err %v; want 0.299", u.Applied, err)
+	}
+}
+
+func TestRevertOnAFinishedPodIsErrGone(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *u.Original.Limit != 1 {
-		t.Fatalf("original %v; a foreign annotation's original is not this node's", *u.Original.Limit)
+	p := getPod(t, cs, "a")
+	p.Status.Phase = corev1.PodSucceeded
+	if _, err := cs.CoreV1().Pods("default").Update(context.Background(), p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Revert(context.Background(), u); !errors.Is(err, runtime.ErrGone) {
+		t.Fatalf("err %v; want ErrGone", err)
 	}
 }
 
@@ -322,6 +424,13 @@ func TestCanReasons(t *testing.T) {
 		{"Guaranteed", burstable("p", "n1", "u", "1", "1", func(p *corev1.Pod) { p.Status.QOSClass = corev1.PodQOSGuaranteed }),
 			"Guaranteed: changing the limit alone would change the pod's QoS class"},
 		{"multi", multi, "more than one container: the limit cannot be split by the agent"},
+		{"deleting", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) { n := metav1.Now(); p.DeletionTimestamp = &n }), "being deleted"},
+		{"sidecar", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) {
+			a := corev1.ContainerRestartPolicyAlways
+			p.Spec.InitContainers = []corev1.Container{{Name: "s", RestartPolicy: &a}}
+		}), "pod-level resources or sidecars: the agent cannot account for them"},
+		{"pod-level resources", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) { p.Spec.Resources = &corev1.ResourceRequirements{Limits: rl("2")} }),
+			"pod-level resources or sidecars: the agent cannot account for them"},
 		{"pending", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending }), "not running"},
 	}
 	for _, c := range cases {

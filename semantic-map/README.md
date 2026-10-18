@@ -612,7 +612,7 @@ The five pre-Phase-1 endpoints keep `http.Error`'s plain-text error body for bac
 ```bash
 # Build for RPi4
 cd semantic-map/go
-GOOS=linux GOARCH=arm64 go build -o agent-arm64 ./cmd/agent
+GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o agent-arm64 ./cmd/agent   # -s -w strips symbols: advisable on edge devices, since client-go makes the binary roughly 36 MiB without it
 
 # Deploy
 scp agent-arm64 pi@192.168.1.x:/usr/local/bin/agent
@@ -691,7 +691,7 @@ runtime:
   kubeconfig: ""          # empty: in-cluster; else a kubeconfig path
 ```
 
-It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (the downward API `metadata.uid`) marks the agent's own pod, which no rule may touch. The role grants `get`, `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
+It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (the downward API `metadata.uid`) marks the agent's own pod, which no rule may touch. The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
 
 ### The state model
 
