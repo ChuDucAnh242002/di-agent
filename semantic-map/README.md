@@ -561,8 +561,6 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
-
-When `loops.relief.enabled` is false every `/relief*` route is `404` with `relief is not enabled in the spec`. The mutating relief routes refuse a body without `Content-Type: application/json` with `400`, as every other mutating route does.
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
@@ -589,6 +587,8 @@ When `loops.relief.enabled` is false every `/relief*` route is `404` with `relie
 | GET  | `/state/peers/{id}`                 | path only                                                | Peer state |
 | POST | `/state/peers/refresh`              | — poll every peer now                                    | Peer state |
 | GET  | `/state/where`                      | `?property=` — per-node answers, deliberately not averaged | Peer state |
+
+When `loops.relief.enabled` is false every `/relief*` route is `404` with `relief is not enabled in the spec`. The mutating relief routes refuse a body without `Content-Type: application/json` with `400`, as every other mutating route does.
 
 `POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `explain.provider: none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 

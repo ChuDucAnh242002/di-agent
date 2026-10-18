@@ -185,6 +185,13 @@ func TestManualRevert(t *testing.T) {
 	if err := json.Unmarshal(get(mux, "/relief/actions").Body.Bytes(), &acts); err != nil || len(acts) != 1 {
 		t.Fatalf("actions = %v, err %v", acts, err)
 	}
+	var raw []map[string]any
+	if err := json.Unmarshal(get(mux, "/relief/actions").Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw[0]["undo"].(map[string]any)["node_id"]; !ok {
+		t.Errorf("undo keys = %v, want snake_case node_id", raw[0]["undo"])
+	}
 	if rec := post(mux, "/relief/actions/nope/revert", true); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown id = %d, want 404", rec.Code)
 	}
