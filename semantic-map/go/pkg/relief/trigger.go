@@ -44,10 +44,12 @@ func (t *Trigger) Phase() Phase { return t.phase }
 // the required time. Any reading off that side breaks the run. Calm and
 // Releasing both enter Relieving on pressure above Enter for EnterFor;
 // Relieving enters Releasing on pressure below Exit for ExitFor. A reading
-// with fresh false (the property is stale or absent) changes nothing: the
-// phase holds and a run in progress is neither advanced nor broken.
+// with fresh false (the property is stale or absent) holds the phase but
+// breaks any run in progress, so a run is only ever consecutive fresh readings
+// and one reading after an outage cannot complete a run begun before it.
 func (t *Trigger) Observe(now time.Time, pressure float64, fresh bool) Phase {
 	if !fresh {
+		t.running = false
 		return t.phase
 	}
 	var (

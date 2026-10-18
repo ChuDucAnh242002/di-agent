@@ -117,15 +117,53 @@ func TestStaleReadingsHoldThePhase(t *testing.T) {
 	}
 }
 
-func TestStaleReadingsNeitherAdvanceNorBreakARun(t *testing.T) {
+func TestStaleReadingBreaksARun(t *testing.T) {
 	tr := NewTrigger(cfg())
 	tr.Observe(t0, 0.3, true)
-	// A long stale gap does not complete the run, and does not break it.
 	if got := tr.Observe(t0.Add(10*time.Minute), 0, false); got != Calm {
 		t.Fatalf("stale: %s", got)
 	}
-	// The run began at t0, so the next fresh high reading completes it.
-	if got := tr.Observe(t0.Add(11*time.Minute), 0.3, true); got != Relieving {
-		t.Fatalf("resumed: %s", got)
+	if got := tr.Observe(t0.Add(11*time.Minute), 0.3, true); got != Calm {
+		t.Fatalf("one fresh reading after the outage: %s", got)
+	}
+	if got := feed(tr, 11*time.Minute+5*time.Second, time.Minute, 0.3); got != Relieving {
+		t.Fatalf("a minute of fresh readings: %s", got)
+	}
+}
+
+func TestReadingsAtTheThresholdDoNotCount(t *testing.T) {
+	tr := NewTrigger(cfg())
+	if got := feed(tr, 0, time.Hour, 0.25); got != Calm {
+		t.Fatalf("at Enter: %s", got)
+	}
+	tr = relieving(t)
+	if got := feed(tr, 2*time.Minute, time.Hour, 0.10); got != Relieving {
+		t.Fatalf("at Exit: %s", got)
+	}
+}
+
+func TestAReadingBetweenBandsRestartsTheExitClock(t *testing.T) {
+	tr := relieving(t)
+	at := 2 * time.Minute
+	feed(tr, at, 2*time.Minute, 0.05)
+	tr.Observe(t0.Add(at+2*time.Minute+5*time.Second), 0.15, true)
+	at += 2*time.Minute + 10*time.Second
+	if got := feed(tr, at, 2*time.Minute+50*time.Second, 0.05); got != Relieving {
+		t.Fatalf("before a full ExitFor: %s", got)
+	}
+	if got := tr.Observe(t0.Add(at+3*time.Minute), 0.05, true); got != Releasing {
+		t.Fatalf("after a full ExitFor: %s", got)
+	}
+}
+
+func TestACoolReadingBreaksARunInReleasing(t *testing.T) {
+	tr, at := releasing(t)
+	feed(tr, at, 50*time.Second, 0.3)
+	tr.Observe(t0.Add(at+55*time.Second), 0.25, true)
+	if got := feed(tr, at+60*time.Second, 50*time.Second, 0.3); got != Releasing {
+		t.Fatalf("got %s", got)
+	}
+	if got := tr.Observe(t0.Add(at+120*time.Second), 0.3, true); got != Relieving {
+		t.Fatalf("got %s", got)
 	}
 }
