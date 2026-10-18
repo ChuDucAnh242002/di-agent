@@ -123,6 +123,10 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 			t.Errorf("policy.settings has no %q: %v", key, raw[0].Policy.Settings)
 		}
 	}
+	// A duration reads as it does in agent.yaml and /config, not as nanoseconds.
+	if got := raw[0].Policy.Settings["cooldown"]; got != "10m0s" {
+		t.Errorf("policy.settings.cooldown = %v (%T), want \"10m0s\"", got, got)
+	}
 }
 
 func TestPolicyRouteExplainsOne(t *testing.T) {
@@ -137,6 +141,9 @@ func TestPolicyRouteExplainsOne(t *testing.T) {
 	}
 	if eff.Rule != -1 || eff.Frozen {
 		t.Errorf("pod:b = rule %d frozen %v, want -1 and false", eff.Rule, eff.Frozen)
+	}
+	if eff.Settings.Cooldown != 10*time.Minute {
+		t.Errorf("cooldown read back as %s, want 10m", eff.Settings.Cooldown)
 	}
 	if c := get(mux, "/policy").Code; c != http.StatusBadRequest {
 		t.Errorf("missing subject: %d, want 400", c)

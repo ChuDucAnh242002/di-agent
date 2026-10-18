@@ -559,7 +559,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
-| GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
+| GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `cooling` | relief   |
 | GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction and `verify_id` (the decision that judged it; absent until verified) (the plan's `effect` is the learned factor it was scaled by), observed drop, `outcome` and `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding) | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
@@ -654,7 +654,7 @@ loops:
     level: full
 ```
 
-Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own; `facts` likewise names the fact sources outright (`facts: []` reads none).
+Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
 
 ### The runtime and the relief loop
 
@@ -671,9 +671,13 @@ loops:
     enabled: true
     interval: 15s       # how often the loop looks
     cpu:
-      enter: 0.25       # node CPU share that starts relief, held for enter_for
-      exit: 0.10        # share below which caps are given back, held for exit_for
+      enter: 0.25       # CPU pressure (PSI stall fraction) that starts relief, held for enter_for
+      exit: 0.10        # pressure below which caps are given back, held for exit_for
 ```
+
+The trigger is the node's CPU pressure, `cpu_pressure_ratio`: the PSI stall fraction, the share of time tasks wait for a CPU, not CPU utilisation. A node can be fully used and not under pressure, and the loop acts only on the waiting.
+
+The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the runtime count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
 
 Outcomes teach the map — interventions on relationships, each workload's learned effect, candidates settled — only on a runtime that really changes the system, never on `dry-run` (ARCHITECTURE §16, "Learning from outcomes"). At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
 
@@ -684,6 +688,16 @@ Outcomes teach the map — interventions on relationships, each workload's learn
 kubectl apply -f deploy/kubernetes/rbac.yaml
 ```
 
+The agent's own pod must carry its UID in `POD_UID`, from the downward API, or the agent refuses to start in-cluster: it is how the agent recognises itself among the pods it may cap.
+
+```yaml
+env:
+  - name: POD_UID
+    valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+```
+
+Run from a host with a `kubeconfig` and no `POD_UID`, it starts and logs that its own pod cannot be recognised.
+
 ```yaml
 node:
   id: worker-1            # a pod with this node name; or set runtime.node
@@ -692,7 +706,7 @@ runtime:
   kubeconfig: ""          # empty: in-cluster; else a kubeconfig path
 ```
 
-It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (the downward API `metadata.uid`) marks the agent's own pod, which no rule may touch. The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
+It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (above) marks the agent's own pod, which no rule may touch. Every API request times out after 30s, and a relief pass, or a manual revert, gives up on the runtime after `loops.relief.interval` (at least 10s). The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
 
 ### The state model
 

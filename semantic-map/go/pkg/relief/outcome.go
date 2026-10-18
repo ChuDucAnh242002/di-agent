@@ -84,7 +84,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		return
 	}
 	if a.revertPending {
-		l.revertFailed(ctx, now, a, "")
+		l.revertFailed(ctx, now, a, a.VerifyID)
 		return
 	}
 	if !fresh || at.Before(a.ActedAt.Add(l.c.Settle)) {
@@ -140,6 +140,9 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 		p := a.prev
 		undo, err = l.cfg.Runtime.Apply(ctx, a.Subject, runtime.Change{Action: runtime.ActionCPULimit,
 			CPULimit: p.Undo.Applied, Expires: p.Undo.Expires, DecisionID: p.DecisionID})
+		if err != nil {
+			l.reconciled = false // what the runtime holds now is asked again, as after any failed Apply
+		}
 	} else {
 		err = l.cfg.Runtime.Revert(ctx, a.Undo)
 	}

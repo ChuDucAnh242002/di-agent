@@ -185,7 +185,8 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 		} else if w.CPU.Limit != nil {
 			original = *w.CPU.Limit
 		}
-		to := math.Max(from*(1-c.Step), math.Max(eff.Settings.Floor.CPUCores, eff.Settings.Floor.OfOriginal*original))
+		floorCores, floorShare := eff.Settings.Floor.Values()
+		to := math.Max(from*(1-c.Step), math.Max(floorCores, floorShare*original))
 		if w.CPU.Request != nil {
 			// A limit below the request is refused by the orchestrator, so the request is a floor.
 			to = math.Max(to, *w.CPU.Request)

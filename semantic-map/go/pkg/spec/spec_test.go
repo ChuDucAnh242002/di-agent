@@ -77,13 +77,16 @@ func TestUnknownKeysAreRefused(t *testing.T) {
 
 func TestInvalidValuesAreRefused(t *testing.T) {
 	for name, doc := range map[string]string{
-		"exit above enter":   "loops: {relief: {cpu: {exit: 0.3}}}",
-		"of_original zero":   "policy: {defaults: {floor: {of_original: 0}}}",
-		"threshold above 1":  "loops: {relief: {cpu: {enter: 1.5}}}",
-		"zero settle":        "loops: {relief: {cpu: {settle: 0s}}}",
-		"unknown level":      "loops: {review: {level: sometimes}}",
-		"negative cooldown":  "policy: {defaults: {cooldown: -1m}}",
-		"zero relief period": "loops: {relief: {interval: 0s}}",
+		"exit above enter":    "loops: {relief: {cpu: {exit: 0.3}}}",
+		"of_original zero":    "policy: {defaults: {floor: {of_original: 0}}}",
+		"threshold above 1":   "loops: {relief: {cpu: {enter: 1.5}}}",
+		"zero settle":         "loops: {relief: {cpu: {settle: 0s}}}",
+		"unknown level":       "loops: {review: {level: sometimes}}",
+		"negative cooldown":   "policy: {defaults: {cooldown: -1m}}",
+		"zero relief period":  "loops: {relief: {interval: 0s}}",
+		"defaults floor null": "policy: {defaults: {floor: null}}",
+		"rule of_original 0":  "policy: {rules: [{match: {name: a}, floor: {of_original: 0}}]}",
+		"rule cores negative": "policy: {rules: [{match: {name: a}, floor: {cpu_cores: -1}}]}",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -140,5 +143,19 @@ func TestALabelMatchTakesOneOrMany(t *testing.T) {
 	l := got.Policy.Rules[0].Match.Labels
 	if !reflect.DeepEqual(l["a"], StringList{"x"}) || !reflect.DeepEqual(l["b"], StringList{"x", "y"}) {
 		t.Errorf("labels = %v", l)
+	}
+}
+
+// TestARuleFloorNamesOneBound: a rule's floor overlays the default floor field by
+// field, so the effective floor is what is validated.
+func TestARuleFloorNamesOneBound(t *testing.T) {
+	for _, doc := range []string{
+		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {cpu_cores: 0.5}}]}",
+		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {of_original: 0.8}}]}",
+		"policy: {defaults: {floor: {cpu_cores: 0.2}}}",
+	} {
+		if _, err := Parse([]byte(doc)); err != nil {
+			t.Errorf("%s: %v", doc, err)
+		}
 	}
 }

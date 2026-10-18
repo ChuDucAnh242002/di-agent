@@ -312,6 +312,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("policy.rules in %s: %v", *configPath, err)
 	}
+	for _, rule := range policy.MissingDefaultFreezes(cfg.Policy) {
+		log.Printf("policy: policy.rules replaces the default rules and has none to %s; "+
+			"copy it from `agent -print-config` unless leaving it out is meant", rule)
+	}
 	var reliefLoop *relief.Loop
 	if cfg.Loops.Relief.Enabled {
 		// Outcomes are evidence only when the runtime really changes the system: after a

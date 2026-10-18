@@ -7,6 +7,9 @@ package policy
 import (
 	"fmt"
 	"path"
+	"slices"
+	"sort"
+	"strings"
 
 	"github.com/DiyazY/di-agent/pkg/spec"
 )
@@ -65,9 +68,9 @@ func (p *Policy) For(t Target) Effective {
 			e.Frozen, e.FrozenBy = true, fmt.Sprintf("rule %d", i)
 		}
 	}
-	if e.Settings.Floor == nil {
-		e.Settings.Floor = &spec.Floor{}
-	}
+	// Every bound is set, so a reader never meets a nil one.
+	cores, share := e.Settings.Floor.Values()
+	e.Settings.Floor = spec.NewFloor(cores, share)
 	return e
 }
 
@@ -95,7 +98,7 @@ func matches(m spec.Match, t Target) bool {
 	return true
 }
 
-// overlay sets onto s every field r leaves set.
+// overlay sets onto s every field r leaves set; a floor field by field.
 func overlay(s *spec.Settings, r spec.Settings) {
 	if r.Allow != nil {
 		s.Allow = append([]string(nil), r.Allow...)
@@ -104,8 +107,7 @@ func overlay(s *spec.Settings, r spec.Settings) {
 		s.Deny = append([]string(nil), r.Deny...)
 	}
 	if r.Floor != nil {
-		f := *r.Floor
-		s.Floor = &f
+		s.Floor = r.Floor.Over(s.Floor)
 	}
 	if r.MaxActionsPerHour != 0 {
 		s.MaxActionsPerHour = r.MaxActionsPerHour
@@ -130,4 +132,55 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// MissingDefaultFreezes names each freeze rule of the default policy that p has
+// no rule for. policy.rules in a file replaces the default rules, so a file that
+// adds a rule without copying them unfreezes what they protected.
+func MissingDefaultFreezes(p spec.PolicySpec) []string {
+	var out []string
+	for _, d := range spec.Default().Policy.Rules {
+		if !d.Freeze {
+			continue
+		}
+		if !slices.ContainsFunc(p.Rules, func(r spec.Rule) bool { return r.Freeze && covers(r.Match, d.Match) }) {
+			out = append(out, describe(d.Match))
+		}
+	}
+	return out
+}
+
+// covers reports whether a rule matching m freezes at least what one matching d
+// does: no narrower kind or name, and for every label of d, the same label with
+// at least d's values and nothing more to hold.
+func covers(m, d spec.Match) bool {
+	if (m.Kind != "" && m.Kind != d.Kind) || (m.Name != "" && m.Name != d.Name) || len(m.Labels) > len(d.Labels) {
+		return false
+	}
+	for k, want := range d.Labels {
+		got, ok := m.Labels[k]
+		if !ok {
+			return false
+		}
+		for _, v := range want {
+			if !slices.Contains(got, v) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// describe is a match as one line, for a warning.
+func describe(m spec.Match) string {
+	keys := make([]string, 0, len(m.Labels))
+	for k := range m.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s in [%s]", k, strings.Join(m.Labels[k], ", ")))
+	}
+	return "freeze where " + strings.Join(parts, " and ")
 }

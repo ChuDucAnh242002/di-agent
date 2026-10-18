@@ -75,7 +75,7 @@ func (m *Map) relationshipViewLocked(r *Relationship) Relationship {
 
 // RecordIntervention journals an outcome and changes structure only on unconfounded
 // evidence. It returns the relationship id and what changed: "", "created",
-// "promoted" or "retired".
+// "promoted" or "retired". An Asserted relationship is never promoted or retired.
 func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err error) {
 	if o.From == "" || o.To == "" || o.From == o.To {
 		return "", "", fmt.Errorf("intervention needs two distinct endpoints, got %q -> %q", o.From, o.To)
@@ -144,6 +144,11 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		}
 		iv.AgreedRun, iv.NullRun = 0, 0
 		return id, "promoted", nil
+	case outcome == "null" && iv.NullRun >= 2 && live != nil && live.Provenance == Asserted:
+		// An operator's assertion outranks the agent's evidence: the nulls are
+		// counted, and the run starts again rather than retiring it.
+		iv.AgreedRun, iv.NullRun = 0, 0
+		return id, "", nil
 	case outcome == "null" && iv.NullRun >= 2 && live != nil:
 		m.retireRelationshipLocked(live, "two interventions had no effect", "intervention", now)
 		iv.AgreedRun, iv.NullRun = 0, 0

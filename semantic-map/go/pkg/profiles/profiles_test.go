@@ -138,7 +138,7 @@ func TestBuildWithScriptPathUsesTheSyntheticSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if coll == nil || !strings.HasPrefix(coll.SourceID(), "system-script:") {
-		t.Fatalf("collector %v; want the synthetic system to replace the others when -script is set", coll)
+		t.Fatalf("collector %v; want the synthetic system to replace the others when sources.script is set", coll)
 	}
 	samples, _ := coll.Collect()
 	var scoped bool
@@ -150,7 +150,7 @@ func TestBuildWithScriptPathUsesTheSyntheticSystem(t *testing.T) {
 	}
 }
 
-// TestBuildRefusesAMissingScript: a bad -script path used to log and hand back a
+// TestBuildRefusesAMissingScript: a bad sources.script path used to log and hand back a
 // daemon with no collector, which then reported "collection loop disabled" — the
 // message for a deliberately disabled loop — and served an empty map indefinitely.
 func TestBuildRefusesAMissingScript(t *testing.T) {
@@ -158,13 +158,13 @@ func TestBuildRefusesAMissingScript(t *testing.T) {
 		ScriptPath: filepath.Join(t.TempDir(), "missing.json"), CgroupRoot: t.TempDir(),
 		EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5})
 	if err == nil {
-		t.Fatal("a missing -script produced a daemon with no collector instead of an error")
+		t.Fatal("a missing sources.script produced a daemon with no collector instead of an error")
 	}
 }
 
 // TestBuildRefusesACollectIntervalThatDisagreesWithTheTick: the script stamps
 // simulated time one tick per Collect while the map sweeps on the wall clock. With
-// -collect-interval above the tick every property goes stale and then retires while
+// sources.interval above the tick every property goes stale and then retires while
 // the script is still emitting; below it nothing ever goes stale. That is not a drift
 // to warn about; it is a configuration the daemon must not start with.
 func TestBuildRefusesACollectIntervalThatDisagreesWithTheTick(t *testing.T) {
@@ -179,8 +179,10 @@ func TestBuildRefusesACollectIntervalThatDisagreesWithTheTick(t *testing.T) {
 		EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5}
 	mismatch := base
 	mismatch.CollectInterval = 1 * time.Second
-	if _, _, err := Build("edge-minimal", mismatch); err == nil || !strings.Contains(err.Error(), "collect-interval") {
-		t.Fatalf("mismatched -collect-interval was accepted (err=%v); want a refusal that names the flag", err)
+	_, _, err := Build("edge-minimal", mismatch)
+	if err == nil || !strings.Contains(err.Error(), "sources.interval") || !strings.Contains(err.Error(), "sources.script") ||
+		strings.Contains(err.Error(), "-collect-interval") || strings.Contains(err.Error(), "-script") {
+		t.Fatalf("mismatched sources.interval was accepted (err=%v); want a refusal naming the spec keys, not removed flags", err)
 	}
 	match := base
 	match.CollectInterval = 10 * time.Second

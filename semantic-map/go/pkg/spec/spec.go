@@ -9,6 +9,7 @@ package spec
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -209,10 +210,11 @@ type Relief struct {
 	CPU      CPURelief     `yaml:"cpu"`
 }
 
-// CPURelief tunes CPU relief. Enter and Exit are shares of node capacity in
-// [0,1], with Exit below Enter so a hot node is not released the moment it
-// cools by a hair. A throttle that has not cut pressure by MinEffect is judged
-// to have failed attribution.
+// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU pressure,
+// the PSI stall fraction cpu_pressure_ratio in [0,1] (the share of time tasks
+// wait for a CPU, not utilisation), with Exit below Enter so a hot node is not
+// released the moment it cools by a hair. A throttle that has not cut pressure
+// by MinEffect is judged to have failed attribution.
 type CPURelief struct {
 	Enter       float64       `yaml:"enter"`
 	Exit        float64       `yaml:"exit"`
@@ -226,10 +228,50 @@ type CPURelief struct {
 }
 
 // Floor is the least a limit may be cut to: an absolute number of cores, or a
-// share of the workload's original limit.
+// share of the workload's original limit, whichever is higher. A rule names
+// either bound or both; the one it leaves out is the default's.
 type Floor struct {
-	CPUCores   float64 `yaml:"cpu_cores" json:"cpu_cores"`
-	OfOriginal float64 `yaml:"of_original" json:"of_original"`
+	CPUCores   *float64 `yaml:"cpu_cores,omitempty" json:"cpu_cores,omitempty"`
+	OfOriginal *float64 `yaml:"of_original,omitempty" json:"of_original,omitempty"`
+}
+
+// NewFloor is a floor with both bounds set.
+func NewFloor(cpuCores, ofOriginal float64) *Floor {
+	return &Floor{CPUCores: &cpuCores, OfOriginal: &ofOriginal}
+}
+
+// Values is the two bounds, zero for one not set.
+func (f *Floor) Values() (cpuCores, ofOriginal float64) {
+	if f == nil {
+		return 0, 0
+	}
+	if f.CPUCores != nil {
+		cpuCores = *f.CPUCores
+	}
+	if f.OfOriginal != nil {
+		ofOriginal = *f.OfOriginal
+	}
+	return cpuCores, ofOriginal
+}
+
+// Over is f with every bound it leaves unset taken from base, as a new floor
+// that shares nothing with either.
+func (f *Floor) Over(base *Floor) *Floor {
+	out := &Floor{}
+	for _, src := range []*Floor{base, f} {
+		if src == nil {
+			continue
+		}
+		if src.CPUCores != nil {
+			v := *src.CPUCores
+			out.CPUCores = &v
+		}
+		if src.OfOriginal != nil {
+			v := *src.OfOriginal
+			out.OfOriginal = &v
+		}
+	}
+	return out
 }
 
 // Settings is what a policy permits. A rule's zero values inherit the defaults.
@@ -241,6 +283,39 @@ type Settings struct {
 	Cooldown          time.Duration `yaml:"cooldown" json:"cooldown"`
 }
 
+// settingsJSON is Settings on the wire: the cooldown as a Go duration string,
+// as agent.yaml writes it and /config shows it, rather than nanoseconds.
+type settingsJSON struct {
+	Allow             []string `json:"allow"`
+	Deny              []string `json:"deny"`
+	Floor             *Floor   `json:"floor"`
+	MaxActionsPerHour int      `json:"max_actions_per_hour"`
+	Cooldown          string   `json:"cooldown"`
+}
+
+// MarshalJSON renders the cooldown as "10m0s".
+func (s Settings) MarshalJSON() ([]byte, error) {
+	return json.Marshal(settingsJSON{Allow: s.Allow, Deny: s.Deny, Floor: s.Floor,
+		MaxActionsPerHour: s.MaxActionsPerHour, Cooldown: s.Cooldown.String()})
+}
+
+// UnmarshalJSON reads what MarshalJSON writes.
+func (s *Settings) UnmarshalJSON(b []byte) error {
+	var w settingsJSON
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	var d time.Duration
+	if w.Cooldown != "" {
+		var err error
+		if d, err = time.ParseDuration(w.Cooldown); err != nil {
+			return fmt.Errorf("cooldown: %w", err)
+		}
+	}
+	*s = Settings{Allow: w.Allow, Deny: w.Deny, Floor: w.Floor, MaxActionsPerHour: w.MaxActionsPerHour, Cooldown: d}
+	return nil
+}
+
 // Match selects workloads. Every field set must hold; a label matches when the
 // workload carries any one of its values.
 type Match struct {
@@ -250,7 +325,8 @@ type Match struct {
 }
 
 // Rule applies Settings to the workloads it matches, or freezes them: a frozen
-// workload is never acted on.
+// workload is never acted on. Settings' MarshalJSON is promoted, so a Rule is
+// not served as JSON; /config renders the spec through its YAML.
 type Rule struct {
 	Match    Match `yaml:"match"`
 	Freeze   bool  `yaml:"freeze"`
@@ -349,7 +425,7 @@ func Default() Spec {
 		Policy: PolicySpec{
 			Defaults: Settings{
 				Allow: []string{"cpu.limit"}, Deny: []string{"evict"},
-				Floor:             &Floor{CPUCores: 0.1, OfOriginal: 0.5},
+				Floor:             NewFloor(0.1, 0.5),
 				MaxActionsPerHour: 6, Cooldown: 10 * time.Minute,
 			},
 			Rules: []Rule{
@@ -421,15 +497,17 @@ func (s Spec) Validate() error {
 			errs = append(errs, fmt.Errorf("%s = %v, want a duration of zero or more", name, d))
 		}
 	}
+	// floor checks an effective floor: both bounds set, and each in range.
 	floor := func(name string, f *Floor) {
-		if f == nil {
+		if f == nil || f.CPUCores == nil || f.OfOriginal == nil {
+			errs = append(errs, fmt.Errorf("%s must set both cpu_cores and of_original", name))
 			return
 		}
-		if f.CPUCores < 0 {
-			errs = append(errs, fmt.Errorf("%s.cpu_cores = %v, want zero or more", name, f.CPUCores))
+		if *f.CPUCores < 0 {
+			errs = append(errs, fmt.Errorf("%s.cpu_cores = %v, want zero or more", name, *f.CPUCores))
 		}
-		if f.OfOriginal <= 0 || f.OfOriginal > 1 {
-			errs = append(errs, fmt.Errorf("%s.of_original = %v, want a value in (0,1]", name, f.OfOriginal))
+		if *f.OfOriginal <= 0 || *f.OfOriginal > 1 {
+			errs = append(errs, fmt.Errorf("%s.of_original = %v, want a value in (0,1]", name, *f.OfOriginal))
 		}
 	}
 
@@ -470,7 +548,11 @@ func (s Spec) Validate() error {
 	for i, rule := range s.Policy.Rules {
 		name := fmt.Sprintf("policy.rules[%d]", i)
 		notNegative(name+".cooldown", rule.Cooldown)
-		floor(name+".floor", rule.Floor)
+		if rule.Floor != nil && s.Policy.Defaults.Floor != nil {
+			// What is checked is the floor the rule takes effect with: its own bounds
+			// over the defaults'.
+			floor(name+".floor", rule.Floor.Over(s.Policy.Defaults.Floor))
+		}
 	}
 	return errors.Join(errs...)
 }

@@ -183,7 +183,7 @@ func TestTheStepRespectsTheFloors(t *testing.T) {
 	}
 
 	// A floor at or above usage leaves no step to take.
-	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = &spec.Floor{CPUCores: 0.4} })
+	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.NewFloor(0.4, 0) })
 	if _, ok, why := MakePlan(m, Attribute(m, ws, high, c), ws, high, c, one); ok || !strings.Contains(why, "floor") {
 		t.Fatalf("ok=%v why=%q; want refused at the floor", ok, why)
 	}

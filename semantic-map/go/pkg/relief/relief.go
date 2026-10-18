@@ -96,7 +96,8 @@ type Loop struct {
 	c     spec.CPURelief
 	epoch int64
 
-	effects effects // what acting on each workload has done; safe on its own
+	effects effects       // what acting on each workload has done; safe on its own
+	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
 	pass       sync.Mutex // serialises the passes that change the system
 	seq        int        // decision counter; touched only under pass
@@ -145,11 +146,16 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Relief.CPU, epoch: now.Unix(),
+		cfg: c, c: c.Relief.CPU, epoch: now.Unix(), timeout: max(c.Relief.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Relief.CPU), phase: Calm, since: now,
 		cooling: map[string]time.Time{}, released: map[string]time.Time{}, cycles: map[string]int{},
 	}, nil
 }
+
+// minCallTimeout is the least a pass waits on the runtime, however short the
+// interval: an orchestrator under the very pressure the loop relieves answers
+// slowly.
+const minCallTimeout = 10 * time.Second
 
 // Start reconciles with what the runtime says this node changed, then ticks
 // every Relief.Interval until ctx ends. A failed reconcile is retried by every
@@ -222,9 +228,15 @@ func (l *Loop) Actions() []Action {
 // or released, because a decision on a reading that is not current is a
 // decision about a system that may no longer exist; only expiry, which needs no
 // reading, still happens.
+//
+// The whole pass, every runtime call in it, is bounded by the loop's timeout
+// (Relief.Interval, at least 10s), so an orchestrator that stops answering
+// cannot hold the pass lock and with it every manual revert.
 func (l *Loop) Tick(ctx context.Context) {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	now := l.cfg.Now()
 	if !l.reconciled {
 		if err := l.reconcile(ctx, now); err != nil {
@@ -301,6 +313,8 @@ func (l *Loop) Tick(ctx context.Context) {
 func (l *Loop) Reconcile(ctx context.Context) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	now := l.cfg.Now()
 	if err := l.reconcile(ctx, now); err != nil {
 		return err
@@ -317,7 +331,10 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 // unexpired changes are kept, for release. Expired ones are kept in force for
 // the caller's expire to give back, so one the runtime will not yet give back is
 // retried every tick.
-// A change stamped by another node is never touched.
+// A change stamped by another node is never touched. Each unexpired change counts
+// toward the hourly limit from the time the journal says it was made, or from now
+// when the journal no longer has it, so a restart does not hand the loop a fresh
+// budget.
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	undos, err := l.cfg.Runtime.Changed(ctx, l.cfg.NodeID)
 	if err != nil {
@@ -333,6 +350,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	l.mu.Unlock()
 
 	var expired, resumed []*Action
+	var acts []time.Time
 	for _, u := range undos {
 		if u.NodeID != l.cfg.NodeID || live[u.Subject] {
 			continue
@@ -358,11 +376,18 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			expired = append(expired, a)
 		} else {
 			resumed = append(resumed, a)
+			at := now
+			if d, ok := l.cfg.Map.Journal().Decision(u.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
+				at = d.At
+			}
+			acts = append(acts, at)
 		}
 	}
 	sort.SliceStable(resumed, func(i, j int) bool { return resumed[i].Undo.Expires.Before(resumed[j].Undo.Expires) })
 
 	l.mu.Lock()
+	l.acted = append(l.acted, acts...)
+	sort.Slice(l.acted, func(i, j int) bool { return l.acted[i].Before(l.acted[j]) })
 	for _, a := range expired {
 		a.Outcome = OutcomeKept
 		l.history = appendHistory(l.history, a)
@@ -389,10 +414,14 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 var ErrNoAction = errors.New("no such action in force")
 
 // Revert undoes an action by hand and cools its workload down, as an operator
-// overriding the loop. Only an action still in force can be reverted.
+// overriding the loop. Only an action still in force can be reverted. A runtime
+// that does not answer within the loop's timeout is an error, and the action
+// stays in force.
 func (l *Loop) Revert(ctx context.Context, id string) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	l.mu.Lock()
 	var a *Action
 	for _, c := range l.liveLocked() {
@@ -534,11 +563,16 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		r.Input("rule", eff.Rule)
 		r.Input("error", err.Error())
 		r.Note("the runtime refused the change; cooling %s down for %s", plan.Subject, eff.Settings.Cooldown)
+		r.Note("the change may have taken effect regardless; the next pass asks the runtime what it holds")
 		r.Commit(map[string]any{"refused": "runtime: " + err.Error()})
 		l.mu.Lock()
 		l.cooling[plan.Subject] = now.Add(eff.Settings.Cooldown)
 		l.nRefused++
 		l.mu.Unlock()
+		// A failed Apply can still have taken effect, as a resize whose call timed
+		// out: reconciling again adopts whatever the runtime recorded, so expiry and
+		// release give it back.
+		l.reconciled = false
 		return
 	}
 
