@@ -54,6 +54,7 @@ type Action struct {
 	needBaseline  bool          // resumed without a fresh reading; PressureAtAct and ActedAt await one
 	origin        *float64      // the limit before the agent's first step, for the of_original floor
 	prev          *Action       // the action as it stood before its latest step
+	originRefused bool          // a further step was refused for want of origin, and journalled
 }
 
 // Config is what a Loop is built from.
@@ -280,7 +281,12 @@ func (l *Loop) Tick(ctx context.Context) {
 func (l *Loop) Reconcile(ctx context.Context) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
-	return l.reconcile(ctx, l.cfg.Now())
+	now := l.cfg.Now()
+	if err := l.reconcile(ctx, now); err != nil {
+		return err
+	}
+	l.expire(ctx, now)
+	return nil
 }
 
 // reconcile is Reconcile under the pass lock. The most recent unexpired change
@@ -288,8 +294,9 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 // the decision that made it if the journal still holds it; with none, it is
 // kept, because there is nothing to judge it against. Its baseline is the
 // pressure now if that is fresh, else the first fresh reading after. Older
-// unexpired changes are kept, for release. Expired ones are given back; one the
-// runtime will not yet give back stays in force so expiry retries it every tick.
+// unexpired changes are kept, for release. Expired ones are kept in force for
+// the caller's expire to give back, so one the runtime will not yet give back is
+// retried every tick.
 // A change stamped by another node is never touched.
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	undos, err := l.cfg.Runtime.Changed(ctx, l.cfg.NodeID)
@@ -310,15 +317,16 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			continue
 		}
 		a := &Action{ID: u.DecisionID, Subject: u.Subject, DecisionID: u.DecisionID, Undo: u,
-			Resumed: true, cooldown: cooldowns(u.Subject), Plan: l.journalledPlan(u)}
+			Resumed: true, cooldown: cooldowns(u.Subject), Plan: Plan{Subject: u.Subject, ToCores: u.Applied}}
+		if p, first, ok := l.journalledAct(u.DecisionID); ok {
+			a.Plan = p
+			if first != "" {
+				a.ID = first
+			}
+		}
+		a.origin = l.originOf(a)
 		if a.ID == "" {
 			a.ID = l.id("act")
-		}
-		switch {
-		case u.Original.Limit != nil:
-			a.origin = cloneFloat(u.Original.Limit)
-		case a.Plan.FromCores > 0:
-			a.origin = cloneFloat(&a.Plan.FromCores)
 		}
 		if fresh {
 			a.PressureAtAct, a.ActedAt = pressure, now
@@ -353,7 +361,6 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	for _, a := range resumed {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Undo.Expires.Format(time.RFC3339))
 	}
-	l.expire(ctx, now)
 	return nil
 }
 
@@ -425,8 +432,13 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	var open []runtime.Workload
 	var limitedBy *policy.Effective
 	var limitedSubject string
+	var unanchored []*Action
 	for _, w := range ws {
 		if cooling[w.Subject] || !actionable(w, pol) {
+			continue
+		}
+		if k := kept[w.Subject]; k != nil && k.origin == nil {
+			unanchored = append(unanchored, k)
 			continue
 		}
 		eff := pol.For(targetOf(w))
@@ -437,6 +449,9 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 			continue
 		}
 		open = append(open, w)
+	}
+	for _, a := range unanchored {
+		l.refuseUnanchored(a)
 	}
 	if len(open) == 0 {
 		if limitedBy != nil {
@@ -621,31 +636,73 @@ func (l *Loop) cooldowns(ctx context.Context) func(subject string) time.Duration
 	}
 }
 
-// journalledPlan is the plan the decision that made a change recorded, so a
-// resumed action is judged against what was predicted. A snapshot restores
-// inputs as decoded JSON rather than as a Plan, so both are read.
-func (l *Loop) journalledPlan(u runtime.Undo) Plan {
-	p := Plan{Subject: u.Subject, ToCores: u.Applied}
-	if u.DecisionID == "" {
-		return p
+// refuseUnanchored journals, once per action, that a workload whose
+// pre-agent limit is not known will not be stepped again: the of_original floor
+// would be a share of the agent's own cap, and would slide down with every step
+// and every restart. The change itself stays, for verify, release and expiry.
+func (l *Loop) refuseUnanchored(a *Action) {
+	l.mu.Lock()
+	done := a.originRefused
+	a.originRefused = true
+	if !done {
+		l.nRefused++
 	}
-	d, ok := l.cfg.Map.Journal().Decision(u.DecisionID)
+	l.mu.Unlock()
+	if done {
+		return
+	}
+	why := fmt.Sprintf("origin of %s's change is unknown: no original limit was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
+	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU further to relieve node pressure?", a.Subject))
+	b.Input("action", a.ID)
+	b.Input("undo", a.Undo)
+	b.Caveat("%s", why)
+	b.Commit(map[string]any{"refused": why})
+}
+
+// originOf is the limit a resumed action's workload had before the agent first
+// touched it, or nil when that is not known for certain. It is the undo's
+// original limit when one was set; otherwise the usage the first act recorded,
+// read from that act and never from a further step, whose usage is already the
+// agent's doing.
+func (l *Loop) originOf(a *Action) *float64 {
+	if a.Undo.Original.Limit != nil {
+		return cloneFloat(a.Undo.Original.Limit)
+	}
+	if a.ID == "" {
+		return nil
+	}
+	p, first, ok := l.journalledAct(a.ID)
+	if !ok || first != "" || p.FromCores <= 0 {
+		return nil
+	}
+	return &p.FromCores
+}
+
+// journalledAct reads an act decision: the plan it recorded, so a resumed action
+// is judged against what was predicted, and, for a further step, the id of the
+// action's first act, which it cites. A snapshot restores inputs as decoded JSON
+// rather than as Go values, so both are read.
+func (l *Loop) journalledAct(id string) (p Plan, first string, ok bool) {
+	if id == "" {
+		return Plan{}, "", false
+	}
+	d, ok := l.cfg.Map.Journal().Decision(id)
 	if !ok {
-		return p
+		return Plan{}, "", false
 	}
 	switch v := d.Inputs["plan"].(type) {
 	case Plan:
-		return v
+		p = v
 	case map[string]any:
-		if f, ok := v["predicted"].(float64); ok {
-			p.Predicted = f
-		}
-		if f, ok := v["from_cores"].(float64); ok {
-			p.FromCores = f
-		}
-		if s, ok := v["estimate_id"].(string); ok {
-			p.EstimateID = s
-		}
+		p.Subject, _ = v["subject"].(string)
+		p.Predicted, _ = v["predicted"].(float64)
+		p.FromCores, _ = v["from_cores"].(float64)
+		p.ToCores, _ = v["to_cores"].(float64)
+		p.EstimateID, _ = v["estimate_id"].(string)
+		p.Basis, _ = v["basis"].(string)
 	}
-	return p
+	if prev, isMap := d.Inputs["previous"].(map[string]any); isMap {
+		first, _ = prev["action"].(string)
+	}
+	return p, first, true
 }

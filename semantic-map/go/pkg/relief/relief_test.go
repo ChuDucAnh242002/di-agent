@@ -815,3 +815,93 @@ func TestNoPlanIsNotReattributedEveryTick(t *testing.T) {
 		t.Fatalf("%d changes below min_effect", n)
 	}
 }
+
+// resumeCapped seeds a change this node made to pod:a, capped at 1.2 cores with no
+// limit before, as a restarted agent finds it, and reconciles.
+func (h *harness) resumeCapped(decisionID string) {
+	h.t.Helper()
+	h.rt.Put(limited(pod("pod:a"), 1.2))
+	record(h.t, h.m, NodePressure, "", 0.5, h.now)
+	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
+		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: decisionID})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) originRefusals() int {
+	n := 0
+	for _, d := range h.decisions("refused") {
+		if s, _ := d.Answer["refused"].(string); strings.Contains(s, "origin") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestAResumedChangeOfUnknownOriginIsNotSteppedAgain: with no original limit and
+// no first act to read the pre-agent usage from, a further step's floor would be
+// a share of the agent's own cap.
+func TestAResumedChangeOfUnknownOriginIsNotSteppedAgain(t *testing.T) {
+	t.Run("no journal", func(t *testing.T) {
+		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.3}})
+		h.resumeCapped("relief-act-1-1")
+		h.run(6*time.Minute, 0.5)
+		if u := h.applied()["pod:a"]; !near(u.Applied, 1.2) {
+			t.Fatalf("undo %+v; want the cap left at 1.2, not stepped", u)
+		}
+		if n := h.originRefusals(); n != 1 {
+			t.Fatalf("%d origin refusals; want one", n)
+		}
+		if a := h.action("pod:a"); a.Outcome != "kept" {
+			t.Fatalf("pod:a %+v; want kept, for release", a)
+		}
+	})
+	t.Run("only a further step journalled", func(t *testing.T) {
+		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.3}})
+		b := h.m.Decide("relief-act-1-2", "a further step")
+		b.Input("plan", Plan{Subject: "pod:a", FromCores: 1.6, ToCores: 1.2, Predicted: 0.1})
+		b.Input("previous", map[string]any{"act": "relief-act-1-1", "action": "relief-act-1-1"})
+		b.Commit(nil)
+		h.resumeCapped("relief-act-1-2")
+		if f := h.l.Status().InFlight; f == nil || f.ID != "relief-act-1-1" || !near(f.Plan.Predicted, 0.1) {
+			t.Fatalf("in flight %+v; want the action named by its first act, judged by its latest", f)
+		}
+		h.run(6*time.Minute, 0.44)
+		if u := h.applied()["pod:a"]; !near(u.Applied, 1.2) {
+			t.Fatalf("undo %+v; want the cap left at 1.2", u)
+		}
+		if n := h.originRefusals(); n != 1 {
+			t.Fatalf("%d origin refusals; want one", n)
+		}
+	})
+	t.Run("the first act anchors the floor", func(t *testing.T) {
+		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.3}})
+		first := h.m.Decide("relief-act-1-1", "the first step")
+		first.Input("plan", Plan{Subject: "pod:a", FromCores: 4, ToCores: 3})
+		first.Commit(nil)
+		later := h.m.Decide("relief-act-1-2", "a further step")
+		later.Input("plan", Plan{Subject: "pod:a", FromCores: 1.6, ToCores: 1.2, Predicted: 0.1})
+		later.Input("previous", map[string]any{"act": "relief-act-1-1", "action": "relief-act-1-1"})
+		later.Commit(nil)
+		h.resumeCapped("relief-act-1-2")
+		h.run(6*time.Minute, 0.44)
+		// Usage 0.3 of 4 cores = 1.2; half the first act's 4 cores is 2.0, so the
+		// floor is reached. A floor from the further step's 1.6 would allow 0.9.
+		if u := h.applied()["pod:a"]; !near(u.Applied, 1.2) {
+			t.Fatalf("undo %+v; want no step below the floor set by the first act", u)
+		}
+		if n := h.originRefusals(); n != 0 {
+			t.Fatalf("%d origin refusals; the origin is known", n)
+		}
+		var floor bool
+		for _, d := range h.decisions("refused") {
+			if s, _ := d.Answer["refused"].(string); strings.Contains(s, "floor reached") {
+				floor = true
+			}
+		}
+		if !floor {
+			t.Fatal("no refusal at the floor")
+		}
+	})
+}
