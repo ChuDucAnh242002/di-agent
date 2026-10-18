@@ -482,7 +482,8 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
 
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
-`decision-model` or `reasoning-agent`), `Model`, `Tier`, `Action` (`confirm`, `reject`,
+`decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
+actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
 `defer`, or `escalate` when no tier was sure enough and the candidate stays in this queue),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
@@ -560,7 +561,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `cooling` | relief   |
-| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction, observed drop and `outcome` | relief   |
+| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction (the plan's `effect` is the learned factor it was scaled by), observed drop, `outcome` and `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding) | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
@@ -674,7 +675,7 @@ loops:
       exit: 0.10        # share below which caps are given back, held for exit_for
 ```
 
-At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
+Outcomes teach the map — interventions on relationships, each workload's learned effect, candidates settled — only on a runtime that really changes the system, never on `dry-run` (ARCHITECTURE §16, "Learning from outcomes"). At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
 
 #### The `kubernetes` runtime
 

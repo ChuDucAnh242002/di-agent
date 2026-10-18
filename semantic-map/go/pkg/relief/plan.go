@@ -46,7 +46,9 @@ type Candidate struct {
 
 // Plan is one step on one workload: the limit it gets and the drop in node
 // pressure that step is predicted to bring. EstimateID is empty for a Basis
-// "usage" plan, which no estimate produced.
+// "usage" plan, which no estimate produced. Effect is what the prediction was
+// scaled by: what acting on the workload has done before against what was
+// predicted, 1 with no history.
 type Plan struct {
 	Subject    string  `json:"subject"`
 	FromCores  float64 `json:"from_cores"`
@@ -55,6 +57,7 @@ type Plan struct {
 	EstimateID string  `json:"estimate_id,omitempty"`
 	Basis      string  `json:"basis"`
 	Rule       int     `json:"rule"`
+	Effect     float64 `json:"effect"`
 }
 
 // targetOf is the workload as the policy sees it: its kind is the subject's part
@@ -145,7 +148,7 @@ func influencedBy(res statemap.EstimateResult, subject string) bool {
 // current usage when there is none), and never below the workload's CPU request. A Basis "map" candidate is predicted by
 // assuming its usage scaled to the new limit; a Basis "usage" candidate, which
 // the map cannot predict, by its share of the node's pressure per unit of
-// usage. effect scales a map prediction by what acting on the subject has done
+// usage. effect scales either prediction by what acting on the subject has done
 // before; 1 means no history.
 func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject string) float64) (p Plan, ok bool, why string) {
 	return makePlan(m, cands, ws, pol, c, effect, nil)
@@ -195,7 +198,8 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 			reasons = append(reasons, fmt.Sprintf("%s: already capped at %.3f cores, at or below the step's %.3f", cand.Subject, *w.CPU.Limit, to))
 			continue
 		}
-		plan := Plan{Subject: cand.Subject, FromCores: from, ToCores: to, Basis: cand.Basis, Rule: eff.Rule}
+		plan := Plan{Subject: cand.Subject, FromCores: from, ToCores: to, Basis: cand.Basis, Rule: eff.Rule,
+			Effect: effect(cand.Subject)}
 		switch cand.Basis {
 		case BasisMap:
 			res := m.Estimate(statemap.EstimateRequest{
@@ -206,7 +210,7 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 				reasons = append(reasons, fmt.Sprintf("%s: no prediction (%s)", cand.Subject, res.Err))
 				continue
 			}
-			plan.Predicted, plan.EstimateID = -res.Hypothetical.Delta*effect(cand.Subject), res.DecisionID
+			plan.Predicted, plan.EstimateID = -res.Hypothetical.Delta*plan.Effect, res.DecisionID
 		default:
 			pressure, okP := m.Property(NodePressure)
 			usage, okU := m.Property(NodeUsage)
@@ -214,7 +218,7 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 				reasons = append(reasons, cand.Subject+": no node pressure or usage to predict from")
 				continue
 			}
-			plan.Predicted = cand.Share * c.Step * (pressure.Value / usage.Value)
+			plan.Predicted = cand.Share * c.Step * (pressure.Value / usage.Value) * plan.Effect
 		}
 		if plan.Predicted < c.MinEffect {
 			reasons = append(reasons, fmt.Sprintf("%s: predicted drop %.4f is below min_effect %g", cand.Subject, plan.Predicted, c.MinEffect))

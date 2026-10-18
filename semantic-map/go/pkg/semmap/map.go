@@ -368,9 +368,11 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 }
 
 // ConfirmCandidate applies an operator's confirmation. from orients an undirected
-// candidate (either end) and is "" for a directed one. A candidate between two
-// properties of the state model becomes a state-map relationship with Discovered
-// provenance — never a Di-Select proposition, whose vocabulary is constructs. A
+// candidate (either end) and is "" or the candidate's own source for a directed one. A
+// candidate between two properties of the state model becomes a state-map
+// relationship with Discovered provenance — never a Di-Select proposition, whose
+// vocabulary is constructs — unless a live relationship already covers the pair with
+// that sign, when the candidate is settled and nothing more is declared. A
 // candidate between constructs (the explicit construct path) goes through the
 // ontology.
 //
@@ -387,6 +389,12 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		sign := 1
 		if prop.Direction == types.Negative {
 			sign = -1
+		}
+		if m.state.Covered(prop.FromConstruct, prop.ToConstruct, sign) {
+			// The pair already has a relationship — the agent's own interventions, say,
+			// created one while the candidate waited. The candidate is settled; a second
+			// relationship on the pair would count one dependency twice.
+			return nil
 		}
 		err := m.state.DeclareRelationship(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,

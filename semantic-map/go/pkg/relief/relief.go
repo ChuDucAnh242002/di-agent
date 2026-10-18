@@ -36,18 +36,21 @@ type Status struct {
 // the first step's act decision, so an operator's handle on the change does not
 // move. Resumed marks one found on the runtime at start rather than made by this
 // loop: its prediction is only known if the journal still has the decision that
-// made it.
+// made it. SharesAtAct is every workload's share of node CPU when the action's
+// baseline was taken, so its outcome can be told apart from another workload
+// moving at the same time.
 type Action struct {
-	ID            string       `json:"id"`
-	Subject       string       `json:"subject"`
-	DecisionID    string       `json:"decision_id"`
-	Plan          Plan         `json:"plan"`
-	Undo          runtime.Undo `json:"undo"`
-	PressureAtAct float64      `json:"pressure_at_act"`
-	ActedAt       time.Time    `json:"acted_at"`
-	Observed      *float64     `json:"observed,omitempty"` // observed drop, after settle
-	Outcome       string       `json:"outcome"`
-	Resumed       bool         `json:"resumed,omitempty"`
+	ID            string             `json:"id"`
+	Subject       string             `json:"subject"`
+	DecisionID    string             `json:"decision_id"`
+	Plan          Plan               `json:"plan"`
+	Undo          runtime.Undo       `json:"undo"`
+	PressureAtAct float64            `json:"pressure_at_act"`
+	ActedAt       time.Time          `json:"acted_at"`
+	Observed      *float64           `json:"observed,omitempty"` // observed drop, after settle
+	Outcome       string             `json:"outcome"`
+	Resumed       bool               `json:"resumed,omitempty"`
+	SharesAtAct   map[string]float64 `json:"shares_at_act,omitempty"`
 
 	cooldown      time.Duration // the workload's policy cooldown, the base of every cooldown after this
 	revertPending bool          // judged not to have helped; the revert has not yet succeeded
@@ -57,15 +60,21 @@ type Action struct {
 	originRefused bool          // a further step was refused for want of origin, and journalled
 }
 
-// Config is what a Loop is built from.
+// Config is what a Loop is built from. Evidence says the runtime really changes
+// the system, so an action's outcome is evidence about it: only then do outcomes
+// feed the map, the learned effects and the discovery queue. A dry run changes
+// nothing, and what pressure did after it is the workload's own doing. Candidates
+// is the discovery queue interventions settle; nil settles nothing.
 type Config struct {
-	Relief  spec.Relief
-	NodeID  string
-	Runtime runtime.Runtime
-	Policy  *policy.Policy
-	Map     *statemap.Map
-	Now     func() time.Time
-	Logf    func(string, ...any)
+	Relief     spec.Relief
+	NodeID     string
+	Runtime    runtime.Runtime
+	Policy     *policy.Policy
+	Map        *statemap.Map
+	Now        func() time.Time
+	Logf       func(string, ...any)
+	Evidence   bool
+	Candidates Candidates
 }
 
 // Loop relieves CPU pressure on one node: it notices pressure, caps the
@@ -83,6 +92,8 @@ type Loop struct {
 	cfg   Config
 	c     spec.CPURelief
 	epoch int64
+
+	effects effects // what acting on each workload has done; safe on its own
 
 	pass       sync.Mutex // serialises the passes that change the system
 	seq        int        // decision counter; touched only under pass
@@ -218,6 +229,12 @@ func (l *Loop) Tick(ctx context.Context) {
 		}
 	}
 	pressure, at, fresh := l.pressure(now)
+	var shares map[string]float64
+	if fresh {
+		// For a resumed action's baseline, taken below; read outside the state lock,
+		// as the loop's other reads of the map are.
+		shares = workloadShares(l.cfg.Map)
+	}
 
 	l.mu.Lock()
 	seen := now
@@ -236,7 +253,7 @@ func (l *Loop) Tick(ctx context.Context) {
 		}
 	}
 	if a := l.inFlight; a != nil && a.needBaseline && fresh {
-		a.PressureAtAct, a.ActedAt, a.needBaseline = pressure, now, false
+		a.PressureAtAct, a.ActedAt, a.SharesAtAct, a.needBaseline = pressure, now, shares, false
 	}
 	phase, paused := l.phase, l.paused
 	l.mu.Unlock()
@@ -305,6 +322,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	pressure, _, fresh := l.pressure(now)
 	cooldowns := l.cooldowns(ctx)
+	shares := workloadShares(l.cfg.Map)
 
 	l.mu.Lock()
 	live := l.liveSubjects()
@@ -329,7 +347,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			a.ID = l.id("act")
 		}
 		if fresh {
-			a.PressureAtAct, a.ActedAt = pressure, now
+			a.PressureAtAct, a.ActedAt, a.SharesAtAct = pressure, now, shares
 		} else {
 			a.needBaseline = true
 		}
@@ -480,7 +498,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		}
 	}
 	cands := Attribute(l.cfg.Map, open, pol, l.c)
-	plan, ok, why := makePlan(l.cfg.Map, cands, open, pol, l.c, func(string) float64 { return 1 }, originals)
+	plan, ok, why := makePlan(l.cfg.Map, cands, open, pol, l.c, l.effects.Of, originals)
 	if !ok {
 		l.mu.Lock()
 		l.noPlanAt, l.noPlanKey = now, key
@@ -502,6 +520,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	b.Property(NodePressure)
 	b.Property(NodeUsage + "@" + plan.Subject)
 	b.Facts()
+	shares := workloadShares(l.cfg.Map)
 	undo, err := l.cfg.Runtime.Apply(ctx, plan.Subject, runtime.Change{
 		Action: runtime.ActionCPULimit, CPULimit: plan.ToCores, Expires: now.Add(l.c.Expiry), DecisionID: id,
 	})
@@ -546,13 +565,14 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		l.history = appendHistory(removeAction(l.history, a), a)
 		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome = id, plan, undo, nil, ""
 		a.PressureAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
+		a.SharesAtAct = shares
 	} else {
 		origin := plan.FromCores
 		if w.CPU.Limit != nil {
 			origin = *w.CPU.Limit
 		}
 		a = &Action{ID: id, Subject: plan.Subject, DecisionID: id, Plan: plan, Undo: undo,
-			PressureAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin}
+			PressureAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin, SharesAtAct: shares}
 		if last, ok := l.released[plan.Subject]; ok && now.Sub(last) < backoffWindow {
 			l.cycles[plan.Subject]++
 		} else {
@@ -703,6 +723,7 @@ func (l *Loop) journalledAct(id string) (p Plan, first string, ok bool) {
 		p.ToCores, _ = v["to_cores"].(float64)
 		p.EstimateID, _ = v["estimate_id"].(string)
 		p.Basis, _ = v["basis"].(string)
+		p.Effect, _ = v["effect"].(float64)
 	}
 	if prev, isMap := d.Inputs["previous"].(map[string]any); isMap {
 		first, _ = prev["action"].(string)
