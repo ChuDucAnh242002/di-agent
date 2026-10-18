@@ -2,6 +2,8 @@ package facts
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
@@ -59,5 +61,25 @@ func TestLoadKeepsWhatItCanRead(t *testing.T) {
 func TestUnknownSourceIsRefused(t *testing.T) {
 	if _, err := Build("inventory", ""); err == nil {
 		t.Fatal("built a source nobody registered")
+	}
+}
+
+// The core is named by its part, then by its vendor; the SoC line comes last, because
+// on a Raspberry Pi it names the wrong chip.
+func TestCPUModelFallsBackInOrder(t *testing.T) {
+	for _, tc := range []struct{ cpuinfo, want string }{
+		{"processor\t: 0\nCPU implementer\t: 0x41\nCPU part\t: 0xd08\nHardware\t: BCM2835\n", "Arm Cortex-A72"},
+		{"processor\t: 0\nCPU implementer\t: 0x51\nCPU part\t: 0x803\nHardware\t: Qualcomm Technologies, Inc SDM845\n", "Qualcomm CPU (part 0x803)"},
+		{"processor\t: 0\nCPU implementer\t: 0x41\nCPU part\t: 0xfff\nHardware\t: Some SoC\n", "Arm CPU (part 0xfff)"},
+		{"processor\t: 0\nCPU implementer\t: 0x99\nCPU part\t: 0x001\nHardware\t: Some SoC\n", "Some SoC"},
+		{"processor\t: 0\nmodel name\t: Intel(R) Core(TM) i7-10710U\n", "Intel(R) Core(TM) i7-10710U"},
+	} {
+		p := filepath.Join(t.TempDir(), "cpuinfo")
+		if err := os.WriteFile(p, []byte(tc.cpuinfo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, n := cpuinfo(p); got != tc.want || n != 1 {
+			t.Errorf("cpuinfo %q: %q, %d cores; want %q, 1", tc.cpuinfo, got, n, tc.want)
+		}
 	}
 }

@@ -161,11 +161,11 @@ func cpuinfo(p string) (string, int) {
 	if model == "" && implementer == "0x41" {
 		model = armParts[part]
 	}
-	if model == "" {
-		model = hardware
-	}
 	if v, ok := armImplementers[implementer]; ok && model == "" {
 		model = v + " CPU (part " + part + ")"
+	}
+	if model == "" {
+		model = hardware
 	}
 	return model, n
 }
