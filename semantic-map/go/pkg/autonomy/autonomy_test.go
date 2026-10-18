@@ -237,15 +237,27 @@ func TestAnUndirectedConfirmationNeedsADriver(t *testing.T) {
 	}
 }
 
-func TestAnUnreachableModelEscalatesAndIsCounted(t *testing.T) {
-	const id = "cpu_utilization@pod:a->cpu_pressure"
-	m := newFakeMap(t, directed(id, ""))
-	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{err: errors.New("connection refused")}})
-	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewEscalate {
-		t.Errorf("%v review %+v; want escalated", c.Status, c.Review)
+func TestAnUnreachableModelRecordsNothingAndTriesAgain(t *testing.T) {
+	const a, b = "cpu_utilization@pod:a->cpu_pressure", "cpu_utilization@pod:b->cpu_pressure"
+	m := newFakeMap(t, directed(a, ""), directed(b, ""))
+	down := &fixed{err: errors.New("connection refused")}
+	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: down})
+	for _, id := range []string{a, b} {
+		if c := m.cands[id]; c.Status != types.Pending || c.Review != nil {
+			t.Errorf("%s %v review %+v; want it untouched: an outage is not a review", id, c.Status, c.Review)
+		}
 	}
-	if s := r.Status(); s.Errors != 1 || s.Escalated != 1 || !strings.Contains(s.LastError, "refused") {
-		t.Errorf("status %+v; want the error counted", s)
+	if s := r.Status(); s.Errors != 1 || s.Reviewed != 0 || !strings.Contains(s.LastError, "refused") {
+		t.Errorf("status %+v; want one error and the cycle stopped there", s)
+	}
+	if len(down.analyses) != 1 {
+		t.Errorf("the model was asked %d times; want the cycle to stop at the first failure", len(down.analyses))
+	}
+
+	down.err, down.actions = nil, confident(types.ReviewConfirm)
+	r.Cycle(context.Background())
+	if c := m.cands[a]; c.Status != types.Confirmed {
+		t.Errorf("%v review %+v; want it reviewed once the model is back", c.Status, c.Review)
 	}
 }
 

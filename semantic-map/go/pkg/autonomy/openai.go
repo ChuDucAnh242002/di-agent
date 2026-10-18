@@ -98,7 +98,7 @@ func (c *openAI) chat(ctx context.Context, body chatRequest) (*chatResponse, err
 		return nil, fmt.Errorf("%s: %w", c.model, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s returned %d: %s", c.model, resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, &statusError{model: c.model, code: resp.StatusCode, body: strings.TrimSpace(string(b))}
 	}
 	var out chatResponse
 	if err := json.Unmarshal(b, &out); err != nil {
@@ -108,4 +108,22 @@ func (c *openAI) chat(ctx context.Context, body chatRequest) (*chatResponse, err
 		return nil, errors.New(c.model + " returned no choices")
 	}
 	return &out, nil
+}
+
+// statusError is a response other than 200, kept whole so a caller can tell a
+// request the server refused (400) from one it could not serve.
+type statusError struct {
+	model string
+	code  int
+	body  string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("%s returned %d: %s", e.model, e.code, e.body)
+}
+
+// refused reports whether err is the server rejecting a request field it names.
+func refused(err error, field string) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusBadRequest && strings.Contains(se.body, field)
 }

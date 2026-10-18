@@ -2044,6 +2044,15 @@ reviewed again, which is what keeps the models from being asked the same questio
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
+**An outage is not a review.** A model that cannot answer — the server still loading, the
+network down, a request it refuses — leaves the candidate untouched: no decision, no
+`Review`, so it is due again next cycle. Recording it as an escalation would shelve the
+candidate until its evidence moved, which on a steady machine may be never. The cycle
+stops at the first failure, since the next candidate would fail the same way, and the
+error is counted in the status. Tier 2's tool loop has a hard end: calls past the budget
+are answered with an error, and a model told to answer that calls tools again fails the
+review rather than looping.
+
 **Orientation.** An undirected candidate cannot be confirmed with an arbitrary end. The
 decision model is asked which end drives the other, with "unclear" as an option; the
 confirmation needs the confirm threshold on both questions, or it escalates.
@@ -2084,8 +2093,8 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 
 | Test | Covers |
 | ---- | ------ |
-| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates |
-| `pkg/autonomy/autonomy_test.go` | Which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model escalates and is counted |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
+| `pkg/autonomy/autonomy_test.go` | Which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
 
 All run against fake models. No test requires Ollama.

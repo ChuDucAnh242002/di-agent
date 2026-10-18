@@ -262,7 +262,7 @@ func main() {
 	autonomyDecisionKeepAlive := flag.String("autonomy-decision-keep-alive", "",
 		"Ollama keep_alive for the tier 1 model (openai-logprobs only); empty leaves the server default")
 	autonomyDecisionEffort := flag.String("autonomy-decision-reasoning-effort", "none",
-		"reasoning_effort sent by openai-logprobs, so a thinking model answers directly; empty omits it")
+		"reasoning_effort sent by openai-logprobs, so a thinking model answers directly; empty omits it, and a server that refuses it gets it dropped")
 	autonomyReasoningBackend := flag.String("autonomy-reasoning-backend", "none",
 		"tier 2: openai-tools (any OpenAI-compatible server with tool calling) or none")
 	autonomyReasoningURL := flag.String("autonomy-reasoning-url", "http://localhost:11434/v1",

@@ -1,13 +1,17 @@
 package autonomy_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -102,5 +106,76 @@ func TestMostProbabilityOffTheOptionsEscalates(t *testing.T) {
 	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: cfg.Decider})
 	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewEscalate {
 		t.Errorf("%v review %+v; want escalated: 0.3 of the probability was on the options", c.Status, c.Review)
+	}
+}
+
+func TestARefusedReasoningEffortIsDropped(t *testing.T) {
+	var seen []map[string]any
+	ok := logprobsServer(t, map[string]float64{"A": 0.9, "B": 0.1}, &seen)
+	defer ok.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+		if _, has := req["reasoning_effort"]; has { // as vLLM answers "none"
+			seen = append(seen, req)
+			http.Error(w, `{"error":"reasoning_effort must be one of low, medium, high"}`, http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		ok.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	cfg, err := autonomy.Build(newFakeMap(t), autonomy.Parts{DecisionBackend: "openai-logprobs",
+		Decision: autonomy.Spec{URL: srv.URL, Model: "general", Options: map[string]string{"reasoning_effort": "none"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := autonomy.Evidence{Candidate: *directed("a@pod:x->b", "")}
+	for range 2 {
+		if _, err := cfg.Decider.Decide(context.Background(), ev, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// refused once, retried without it, and not sent again
+	if len(seen) != 3 || seen[0]["reasoning_effort"] != "none" || seen[1]["reasoning_effort"] != nil || seen[2]["reasoning_effort"] != nil {
+		t.Errorf("requests %v; want reasoning_effort refused once, then dropped", seen)
+	}
+}
+
+func TestAReasonerThatWillNotStopCallingToolsIsStopped(t *testing.T) {
+	turns := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turns++
+		var calls []any
+		for i := range 4 { // more in one turn than the budget allows
+			calls = append(calls, map[string]any{"id": fmt.Sprint("c", turns, i), "type": "function",
+				"function": map[string]any{"name": "get_state", "arguments": "{}"}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+			"message": map[string]any{"role": "assistant", "content": "", "tool_calls": calls}}}})
+	}))
+	defer srv.Close()
+	m := newFakeMap(t)
+	cfg, err := autonomy.Build(m, autonomy.Parts{ReasoningBackend: "openai-tools",
+		Reasoning: autonomy.Spec{URL: srv.URL, Model: "chatty"}, Tools: []string{"get_state"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cfg.Reasoner.Reason(context.Background(), autonomy.Evidence{Candidate: *directed("a@pod:x->b", "")})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "kept calling tools") {
+			t.Errorf("err %v; want the loop stopped", err)
+		}
+		if turns != 3 { // 4 calls, 2 more (budget 6, the rest refused), then the final turn
+			t.Errorf("%d turns; want 3", turns)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tool loop did not stop")
 	}
 }

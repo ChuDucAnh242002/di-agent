@@ -316,7 +316,13 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 			waiting++
 			continue
 		}
-		if r.review(ctx, c, pending) {
+		ok, err := r.review(ctx, c, pending)
+		if err != nil {
+			// A model that failed for one candidate will fail for the next: the
+			// rest wait for the next cycle rather than each record the outage.
+			break
+		}
+		if ok {
 			reviewed++
 		}
 	}
@@ -338,12 +344,14 @@ type outcome struct {
 }
 
 // review takes one candidate up the tiers. It reports false when the candidate was
-// passed over without a decision.
-func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending []*types.CandidateEdge) bool {
+// passed over without a decision, and an error when a model failed: then nothing is
+// recorded, neither a decision nor a review, so the candidate is due again next cycle
+// — an outage is not a judgement about the pair.
+func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending []*types.CandidateEdge) (bool, error) {
 	st := r.m.State()
 	if st == nil {
 		r.failed(fmt.Errorf("the map has no state model to record decisions in"))
-		return false
+		return false, nil
 	}
 	id := r.decisionID(c)
 	b := st.Decide(id, "review candidate "+c.CandidateID)
@@ -356,7 +364,11 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	b.Input("neighbours", ev.Neighbours)
 	b.Input("autonomy", map[string]any{"level": r.cfg.Level.String(), "thresholds": r.cfg.Thresholds})
 
-	o := r.decide(ctx, b, ev)
+	o, err := r.decide(ctx, b, ev)
+	if err != nil {
+		r.failed(err)
+		return false, err
+	}
 	applied, err := r.apply(c, o, id)
 	if err != nil {
 		b.Caveat("applying %s failed: %v; the candidate was escalated instead", o.action, err)
@@ -392,7 +404,7 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 		verb = "applied"
 	}
 	r.cfg.Logf("autonomy: %s %s %s (tier %d, %s; decision %s)", verb, o.action, c.CandidateID, o.tier, o.by, id)
-	return true
+	return true, nil
 }
 
 // endsActive reports whether both ends of c are active. An end that is stale or gone
@@ -411,45 +423,37 @@ func (r *Reviewer) endsActive(c *types.CandidateEdge) bool {
 	return true
 }
 
-// decide runs the tiers, recording what each read and answered.
-func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev Evidence) outcome {
+// decide runs the tiers, recording what each read and answered. An error is a model
+// that could not answer; the review is then not recorded at all.
+func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev Evidence) (outcome, error) {
 	if o, ok := r.rules(ev); ok {
-		return o
+		return o, nil
 	}
 	if r.cfg.Decider == nil {
 		return outcome{tier: 0, by: types.ReviewerRules, action: types.ReviewEscalate,
-			why: "no rule applies and no decision model is configured"}
+			why: "no rule applies and no decision model is configured"}, nil
 	}
 	v, err := r.cfg.Decider.Decide(ctx, ev, "")
 	if err != nil {
-		b.Caveat("decision model: %v", err)
-		r.failed(err)
-		return outcome{tier: 1, by: types.ReviewerDecisionModel, model: r.cfg.Decider.Name(),
-			action: types.ReviewEscalate, why: "the decision model could not be reached"}
+		return outcome{}, fmt.Errorf("decision model: %w", err)
 	}
 	b.Input("tier1", v)
 	o := r.choose(v, ev, 1, types.ReviewerDecisionModel, r.cfg.Decider.Name())
 	if o.action != types.ReviewEscalate || r.cfg.Reasoner == nil {
-		return o
+		return o, nil
 	}
 	a, err := r.cfg.Reasoner.Reason(ctx, ev)
 	if err != nil {
-		b.Caveat("reasoning model: %v", err)
-		r.failed(err)
-		o.why += "; the reasoning model failed"
-		return o
+		return outcome{}, fmt.Errorf("reasoning model: %w", err)
 	}
 	b.Input("tier2_analysis", a)
 	b.Caveat("the tier 2 analysis is the reasoning model's reading of the map; its tool calls are recorded with it")
 	v2, err := r.cfg.Decider.Decide(ctx, ev, a.Text)
 	if err != nil {
-		b.Caveat("decision model on the analysis: %v", err)
-		r.failed(err)
-		o.why += "; the decision model could not score the analysis"
-		return o
+		return outcome{}, fmt.Errorf("decision model on the analysis: %w", err)
 	}
 	b.Input("tier2", v2)
-	return r.choose(v2, ev, 2, types.ReviewerReasoningAgent, r.cfg.Reasoner.Name()+" + "+r.cfg.Decider.Name())
+	return r.choose(v2, ev, 2, types.ReviewerReasoningAgent, r.cfg.Reasoner.Name()+" + "+r.cfg.Decider.Name()), nil
 }
 
 // choose turns a verdict into an outcome: the top action when its probability

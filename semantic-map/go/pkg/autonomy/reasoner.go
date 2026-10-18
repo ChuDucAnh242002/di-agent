@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -71,10 +72,15 @@ func (c *Chat) Reason(ctx context.Context, e Evidence) (*Analysis, error) {
 		{Role: "user", Content: c.render.Render(e, "")},
 	}
 	a := &Analysis{Model: c.client.model, Prompt: ReasonPrompt + "/" + c.render.Name()}
-	for calls := 0; ; {
+	for calls, final := 0, false; ; {
 		tools := schemas
 		if calls >= maxCalls {
-			tools = nil // out of calls: the next turn has to answer
+			if final {
+				// The model was told to answer and called tools anyway: stop here,
+				// rather than ask again until the daemon exits.
+				return nil, fmt.Errorf("%s kept calling tools after %d calls", c.client.model, calls)
+			}
+			final, tools = true, nil // out of calls: the next turn has to answer
 			msgs = append(msgs, chatMessage{Role: "user", Content: "No more tool calls. Answer now with the JSON object."})
 		}
 		resp, err := c.client.chat(ctx, chatRequest{Messages: msgs, Tools: tools, KeepAlive: c.keepAlive})
@@ -91,6 +97,13 @@ func (c *Chat) Reason(ctx context.Context, e Evidence) (*Analysis, error) {
 		}
 		msgs = append(msgs, msg)
 		for _, tc := range msg.ToolCalls {
+			// Every call is answered, as the API requires, but past the budget with
+			// an error rather than a result: one turn cannot run past maxCalls.
+			if calls >= maxCalls {
+				out, _ := json.Marshal(map[string]string{"error": "no more tool calls"})
+				msgs = append(msgs, chatMessage{Role: "tool", Content: string(out), ToolCallID: tc.ID})
+				continue
+			}
 			calls++
 			out, digest := call(byName[tc.Function.Name], tc.Function.Name, tc.Function.Arguments)
 			a.Trace = append(a.Trace, digest)

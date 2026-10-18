@@ -954,7 +954,7 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | `-autonomy-decision-url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `-autonomy-decision-model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `-autonomy-decision-keep-alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
-| `-autonomy-decision-reasoning-effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly. |
+| `-autonomy-decision-reasoning-effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
 | `-autonomy-reasoning-backend` | `none`              | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. |
 | `-autonomy-reasoning-url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
 | `-autonomy-reasoning-model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |

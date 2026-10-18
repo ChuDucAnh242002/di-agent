@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,6 +39,10 @@ type Logprobs struct {
 	render    Renderer
 	keepAlive string
 	effort    string // reasoning_effort, for a thinking model: "none" asks it to answer directly
+
+	// noEffort is set once the backend refuses reasoning_effort (vLLM accepts only
+	// low, medium or high): the field is a hint, so it is dropped, not the question.
+	noEffort atomic.Bool
 }
 
 func (d *Logprobs) Name() string { return d.client.model }
@@ -74,10 +79,19 @@ func (d *Logprobs) ask(ctx context.Context, state, q string, opts []option) (map
 		fmt.Fprintf(&b, "%c) %s\n", letters[i], o.text)
 	}
 	b.WriteString("Answer with the letter only.")
-	resp, err := d.client.chat(ctx, chatRequest{
+	req := chatRequest{
 		Messages:  []chatMessage{{Role: "system", Content: logprobsSystem}, {Role: "user", Content: b.String()}},
-		MaxTokens: 1, Logprobs: true, TopLogprobs: 10, ReasoningEffort: d.effort, KeepAlive: d.keepAlive,
-	})
+		MaxTokens: 1, Logprobs: true, TopLogprobs: 10, KeepAlive: d.keepAlive,
+	}
+	if !d.noEffort.Load() {
+		req.ReasoningEffort = d.effort
+	}
+	resp, err := d.client.chat(ctx, req)
+	if err != nil && req.ReasoningEffort != "" && refused(err, "reasoning_effort") {
+		d.noEffort.Store(true)
+		req.ReasoningEffort = ""
+		resp, err = d.client.chat(ctx, req)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
