@@ -184,3 +184,39 @@ func TestTheMapsSubjectsBecomeWorkloads(t *testing.T) {
 		t.Fatalf("can %+v", ws[0].Can)
 	}
 }
+
+// TestASecondChangeKeepsTheFirstOriginal: a workload stepped twice by this node is
+// given back, in one revert, what it had before the first step.
+func TestASecondChangeKeepsTheFirstOriginal(t *testing.T) {
+	ctx := context.Background()
+	d := newDry(t, "n1")
+	d.Put(Workload{Subject: "pod:a", Name: "a", CPU: Resource{Limit: f64(2.0)}})
+	if _, err := d.Apply(ctx, "pod:a", Change{Action: ActionCPULimit, CPULimit: 1.5, DecisionID: "d1"}); err != nil {
+		t.Fatal(err)
+	}
+	exp := time.Unix(2000, 0)
+	u, err := d.Apply(ctx, "pod:a", Change{Action: ActionCPULimit, CPULimit: 1.0, Expires: exp, DecisionID: "d2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Original.Limit == nil || *u.Original.Limit != 2.0 || u.Applied != 1.0 || u.DecisionID != "d2" || !u.Expires.Equal(exp) {
+		t.Fatalf("undo %+v; want the first original (2.0) with the second change", u)
+	}
+	ch, _ := d.Changed(ctx, "n1")
+	if len(ch) != 1 || *ch[0].Original.Limit != 2.0 || ch[0].Applied != 1.0 || ch[0].DecisionID != "d2" {
+		t.Fatalf("outstanding %+v; want one record, updated", ch)
+	}
+	if err := d.Revert(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if l := limitOf(t, d, "pod:a"); l == nil || *l != 2.0 {
+		t.Fatalf("limit %v; want 2.0", l)
+	}
+
+	// Another node's outstanding change is not this node's first original.
+	d.PutUndo(Undo{NodeID: "other", Subject: "pod:a", Original: Resource{Limit: f64(9)}})
+	u, _ = d.Apply(ctx, "pod:a", Change{Action: ActionCPULimit, CPULimit: 1.0})
+	if *u.Original.Limit != 2.0 {
+		t.Fatalf("original %v; want the current limit, not another node's", *u.Original.Limit)
+	}
+}

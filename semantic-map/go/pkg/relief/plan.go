@@ -122,12 +122,14 @@ func Attribute(m *statemap.Map, ws []runtime.Workload, pol *policy.Policy, c spe
 	return append(byMap, byUsage...)
 }
 
-// influencedBy reports whether one of the subject's properties reaches the
-// target through a relationship with a known strength. One with no strength
-// yet contributes nothing to the projection, so it is no basis for a rank.
+// influencedBy reports whether the subject's own CPU usage reaches the target
+// through a relationship with a known strength. It is the same source the plan's
+// prediction assumes a new value for, so a "map" rank and a "map" prediction
+// rest on one relationship; one with no strength yet contributes nothing to the
+// projection, so it is no basis for a rank.
 func influencedBy(res statemap.EstimateResult, subject string) bool {
 	for _, inf := range res.Influences {
-		if inf.Known && strings.HasSuffix(inf.Source, "@"+subject) {
+		if inf.Known && inf.Source == NodeUsage+"@"+subject {
 			return true
 		}
 	}
@@ -146,6 +148,14 @@ func influencedBy(res statemap.EstimateResult, subject string) bool {
 // usage. effect scales a map prediction by what acting on the subject has done
 // before; 1 means no history.
 func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject string) float64) (p Plan, ok bool, why string) {
+	return makePlan(m, cands, ws, pol, c, effect, nil)
+}
+
+// makePlan is MakePlan for a loop that has already capped some workloads:
+// originals holds, for each, the limit it had before the agent first touched it,
+// which is what the of_original floor is a share of. A workload's current limit
+// is then the agent's own cap, and a step that would not go below it is no step.
+func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject string) float64, originals map[string]float64) (p Plan, ok bool, why string) {
 	n, ok := coreCount(m)
 	if !ok {
 		return Plan{}, false, noCores
@@ -167,12 +177,18 @@ func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 		eff := pol.For(targetOf(w))
 		from := cand.Share * n
 		original := from
-		if w.CPU.Limit != nil {
+		if o, ok := originals[cand.Subject]; ok {
+			original = o
+		} else if w.CPU.Limit != nil {
 			original = *w.CPU.Limit
 		}
 		to := math.Max(from*(1-c.Step), math.Max(eff.Settings.Floor.CPUCores, eff.Settings.Floor.OfOriginal*original))
 		if to >= from {
 			reasons = append(reasons, fmt.Sprintf("%s: floor reached (%.3f cores in use, floor %.3f)", cand.Subject, from, to))
+			continue
+		}
+		if w.CPU.Limit != nil && to >= *w.CPU.Limit {
+			reasons = append(reasons, fmt.Sprintf("%s: already capped at %.3f cores, at or below the step's %.3f", cand.Subject, *w.CPU.Limit, to))
 			continue
 		}
 		plan := Plan{Subject: cand.Subject, FromCores: from, ToCores: to, Basis: cand.Basis, Rule: eff.Rule}

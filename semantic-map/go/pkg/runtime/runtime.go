@@ -75,6 +75,10 @@ type Runtime interface {
 	// Workloads lists what the node runs now. The result is the caller's to keep.
 	Workloads(ctx context.Context) ([]Workload, error)
 	// Apply makes a change and returns what undoes it. An unknown subject is ErrGone.
+	// A workload with an outstanding change from this node keeps the Original from
+	// before that first change: the outstanding record is updated with the new
+	// change, not replaced by one whose Original is the intermediate cap, so one
+	// Revert always gives back what the workload had before the agent touched it.
 	Apply(ctx context.Context, subject string, c Change) (Undo, error)
 	// Revert restores what an Undo recorded. A removed workload is ErrGone.
 	Revert(ctx context.Context, u Undo) error

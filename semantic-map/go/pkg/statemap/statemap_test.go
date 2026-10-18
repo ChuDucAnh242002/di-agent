@@ -2066,3 +2066,12 @@ func TestSubjectsListsTheLiveOnes(t *testing.T) {
 		t.Errorf("Subjects() = %v, want [pod:a pod:b]: sorted, distinct, no node scope, no retired subject", got)
 	}
 }
+
+func TestStaleAfterIsTheConfiguredSilence(t *testing.T) {
+	if got := New(Config{}, nil).StaleAfter(); got != 2*time.Minute {
+		t.Errorf("default %s; want 2m", got)
+	}
+	if got := New(Config{StaleAfter: 30 * time.Second}, nil).StaleAfter(); got != 30*time.Second {
+		t.Errorf("configured %s; want 30s", got)
+	}
+}

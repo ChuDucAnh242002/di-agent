@@ -58,7 +58,9 @@ func (d *DryRun) Workloads(ctx context.Context) ([]Workload, error) {
 	return out, nil
 }
 
-// Apply sets the workload's CPU limit and records how to undo it. Any action other
+// Apply sets the workload's CPU limit and records how to undo it. A workload this
+// node already changed keeps the original from before its first change, so one
+// revert gives back what it had before the agent touched it. Any action other
 // than ActionCPULimit is an error, and an unknown subject is ErrGone.
 func (d *DryRun) Apply(ctx context.Context, subject string, c Change) (Undo, error) {
 	if c.Action != ActionCPULimit {
@@ -70,12 +72,16 @@ func (d *DryRun) Apply(ctx context.Context, subject string, c Change) (Undo, err
 	if !ok {
 		return Undo{}, fmt.Errorf("%s: %w", subject, ErrGone)
 	}
+	original := cloneResource(w.CPU)
+	if prev, ok := d.undos[subject]; ok && prev.NodeID == d.env.NodeID {
+		original = cloneResource(prev.Original)
+	}
 	u := Undo{
 		Runtime:    "dry-run",
 		NodeID:     d.env.NodeID,
 		Subject:    subject,
 		Action:     c.Action,
-		Original:   cloneResource(w.CPU),
+		Original:   original,
 		Applied:    c.CPULimit,
 		Expires:    c.Expires,
 		DecisionID: c.DecisionID,
@@ -83,7 +89,7 @@ func (d *DryRun) Apply(ctx context.Context, subject string, c Change) (Undo, err
 	limit := c.CPULimit
 	w.CPU.Limit = &limit
 	d.workloads[subject] = w
-	d.undos[subject] = u
+	d.undos[subject] = cloneUndo(u)
 	return u, nil
 }
 

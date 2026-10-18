@@ -233,3 +233,25 @@ func TestNoCoresNoPlan(t *testing.T) {
 }
 
 func near(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+
+// TestOnlyItsOwnUsageRanksAWorkloadByTheMap: a relationship from another of the
+// workload's properties says nothing about what capping its CPU would do, which
+// is what the plan predicts by assuming a new cpu_utilization@<subject>.
+func TestOnlyItsOwnUsageRanksAWorkloadByTheMap(t *testing.T) {
+	m := newMap(t, func() time.Time { return t0 })
+	record(t, m, NodePressure, "", 0.5, t0)
+	record(t, m, NodeUsage, "", 0.8, t0)
+	record(t, m, usage("pod:q"), "pod:q", 0.4, t0)
+	record(t, m, "queue@pod:q", "pod:q", 0.9, t0)
+	r := statemap.Relationship{From: "queue@pod:q", To: NodePressure, Sign: 1, Label: "drives"}
+	if err := m.DeclareRelationship(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AssertRelationshipStrength(statemap.RelationshipID(r.From, r.To, r.Label), 1, "test", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	cs := Attribute(m, []runtime.Workload{pod("pod:q")}, defaultPolicy(t, nil), reliefCfg())
+	if len(cs) != 1 || cs[0].Basis != BasisUsage {
+		t.Fatalf("candidates %+v; want pod:q ranked on usage", cs)
+	}
+}
