@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/DiyazY/di-agent/pkg/facts"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -88,14 +89,11 @@ func machineCores() int {
 // loadFacts reads the machine's facts from each named source into the map. A source
 // that reads nothing is logged, not fatal: a map without facts still models the
 // machine, it only lacks the frame. An unknown source name is fatal, since it is a
-// mistake in the command line.
-func loadFacts(m *statemap.Map, names, root string) error {
+// mistake in the spec.
+func loadFacts(m *statemap.Map, from []spec.FactSource) error {
 	var srcs []facts.Source
-	for _, n := range splitList(names) {
-		if n == "none" {
-			continue
-		}
-		s, err := facts.Build(n, root)
+	for _, f := range from {
+		s, err := facts.Build(f.Kind, f.Root)
 		if err != nil {
 			return err
 		}

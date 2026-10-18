@@ -11,26 +11,27 @@
 //
 // Usage:
 //
-//	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
-//	      -priors /path/to/prior_weights.json -kd k0s \
-//	      -collect-interval 10s -cgroup-root /sys/fs/cgroup \
-//	      [-script scenarios/linear.json] \
-//	      -peers http://node_1:8080,http://node_2:8080
+//	agent -config agent.yaml
+//	agent -print-config                  # the defaults, as a file to copy and edit
+//	agent -config agent.yaml -print-config   # the effective spec
 //
-// The -kd flag selects per-distribution edge weights from prior_weights.json
-// when set. Omit it (or pass an empty string) to use the global Di-Select
-// proposition strengths.
+// The agent is described by one document, agent.yaml (see pkg/spec): the file
+// overlays the defaults, so it names only what it changes, and a key the agent does
+// not know is refused. These are the only flags.
 //
-// The autonomous collection loop ticks at -collect-interval, calls
+// The profile's kd (profile.kd) selects the distribution named in profile.priors
+// when set. Omit it to use the global Di-Select proposition strengths.
+//
+// The autonomous collection loop ticks at sources.interval, calls
 // CollectorContract.Collect on the profile's collector, and runs each sample
 // through the facade's IngestSample. The collector is the cgroup one at
-// -cgroup-root, the Netdata one at -netdata-url, both together, or the synthetic
-// system from -script; with none configured, or -collect-interval=0, the loop is
-// disabled and only the manual POST /ingest-sample path updates the model.
+// sources.cgroup.root, the Netdata one at sources.netdata.url, both together, or the
+// synthetic system from sources.script; with none configured, or sources.interval 0,
+// the loop is disabled and only the manual POST /ingest-sample path updates the model.
 //
-// -regime (stable|default|bursty|volatile) sets alpha and convergence to a
+// profile.regime (stable|default|bursty|volatile) sets alpha and convergence to a
 // pre-characterised bundle matching the deployment's dynamics. Overrides any
-// explicit -alpha and -convergence values when set.
+// explicit profile.alpha and profile.convergence values when set.
 package main
 
 import (
@@ -47,14 +48,13 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
-	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
-	"github.com/DiyazY/di-agent/pkg/facts"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -66,238 +66,46 @@ const Version = "0.1.0"
 // binary is built without `-ldflags "-X main.BuildCommit=…"`.
 var BuildCommit = ""
 
+// defineFlags declares the command line: the agent is described by its file, so
+// the flags only name it and ask to see it.
+func defineFlags(fs *flag.FlagSet) (configPath *string, printConfig *bool) {
+	configPath = fs.String("config", "",
+		"path to the agent's spec, agent.yaml; empty runs the defaults. Every setting the "+
+			"agent takes lives in that file")
+	printConfig = fs.Bool("print-config", false,
+		"print the effective spec as YAML (the file over the defaults) and exit; "+
+			"`agent -print-config` is the full document to copy and edit")
+	return configPath, printConfig
+}
+
 func main() {
-	profileName := flag.String("profile", "edge-minimal", "deployment profile")
-	addr := flag.String("addr", ":8080", "HTTP listen address")
-	alpha := flag.Float64("alpha", 0.2, "EMA decay factor for the RECENT layer (0 < alpha < 1)")
-	alphaSlow := flag.Float64("alpha-slow", 0.001,
-		"EMA decay factor for the ESTABLISHED layer: the same paired observations read on a "+
-			"slower clock, answering what is normal for this machine rather than what is "+
-			"happening now. The default is a design choice on a measured trade-off, not a "+
-			"derived optimum: order-invariance and responsiveness trade off monotonically, "+
-			"so the measurement supports a band (roughly 0.004 to 0.0005) and 0.001 sits "+
-			"mid-band with ~10x the recent layer's order-invariance and about a third of "+
-			"its responsiveness. Pinning one value needs a stated requirement about how "+
-			"fast a baseline should follow a persistent change. An offline fit reported an "+
-			"interior maximum; a 135-stream sweep against this daemon refuted it as an "+
-			"artefact of the offline streams being ~6x shorter than a deployment's.")
-	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
-	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
-	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
-	kd := flag.String("kd", "", "Kubernetes distribution running on this node "+
-		"(k3s|k0s|k8s|kubeEdge|openYurt); selects per-KD edge weights from -priors when set")
-	collectInterval := flag.Duration("collect-interval", 10*time.Second,
-		"how often the collection loop ticks the Collector; 0 disables the loop")
-	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
-		"filesystem root the cgroup collector reads from; empty string disables the loop")
-	cgroupSubjects := flag.Bool("cgroup-subjects", true,
-		"walk pod cgroups (and -cgroup-units) as subjects: each becomes its own set of "+
-			"properties, admitted on first observation and retired on silence")
-	cgroupUnits := flag.String("cgroup-units", "",
-		"comma-separated globs of systemd units under system.slice to model as unit:<name> "+
-			"subjects (e.g. 'k0s*.service,containerd.service'); empty models none")
-	cgroupMaxSubjects := flag.Int("cgroup-max-subjects", 256,
-		"upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped")
-	cgroupCmdLabel := flag.Bool("cgroup-cmd-label", false,
-		"stamp cmd=<argv0> from each subject's first process (label only; needs /proc "+
-			"visibility, i.e. hostPID or privileged)")
-	cgroupPodLogs := flag.String("cgroup-pod-logs", minimal.DefaultPodLogRoot,
-		"the kubelet's pod log directory (<namespace>_<name>_<uid> per pod); each pod "+
-			"subject is labelled with its namespace and name from it. Empty names none; "+
-			"in a container, mount the host's directory here")
-	proposerThreshold := flag.Float64("proposer-threshold", 0.85,
-		"|Pearson r| above which the proposer emits a candidate")
-	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
-		"co-observations a pair needs inside the pair window before it can become a "+
-			"candidate — the pace at which structure appears")
-	proposerMinSpread := flag.Float64("proposer-min-spread", minimal.DefaultMinSpread,
-		"least movement, as a share of its declared range, each end of a pair must show "+
-			"over the window to become a candidate. Correlation is scale-free: without "+
-			"this, a series that barely moves can correlate perfectly. 0 disables it")
-	proposerFDR := flag.Float64("proposer-fdr", minimal.DefaultFDR,
-		"false-discovery rate of the candidate bar: a pair becomes a candidate only when "+
-			"its p-value clears the Benjamini-Hochberg bar at this rate over every pair "+
-			"tested, so the more pairs are tested the more evidence a candidate needs. "+
-			"0 disables the correction")
-	proposerMaxPairs := flag.Int("proposer-max-pairs", 0,
-		"how many property pairs discovery tests at once, across every pair class. 0 "+
-			"derives it from the machine: 1% of its memory and 1% of each collection "+
-			"tick's CPU, whichever allows fewer. When the budget is full the most "+
-			"variable properties get pairs first, and /state reports how far it rationed")
-	nodeID := flag.String("node-id", "",
-		"the machine this agent models. Used both to stamp its own MetricSamples and "+
-			"as its identity: the map is node-local, so samples labelled with another "+
-			"machine's ID are rejected unless -ingest-scope=any. Empty falls back to "+
-			"os.Hostname()")
-	staleAfter := flag.Duration("stale-after", 2*time.Minute,
-		"silence after which a property is marked stale. A model that keeps reporting "+
-			"a departed metric's last value asserts something it cannot support, so the "+
-			"map says 'stale' instead of holding the number quietly.")
-	retireAfter := flag.Duration("retire-after", 10*time.Minute,
-		"silence after which a property is retired automatically, cascading to the "+
-			"relationships that reference it. 0 leaves retirement to an operator. The "+
-			"default, 10m, is five default stale windows — long enough that a restarting "+
-			"collector is not mistaken for a departed subject — and does not follow -stale-after.")
-	noLearn := flag.Bool("no-learn", false,
-		"stop relationships learning their strength from paired observations of both "+
-			"endpoints. They then stay at their seeded priors with confidence 0, which is "+
-			"the honest report when nothing has been learned — but the map never improves "+
-			"on what it was told.")
-	pairWindowS := flag.Int("pair-window-seconds", 15,
-		"how far apart two observations may be and still count as simultaneous for "+
-			"learning. A tolerance, not smoothing: collectors sample on independent grids, "+
-			"so without one no pair ever forms.")
-	noAdmit := flag.Bool("no-admit", false,
-		"reject observations of properties that were never declared. Off by default: a "+
-			"model of a changing system that cannot represent something new is a model "+
-			"of the system as it was when someone wrote it down.")
-	sweepInterval := flag.Duration("sweep-interval", 0,
-		"how often to apply lifecycle transitions. 0 derives it from -stale-after "+
-			"(half, floored at 5s). Without a sweep, staleness and retirement only "+
-			"happen when something asks for them, which makes -stale-after a setting "+
-			"that describes nothing.")
-	stateFile := flag.String("state-file", "",
-		"path to persist the map and its journal. Empty keeps everything in memory, which "+
-			"means a restart returns the agent to cold start on a system it has already "+
-			"watched, and makes the audit trail an artefact of one process lifetime.")
-	saveInterval := flag.Duration("save-interval", time.Minute,
-		"how often to snapshot when -state-file is set. A snapshot is also written on "+
-			"shutdown, so this bounds what an unclean exit loses rather than what a clean "+
-			"one does.")
-	journalSize := flag.Int("journal-size", 0,
-		"entries of change and decision history to hold in memory (0 = default)")
-	ingestScope := flag.String("ingest-scope", "self",
-		"self: ingest only this machine's samples, which is what a node-local map means. "+
-			"any: aggregate every machine's telemetry into one graph — correct for "+
-			"replaying a whole testbed into a single daemon, wrong for a deployment, "+
-			"because the resulting weights average over machines that may be different "+
-			"physical systems")
-	netdataURL := flag.String("netdata-url", "",
-		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
-	netdataInclude := flag.String("netdata-include", strings.Join(minimal.DefaultNetdataInclude, ","),
-		"comma-separated patterns over Netdata chart contexts (path.Match: system.*, disk.io); "+
-			"each selected chart's dimensions become properties. '*' selects every chart Netdata has")
-	script := flag.String("script", "",
-		"run the synthetic system from this scenario file instead of real collectors; "+
-			"-collect-interval must equal the scenario's tick_seconds (the daemon refuses to start otherwise, "+
-			"because the script stamps simulated time while the map sweeps on the wall clock)")
-	peersFlag := flag.String("peers", "",
-		"comma-separated peer agent URLs to register at startup "+
-			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
-			"these by trust-weighted savings. Additional peers can be added at "+
-			"runtime via POST /peers.")
-	peerStatePoll := flag.Duration("peer-state-poll", 30*time.Second,
-		"how often to fetch each peer's semantic map. 0 disables polling, leaving "+
-			"GET /state/cluster to report only what a manual POST /state/peers/refresh "+
-			"collected — an empty cluster view then means nobody asked, not that the "+
-			"peers have no state.")
-	peerStateStale := flag.Duration("peer-state-stale", 90*time.Second,
-		"how old a peer's snapshot may be before the cluster view marks it history. "+
-			"Nothing is deleted at this age: during a partition the last snapshot is "+
-			"the only thing this agent has about that node, and it is labelled rather "+
-			"than withheld.")
-	domainPath := flag.String("domain", "",
-		"path to domain_spec.json: the constructs, metric routing, propositions, "+
-			"adjustment policy and operator vocabulary the agent reasons over. When "+
-			"empty the daemon searches upward from the working directory, and runs "+
-			"without a domain model if none is found: every observed property is still "+
-			"recorded and relationships are still discovered, but cost, recommendations "+
-			"and tuning are unavailable. A path that does not load is an error, and so "+
-			"is -no-admit with no domain model and no restored state, which would record nothing.")
-	regime := flag.String("regime", "",
-		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
-	var useProposer bool
-	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
-	var useTuner bool
-	flag.BoolVar(&useTuner, "tuner", true,
-		"enable the RuleBasedTuner behind POST /agent/tune (disable to wire DisabledTuner, "+
-			"which accepts requests and applies nothing)")
-
-	pairSupport := flag.Int("pair-support", 0,
-		"paired observations a relationship needs before its strength moves at all "+
-			"(0 = default 8). Below it the pair is buffered and confidence keeps "+
-			"reporting that nothing has been learned.")
-	pairHistory := flag.Int("pair-history", 0,
-		"recent pairs the strength estimate is computed over (0 = default 60). Older "+
-			"pairs fall out, which is what lets a relationship follow a system whose "+
-			"behaviour changes rather than averaging its whole history.")
-
-	explainProvider := flag.String("explain-provider", "none",
-		"natural-language explain provider: none (disabled) or openai-compatible "+
-			"(routes to any OpenAI-compat backend — Ollama, llama-server, LM Studio, vLLM)")
-	explainURL := flag.String("explain-url", "http://localhost:11434/v1",
-		"base URL for the OpenAI-compatible backend (used when -explain-provider=openai-compatible)")
-	explainModel := flag.String("explain-model", "qwen2.5:7b-instruct",
-		"model name for the OpenAI-compatible backend")
-	explainPrompt := flag.String("explain-prompt", "",
-		"path to the system-prompt file for /explain (default: cmd/agent/prompts/explain-v1.md alongside the binary)")
-	explainAPIKey := flag.String("explain-api-key", "",
-		"optional bearer token for the OpenAI-compatible backend "+
-			"(env var EXPLAIN_API_KEY takes precedence when both are set)")
-	explainPlannerPrompt := flag.String("explain-planner-prompt", "",
-		"path to the planner system prompt; empty derives planner-v1.md from -explain-prompt's directory")
-	explainCriticPrompt := flag.String("explain-critic-prompt", "",
-		"path to the critic system prompt; empty derives critic-v1.md from -explain-prompt's directory")
-	explainKeepAlive := flag.String("explain-keep-alive", "30m",
-		"how long the backend should keep the model resident between calls "+
-			"(Ollama `keep_alive`); empty disables the hint")
-	explainSessions := flag.Bool("explain-sessions", true,
-		"enable multi-turn session memory and the session-scoped tool cache for /explain")
-
-	autonomyLevel := flag.String("autonomy", "off",
-		"how much the agent reviews proposer candidates on its own: off (no reviewer), "+
-			"suggest (0: every tier suggests, nothing is applied), rules (1: tier 0 acts), "+
-			"bounded (2: model tiers confirm and defer above threshold; their rejections escalate), "+
-			"full (3: every tier acts above threshold); every review is a decision record")
-	autonomyInterval := flag.Duration("autonomy-interval", time.Minute, "how often the reviewer looks at the queue")
-	autonomyPerCycle := flag.Int("autonomy-per-cycle", 10, "candidates reviewed per cycle, strongest first")
-	autonomyRules := flag.String("autonomy-rules", "composition",
-		"tier 0 rules, comma-separated, first match decides; none for no rules")
-	autonomyRenderer := flag.String("autonomy-renderer", "text", "how a candidate's evidence is written for the models")
-	factSources := flag.String("facts", "host",
-		"comma-separated sources of the machine's facts (OS, CPU, memory, disk), read at startup; none for none (have: "+
-			strings.Join(facts.Names(), ", ")+")")
-	factsRoot := flag.String("facts-root", "",
-		"where the machine's filesystem is mounted, for an agent in a container reading its host (such as /host)")
-	autonomyDecisionBackend := flag.String("autonomy-decision-backend", "systemone",
-		"tier 1: systemone (Ollama decision models, /v1/systemone), openai-logprobs (any OpenAI-compatible "+
-			"server returning token log-probabilities: llama.cpp, vLLM, Ollama /v1), or none")
-	autonomyDecisionURL := flag.String("autonomy-decision-url", "http://localhost:11434",
-		"tier 1 base URL: Ollama's root for systemone, the /v1 base for openai-logprobs")
-	autonomyDecisionModel := flag.String("autonomy-decision-model", "tev1:4b", "tier 1 model")
-	autonomyDecisionKeepAlive := flag.String("autonomy-decision-keep-alive", "",
-		"Ollama keep_alive for the tier 1 model (openai-logprobs only); empty leaves the server default")
-	autonomyDecisionEffort := flag.String("autonomy-decision-reasoning-effort", "none",
-		"reasoning_effort sent by openai-logprobs, so a thinking model answers directly; empty omits it, and a server that refuses it gets it dropped")
-	autonomyReasoningBackend := flag.String("autonomy-reasoning-backend", "none",
-		"tier 2: openai-tools (any OpenAI-compatible server with tool calling) or none")
-	autonomyReasoningURL := flag.String("autonomy-reasoning-url", "http://localhost:11434/v1",
-		"tier 2 /v1 base URL; may be another machine")
-	autonomyReasoningModel := flag.String("autonomy-reasoning-model", "qwen3.8:27b-nvfp4", "tier 2 model")
-	autonomyReasoningKeepAlive := flag.String("autonomy-reasoning-keep-alive", "10m",
-		"Ollama keep_alive for the tier 2 model; empty omits it")
-	autonomyReasoningTools := flag.String("autonomy-reasoning-tools", strings.Join(autonomy.DefaultTools, ","),
-		"read-only tools the tier 2 model may call, comma-separated")
-	autonomyConfirm := flag.Float64("autonomy-confirm", autonomy.DefaultThresholds.Confirm,
-		"probability a model tier needs to confirm a candidate (and to orient an undirected one)")
-	autonomyReject := flag.Float64("autonomy-reject", autonomy.DefaultThresholds.Reject,
-		"probability a model tier needs to reject a candidate")
-	autonomyDefer := flag.Float64("autonomy-defer", autonomy.DefaultThresholds.Defer,
-		"probability a model tier needs to defer a candidate")
-
+	configPath, printConfig := defineFlags(flag.CommandLine)
 	flag.Parse()
 
 	if err := checkNoPositionalArgs(flag.NArg(), flag.Arg(0)); err != nil {
 		log.Fatalf("%v", err)
 	}
 
-	if err := applyRegime(*regime, alpha, convergence); err != nil {
-		log.Fatalf("invalid -regime %q: %v", *regime, err)
+	cfg, err := spec.Load(*configPath)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if *printConfig {
+		out, err := cfg.YAML()
+		if err != nil {
+			log.Fatalf("print-config: %v", err)
+		}
+		os.Stdout.Write(out)
+		return
 	}
 
-	if *nodeID == "" {
+	if err := applyRegime(cfg.Profile.Regime, &cfg.Profile.Alpha, &cfg.Profile.Convergence); err != nil {
+		log.Fatalf("invalid profile.regime %q: %v", cfg.Profile.Regime, err)
+	}
+
+	if cfg.Node.ID == "" {
 		if h, err := os.Hostname(); err == nil {
-			*nodeID = h
+			cfg.Node.ID = h
 		}
 	}
 
@@ -307,84 +115,88 @@ func main() {
 	// and discovers how they relate; what it cannot do is reason over constructs
 	// nobody declared. A path that was named and does not load is still an error,
 	// because silently running without the model someone asked for is worse.
-	var spec *domain.Spec
+	var dom *domain.Spec
 	switch {
-	case *domainPath != "":
+	case cfg.Domain.Path != "":
 		var err error
-		if spec, err = domain.Load(*domainPath); err != nil {
+		if dom, err = domain.Load(cfg.Domain.Path); err != nil {
 			log.Fatalf("domain spec: %v", err)
 		}
 	default:
 		if p, err := domain.FindSpec(""); err == nil {
-			if spec, err = domain.Load(p); err != nil {
+			if dom, err = domain.Load(p); err != nil {
 				log.Fatalf("domain spec: %v", err)
 			}
 		}
 	}
-	if spec != nil {
+	if dom != nil {
 		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-			len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
+			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting))
 	} else {
-		log.Printf("domain model: none (no -domain and no domain_spec.json found): every " +
+		log.Printf("domain model: none (no domain.path and no domain_spec.json found): every " +
 			"observed property is recorded and relationships are discovered; cost, " +
 			"recommendations and tuning return 501")
 	}
-	switch *ingestScope {
+	switch cfg.Node.IngestScope {
 	case "self":
-		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
+		log.Printf("identity: %s (node-local: foreign samples rejected)", cfg.Node.ID)
 	case "any":
-		log.Printf("identity: %s (ingest-scope=any: this graph will be an aggregate over "+
-			"every machine whose telemetry arrives, which is not a deployment topology)", *nodeID)
+		log.Printf("identity: %s (ingest_scope=any: this graph will be an aggregate over "+
+			"every machine whose telemetry arrives, which is not a deployment topology)", cfg.Node.ID)
 	default:
-		log.Fatalf("invalid -ingest-scope %q (valid: self, any)", *ingestScope)
+		log.Fatalf("invalid node.ingest_scope %q (valid: self, any)", cfg.Node.IngestScope)
 	}
+	pairWindowS := int(cfg.Map.PairWindow / time.Second)
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
-		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
-	maxPairs := *proposerMaxPairs
-	if maxPairs <= 0 && useProposer {
+		pairWindowS, orDefault(cfg.Map.PairSupport, 8), orDefault(cfg.Map.PairHistory, 60))
+	prop := cfg.Map.Proposer
+	maxPairs := prop.MaxPairs
+	if maxPairs <= 0 && prop.Enabled {
 		mem, cores := machineMemory(), machineCores()
-		maxPairs = minimal.DerivePairBudget(mem, cores, *collectInterval, profiles.DefaultProposerBufSize)
+		maxPairs = minimal.DerivePairBudget(mem, cores, cfg.Sources.Interval, profiles.DefaultProposerBufSize)
 		if mem == 0 {
 			log.Printf("proposer: machine memory unreadable; pair budget %d (fallback)", maxPairs)
 		} else {
 			log.Printf("proposer: pair budget %d derived from %.1f GiB and %d cores at a %s tick",
-				maxPairs, float64(mem)/(1<<30), cores, *collectInterval)
+				maxPairs, float64(mem)/(1<<30), cores, cfg.Sources.Interval)
 		}
 	}
 	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f fdr=%.3f max-pairs=%d",
-		*proposerThreshold, *proposerMinPairs, *proposerMinSpread, *proposerFDR, maxPairs)
+		prop.Threshold, prop.MinPairs, prop.MinSpread, prop.FDR, maxPairs)
+	cg := cfg.Sources.Cgroup
 	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v pod-logs=%q",
-		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel, *cgroupPodLogs)
-	if *netdataURL != "" {
-		log.Printf("netdata collector: url=%s include=%q", *netdataURL, *netdataInclude)
+		cg.Root, cg.Subjects, cg.Units, cg.MaxSubjects, cg.CmdLabel, cg.PodLogs)
+	if cfg.Sources.Netdata.URL != "" {
+		log.Printf("netdata collector: url=%s include=%q", cfg.Sources.Netdata.URL, cfg.Sources.Netdata.Include)
 	}
 
-	peerURLs := parsePeerURLs(*peersFlag)
+	peerURLs := cfg.Peers.URLs
 
-	cfg := profiles.Config{
-		EMAAlpha:             *alpha,
-		EMAAlphaSlow:         *alphaSlow,
-		ConvergenceThreshold: *convergence,
-		MinTrustScore:        *minTrust,
-		PriorWeightsPath:     *priorsPath,
-		KD:                   *kd,
-		NodeID:               *nodeID,
-		CgroupRoot:           *cgroupRoot,
-		CgroupSubjects:       *cgroupSubjects,
-		CgroupUnitGlobs:      splitCSV(*cgroupUnits),
-		CgroupMaxSubjects:    *cgroupMaxSubjects,
-		CgroupCmdLabel:       *cgroupCmdLabel,
-		CgroupPodLogRoot:     *cgroupPodLogs,
-		ScriptPath:           *script,
-		NetdataURL:           *netdataURL,
-		NetdataInclude:       splitCSV(*netdataInclude),
-		CollectInterval:      *collectInterval,
+	minSpread, fdr := prop.MinSpread, prop.FDR
+	pcfg := profiles.Config{
+		EMAAlpha:             cfg.Profile.Alpha,
+		EMAAlphaSlow:         cfg.Profile.AlphaSlow,
+		ConvergenceThreshold: cfg.Profile.Convergence,
+		MinTrustScore:        cfg.Profile.MinTrust,
+		PriorWeightsPath:     cfg.Profile.Priors,
+		KD:                   cfg.Profile.KD,
+		NodeID:               cfg.Node.ID,
+		CgroupRoot:           cg.Root,
+		CgroupSubjects:       cg.Subjects,
+		CgroupUnitGlobs:      cg.Units,
+		CgroupMaxSubjects:    cg.MaxSubjects,
+		CgroupCmdLabel:       cg.CmdLabel,
+		CgroupPodLogRoot:     cg.PodLogs,
+		ScriptPath:           cfg.Sources.Script,
+		NetdataURL:           cfg.Sources.Netdata.URL,
+		NetdataInclude:       cfg.Sources.Netdata.Include,
+		CollectInterval:      cfg.Sources.Interval,
 		PeerURLs:             peerURLs,
-		UseProposer:          useProposer,
-		ProposerThreshold:    *proposerThreshold,
-		ProposerMinPairs:     *proposerMinPairs,
-		ProposerMinSpread:    proposerMinSpread,
-		ProposerFDR:          proposerFDR,
+		UseProposer:          prop.Enabled,
+		ProposerThreshold:    prop.Threshold,
+		ProposerMinPairs:     prop.MinPairs,
+		ProposerMinSpread:    &minSpread,
+		ProposerFDR:          &fdr,
 		ProposerMaxPairs:     maxPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
@@ -392,12 +204,12 @@ func main() {
 		// returned HTTP 200 with an empty applied[] — accepting the request and
 		// doing nothing — which is indistinguishable from an intent that matched
 		// no keyword group.
-		UseRuleBasedTuner:    useTuner,
-		DomainSpec:           spec,
-		AcceptForeignSamples: *ingestScope == "any",
-		PairWindowSeconds:    *pairWindowS,
-		PairMinSupport:       *pairSupport,
-		PairWindow:           *pairHistory,
+		UseRuleBasedTuner:    cfg.Map.Tuner,
+		DomainSpec:           dom,
+		AcceptForeignSamples: cfg.Node.IngestScope == "any",
+		PairWindowSeconds:    pairWindowS,
+		PairMinSupport:       cfg.Map.PairSupport,
+		PairWindow:           cfg.Map.PairHistory,
 	}
 
 	// The state model: what this system exhibits, updated by every sample. It is
@@ -409,47 +221,47 @@ func main() {
 		// The map is owned by this node, and says so. Everything it reports about
 		// itself is attributable once state starts crossing node boundaries, and a
 		// snapshot from another machine is refused rather than adopted.
-		Owner:                   *nodeID,
-		StaleAfter:              *staleAfter,
-		RetireAfter:             *retireAfter,
-		ConvergenceObservations: int(*convergence),
-		Alpha:                   *alpha,
-		AlphaSlow:               *alphaSlow,
-		AdmitUnknown:            !*noAdmit,
-		Learn:                   !*noLearn,
+		Owner:                   cfg.Node.ID,
+		StaleAfter:              cfg.Map.StaleAfter,
+		RetireAfter:             cfg.Map.RetireAfter,
+		ConvergenceObservations: int(cfg.Profile.Convergence),
+		Alpha:                   cfg.Profile.Alpha,
+		AlphaSlow:               cfg.Profile.AlphaSlow,
+		AdmitUnknown:            cfg.Map.Admit,
+		Learn:                   cfg.Map.Learn,
 		LearnConfig: statemap.LearnConfig{
-			PairWindowSeconds: *pairWindowS,
-			MinSupport:        orDefault(*pairSupport, 8),
-			Window:            orDefault(*pairHistory, 60),
+			PairWindowSeconds: pairWindowS,
+			MinSupport:        orDefault(cfg.Map.PairSupport, 8),
+			Window:            orDefault(cfg.Map.PairHistory, 60),
 		},
-	}, statemap.NewJournal(*journalSize))
+	}, statemap.NewJournal(cfg.Map.JournalSize))
 	// Load before seeding. A snapshot holds what this agent learned; seeding holds what
 	// the specification declares. Loading second would refuse (the map would be
 	// populated), and merging blindly would silently pick a winner per property — so the
 	// order is: restore, then let seeding re-declare, where the rules are explicit and
 	// journalled.
-	if *stateFile != "" {
-		loaded, err := state.Load(*stateFile)
+	if cfg.Persist.File != "" {
+		loaded, err := state.Load(cfg.Persist.File)
 		if err != nil {
-			log.Fatalf("restoring state from %s: %v", *stateFile, err)
+			log.Fatalf("restoring state from %s: %v", cfg.Persist.File, err)
 		}
 		if loaded {
 			c := state.Census()
 			log.Printf("state model: restored %d properties and %d relationships from %s "+
-				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, *stateFile,
+				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, cfg.Persist.File,
 				state.Revision())
 		} else {
-			log.Printf("state model: no snapshot at %s, starting cold", *stateFile)
+			log.Printf("state model: no snapshot at %s, starting cold", cfg.Persist.File)
 		}
 	}
 
-	if err := checkCanRecord(spec != nil, *noAdmit, state.Census().PropertiesTotal); err != nil {
+	if err := checkCanRecord(dom != nil, !cfg.Map.Admit, state.Census().PropertiesTotal); err != nil {
 		log.Fatal(err)
 	}
 
 	// What the machine is, read once: the frame every property is read in. After the
 	// snapshot, which restores the revision, so the facts' entries follow it.
-	if err := loadFacts(state, *factSources, *factsRoot); err != nil {
+	if err := loadFacts(state, cfg.Facts); err != nil {
 		log.Fatal(err)
 	}
 
@@ -457,27 +269,17 @@ func main() {
 	// the specification, so relationships get this cluster's priors rather than a
 	// placeholder.
 
-	cfg.StateMap = state
+	pcfg.StateMap = state
 
-	sm, collector, err := profiles.Build(*profileName, cfg)
+	sm, collector, err := profiles.Build(cfg.Profile.Name, pcfg)
 	if err != nil {
-		log.Fatalf("failed to build profile %q: %v", *profileName, err)
+		log.Fatalf("failed to build profile %q: %v", cfg.Profile.Name, err)
 	}
 	if len(peerURLs) > 0 {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
-	explainer, err := buildExplainer(sm, explainOptions{
-		Provider:      *explainProvider,
-		BaseURL:       *explainURL,
-		Model:         *explainModel,
-		PromptPath:    *explainPrompt,
-		PlannerPath:   *explainPlannerPrompt,
-		CriticPath:    *explainCriticPrompt,
-		FlagAPIKey:    *explainAPIKey,
-		KeepAlive:     *explainKeepAlive,
-		EnableSession: *explainSessions,
-	})
+	explainer, err := buildExplainer(sm, cfg.Explain)
 	if err != nil {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
@@ -486,9 +288,9 @@ func main() {
 	// What this agent has heard from other agents, kept apart from what it observes
 	// itself. This is how a cluster-level question is answered without pretending the
 	// answer came from local observation.
-	peerState := statemap.NewPeerStore(*nodeID, *peerStateStale)
+	peerState := statemap.NewPeerStore(cfg.Node.ID, cfg.Peers.StateStale)
 	peerFetcher := &peerStateFetcher{
-		// The registry, not the -peers list: a peer added at runtime via POST /peers is
+		// The registry, not the peers.urls list: a peer added at runtime via POST /peers is
 		// then polled without a restart.
 		registry: sm.Peers(),
 		client:   peers.NewClient(5 * time.Second),
@@ -497,17 +299,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
-	reviewer, err := buildReviewer(sm, autonomyOptions{
-		Level: *autonomyLevel, Interval: *autonomyInterval, PerCycle: *autonomyPerCycle,
-		Thresholds: autonomy.Thresholds{Confirm: *autonomyConfirm, Reject: *autonomyReject, Defer: *autonomyDefer},
-		Rules:      *autonomyRules, Renderer: *autonomyRenderer,
-		DecisionBackend: *autonomyDecisionBackend, DecisionURL: *autonomyDecisionURL,
-		DecisionModel: *autonomyDecisionModel, DecisionKeepAlive: *autonomyDecisionKeepAlive,
-		DecisionEffort:   *autonomyDecisionEffort,
-		ReasoningBackend: *autonomyReasoningBackend, ReasoningURL: *autonomyReasoningURL,
-		ReasoningModel: *autonomyReasoningModel, ReasoningKeepAlive: *autonomyReasoningKeepAlive,
-		ReasoningTools: *autonomyReasoningTools,
-	})
+	registerConfigRoute(mux, cfg)
+	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
 	}
@@ -515,13 +308,13 @@ func main() {
 	registerAutonomyRoutes(mux, reviewer)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		log.Printf("semantic-map agent starting profile=%s addr=%s", *profileName, *addr)
+		log.Printf("semantic-map agent starting profile=%s addr=%s", cfg.Profile.Name, cfg.Node.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -532,13 +325,13 @@ func main() {
 	// collector with interval=0 is a deliberately disabled loop (useful for
 	// tests and for nodes that only accept manual POST /ingest-sample).
 	// Lifecycle is time-based, so something has to advance it. Without this loop
-	// -stale-after and -retire-after would only take effect when an operator posted
+	// map.stale_after and map.retire_after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
-	startSweepLoop(ctx, state, sweepEvery(*sweepInterval, *staleAfter))
-	startSaveLoop(ctx, state, *stateFile, *saveInterval)
-	startPeerStateLoop(ctx, peerFetcher, *peerStatePoll)
+	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
+	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
+	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 
-	startCollectionLoop(ctx, sm, collector, *collectInterval)
+	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
 	}
@@ -553,8 +346,8 @@ func main() {
 	// context and returning let the process exit while the goroutine was still racing to
 	// write, so the shutdown snapshot was usually lost and a clean restart silently
 	// dropped everything since the last periodic save.
-	if *stateFile != "" {
-		if err := state.Save(*stateFile); err != nil {
+	if cfg.Persist.File != "" {
+		if err := state.Save(cfg.Persist.File); err != nil {
 			log.Printf("state model: shutdown save failed: %v", err)
 		} else {
 			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
@@ -584,7 +377,7 @@ var regimes = map[string]regimePreset{
 }
 
 // applyRegime overwrites *alpha and *convergence with the preset values for the
-// named regime. It is a no-op when regime is empty (explicit flags win).
+// named regime. It is a no-op when regime is empty (an explicit alpha and convergence lose to it).
 // Returns an error for unrecognised regime names so the caller can log.Fatalf.
 func applyRegime(regime string, alpha, convergence *float64) error {
 	if regime == "" {
@@ -598,40 +391,6 @@ func applyRegime(regime string, alpha, convergence *float64) error {
 	*convergence = p.convergence
 	log.Printf("regime=%s → alpha=%.2f convergence=%.0f", regime, p.alpha, p.convergence)
 	return nil
-}
-
-// parsePeerURLs splits the --peers comma-separated value into a clean slice.
-// Empty entries (e.g. trailing commas, all-whitespace tokens) are dropped so
-// the registry never sees a "" URL. Returns nil when the input is empty so
-// callers can branch on len() instead of inspecting both flag and slice.
-func parsePeerURLs(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// splitCSV splits a comma-separated flag, trimming blanks; "" yields nil.
-func splitCSV(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if p := strings.TrimSpace(part); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // startCollectionLoop launches the autonomous tick goroutine. It is a no-op
@@ -649,7 +408,7 @@ func startCollectionLoop(
 		log.Printf("collection loop disabled: no collector for this profile/configuration")
 		return
 	case interval <= 0:
-		log.Printf("collection loop disabled: -collect-interval=%s", interval)
+		log.Printf("collection loop disabled: sources.interval=%s", interval)
 		return
 	}
 
@@ -694,40 +453,24 @@ func runCollectionLoop(
 	}
 }
 
-// buildExplainer constructs the /explain backend based on the -explain-provider
-// flag. Returns a DisabledExplainer when the operator hasn't opted in, so the
-// route handler can always safely call methods on the returned value.
+// buildExplainer constructs the /explain backend from the spec's explain block.
+// Returns a DisabledExplainer when the operator hasn't opted in, so the route
+// handler can always safely call methods on the returned value.
 //
-// The bearer token comes from EXPLAIN_API_KEY (env) if set, otherwise from the
-// -explain-api-key flag. Env-first matches the standard secret-handling
-// convention: credentials don't live in shell history or systemd unit files
-// unless the operator explicitly opted in via the flag.
-// explainOptions bundles the -explain-* flags. A struct rather than a long
-// positional list so adding a knob doesn't churn every call site.
-type explainOptions struct {
-	Provider      string
-	BaseURL       string
-	Model         string
-	PromptPath    string
-	PlannerPath   string
-	CriticPath    string
-	FlagAPIKey    string
-	KeepAlive     string
-	EnableSession bool
-}
-
-func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explainer, error) {
+// The bearer token is explain.api_key; write it as ${EXPLAIN_API_KEY} to keep the
+// credential out of the file.
+func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer, error) {
 	if opt.Provider == "" || opt.Provider == "none" {
 		log.Printf("explain: provider=none (POST /explain will return 501)")
 		return explain.NewDisabled(), nil
 	}
 	if opt.Provider != "openai-compatible" {
-		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", opt.Provider)
+		return nil, fmt.Errorf("unknown explain.provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
-	if opt.PromptPath == "" {
-		opt.PromptPath = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
+	if opt.Prompt == "" {
+		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
 	}
-	prompt, err := explain.LoadPrompt(opt.PromptPath)
+	prompt, err := explain.LoadPrompt(opt.Prompt)
 	if err != nil {
 		return nil, fmt.Errorf("read prompt: %w", err)
 	}
@@ -735,26 +478,21 @@ func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explain
 	// Planner and critic prompts are optional: a missing file disables that
 	// stage rather than failing startup, so an operator can run answer-only
 	// even with a partial prompt directory.
-	promptDir := filepath.Dir(opt.PromptPath)
-	plannerPrompt := loadOptionalPrompt(opt.PlannerPath, promptDir, "planner-v1.md", "planner")
-	criticPrompt := loadOptionalPrompt(opt.CriticPath, promptDir, "critic-v1.md", "critic")
-
-	apiKey := os.Getenv("EXPLAIN_API_KEY")
-	if apiKey == "" {
-		apiKey = opt.FlagAPIKey
-	}
+	promptDir := filepath.Dir(opt.Prompt)
+	plannerPrompt := loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v1.md", "planner")
+	criticPrompt := loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v1.md", "critic")
 
 	var sessions *explain.SessionStore
-	if opt.EnableSession {
+	if opt.Sessions {
 		sessions = explain.NewSessionStore(explain.SessionConfig{})
 	}
 
 	e, err := explain.NewOpenAICompatible(explainReader{sm}, explain.OpenAICompatibleConfig{
-		BaseURL:       opt.BaseURL,
+		BaseURL:       opt.URL,
 		Model:         opt.Model,
-		APIKey:        apiKey,
+		APIKey:        opt.APIKey,
 		SystemPrompt:  prompt,
-		PromptFile:    opt.PromptPath,
+		PromptFile:    opt.Prompt,
 		PlannerPrompt: plannerPrompt,
 		CriticPrompt:  criticPrompt,
 		KeepAlive:     opt.KeepAlive,
@@ -764,7 +502,7 @@ func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explain
 		return nil, err
 	}
 	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s planner=%t critic=%t sessions=%t keep_alive=%s",
-		opt.BaseURL, opt.Model, opt.PromptPath, plannerPrompt != "", criticPrompt != "", opt.EnableSession, opt.KeepAlive)
+		opt.URL, opt.Model, opt.Prompt, plannerPrompt != "", criticPrompt != "", opt.Sessions, opt.KeepAlive)
 	return e, nil
 }
 
@@ -816,14 +554,14 @@ func checkNoPositionalArgs(n int, first string) error {
 }
 
 // checkCanRecord refuses a configuration that can never record anything: without a
-// domain model nothing is declared, and -no-admit refuses whatever is not, so unless
+// domain model nothing is declared, and admit: false refuses whatever is not, so unless
 // a restored snapshot supplies properties every sample would be dropped while /state
 // stays empty, which looks the same as telemetry that has not arrived yet.
 func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
 	if hasSpec || !noAdmit || restored > 0 {
 		return nil
 	}
-	return fmt.Errorf("-no-admit without a domain model records nothing: no property " +
+	return fmt.Errorf("admit: false without a domain model records nothing: no property " +
 		"is declared, so every observation would be refused. Give -domain, restore a " +
 		"snapshot with -state-file, or drop -no-admit")
 }

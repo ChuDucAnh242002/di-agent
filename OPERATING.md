@@ -13,12 +13,12 @@ If you are changing code, read [`DEVELOPING.md`](DEVELOPING.md) instead. If you 
 | Assumption | Consequence for you |
 | ---------- | ------------------- |
 | **No authentication on any endpoint.** No TLS, no bearer tokens, no middleware. | Anyone who can reach the port can read the **whole model** — `GET /state` returns every property, relationship, decision and journal entry, not only the graph — *and mutate it*: deprecate propositions, reset edges, retune weights. Agents fetch each other's `/state` the same way, so a reachable agent also discloses to any host that can pose as a peer. Treat the listen address as fully trusted. |
-| **State is in memory unless `-state-file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold start — every relationship reporting `unknown` again. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
-| **`-addr :8080` binds every interface.** | On a multi-homed host this is reachable from anywhere routable. Bind explicitly. |
+| **State is in memory unless `persist.file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold start — every relationship reporting `unknown` again. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
+| **`node.addr: ":8080"` binds every interface.** | On a multi-homed host this is reachable from anywhere routable. Bind explicitly. |
 
 None of these are oversights — they are recorded scope decisions ([ARCHITECTURE §10](semantic-map/ARCHITECTURE.md#10-coordination)) for a lab-network deployment, with production hardening deferred to P7. But they mean the deployment rule is simple:
 
-> **Run it on an isolated or trusted network segment, bound to a private interface. Set `-state-file` if a restart must keep its learned state; without it, a restart returns to cold-start priors.**
+> **Run it on an isolated or trusted network segment, bound to a private interface. Set `persist.file` if a restart must keep its learned state; without it, a restart returns to cold-start priors.**
 
 If you need it on a shared network, put it behind something that terminates TLS and authenticates — a reverse proxy with client certs, or a WireGuard/Tailscale interface. Do not expose port 8080 to anything you do not control.
 
@@ -53,19 +53,19 @@ Measured on the reference build (`linux/arm64`, single static binary, no runtime
 | RSS after 500 observations (warm graph) | ~15 MB |
 | OS threads | 8 |
 
-A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. Memory grows with what the map holds, not with uptime: the domain model is small, the cgroup walk admits at most `-cgroup-max-subjects` subjects (default 256), silent properties are retired, and the observation ring buffers (the ~3 MB delta above) are bounded.
+A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. Memory grows with what the map holds, not with uptime: the domain model is small, the cgroup walk admits at most `sources.cgroup.max_subjects` subjects (default 256), silent properties are retired, and the observation ring buffers (the ~3 MB delta above) are bounded.
 
-Set `-proposer=false` on nodes where you want to reclaim the ring-buffer overhead entirely.
+Set `map.proposer.enabled: false` on nodes where you want to reclaim the ring-buffer overhead entirely.
 
 ### Software
 
 | Requirement | Notes |
 | ----------- | ----- |
-| Linux with cgroups v2 | Only if you want the cgroup collector. `-cgroup-root ""` disables it. |
-| Netdata (optional) | For richer host metrics. `-netdata-url ""` disables it. Tested against v1.42 and v1.33. |
+| Linux with cgroups v2 | Only if you want the cgroup collector. `sources.cgroup.root: ""` disables it. |
+| Netdata (optional) | For richer host metrics. an empty `sources.netdata.url` disables it. Tested against v1.42 and v1.33. |
 | Nothing else | Static Go binary. No interpreter, no shared libraries, no package manager. |
 
-The agent does **not** require Kubernetes to run. `-kd` only names the distribution for the record and is validated against the artefact's `distributions` list; it selects no magnitude and does not talk to an API server.
+The agent does **not** require Kubernetes to run. `profile.kd` only names the distribution for the record and is validated against the artefact's `distributions` list; it selects no magnitude and does not talk to an API server.
 
 ---
 
@@ -95,7 +95,7 @@ Then on each node:
 ```bash
 sudo install -m 0755 di-agent-arm64 /usr/local/bin/di-agent
 sudo mkdir -p /etc/di-agent
-di-agent --help          # confirm it runs
+di-agent -print-config >/dev/null   # confirm it runs
 ```
 
 ### Optional: initialization artefact
@@ -106,29 +106,29 @@ di-agent --help          # confirm it runs
 sudo install -m 0644 semantic-map/prior_weights.json /etc/di-agent/prior_weights.json
 ```
 
-Pass it with `-priors /etc/di-agent/prior_weights.json`. `-kd` names this node's distribution and is validated against the file; it no longer selects a magnitude, so two agents differing only in `-kd` answer identically until telemetry arrives.
+Name it with `profile.priors: /etc/di-agent/prior_weights.json`. `profile.kd` names this node's distribution and is validated against the file; it no longer selects a magnitude, so two agents differing only in `kd` answer identically until telemetry arrives.
 
 ---
 
 ## 3. Configure
 
-Everything is command-line flags — there is no config file. The full table is in [README §3](semantic-map/README.md#3-running-the-edge-daemon); these are the ones that matter operationally.
+The agent is described by one file, `agent.yaml`, passed as `-config`; there are no other settings flags. The file overlays the defaults, so it names only what it changes, and a key the agent does not know is refused. `di-agent -print-config` prints every setting with its default. The full reference is in [README §3](semantic-map/README.md#3-running-the-edge-daemon); these are the ones that matter operationally.
 
 ### Must decide
 
-| Flag | Why you care |
+| Setting | Why you care |
 | ---- | ------------ |
-| `-addr` | **Bind explicitly.** `-addr 127.0.0.1:8080` for local-only, or `-addr 10.0.0.5:8080` for one interface. The `:8080` default listens everywhere. |
-| `-node-id` | Identifies this agent in observations and event IDs. Defaults to `os.Hostname()`. Set it if hostnames are not stable. |
-| `-kd` | `k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`. Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. Selects no magnitude, so a wrong-but-valid value changes no answer. Wrong value = a mislabelled record, and the agent will not tell you. |
+| `node.addr` | **Bind explicitly.** `127.0.0.1:8080` for local-only, or `10.0.0.5:8080` for one interface. The `:8080` default listens everywhere. |
+| `node.id` | Identifies this agent in observations and event IDs. Defaults to `os.Hostname()`. Set it if hostnames are not stable. |
+| `profile.kd` | `k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`. Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. Selects no magnitude, so a wrong-but-valid value changes no answer. Wrong value = a mislabelled record, and the agent will not tell you. |
 
 ### Should tune
 
-| Flag | Guidance |
+| Setting | Guidance |
 | ---- | -------- |
-| `-regime` | `stable` / `default` / `bursty` / `volatile`. Sets `-alpha` and `-convergence` to a bundle calibrated against the k0s workload matrix. **Prefer this over tuning the two numbers by hand.** Use `stable` for steady IoT nodes, `bursty` for control-plane-heavy ones. |
-| `-collect-interval` | `10s` default. `5s` on nodes you want to converge faster; `0` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
-| `-proposer` | `true` default. Set `false` on CPU-constrained nodes — it keeps ring buffers per construct pair. |
+| `profile.regime` | `stable` / `default` / `bursty` / `volatile`. Sets `alpha` and `convergence` to a bundle calibrated against the k0s workload matrix. **Prefer this over tuning the two numbers by hand.** Use `stable` for steady IoT nodes, `bursty` for control-plane-heavy ones. |
+| `sources.interval` | `10s` default. `5s` on nodes you want to converge faster; `0s` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
+| `map.proposer.enabled` | `true` default. Set `false` on CPU-constrained nodes — it keeps ring buffers per construct pair. |
 
 ### Port conflict warning
 
@@ -150,15 +150,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/di-agent/env
-ExecStart=/usr/local/bin/di-agent \
-  -profile edge-minimal \
-  -addr ${LISTEN_ADDR} \
-  -node-id ${NODE_ID} \
-  -kd ${KD} \
-  -priors /etc/di-agent/prior_weights.json \
-  -netdata-url http://localhost:19999 \
-  -collect-interval 10s \
-  -regime ${REGIME}
+ExecStart=/usr/local/bin/di-agent -config /etc/di-agent/agent.yaml
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -203,6 +195,21 @@ KD=k0s
 REGIME=stable
 ```
 
+`/etc/di-agent/agent.yaml` carries what the old flags did; `${VAR}` in it is read from the environment (`/etc/di-agent/env` above), so one file serves many nodes:
+
+```yaml
+node:
+  addr: ${LISTEN_ADDR}
+  id: ${NODE_ID}
+profile:
+  kd: ${KD}
+  priors: /etc/di-agent/prior_weights.json
+  regime: ${REGIME}
+sources:
+  netdata:
+    url: http://localhost:19999
+```
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now di-agent
@@ -210,9 +217,9 @@ sudo systemctl status di-agent
 journalctl -u di-agent -f
 ```
 
-The hardening directives above are additions to the PoC unit, not copied from it — as written (no `-state-file`) the agent needs no filesystem writes, no privileges, and no address families beyond IP, so lock all of that down. **If you enable persistence**, add the state file's directory to `ReadWritePaths=`: `ProtectSystem=strict` makes the whole tree read-only, and both the periodic write and its temp file need that directory writable, so a hardened unit otherwise fails to persist silently while everything else looks healthy. `MemoryMax=128M` is roughly 8× the measured working set, which leaves headroom while still killing a runaway.
+The hardening directives above are additions to the PoC unit, not copied from it — as written (no `persist.file`) the agent needs no filesystem writes, no privileges, and no address families beyond IP, so lock all of that down. **If you enable persistence**, add the state file's directory to `ReadWritePaths=`: `ProtectSystem=strict` makes the whole tree read-only, and both the periodic write and its temp file need that directory writable, so a hardened unit otherwise fails to persist silently while everything else looks healthy. `MemoryMax=128M` is roughly 8× the measured working set, which leaves headroom while still killing a runaway.
 
-**`Restart=always` interacts with persistence — know which mode you are in.** With `-state-file`, a restart restores the map and journal from the last snapshot (written periodically and on clean shutdown), so `Restart=always` keeps the agent both available and warm; only what changed since the last periodic write is lost, and only on an unclean kill. Without a state file, every restart is a full reset to cold-start priors — automatic restart keeps the agent available but discards all learned evidence, and frequent restarts in `journalctl` are a data-loss event, not a blip.
+**`Restart=always` interacts with persistence — know which mode you are in.** With `persist.file`, a restart restores the map and journal from the last snapshot (written periodically and on clean shutdown), so `Restart=always` keeps the agent both available and warm; only what changed since the last periodic write is lost, and only on an unclean kill. Without a state file, every restart is a full reset to cold-start priors — automatic restart keeps the agent available but discards all learned evidence, and frequent restarts in `journalctl` are a data-loss event, not a blip.
 
 ---
 
@@ -314,7 +321,7 @@ curl -sf -X POST http://nodeA:9090/peers/$PEER_ID/trust -H 'Content-Type: applic
 
 2. **Peering is directional.** Registering B on A does not register A on B. For a full mesh, register every pair in both directions — that is 6 calls for 3 nodes.
 
-`-peers http://nodeB:9090,http://nodeC:9090` registers at startup, but only at trust `0.5`. Peers registered at runtime survive until restart, then vanish with the rest of the in-memory state.
+`peers.urls: http://nodeB:9090,http://nodeC:9090` registers at startup, but only at trust `0.5`. Peers registered at runtime survive until restart, then vanish with the rest of the in-memory state.
 
 Verify the mesh:
 
@@ -324,7 +331,7 @@ curl -sf -X POST http://nodeA:9090/recommend -H 'Content-Type: application/json'
   -d '{"task_type":"pod-scheduling","source_node_id":"master"}' | jq '{PeerID,ExpectedSavings}'
 ```
 
-Peers below the `-min-trust` floor (default `0.5`) are excluded from recommendations entirely. `poc/scripts/05-peers.sh` is a working full-mesh registration script if you want to copy the pattern.
+Peers below the `profile.min_trust` floor (default `0.5`) are excluded from recommendations entirely. `poc/scripts/05-peers.sh` is a working full-mesh registration script if you want to copy the pattern.
 
 ---
 
@@ -341,7 +348,7 @@ curl -s http://$ADDR/version | jq -r .agent_version    # confirm
 
 Rollback is the same procedure with the old binary. Keep the previous one around.
 
-**Plan for the state loss.** Without `-state-file` every upgrade returns the graph to cold start — every relationship reporting `unknown` — and the agent needs `-convergence` *paired* observations per relationship to re-converge (500 at default, ~40 minutes at a 5 s collect interval). Upgrade during a period when degraded decision quality is acceptable, and stagger across nodes rather than restarting a whole mesh at once.
+**Plan for the state loss.** Without `persist.file` every upgrade returns the graph to cold start — every relationship reporting `unknown` — and the agent needs `profile.convergence` *paired* observations per relationship to re-converge (500 at default, ~40 minutes at a 5 s collect interval). Upgrade during a period when degraded decision quality is acceptable, and stagger across nodes rather than restarting a whole mesh at once.
 
 If you need the learned state, snapshot it before stopping — `GET /graph` returns everything, and it is a reasonable audit record even though the agent cannot reload it:
 
@@ -360,12 +367,12 @@ Full inventory, so you can reason about it before deploying.
 
 | Path / endpoint | When | Why |
 | --------------- | ---- | --- |
-| `/sys/fs/cgroup/**` | Every `-collect-interval` | CPU, memory, throttling and CPU, I/O and memory pressure (`cpu.stat`, `memory.current`, `cpu.pressure`, `io.pressure`, `memory.pressure`). Read-only. Disable with `-cgroup-root ""`. |
-| `/proc/meminfo`, `/proc/stat` | Every `-collect-interval`, with the cgroup collector | The node's memory in use (a cgroup v2 root has no memory files) and CPU steal time. Read-only. |
-| `/proc/meminfo`, the agent's own `/sys/fs/cgroup/memory.max` and `cpu.max` | Once at start, with the proposer on and `-proposer-max-pairs=0` | The memory and CPUs the agent may use, from which the pair budget is derived. A container limit lower than the host counts. Read-only. |
-| `$NETDATA_URL/api/v1/data` | Every `-collect-interval` | Host metrics. Disable with `-netdata-url ""`. |
-| `-priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
-| `-explain-prompt` files | Once, at startup | Only when the explain layer is enabled. |
+| `/sys/fs/cgroup/**` | Every `sources.interval` | CPU, memory, throttling and CPU, I/O and memory pressure (`cpu.stat`, `memory.current`, `cpu.pressure`, `io.pressure`, `memory.pressure`). Read-only. Disable with `sources.cgroup.root: ""`. |
+| `/proc/meminfo`, `/proc/stat` | Every `sources.interval`, with the cgroup collector | The node's memory in use (a cgroup v2 root has no memory files) and CPU steal time. Read-only. |
+| `/proc/meminfo`, the agent's own `/sys/fs/cgroup/memory.max` and `cpu.max` | Once at start, with the proposer on and `map.proposer.max_pairs: 0` | The memory and CPUs the agent may use, from which the pair budget is derived. A container limit lower than the host counts. Read-only. |
+| `$NETDATA_URL/api/v1/data` | Every `sources.interval` | Host metrics. Disable with `sources.netdata.url: ""`. |
+| `profile.priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
+| `explain.prompt` files | Once, at startup | Only when the explain layer is enabled. |
 
 ### Writes
 
@@ -375,10 +382,10 @@ Full inventory, so you can reason about it before deploying.
 
 | Direction | Target | When |
 | --------- | ------ | ---- |
-| Inbound | `-addr` (default `:8080`, **all interfaces**) | Always. **Unauthenticated.** |
-| Outbound | Netdata at `-netdata-url` | Every collect interval |
+| Inbound | `node.addr` (default `:8080`, **all interfaces**) | Always. **Unauthenticated.** |
+| Outbound | Netdata at `sources.netdata.url` | Every collect interval |
 | Outbound | Peer agents' `/cost`, `/healthz`, `/offload` | On `/recommend` and offload |
-| Outbound | LLM at `-explain-url` | Only if `-explain-provider` is set; default is `none`, so **no LLM traffic by default** |
+| Outbound | LLM at `explain.url` | Only if `explain.provider` is set; default is `none`, so **no LLM traffic by default** |
 
 No telemetry, analytics, or update checks. The agent never contacts anything you have not configured.
 
@@ -399,7 +406,7 @@ journalctl -u di-agent | grep "collection loop"
 # "collection loop started: source=… interval=…"    → loop is up; source is unreachable
 ```
 
-If the loop is up, test the source directly: `curl -s localhost:19999/api/v1/data?chart=system.cpu | head`. On macOS or a container without cgroups v2, `-cgroup-root ""` is correct and expected — you need Netdata instead.
+If the loop is up, test the source directly: `curl -s localhost:19999/api/v1/data?chart=system.cpu | head`. On macOS or a container without cgroups v2, `sources.cgroup.root: ""` is correct and expected — you need Netdata instead.
 
 **Port already in use.** Under k0s, kube-router owns `:8080`. Use `:9090`. Check with `ss -tlnp | grep :8080`.
 
@@ -419,13 +426,13 @@ curl -s http://$ADDR/graph | jq -r '.edges[] | select(.deprecated == true) | .pr
 
 **A relationship shows strength 0 with a high `sign_conflicts` count.** That is not a quiet system; it is a wrong declaration. The machine is producing the opposite sign to the one the specification declares, every pair is being rejected at the gate, and `sign_suspect` flags it past 30 pairs at 60% conflict. Fix the declared direction or the route's polarity in `domain_spec.json` — do not wait for it to converge, because it cannot.
 
-**`/recommend` returns no peer.** Check, in order: peers registered (`GET /peers`), trust at or above `-min-trust` (default `0.5`), peers reachable (`curl` their `/healthz` from this node), and that at least one peer has a *lower* cost than local — a recommendation requires positive savings.
+**`/recommend` returns no peer.** Check, in order: peers registered (`GET /peers`), trust at or above `profile.min_trust` (default `0.5`), peers reachable (`curl` their `/healthz` from this node), and that at least one peer has a *lower* cost than local — a recommendation requires positive savings.
 
-**`POST /explain` returns 501.** Working as intended. `-explain-provider` defaults to `none`.
+**`POST /explain` returns 501.** Working as intended. `explain.provider` defaults to `none`.
 
 **Learned state vanished.** The process restarted. Check `systemctl show -p NRestarts di-agent`. All state is in memory; see [§8](#8-upgrade-and-rollback).
 
-**Everything looks right but decisions seem wrong.** `-kd` is no longer a candidate: it seeds no magnitude, so a mismatch mislabels the record and changes no answer. Check instead what the agent is actually reading — `GET /edges` gives `basis` per relationship, and `basis: unknown` on a relationship you expected to be learned means no pairs have formed. `GET /state/decisions/{id}` reproduces the inputs of any cost answer.
+**Everything looks right but decisions seem wrong.** `profile.kd` is no longer a candidate: it seeds no magnitude, so a mismatch mislabels the record and changes no answer. Check instead what the agent is actually reading — `GET /edges` gives `basis` per relationship, and `basis: unknown` on a relationship you expected to be learned means no pairs have formed. `GET /state/decisions/{id}` reproduces the inputs of any cost answer.
 
 ---
 

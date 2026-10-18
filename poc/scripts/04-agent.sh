@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POC_DIR="$(dirname "$SCRIPT_DIR")"
 GO_SRC="$(dirname "$POC_DIR")/semantic-map/go"
 SERVICE_SRC="$POC_DIR/config/di-agent.service"
+SPEC_SRC="$POC_DIR/config/agent.yaml"
 BINARY_OUT="/tmp/di-agent"
 
 # ── args ─────────────────────────────────────────────────────────────────────
@@ -73,6 +74,10 @@ NODE_ID=${NODE_ID}
 REGIME=${REGIME}
 ENVEOF
     "
+
+    info "$vm: installing /etc/di-agent/agent.yaml ..."
+    multipass transfer "$SPEC_SRC" "$vm:/tmp/agent.yaml"
+    multipass exec "$vm" -- bash -c "sudo mv /tmp/agent.yaml /etc/di-agent/agent.yaml"
 
     info "$vm: installing systemd service ..."
     multipass transfer "$SERVICE_SRC" "$vm:/tmp/di-agent.service"

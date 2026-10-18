@@ -133,7 +133,7 @@ than a convenience.
 proposition identifier. `domain_spec.json` declares the constructs, the
 propositions over them with their directions, the metric-to-construct routing,
 the adjustment floor and ceiling, and the tuner's intent vocabulary; the daemon
-loads it via `-domain`. It is optional: a node may have no specification to give
+loads it via `domain.path`. It is optional: a node may have no specification to give
 it, and the state model needs none — it admits whatever a node exhibits and
 discovers how those properties relate. Without one, only the operations defined
 over declared constructs are unavailable (cost and its recommendations, tuning),
@@ -163,13 +163,13 @@ When the pair tracker briefly keyed on construct alone and mixed nodes, the conf
 pair on RC→PS separated the opposite way under load; per-node pairing reversed the
 conclusion.
 
-Two mechanisms enforce this. `-node-id` is the agent's identity, not merely the label
-it stamps on its own samples, and `-ingest-scope=self` (the default) rejects samples
+Two mechanisms enforce this. `node.id` is the agent's identity, not merely the label
+it stamps on its own samples, and `node.ingest_scope: self` (the default) rejects samples
 belonging to another machine with a distinguishable error. `GET /cost?node=X` answers
 409 when X is not this agent, naming that machine's own URL if it is a known peer,
 because returning local numbers under a peer's name is a fabrication — and ignoring
 the parameter, which is what the route did before, was exactly that. Replaying a
-whole testbed into one daemon is legitimate and available via `-ingest-scope=any`,
+whole testbed into one daemon is legitimate and available via `node.ingest_scope: any`,
 which logs at startup that the resulting graph is an aggregate and not a deployment
 topology.
 
@@ -271,16 +271,16 @@ What each piece is for, when it runs, and whether it is required.
 
 | Component | Package | Purpose | Runs when | Required? |
 |---|---|---|---|---|
-| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest-sample` works without one |
+| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
 | **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
 | **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
 | **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
-| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`-proposer`) | Optional |
+| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
 | **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
-| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`-explain-provider=none` default) |
+| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup | Once, at boot | Yes |
 
 ### The four request lifecycles
@@ -399,7 +399,7 @@ The contract set has stayed at six since the first release. Three substantial co
 |---|---|
 | **State model** (`pkg/statemap`) | One implementation, and it is the agent's model rather than a pluggable store. A contract here would invite a second implementation, which is the arrangement §2 just finished removing. |
 | **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
-| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `-explain-provider=none`. |
+| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `explain.provider: none`. |
 
 The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
@@ -451,7 +451,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `ColdStart`                                    | every declared relationship present with confidence=0 and **no effective value at all** — `Effective()` reports not-known, so the agent says it does not know rather than reporting a constant |
 | `ConvergenceOnOneEdge`                         | observations at a fixed value: the recent layer converges, the established layer follows more slowly, confidence climbs 0→1 |
-| `PerKDAgentsAreIdenticalUntilTheyObserve`      | two agents built with different `-kd` produce **identical** cost answers until telemetry arrives — the inversion of the old expectation, and the point: nothing distinguishes them but what they measure |
+| `PerKDAgentsAreIdenticalUntilTheyObserve`      | two agents built with different `profile.kd` produce **identical** cost answers until telemetry arrives — the inversion of the old expectation, and the point: nothing distinguishes them but what they measure |
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
@@ -465,8 +465,8 @@ to 1e-6; the inversion is deliberate, and the failure it now guards against is a
 appearing where nothing has been measured. It still runs through `Build` with the same
 Config literal the daemon constructs, which a library-level test of the seeder could not
 do — and that distinction caught a real failure once, when the convergence harness
-passed `-proposer false` and Go's flag package silently dropped every flag after it,
-including `-priors` and `-kd`.
+passed `map.proposer.enabled: false` and Go's flag package silently dropped every flag after it,
+including `profile.priors` and `profile.kd`.
 
 `TestBuildKeepsOntologyAndStorageInAgreement` pins a second invariant: the strength a
 caller reads from `GET /propositions` is the one every answer is computed from. This
@@ -831,7 +831,7 @@ produce.
 `GET /state/estimate?target=` does the same for any property, not only the cost
 constructs.
 
-**The map survives the process.** `-state-file` persists properties, relationships and
+**The map survives the process.** `persist.file` persists properties, relationships and
 the journal; the write is to a temporary file and renamed, because a half-written
 snapshot read back on the next start would look like knowledge. Two things follow from
 persisting at all. A restarted agent is not back at cold start on a system it has
@@ -858,9 +858,9 @@ The map changes at three rates, and each is a setting rather than an accident.
 
 | Pace | Appears | Disappears |
 |---|---|---|
-| **Property** | one observation, at confidence 0 | stale after `-stale-after` (2 m) → retired after `-retire-after` (10 m), cascading to incident relationships |
-| **Magnitude** | `-alpha` (0.2) for the recent layer, `-alpha-slow` (0.001) for the established layer | — |
-| **Structure** | `-proposer-min-pairs` (30) co-observations inside `-pair-window-seconds` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+| **Property** | one observation, at confidence 0 | stale after `map.stale_after` (2 m) → retired after `map.retire_after` (10 m), cascading to incident relationships |
+| **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
+| **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
 
 Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
 
@@ -895,7 +895,7 @@ cluster view. A peer that answered before and cannot be reached now keeps its la
 snapshot and is listed as unreachable — during a partition that snapshot is all this
 agent has. An address that has never identified itself is reported as silent and does
 not become a node, because inventing one from a URL would put a machine that may not
-exist into the cluster view. And a snapshot older than `-peer-state-stale` is labelled
+exist into the cluster view. And a snapshot older than `peers.state_stale` is labelled
 history rather than withheld, so the caller decides whether to act on it.
 
 ### How a relationship's strength is learned
@@ -1039,13 +1039,13 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `-cgroup-pod-logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `sources.cgroup.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `sources.cgroup.max_subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `sources.cgroup.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
-| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick), `/api/v1/charts` for chart types (when a chart appears that it has not described, at most once a minute) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`-netdata-include`; a curated default of CPU, memory, I/O, network and disk — not pressure, which beside the cgroup collector is the same quantity read twice and discovery proposes the two readings as a near-perfect pair; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped. A sample's chart is the Netdata chart id only when Netdata calls the chart `stacked` — a whole split into parts (`system.cpu`, `system.ram`, `disk.space`) — and `<chart id>/<dimension>` otherwise: an area or line chart's dimensions share an axis, not a reading, and received and sent, or reads and writes, track each other when the traffic is request and response, which is a finding. A device chart Netdata counts into a node chart (by its `interface_type: real` or `device_type: physical` label, or any core) declares `part_of` the node type each dimension adds to. A chart not yet described counts as not stacked; a collapsed type carries its source dimension's chart, so `network_rx_bps` groups with `system.net.InOctets` and not with `OutOctets`. When it is the only collector it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); beside the cgroup collector it does not, because the two measure CPU differently. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
+| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick), `/api/v1/charts` for chart types (when a chart appears that it has not described, at most once a minute) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`sources.netdata.include`; a curated default of CPU, memory, I/O, network and disk — not pressure, which beside the cgroup collector is the same quantity read twice and discovery proposes the two readings as a near-perfect pair; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped. A sample's chart is the Netdata chart id only when Netdata calls the chart `stacked` — a whole split into parts (`system.cpu`, `system.ram`, `disk.space`) — and `<chart id>/<dimension>` otherwise: an area or line chart's dimensions share an axis, not a reading, and received and sent, or reads and writes, track each other when the traffic is request and response, which is a finding. A device chart Netdata counts into a node chart (by its `interface_type: real` or `device_type: physical` label, or any core) declares `part_of` the node type each dimension adds to. A chart not yet described counts as not stacked; a collapsed type carries its source dimension's chart, so `network_rx_bps` groups with `system.net.InOctets` and not with `OutOctets`. When it is the only collector it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); beside the cgroup collector it does not, because the two measure CPU differently. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
 
 The `CgroupCollector` reports memory from two different places, because a cgroup v2
 root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
@@ -1160,7 +1160,7 @@ Proposer pairs any two properties that co-occur — subject → node, node ↔ n
 subject ↔ subject — one pair per reading, as many pairs at once as the pair budget
 allows (the pairing rule below)
         ↓
-If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND each end holds
+If |r| ≥ map.proposer.threshold AND n ≥ map.proposer.min_pairs AND each end holds
 -proposer-min-pairs distinct readings AND each end moved by
 -proposer-min-spread of its declared range AND the map does not already hold the
 pair (either way round, for an undirected one):
@@ -1191,7 +1191,7 @@ because a person who has looked at the pair is the last tier there is.
 
 The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a pair of state-map properties becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
 
-The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `-proposer-min-pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, or rejected or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (`map.proposer.enabled: true` in `agent.yaml`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `map.proposer.min_pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, or rejected or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `map.proposer.enabled: false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
 
 ### The pairing rule and Discovered provenance
 
@@ -1207,13 +1207,13 @@ Readings further apart than the pair window do not form a pair, and a reading no
 
 ### The pair budget
 
-The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `-proposer-max-pairs`, is shared by all three classes.
+The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `map.proposer.max_pairs`, is shared by all three classes.
 
 - **Default from the machine.** `0` (the default) derives it at start from 1% of the agent's memory (`MemTotal`, or its own cgroup's `memory.max` when lower) at ~2.6 KB per tested pair, and 1% of each collection tick across its CPUs (`cpu.max` when lower) at 5 µs per pair per tick — ten times what an Apple M-series core measured, so a Raspberry Pi-class core is not overcommitted — whichever allows fewer. A 2 GiB VM gets about 8 000 pairs; an 8 GiB, 4-core Raspberry Pi about 32 000. Fixed at start rather than adapting while the agent runs, so a run's budget is one number in its log and in `/state`. When the memory cannot be read (not Linux), 4 096. An explicit value always wins.
 - **While there is room** every pair a reading can form is tested, so a node within its budget behaves as if there were none.
 - **When it is full**, a rationing pass runs at most once per pair window of reading time:
   - pairs whose candidate was confirmed, rejected or deferred by an operator, or that became a relationship, stop being tested;
-  - only properties observed within the pair window that moved by at least `-proposer-min-spread` of their declared range (of their largest magnitude when they declare none) compete;
+  - only properties observed within the pair window that moved by at least `map.proposer.min_spread` of their declared range (of their largest magnitude when they declare none) compete;
   - the most variable properties get pairs first, whatever the class — a pair ranks by its less variable end, because the variation gate needs both;
   - an arithmetic group competes through its representative only;
   - a new pair takes a free slot or displaces a tested pair that ranks below it: first one with an end gone quiet (not observed within the pair window), then one that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A live pair at or above the threshold is never displaced, and a pair is never displaced by one that ranks no higher, so the budget settles instead of rotating;
@@ -1224,11 +1224,11 @@ The per-pair cost is what made the budget affordable: each pair window used to k
 
 Four gates shape what is proposed:
 
-- **Variation.** Correlation is scale-free: a pod whose memory stepped between 572 KB and 1 MB correlated with node memory at r = 0.995 while moving 0.01% of the node. A candidate is emitted only when each end moved, over the window, by at least `-proposer-min-spread` (default 0.01) of its declared range. An end whose producer declared no range cannot be checked; the candidate is still emitted and its `Caveats` say so.
-- **Evidence, not length.** A rate that sits at zero and spikes a few times correlates, over a window, as if it had only those readings: idle pods' interfaces, at zero but for occasional bursts at the same moments (plausibly the bridge's broadcasts; not verified), paired at r = 1.0, 21 candidates in one 25-minute run. Each end must hold `-proposer-min-pairs` readings' worth of evidence — its readings off its commonest value, plus that value once, which is the window's length when no value repeats — or its r is undefined, as a constant series' is: no candidate, no group link, a pending candidate deferred as weakened. Past that, spikes count like any other movement, so a bursty workload active a quarter of the time is still tested. Unlike the spread gate this needs no declared range, so it covers the rates the spread gate cannot check.
+- **Variation.** Correlation is scale-free: a pod whose memory stepped between 572 KB and 1 MB correlated with node memory at r = 0.995 while moving 0.01% of the node. A candidate is emitted only when each end moved, over the window, by at least `map.proposer.min_spread` (default 0.01) of its declared range. An end whose producer declared no range cannot be checked; the candidate is still emitted and its `Caveats` say so.
+- **Evidence, not length.** A rate that sits at zero and spikes a few times correlates, over a window, as if it had only those readings: idle pods' interfaces, at zero but for occasional bursts at the same moments (plausibly the bridge's broadcasts; not verified), paired at r = 1.0, 21 candidates in one 25-minute run. Each end must hold `map.proposer.min_pairs` readings' worth of evidence — its readings off its commonest value, plus that value once, which is the window's length when no value repeats — or its r is undefined, as a constant series' is: no candidate, no group link, a pending candidate deferred as weakened. Past that, spikes count like any other movement, so a bursty workload active a quarter of the time is still tested. Unlike the spread gate this needs no declared range, so it covers the rates the spread gate cannot check.
 - **Composition.** A subject's metric against the node total of the same metric (`cpu_utilization@pod:a → cpu_utilization`) is part against whole, so its correlation is accounting rather than something learned. It is still proposed, because how much of the node one workload accounts for is what `without=` answers from, and carries `Kind: "composition"` so it is not read as a discovery. A part need not share the whole's name: a producer that knows a subject's quantity is summed into a node type declares it with `part_of`, and the Netdata collector does so for the devices Netdata counts into its node charts — real interfaces into `system.net`, physical disks into `system.io`, cores into `system.cpu`. On a node with one disk and one interface those pairs reached r = 1.000 and were offered as findings; they are the device being the node's total.
 - **Arithmetic groups.** A producer that computes several series from one reading (a Netdata chart's dimensions, a counter and its 10 s and 60 s averages) names them with one `chart`. Series of one chart and one subject whose tested pair reaches |r| ≥ 0.99 are sums, complements or smoothings of each other: the pair links them into a group instead of becoming a candidate, and the members a chain of links connects are one group. Its representative — the most variable member when the group formed, kept while it stays a member so one link elsewhere does not move every group's pairs — is the only member paired outside the chart; the others' outside pairs stop being tested and their pending candidates are deferred with `Reason: "grouped"`. Pairs inside a chart keep being tested, so a group breaks when its members part ways and they are paired again. A link forms at 0.99 and holds until |r| falls more than one standard error of Fisher's z below it (0.988 at 120 pairs), the band a pending candidate gets under its threshold: a pair whose |r| hovers at the cut-off otherwise forms and breaks its group at every crossing, and each break sends the pair into the pending queue as an ordinary candidate (the group count went 0 → 5 → 3 → 1 → 3 in a 25-minute run with Netdata before the band). The band is a Schmitt trigger set by sampling error, the same device ODAC (Rodrigues, Gama and Pedroso, IEEE TKDE 2008) uses when it splits a cluster of correlated streams only once the difference in question exceeds its Hoeffding bound; a link displaced from the budget breaks it too, since an untested link can neither hold nor break a group. Without this, a wide include list fills the pending queue with arithmetic. Series with no chart are never grouped: two quantities that merely correlate perfectly are a finding, not an identity. The chart is therefore the producer's claim that its series are parts of one reading, not that they are drawn together: the Netdata collector gives a non-stacked chart's dimensions a chart each, because received and sent on one interface reached |r| ≥ 0.99 on a request/response workload and were grouped as if one were arithmetic of the other.
-- **A bar corrected for the pairs tested.** With thousands of pairs, |r| ≥ 0.85 over few readings passes by chance often enough to matter. Each pair's Fisher p-value is kept at its last fold; a candidate must also have a p-value at or under the Benjamini–Hochberg bar at `-proposer-fdr` (default 0.05) over the `m` pairs being tested — `k·q/m` for the largest `k` whose sorted p-value is under it, `q/m` when none is — and carries that bar as `PBar`. A pair without enough readings yet counts in `m` as a test that found nothing: without that, the first pairs to reach `-proposer-min-pairs` were judged as if they were the only tests, and in a run of 30 noise properties about one noise pair per run got through. Arithmetic links are left out, since their p ≈ 0 would count as discoveries and loosen the bar for every real pair. A pending candidate the bar tightens past is deferred with `Reason: "bar"` and re-enters if it clears the bar again. The bar is recomputed once per round of folds, or sooner when `m` moves by a tenth: about one sort per tick. It controls the false-discovery rate under independence; readings that drift slowly together are autocorrelated, so the bar is a floor on the evidence asked for, not a guarantee.
+- **A bar corrected for the pairs tested.** With thousands of pairs, |r| ≥ 0.85 over few readings passes by chance often enough to matter. Each pair's Fisher p-value is kept at its last fold; a candidate must also have a p-value at or under the Benjamini–Hochberg bar at `map.proposer.fdr` (default 0.05) over the `m` pairs being tested — `k·q/m` for the largest `k` whose sorted p-value is under it, `q/m` when none is — and carries that bar as `PBar`. A pair without enough readings yet counts in `m` as a test that found nothing: without that, the first pairs to reach `map.proposer.min_pairs` were judged as if they were the only tests, and in a run of 30 noise properties about one noise pair per run got through. Arithmetic links are left out, since their p ≈ 0 would count as discoveries and loosen the bar for every real pair. A pending candidate the bar tightens past is deferred with `Reason: "bar"` and re-enters if it clears the bar again. The bar is recomputed once per round of folds, or sooner when `m` moves by a tenth: about one sort per tick. It controls the false-discovery rate under independence; readings that drift slowly together are autocorrelated, so the bar is a floor on the evidence asked for, not a guarantee.
 
 Confirming a candidate between properties declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Whether a confirmation goes to the state map or the ontology is decided by its ends, not their scope: two node-level properties are unscoped and still not constructs. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
 
@@ -1306,6 +1306,8 @@ This design also satisfies Ng's reliable-agentic-system invariant — *every imp
 
 ## 9. Control Surface
 
+**The agent is described by a spec, not by flags.** `pkg/spec` holds one document, `agent.yaml`: every setting the daemon takes, each defaulted to what the flag it replaced defaulted to. The file overlays the defaults, `${VAR}` is expanded from the environment so a secret stays out of it, and an unknown key is refused. The daemon's only flags are `-config` and `-print-config`; `GET /config` serves the running spec with secrets redacted. `main` builds every part from one `spec.Spec` value, so a later stage adds a block to the spec rather than a flag to the command line.
+
 The Semantic Map facade is a Go API. The agent daemon wraps it in three layers so that operators, scripts, and demos can drive the same surface without sharing process memory:
 
 ```
@@ -1335,6 +1337,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
 | ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
 | GET  | `/healthz`                        | —                                                                      | `{"ok":true}`                 | Liveness probe; never touches the facade                                                                |
+| GET  | `/config`                      | —                                                                      | the spec as JSON             | The spec the agent runs on (`agent.yaml` over the defaults); secrets shown as `[redacted]` |
 | GET  | `/version`                        | —                                                                      | `VersionResponse`             | Agent version, Go runtime, build commit, construct/proposition counts                                  |
 | GET  | `/graph`                          | —                                                                      | `GraphSnapshot`               | Full snapshot: every construct, every proposition (incl. deprecated), every edge                       |
 | GET  | `/edges`                          | `?from=&to=` (either or both, optional)                                | `[]EdgeDTO`                   | Filtered edge list; when both `from` and `to` are set, returns the conflict-pair multigraph fan-out    |
@@ -1528,7 +1531,7 @@ This section covers the registry and the trust mechanics that decide *where work
 In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
 - SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
-- gossip-based discovery (mDNS / dat-style) so peers find each other without a static `--peers` flag.
+- gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
 
@@ -1679,7 +1682,7 @@ Each VM: 2 vCPU, 2 GB RAM, 10 GB disk. Provisioned via [Multipass](https://multi
 Each node runs:
 - **k0s** in `--single` (controller+worker) mode — provides the k8s surface that Netdata's `k8s.cgroup` collector observes.
 - **Netdata** — system metrics at `localhost:19999`.
-- **di-agent** — `edge-minimal` profile, `-netdata-url http://localhost:19999`, `-kd k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
+- **di-agent** — `edge-minimal` profile, `sources.netdata.url: http://localhost:19999`, `profile.kd: k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
 
 Peer mesh: each agent registers the other two via `POST /peers`. The server derives the peer ID as `sha256(url)[:12]` and initialises trust at 0.5; `05-peers.sh` follows each add with `POST /peers/{id}/trust {"value":0.8}` to set the operational trust. diag-1 uses this mesh for `/recommend`.
 
@@ -1744,7 +1747,7 @@ make -C poc teardown                   # delete VMs and purge
 - **linux/arm64 binary**: `04-agent.sh` cross-compiles with `GOOS=linux GOARCH=arm64`. On an Apple Silicon host this is a same-arch cross (darwin → linux, same ISA); no emulation layer.
 - **Independent single-node clusters**: each VM runs k0s `--single`, not a joined multi-node cluster. The PoC tests agent-level routing decisions, not k8s scheduling. Three separate clusters keep provisioning simple and failure-isolated.
 - **No auth**: same v1 stance as the coordination layer — lab network only.
-- **`-proposer=false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
+- **`map.proposer.enabled: false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
 
 ---
 
@@ -1804,16 +1807,16 @@ v1 speaks the OpenAI `/v1/chat/completions` surface with function-tool semantics
 | vLLM            | `http://localhost:8000/v1`        |
 | Hosted (OpenAI) | `https://api.openai.com/v1`       |
 
-Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `-explain-provider=none` (the default).
+Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `explain.provider: none` (the default).
 
-### Configuration flags
+### Configuration
 
 ```
--explain-provider     none | openai-compatible          (default: none)
--explain-url          http://localhost:11434/v1         (default)
--explain-model        qwen2.5:7b-instruct               (default)
--explain-prompt       cmd/agent/prompts/explain-v1.md   (default)
--explain-api-key      ""                                (env EXPLAIN_API_KEY overrides)
+explain.provider      none | openai-compatible          (default: none)
+explain.url           http://localhost:11434/v1         (default)
+explain.model         qwen2.5:7b-instruct               (default)
+explain.prompt        cmd/agent/prompts/explain-v1.md   (default)
+explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
@@ -1839,7 +1842,7 @@ The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prom
 
 ### Reproducibility stance
 
-`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `-explain-provider=none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
+`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `explain.provider: none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
 
 ### Tests
 
@@ -2022,7 +2025,7 @@ Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `cr
 
 - **The reasoner, the state model, and the prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
 - **The tool registry is still read-only.** Planner, answering agent, and critic all get the same six read tools. None can mutate.
-- **`-explain-provider=none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
+- **`explain.provider: none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
 
 ### Tests
 
@@ -2043,7 +2046,7 @@ All run against a scripted mock LLM. No test requires Ollama.
 
 Candidate review is the one place the map waits on a person, and the first decision the
 agent takes on its own authority. How much authority is an operator setting
-(`-autonomy`); what the agent does with it is always a decision record.
+(`loops.review.level`); what the agent does with it is always a decision record.
 
 **Tiers, cheapest first.** A candidate goes up only as far as it has to.
 

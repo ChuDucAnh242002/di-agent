@@ -33,6 +33,7 @@ AGENT_BIN="./cmd/agent/tmp/di-agent-poc"
 MAPCTL_BIN="/tmp/semantic-map-mapctl"
 REPLAY_BIN="/tmp/semantic-map-replay"
 LOG_FILE="/tmp/semantic-map-agent.log"
+SPEC_FILE="/tmp/semantic-map-agent.yaml"
 BUILD_GOOS="${BUILD_GOOS:-${GOOS:-}}"
 BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-}}"
 BUILD_TARGET_FILE="/tmp/semantic-map-build-target"
@@ -136,9 +137,18 @@ cmd_start() {
     # An IPv6 literal needs brackets before the port (BIND=::1 → [::1]:8080).
     local host="$BIND"
     [[ "$host" == *:* && "$host" != \[* ]] && host="[$host]"
-    local args=(-profile "$PROFILE" -addr "$host:$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
-    [[ -n "$KD" ]]     && args+=(-kd "$KD")
-    [[ -n "$PRIORS" ]] && args+=(-priors "$PRIORS")
+    # The agent is described by a spec file; write this run's from the environment.
+    cat > "$SPEC_FILE" <<SPEC
+node:
+  addr: "$host:$PORT"
+profile:
+  name: "$PROFILE"
+  kd: "$KD"
+  priors: "$PRIORS"
+  alpha: $ALPHA
+  convergence: $CONVERGENCE
+SPEC
+    local args=(-config "$SPEC_FILE")
 
     step "$AGENT_BIN ${args[*]}"
     nohup "$AGENT_BIN" "${args[@]}" > "$LOG_FILE" 2>&1 &

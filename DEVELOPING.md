@@ -54,7 +54,7 @@ If both commands succeed you have a working checkout. Nothing else on this list 
 | Use `POST /explain` | A local OpenAI-compatible LLM. [Ollama](https://ollama.com) is smallest: `brew install ollama && ollama pull qwen2.5:7b-instruct` |
 | Run the 3-VM PoC | [Multipass](https://multipass.run) |
 
-**The LLM is genuinely optional.** `-explain-provider` defaults to `none`; the daemon boots and serves every other endpoint without it, and `POST /explain` returns `501` with instructions. No published result depends on it — see [ARCHITECTURE §13](semantic-map/ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain).
+**The LLM is genuinely optional.** `explain.provider` defaults to `none`; the daemon boots and serves every other endpoint without it, and `POST /explain` returns `501` with instructions. No published result depends on it — see [ARCHITECTURE §13](semantic-map/ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain).
 
 ---
 
@@ -105,22 +105,15 @@ Not via `dev.sh`. Build the binary and run it on the host.
 cd semantic-map/go
 go build -o /usr/local/bin/di-agent ./cmd/agent
 
-di-agent \
-  -profile edge-minimal \
-  -addr :8080 \
-  -priors /etc/di-agent/prior_weights.json \
-  -kd k0s \
-  -netdata-url http://localhost:19999 \
-  -collect-interval 10s \
-  -regime bursty
+di-agent -config /etc/di-agent/agent.yaml
 ```
 
-The full flag table is in [README §3](semantic-map/README.md#3-running-the-edge-daemon). The four that matter most:
+The agent is described by `agent.yaml`, not by flags; `di-agent -print-config` prints every setting with its default, and `semantic-map/agent.example.yaml` is that output. The reference is [README §3](semantic-map/README.md#3-running-the-edge-daemon). The four that matter most:
 
-- **`-kd`** names this node's distribution and is validated against the artefact's `distributions` list. It selects no magnitude: two agents differing only in `-kd` answer identically until telemetry arrives, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts. What makes an agent "know it is on k0s" is what it has measured on k0s.
-- **`-regime`** (`stable`/`default`/`bursty`/`volatile`) sets `-alpha` and `-convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
-- **`-collect-interval 0`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
-- **`-proposer=false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
+- **`profile.kd`** names this node's distribution and is validated against the artefact's `distributions` list. It selects no magnitude: two agents differing only in `kd` answer identically until telemetry arrives, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts. What makes an agent "know it is on k0s" is what it has measured on k0s.
+- **`profile.regime`** (`stable`/`default`/`bursty`/`volatile`) sets `alpha` and `convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
+- **`sources.interval: 0s`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
+- **`map.proposer.enabled: false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
 
 `poc/` has a Multipass-based 3-VM deployment (`make -C poc all`) if you want a real multi-node mesh; see [ARCHITECTURE §12](semantic-map/ARCHITECTURE.md#12-poc-deployment-poc).
 
@@ -223,7 +216,7 @@ There is also no longer a Python mirror of these interfaces. One existed, descri
 
 ### 4.4 Add a deployment profile
 
-A profile is a named wiring of implementations. The binary is identical across profiles; only the `-profile` flag changes.
+A profile is a named wiring of implementations. The binary is identical across profiles; only `profile.name` changes.
 
 In `pkg/profiles/profiles.go`:
 
@@ -344,11 +337,11 @@ Never commit absolute local paths (`/Users/…`).
 
 ## 7. Troubleshooting
 
-**`POST /explain` returns 501.** Working as intended — `-explain-provider` defaults to `none`. The response body says how to enable it.
+**`POST /explain` returns 501.** Working as intended — `explain.provider` defaults to `none`. The response body says how to enable it.
 
-**Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `-addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
+**Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `node.addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
 
-**Collector emits nothing.** Three usual causes: (1) `-collect-interval 0` disables the loop; (2) `-cgroup-root ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
+**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) `sources.cgroup.root: ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
 
 **Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values. Every `MetricSample.Value` must be in `[0,1]`. See the warning in [§4.1](#41-add-a-collector-most-common).
 
