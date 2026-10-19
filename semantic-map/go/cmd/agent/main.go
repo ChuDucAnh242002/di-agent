@@ -529,7 +529,7 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) 
 		return nil, fmt.Errorf("unknown explain.provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
 	if opt.Prompt == "" {
-		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
+		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v2.md")
 	}
 	prompt, err := explain.LoadPrompt(opt.Prompt)
 	if err != nil {
@@ -541,8 +541,8 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) 
 	// even with a partial prompt directory.
 	promptDir := filepath.Dir(opt.Prompt)
 	prompt = withDomain(prompt, dom)
-	plannerPrompt := withDomain(loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v1.md", "planner"), dom)
-	criticPrompt := withDomain(loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v1.md", "critic"), dom)
+	plannerPrompt := withDomain(loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v2.md", "planner"), dom)
+	criticPrompt := withDomain(loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v2.md", "critic"), dom)
 
 	var sessions *explain.SessionStore
 	if opt.Sessions {

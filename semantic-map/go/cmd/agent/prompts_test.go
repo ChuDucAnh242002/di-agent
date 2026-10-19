@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,8 +14,12 @@ import (
 // from the domain model loaded at startup ({{DOMAIN}}). A prompt that lists a domain's
 // constructs, or the seeded-prior arithmetic the agent no longer has, tells a language
 // model about a map that does not exist.
+// constructOrProposition matches a Di-Select construct abbreviation or a
+// proposition id standing alone, as a worked example would write one.
+var constructOrProposition = regexp.MustCompile(`\b(RC|PS|CO|SC|MU|RR|CE|P[0-9]{1,2})\b`)
+
 func TestPromptsNameNoConstructs(t *testing.T) {
-	for _, name := range []string{"explain-v1.md", "planner-v1.md", "critic-v1.md"} {
+	for _, name := range []string{"explain-v2.md", "planner-v2.md", "critic-v2.md"} {
 		b, err := os.ReadFile(filepath.Join("prompts", name))
 		if err != nil {
 			t.Fatal(err)
@@ -24,10 +29,15 @@ func TestPromptsNameNoConstructs(t *testing.T) {
 			t.Errorf("%s: no {{DOMAIN}} placeholder for the loaded domain model", name)
 		}
 		for _, stale := range []string{"7 constructs", "Connectivity & Offline", "15 propositions",
-			"prior_weight", "(1 - c)", "(effective - prior)", "usually 'master'"} {
+			"prior_weight", "(1 - c)", "(effective - prior)", "usually 'master'", "ResourceCost", "Resource & Cost"} {
 			if strings.Contains(s, stale) {
 				t.Errorf("%s: still says %q", name, stale)
 			}
+		}
+		// Worked examples teach the model what to ask for, so one that queries a
+		// construct or a proposition by id teaches it to expect a domain model.
+		if ids := constructOrProposition.FindAllString(s, -1); len(ids) > 0 {
+			t.Errorf("%s: names construct or proposition ids %v", name, ids)
 		}
 	}
 }
@@ -38,7 +48,8 @@ func TestToolDescriptionsNameNoConstructs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stale := range []string{"RC/PS/CO/SC/MU/RR/CE", "prior_weight", "usually 'master'"} {
+	for _, stale := range []string{"RC/PS/CO/SC/MU/RR/CE", "prior_weight", "usually 'master'",
+		"between the domain model's constructs", "From-construct", "To-construct"} {
 		if strings.Contains(string(b), stale) {
 			t.Errorf("tools.go: a tool description still says %q", stale)
 		}

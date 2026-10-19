@@ -1820,7 +1820,7 @@ Operator → POST /explain (question)
              ▼
         pkg/explain (OpenAICompatibleExplainer)
              │
-             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (system prompt: cmd/agent/prompts/explain-v2.md)
              │  (tool schemas: get_cost, get_edges, get_history,
              │                 get_peers, get_recommend, get_graph)
              │
@@ -1870,13 +1870,13 @@ Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary 
 explain.provider      none | openai-compatible          (default: none)
 explain.url           http://localhost:11434/v1         (default)
 explain.model         qwen2.5:7b-instruct               (default)
-explain.prompt        cmd/agent/prompts/explain-v1.md   (default)
+explain.prompt        cmd/agent/prompts/explain-v2.md   (default)
 explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 
@@ -2062,9 +2062,9 @@ Every response carries `usage`:
 explain.provider         none | openai-compatible          (default: none)
 explain.url              http://localhost:11434/v1
 explain.model            qwen2.5:7b-instruct
-explain.prompt           cmd/agent/prompts/explain-v1.md
-explain.planner_prompt   (derived: <prompt dir>/planner-v1.md)
-explain.critic_prompt    (derived: <prompt dir>/critic-v1.md)
+explain.prompt           cmd/agent/prompts/explain-v2.md
+explain.planner_prompt   (derived: <prompt dir>/planner-v2.md)
+explain.critic_prompt    (derived: <prompt dir>/critic-v2.md)
 explain.keep_alive       30m
 explain.sessions         true
 explain.api_key          ""   (write ${EXPLAIN_API_KEY} to read it from the environment)
@@ -2074,7 +2074,7 @@ A missing *derived* planner/critic prompt disables that stage with a log line; a
 
 ### Prompt versioning
 
-Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+Three prompts, each versioned by filename (v1 is kept unedited; v2 removed the hard-coded constructs): `explain-v2.md`, `planner-v2.md`, `critic-v2.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
 
 ### What v2 does not change
 

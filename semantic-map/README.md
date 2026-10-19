@@ -257,9 +257,9 @@ semantic-map/
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
     │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
     │   ├── prompts/            Versioned LLM system prompts (loaded at startup)
-    │   │   ├── explain-v1.md   Answering agent — graph semantics, tools, response schema
-    │   │   ├── planner-v1.md   Planner agent — planning rules + worked examples
-    │   │   └── critic-v1.md    Critic agent — what Gate 1 already covers, what only it can catch
+    │   │   ├── explain-v2.md   Answering agent — graph semantics, tools, response schema
+    │   │   ├── planner-v2.md   Planner agent — planning rules + worked examples
+    │   │   └── critic-v2.md    Critic agent — what Gate 1 already covers, what only it can catch
     │   └── static/             Embedded operator console — no external assets
     │       ├── index.html      Shell: header, census strip, canvas, inspector, drawer
     │       ├── style.css       Design tokens (sign / status / provenance / ink) + layout
@@ -1070,9 +1070,9 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `explain.provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
 | `explain.url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
 | `explain.model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
-| `explain.prompt`          | `cmd/agent/prompts/explain-v1.md`| Answering-agent system prompt. Required when the provider is enabled.   |
-| `explain.planner_prompt`  | `<prompt-dir>/planner-v1.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
-| `explain.critic_prompt`   | `<prompt-dir>/critic-v1.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
+| `explain.prompt`          | `cmd/agent/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `explain.planner_prompt`  | `<prompt-dir>/planner-v2.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
+| `explain.critic_prompt`   | `<prompt-dir>/critic-v2.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
 | `explain.keep_alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
 | `explain.sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
 | `explain.api_key`         | `""`                             | Bearer token for the backend. Write `${EXPLAIN_API_KEY}` to read it from the environment; the agent no longer reads that variable on its own. |
@@ -1381,7 +1381,7 @@ explain:
   provider: openai-compatible
   url: http://localhost:11434/v1
   model: qwen2.5:7b-instruct
-  prompt: cmd/agent/prompts/explain-v1.md
+  prompt: cmd/agent/prompts/explain-v2.md
 persist:
   file: ""
 SPEC
@@ -1486,8 +1486,8 @@ Every response carries a `usage` block so you can see what each feature costs:
 
 ```yaml
 explain:
-  planner_prompt: ""   # path to the planner prompt; empty is <dir of explain.prompt>/planner-v1.md
-  critic_prompt: ""    # path to the critic prompt; empty is <dir of explain.prompt>/critic-v1.md
+  planner_prompt: ""   # path to the planner prompt; empty is <dir of explain.prompt>/planner-v2.md
+  critic_prompt: ""    # path to the critic prompt; empty is <dir of explain.prompt>/critic-v2.md
   keep_alive: 30m      # model residency hint: a big latency win on repeat calls
   sessions: true       # session memory
 ```
