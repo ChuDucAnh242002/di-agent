@@ -37,7 +37,8 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 # 1. Start the daemon (edge-minimal profile, in-memory).
 # domain.path loads the domain model; without it (and with no domain_spec.json found
 # above the working directory) the agent runs with none. persist.file "" keeps the
-# map in memory: the default, /var/lib/di-agent, needs root. See §3.
+# map in memory: the agent refuses to start where it cannot write the default,
+# /var/lib/di-agent, which usually needs root. See §3.
 cd semantic-map/go
 printf 'domain:\n  path: ../domain_spec.json\npersist:\n  file: ""\n' > /tmp/agent.yaml
 go run ./cmd/agent -config /tmp/agent.yaml &
@@ -694,7 +695,7 @@ kubectl apply -f deploy/kubernetes/rbac.yaml
 kubectl apply -f deploy/kubernetes/daemonset.yaml
 ```
 
-The DaemonSet keeps the map on the node, in `/var/lib/di-agent` (a `hostPath`), so it survives the pod being restarted or upgraded; a drain sends SIGTERM and the agent saves before it exits. It reads the node's cgroups and pod logs read-only under `/host`, and ships with `loops.relief.enabled: false`.
+The DaemonSet keeps the map on the node, in `/var/lib/di-agent` (a `hostPath`), so it survives the pod being restarted or upgraded; a drain sends SIGTERM and the agent saves before it exits. The node's filesystem is mounted read-only at `/host`, where the agent reads the node's cgroups, pod logs and facts (`facts[].root: /host`), so the map describes the node and not the container. It tolerates every taint, so control-plane and tainted nodes run an agent too, and ships with `loops.relief.enabled: false`.
 
 The agent's own pod must carry its UID in `POD_UID`, from the downward API, or the agent refuses to start in-cluster: it is how the agent recognises itself among the pods it may cap.
 
@@ -803,6 +804,8 @@ and the default `node.ingest_scope: self` rejects telemetry labelled with anothe
 machine's ID rather than folding it in. Every map is stamped with its owner, so a
 property is attributable once state crosses a node boundary, and a snapshot copied
 from another host is refused instead of adopted as local history.
+
+Each example below keeps the map in `/var/lib/di-agent/state.json`, the default; run as a user who cannot write there, add `persist: {file: ""}` to keep it in memory, or name a writable path.
 
 ```bash
 # A deployment: one agent per node, modelling that node
@@ -1047,7 +1050,7 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
 | `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
-| `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
+| `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero. |
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
 | `facts[].root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |

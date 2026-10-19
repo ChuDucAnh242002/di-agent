@@ -7,6 +7,10 @@
 # restarted, rescheduled onto the same node, or upgraded: an agent that has watched
 # a machine for a week comes back with what it learned. The snapshot is stamped
 # with the node's name and is refused by any other node.
+#
+# The node's own filesystem is mounted read-only at /host: the agent reads the
+# node's cgroups, pod logs, and the facts that say what machine this is (its
+# hostname, OS, CPU, memory and disk) there, not the container's.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,6 +24,9 @@ data:
       cgroup:
         root: /host/sys/fs/cgroup
         pod_logs: /host/var/log/pods
+    facts:
+      - kind: host
+        root: /host
     persist:
       file: /var/lib/di-agent/state.json
     runtime:
@@ -42,6 +49,9 @@ spec:
       labels: {app: di-agent}
     spec:
       serviceAccountName: di-agent
+      # Every node runs an agent, tainted ones and the control plane included.
+      tolerations:
+        - operator: Exists
       containers:
         - name: agent
           image: di-agent:dev
@@ -62,17 +72,14 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/di-agent, readOnly: true}
             - {name: state, mountPath: /var/lib/di-agent}
-            - {name: cgroup, mountPath: /host/sys/fs/cgroup, readOnly: true}
-            - {name: pod-logs, mountPath: /host/var/log/pods, readOnly: true}
+            - {name: host, mountPath: /host, readOnly: true}
       # A pod stopped by a drain or an upgrade gets SIGTERM and saves the map before
-      # it exits; the default 30s is ample for a snapshot.
+      # it exits, well within the grace period.
       terminationGracePeriodSeconds: 30
       volumes:
         - name: config
           configMap: {name: di-agent}
         - name: state
           hostPath: {path: /var/lib/di-agent, type: DirectoryOrCreate}
-        - name: cgroup
-          hostPath: {path: /sys/fs/cgroup, type: Directory}
-        - name: pod-logs
-          hostPath: {path: /var/log/pods, type: DirectoryOrCreate}
+        - name: host
+          hostPath: {path: /, type: Directory}

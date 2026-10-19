@@ -384,7 +384,9 @@ func main() {
 	// dropped everything since the last periodic save.
 	if cfg.Persist.File != "" {
 		if err := state.Save(cfg.Persist.File); err != nil {
-			log.Printf("state model: shutdown save failed: %v", err)
+			// Exits non-zero, so a supervisor sees what the log says: what changed
+			// since the last periodic save may be lost.
+			log.Fatalf("state model: shutdown save failed: %v", err)
 		} else {
 			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 		}

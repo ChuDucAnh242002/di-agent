@@ -2,9 +2,11 @@ package statemap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/stats"
@@ -107,6 +109,8 @@ func (m *Map) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating snapshot directory: %w", err)
 	}
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	snap := m.Snapshot()
 	blob, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -146,25 +150,33 @@ func (m *Map) Save(path string) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replacing snapshot: %w", err)
 	}
-	// And the directory after it, so the rename itself survives a power cut.
+	// And the directory after it, so the rename itself survives a power cut. The
+	// snapshot is in place by now, so a failure here says so rather than reading as
+	// a failed save.
 	if err := syncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("flushing snapshot directory: %w", err)
+		return fmt.Errorf("snapshot replaced, but flushing its directory failed: %w", err)
 	}
 	return nil
 }
 
+// syncDir flushes a directory. A filesystem that cannot flush one (some network
+// and FUSE mounts refuse with EINVAL or ENOTSUP) has nothing to flush, and is not
+// a failure.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
+		return err
+	}
+	return nil
 }
 
 // CanSave reports whether a snapshot can be written at path, by creating its
 // directory and a temporary file beside it. An agent checks this at start: a
-// path it cannot write would otherwise fail every minute in the log while the
+// path it cannot write would otherwise fail at every save, in the log while the
 // operator believes the map is being kept.
 func CanSave(path string) error {
 	if path == "" {

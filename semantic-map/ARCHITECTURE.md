@@ -546,7 +546,7 @@ What is stable, what is not:
 - **Proposition removal** is impossible. `Deprecate` is the only retirement path. Deprecated propositions remain in `Propositions()` so the audit trail / replay are intact, and the relationship stays in the model marked retired — soft-delete preserves both the structural and the evidence record, so a decision taken before the retirement remains reconstructible.
 - **Proposition direction reversal** is impossible. `ValidateProposition` rejects a new edge that contradicts an existing direction. The three Di-Select conflict pairs (P2/P3, P5/P6, P7/P9) are exempt because both halves are present from the bootstrap; the Proposer cannot introduce *new* conflict pairs without explicit operator action (a future extension).
 
-The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart when a state file is configured (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
+The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart unless `persist.file` is set to `""` (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
 
 Implementations that intentionally do not support a mutation (e.g. a read-only ontology cache layered in front of the canonical store) return `contracts.ErrNotImplemented` rather than silently succeeding. The compliance suite tolerates this — every live-ontology subtest skips on `ErrNotImplemented`.
 
@@ -843,11 +843,13 @@ constructs.
 the journal, and is on by default (`/var/lib/di-agent/state.json`): an agent that keeps
 nothing is the exception an operator asks for with `""`, not the default they forget to
 change. The write is to a temporary file, flushed to disk, renamed, and the directory
-flushed after it, because a half-written snapshot read back on the next start would look
+flushed after it (a filesystem that cannot flush a directory is let be), because a half-written snapshot read back on the next start would look
 like knowledge, and a rename that reached the disk before its bytes leaves an empty one
 after a power cut, which an edge node on an SD card will see. The agent checks at start
 that it can write there and refuses to start if not, rather than failing every minute
-in a log while the operator believes the map is kept. Two things follow from
+in a log while the operator believes the map is kept. Saves take turns, from snapshot to
+rename, so a periodic save still writing at shutdown cannot land an older state over
+the shutdown save; and a shutdown save that fails exits non-zero. Two things follow from
 persisting at all. A restarted agent is not back at cold start on a system it has
 already watched for a week, and "why did you do that yesterday" stays answerable —
 without this the audit trail is an artefact of one process lifetime rather than of the

@@ -464,6 +464,11 @@ type Map struct {
 	mu  sync.RWMutex
 	cfg Config
 
+	// saveMu makes saves take turns, from the snapshot to the rename, so the later
+	// snapshot always lands last: a periodic save still writing at shutdown cannot
+	// rename an older state over the shutdown save.
+	saveMu sync.Mutex
+
 	// owner is the system this map models. Fixed at construction: a map that could be
 	// reassigned to another system would carry the first one's history into the second.
 	owner string
