@@ -1103,7 +1103,10 @@ one pod alone at a 1.5-core limit put node pressure at 27% with nothing else wai
 its own throttled share 29%, and lowering its limit to 1 core raised node pressure to
 42%. Per subject, contention is the stall share left after the cgroup's own throttled
 time, clamped at zero; a cgroup without `throttled_usec` has no quota, so all its stall
-counts. The node's is the highest of its subjects' this tick — the share of the window
+counts. It is an approximation that errs toward zero: `throttled_usec` sums the time each
+of the cgroup's per-CPU runqueues spent throttled, while the PSI total is wall-clock, so a
+cgroup throttled on several CPUs at once has more subtracted than its throttling explains
+and reads low, never high. The node's is the highest of its subjects' this tick — the share of the window
 in which some workload waited for a CPU another was using — over the subjects that were
 promised CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
 nearly all the time, and letting it set the signal would have relief cap a workload that

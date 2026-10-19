@@ -879,3 +879,37 @@ func TestABestEffortPodDoesNotSetNodeContention(t *testing.T) {
 		t.Fatalf("BestEffort pod's own cpu_contention_ratio %v; want it still reported, 0.95", s)
 	}
 }
+
+// TestNodeContentionIsAnchoredOnItsWindow: like every other windowed sample, the
+// node's cpu_contention_ratio takes its event identity from the start of the window it
+// measures, so a reading is identified by the window and not by when it was emitted.
+func TestNodeContentionIsAnchoredOnItsWindow(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := start
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bySubject(samples)[""][types.CPUContentionRatio]
+	if s == nil {
+		t.Fatal("no node cpu_contention_ratio")
+	}
+	want := c.sample(types.CPUContentionRatio, unitNodeShare, s.Value, clock, start, "", nil).EventID
+	if s.EventID != want {
+		t.Fatalf("event id %s; want the one anchored on the window start %s", s.EventID, want)
+	}
+}
