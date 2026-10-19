@@ -17,7 +17,10 @@ FILE="$OUT/capture.jsonl"
 
 EVERY_TICK=(/state "/candidates?status=all" /state/relationships /relief /relief/actions /state/journal)
 EVERY_TENTH=(/state/decisions)
-ONCE=(/version /config)
+# Which binary and which spec answered: polled until both answer, and again after any
+# failed /state poll, since an agent that went away may come back as another build or
+# on another spec (the P3 restart does).
+META=(/version /config)
 
 poll() {
     local endpoint="$1" t body status
@@ -48,11 +51,20 @@ verify_decisions() {
 
 jq -cn --argjson t "$(date +%s.%N)" --arg v "$(k0s version 2>/dev/null)" \
     '{t: $t, endpoint: "k0s version", status: 200, body: $v}' >>"$FILE"
-for e in "${ONCE[@]}"; do poll "$e"; done
+meta_due=1
+meta() {
+    local ok=1 e
+    for e in "${META[@]}"; do poll "$e" || ok=0; done
+    [ "$ok" -eq 1 ] && meta_due=0
+    return 0
+}
 
 tick=0
 while true; do
-    for e in "${EVERY_TICK[@]}"; do poll "$e"; done
+    [ "$meta_due" -eq 1 ] && meta
+    for e in "${EVERY_TICK[@]}"; do
+        poll "$e" || { [ "$e" = /state ] && meta_due=1; }
+    done
     verify_decisions
     if [ $((tick % 10)) -eq 0 ]; then
         for e in "${EVERY_TENTH[@]}"; do poll "$e"; done

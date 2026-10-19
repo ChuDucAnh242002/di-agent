@@ -110,7 +110,9 @@ phase_P2() {
     ids=$(curl -sf "$API/candidates?status=pending" | jq -r --arg s "$subject" \
         '.[] | select(.FromID == "memory_utilization@" + $s and .ToID == "memory_utilization") | .CandidateID')
     if [ -z "$ids" ]; then
-        mark P2 "no pending candidate from mem-wave memory to node memory" --arg subject "$subject"
+        mark P2 "refused: no pending candidate from mem-wave memory to node memory, nothing deleted" \
+            --arg subject "$subject"
+        exit 1
     fi
     for id in $ids; do
         curl -sf -X POST "$API/candidates/$(jq -rn --arg i "$id" '$i | @uri')/confirm" >/dev/null
@@ -122,10 +124,16 @@ phase_P2() {
     local observed=0
     for _ in $(seq 60); do
         observed=$(curl -sf "$API/state/relationships" | jq --arg f "memory_utilization@$subject" \
-            '[.relationships[] | select(.from == $f and .to == "memory_utilization") | .n_observations] | max // 0')
+            '[.relationships[] | select(.from == $f and .to == "memory_utilization") | .n_observations] | max // 0' || echo 0)
         [ "$observed" -gt 0 ] && break
         sleep 5
     done
+    if [ "$observed" -eq 0 ]; then
+        # Asked now, the estimate would leave the relationship out and project no change.
+        mark P2 "refused: the confirmed relationship has no observation after 5 min, nothing deleted" \
+            --arg subject "$subject"
+        exit 1
+    fi
     mark P2 "relationship observed" --arg subject "$subject" --argjson n_observations "$observed"
 
     estimate=$(curl -s -w '\n%{http_code}' "$API/state/estimate?target=memory_utilization&without=$subject")

@@ -49,12 +49,19 @@ share of time some workload waited for a CPU another was using, so it needs a vi
 at its limit is throttled, not contended. A relationship needs two agreeing results and the policy
 cools a workload down for 10 minutes after it is touched, hence two episodes.
 
+Everything runs on the node, as root, from this directory, next to an `agent` binary:
+
 ```bash
-OUT=run-$(date +%F)
-./capture.sh di-node "$OUT" &      # polls every 30 s until killed
-./schedule.sh di-node "$OUT"       # about 2 h 10 min
-kill %1
+sudo ./launch.sh run-$(date +%F)       # capture + timetable, detached; about 2 h 10 min
+# when run-*/schedule.out says "done", stop the capture:
+sudo pkill -f '[c]apture.sh'
 ```
+
+P2 refuses to delete `mem-wave` — and exits — unless discovery has a pending candidate for its
+memory against node memory, the confirmed relationship has at least one observation (a
+relationship confirmed a moment ago has no strength, and the estimate would leave it out), and
+the estimate returned 200 with a decision id and `mem-wave` in `excluded`.
+`repeat-p2.sh <out-dir>` runs that episode on its own against the running agent.
 
 Both write JSON lines stamped with the VM's clock: `capture.jsonl` (`t`, `endpoint`, `status`,
 `body`; a failed poll has `status: 0` and `body: null`) and `phases.jsonl` (`t`, `phase`, `event`, and
