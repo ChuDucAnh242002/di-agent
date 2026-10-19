@@ -1,0 +1,17 @@
+# The demo's agent: the case study's, with the review loop deciding on its own. Both model
+# tiers are the host's Ollama through tunnel.sh (node localhost:11435), so the node's CPU
+# holds only the workloads the map is about.
+node: { addr: "0.0.0.0:9090" }
+sources:
+  interval: 5s
+  netdata: { url: http://localhost:19999 }
+runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
+loops:
+  review:
+    level: full
+    decision: { backend: systemone, url: "http://localhost:11435", model: "tev1:4b" }
+    reasoning: { backend: openai-tools, url: "http://localhost:11435/v1", model: "qwen3.8:27b-nvfp4" }
+  relief: { enabled: true }
+persist:
+  file: /var/lib/di-agent/state.json
+domain: { path: none }

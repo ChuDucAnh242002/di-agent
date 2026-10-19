@@ -10,6 +10,25 @@ A Multipass VM (Ubuntu 24.04, arm64, 4 vCPU, 8 GB, cgroup v2) with k0s **v1.36.4
 node, installed by `poc/scripts/02-k0s.sh`. The agent runs on the VM as root from
 `agent.yaml`, then `agent-relief.yaml`.
 
+## Provisioning
+
+From the host, in this directory:
+
+```bash
+./provision.sh di-node     # VM, k0s, Netdata, the tunnel key, this directory on the node
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go -C ../../semantic-map/go build -ldflags "-s -w -X main.BuildCommit=$(git rev-parse --short HEAD)" -o "$PWD/agent" ./cmd/agent
+multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sudo mv /tmp/agent.new /home/ubuntu/casestudy/agent.new
+./tunnel.sh di-node &      # the node's localhost:11435 is the host's Ollama while this runs
+```
+
+The review models run on the host (`ollama pull tev1:4b qwen3.8:27b-nvfp4`), not on the node: a decision
+model on a 4-vCPU node takes the CPU the workloads it models need, and relief then finds the hog
+starved below its floor. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
+`tunnel.sh` reconnects if the link drops. Ollama on the host keeps listening on 127.0.0.1 only.
+
+`demo.sh <out-dir>` (on the node) is a 48-minute compressed run with the review loop deciding on its
+own (`agent-demo.yaml`): planted pods arrive and leave, then two relief episodes on the hog.
+
 ## The workloads and what each should produce
 
 Each moves one resource on its own period, on cycles that never line up, so pods should not
