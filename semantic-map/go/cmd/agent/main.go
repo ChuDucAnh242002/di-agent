@@ -245,6 +245,10 @@ func main() {
 	// order is: restore, then let seeding re-declare, where the rules are explicit and
 	// journalled.
 	if cfg.Persist.File != "" {
+		if err := statemap.CanSave(cfg.Persist.File); err != nil {
+			log.Fatalf("persist.file %s cannot be written: %v. Set persist.file to a writable "+
+				"path, or to \"\" to keep the map in memory only", cfg.Persist.File, err)
+		}
 		loaded, err := state.Load(cfg.Persist.File)
 		if err != nil {
 			log.Fatalf("restoring state from %s: %v", cfg.Persist.File, err)

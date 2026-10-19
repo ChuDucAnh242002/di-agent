@@ -119,8 +119,13 @@ type Proposer struct {
 	MaxPairs  int     `yaml:"max_pairs"`
 }
 
+// DefaultStateFile is where the map is snapshotted unless persist.file says
+// otherwise.
+const DefaultStateFile = "/var/lib/di-agent/state.json"
+
 // Persist is where the map and its journal are snapshotted. An empty File keeps
-// everything in memory.
+// everything in memory; the default is a path under /var/lib, so an agent that has
+// watched a machine keeps what it learned across restarts unless told not to.
 type Persist struct {
 	File     string        `yaml:"file"`
 	Interval time.Duration `yaml:"interval"`
@@ -391,7 +396,7 @@ func Default() Spec {
 			StaleAfter: 2 * time.Minute, RetireAfter: 10 * time.Minute,
 			Learn: true, Admit: true, Tuner: true,
 		},
-		Persist: Persist{Interval: time.Minute},
+		Persist: Persist{File: DefaultStateFile, Interval: time.Minute},
 		Peers:   Peers{URLs: []string{}, StatePoll: 30 * time.Second, StateStale: 90 * time.Second},
 		Explain: Explain{
 			Provider: "none", URL: "http://localhost:11434/v1", Model: "qwen2.5:7b-instruct",

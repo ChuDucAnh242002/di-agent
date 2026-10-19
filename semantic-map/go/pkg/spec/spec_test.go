@@ -23,6 +23,9 @@ func TestDefaultsAreTodaysFlags(t *testing.T) {
 	if d.Policy.Defaults.MaxActionsPerHour != 6 {
 		t.Errorf("MaxActionsPerHour = %d", d.Policy.Defaults.MaxActionsPerHour)
 	}
+	if d.Persist.File != "/var/lib/di-agent/state.json" {
+		t.Errorf("Persist.File = %q; the map is kept unless told not to", d.Persist.File)
+	}
 	if d.Runtime.Kind != "dry-run" {
 		t.Errorf("Runtime.Kind = %q", d.Runtime.Kind)
 	}

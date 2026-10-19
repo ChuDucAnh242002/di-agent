@@ -55,7 +55,7 @@ map:
     journal_size: 0
     tuner: true
 persist:
-    file: ""
+    file: /var/lib/di-agent/state.json
     interval: 1m0s
 peers:
     urls: []

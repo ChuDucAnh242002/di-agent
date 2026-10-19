@@ -840,8 +840,14 @@ produce.
 constructs.
 
 **The map survives the process.** `persist.file` persists properties, relationships and
-the journal; the write is to a temporary file and renamed, because a half-written
-snapshot read back on the next start would look like knowledge. Two things follow from
+the journal, and is on by default (`/var/lib/di-agent/state.json`): an agent that keeps
+nothing is the exception an operator asks for with `""`, not the default they forget to
+change. The write is to a temporary file, flushed to disk, renamed, and the directory
+flushed after it, because a half-written snapshot read back on the next start would look
+like knowledge, and a rename that reached the disk before its bytes leaves an empty one
+after a power cut, which an edge node on an SD card will see. The agent checks at start
+that it can write there and refuses to start if not, rather than failing every minute
+in a log while the operator believes the map is kept. Two things follow from
 persisting at all. A restarted agent is not back at cold start on a system it has
 already watched for a week, and "why did you do that yesterday" stays answerable —
 without this the audit trail is an artefact of one process lifetime rather than of the
