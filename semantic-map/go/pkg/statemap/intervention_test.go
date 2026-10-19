@@ -206,3 +206,76 @@ func TestAssertionIsNeverOverwrittenByPromotion(t *testing.T) {
 		t.Fatalf("changed %q provenance %q", changed, r.Provenance)
 	}
 }
+
+func measured(agreed, confounded bool, id string, effect float64) InterventionOutcome {
+	o := outcome(agreed, confounded, id)
+	o.Effect, o.HasEffect = effect, true
+	return o
+}
+
+// TestAnInterventionsMeasuredEffectIsItsStrength: an action changed one thing and the
+// map saw what followed, so its strength is the effect it measured — not the
+// co-variation the learner folds in afterwards, which on a capped workload is small
+// because the cap is what stopped the two moving together.
+func TestAnInterventionsMeasuredEffectIsItsStrength(t *testing.T) {
+	m := interventionMap(t)
+	mustRecord(t, m, measured(true, false, "d1", 0.6))
+	id, changed := mustRecord(t, m, measured(true, false, "d2", 0.8))
+	if changed != "created" {
+		t.Fatalf("changed %q, want created", changed)
+	}
+	for i := 0; i < 50; i++ {
+		if err := m.ObserveRelationship(id, 0.05, m.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, _ := m.Relationship(id)
+	if eff, ok := r.Effective(); !ok || !nearly(eff, 0.7) || r.Basis() != "measured" {
+		t.Fatalf("effective %v (%v) basis %q; want the measured 0.7 over the co-observed 0.05", eff, ok, r.Basis())
+	}
+	// A null outcome measures a small effect and pulls the strength down.
+	mustRecord(t, m, measured(false, false, "d3", 0.1))
+	if r, _ = m.Relationship(id); !nearly(*r.Measured, 0.5) {
+		t.Fatalf("measured %v; want the mean of 0.6, 0.8 and 0.1", *r.Measured)
+	}
+	// A confounded outcome measures nothing.
+	mustRecord(t, m, measured(true, true, "d4", 1))
+	if r, _ = m.Relationship(id); !nearly(*r.Measured, 0.5) {
+		t.Fatalf("measured %v after a confounded outcome; want it unchanged", *r.Measured)
+	}
+	// An operator's assertion still outranks it.
+	if err := m.AssertRelationshipStrength(id, 0.9, "op", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ = m.Relationship(id); r.Basis() != "asserted" {
+		t.Fatalf("basis %q; an assertion outranks a measurement", r.Basis())
+	}
+}
+
+// TestAMeasuredEffectReachesAPromotedRelationshipAndSurvivesARestart: a discovered
+// relationship promoted by interventions takes their measured effect as well, and the
+// measurement is part of the snapshot.
+func TestAMeasuredEffectReachesAPromotedRelationshipAndSurvivesARestart(t *testing.T) {
+	m := interventionMap(t)
+	if err := m.DeclareRelationship(Relationship{From: "cpu_limit", To: "pressure", Sign: 1, Provenance: Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	mustRecord(t, m, measured(true, false, "d1", 0.4))
+	if _, changed := mustRecord(t, m, measured(true, false, "d2", 0.6)); changed != "promoted" {
+		t.Fatalf("changed %q, want promoted", changed)
+	}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
+	if ok, err := m2.Load(path); err != nil || !ok {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	r, _ := m2.Relationship("cpu_limit->pressure")
+	if r.Measured == nil || !nearly(*r.Measured, 0.5) || r.Basis() != "measured" {
+		t.Fatalf("after restart measured %v basis %q; want 0.5, measured", r.Measured, r.Basis())
+	}
+}
+
+func nearly(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }

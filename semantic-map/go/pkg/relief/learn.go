@@ -146,6 +146,20 @@ func movedSince(m *statemap.Map, at map[string]float64, throttled string, step f
 	return moved, left, absorbed
 }
 
+// measuredEffect is what one outcome measured about the relationship it tests: the
+// drop in node contention per unit drop in the workload's share of node CPU, both
+// fractions of the node, so in the range-normalised units the estimate projects in.
+// It is clamped to [0, 1] like every strength, a rise in contention measuring zero.
+// A share that fell by no more than confoundAbs gives nothing to divide by, and no
+// effect is measured.
+func measuredEffect(observed, shareAtAct, shareNow float64) (float64, bool) {
+	drop := shareAtAct - shareNow
+	if drop <= confoundAbs {
+		return 0, false
+	}
+	return math.Min(1, math.Max(0, observed/drop)), true
+}
+
 // confoundedBy is the workloads an outcome cannot be separated from. Moved and left
 // always are. An absorbed rise is the relief working only when the outcome agreed:
 // when contention did not drop as predicted, the same rise may be a workload that
@@ -216,10 +230,15 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 	}
 
 	from := NodeUsage + "@" + a.Subject
-	rel, changed, err := l.cfg.Map.RecordIntervention(statemap.InterventionOutcome{
-		From: from, To: NodeContention, Agreed: agreed, Confounded: conf, DecisionID: verifyID,
-	})
+	o := statemap.InterventionOutcome{From: from, To: NodeContention, Agreed: agreed, Confounded: conf, DecisionID: verifyID}
+	if then, ok := a.SharesAtAct[a.Subject]; ok && haveShare {
+		o.Effect, o.HasEffect = measuredEffect(observed, then, nowShare)
+	}
+	rel, changed, err := l.cfg.Map.RecordIntervention(o)
 	iv := map[string]any{"relationship": rel, "changed": changed}
+	if o.HasEffect {
+		iv["effect"] = o.Effect
+	}
 	if err != nil {
 		iv["error"] = err.Error()
 		b.Caveat("recording the intervention: %v", err)

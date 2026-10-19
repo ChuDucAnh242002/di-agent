@@ -19,6 +19,18 @@ type Interventions struct {
 	NullRun      int       `json:"null_run"`
 	Last         time.Time `json:"last,omitzero"`
 	LastDecision string    `json:"last_decision,omitempty"`
+	// EffectSum and EffectN accumulate the measured effects of unconfounded outcomes;
+	// their mean is the Measured strength of the relationship on this pair.
+	EffectSum float64 `json:"effect_sum,omitempty"`
+	EffectN   int     `json:"effect_n,omitempty"`
+}
+
+// effect is the mean measured effect, and whether there is one.
+func (iv *Interventions) effect() (float64, bool) {
+	if iv.EffectN == 0 {
+		return 0, false
+	}
+	return clamp01(iv.EffectSum / float64(iv.EffectN)), true
 }
 
 // InterventionOutcome is the verified result of one action the agent took.
@@ -27,6 +39,11 @@ type InterventionOutcome struct {
 	Agreed     bool // observed >= half of predicted
 	Confounded bool
 	DecisionID string
+	// Effect is the target's observed change per unit change of the source, both
+	// range-normalised; HasEffect says the caller could measure one (the source moved
+	// enough to divide by). Only an unconfounded outcome's effect is kept.
+	Effect    float64
+	HasEffect bool
 }
 
 func interventionKey(from, to string) string { return from + "->" + to }
@@ -113,10 +130,24 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		iv.NullRun++
 		iv.AgreedRun = 0
 	}
+	if !o.Confounded && o.HasEffect {
+		iv.EffectSum += clamp01(o.Effect)
+		iv.EffectN++
+	}
 	m.bump(EventIntervention, target, "intervention", map[string]any{
 		"outcome": outcome, "decision": o.DecisionID, "agreed": iv.Agreed, "null": iv.Null,
 		"confounded": iv.Confounded, "agreed_run": iv.AgreedRun, "null_run": iv.NullRun,
+		"effect_n": iv.EffectN,
 	}, now)
+	// Whatever the structure does below, the live relationship on this pair carries the
+	// interventions' measurement.
+	defer func() {
+		if r := m.pairRelationshipLocked(o.From, o.To, false); r != nil {
+			if e, ok := iv.effect(); ok {
+				r.Measured = &e
+			}
+		}
+	}()
 
 	id = target
 	if live == nil {

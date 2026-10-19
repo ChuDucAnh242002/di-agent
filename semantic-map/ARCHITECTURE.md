@@ -319,7 +319,7 @@ GET /cost?task=pod-scheduling&node=master
         ├─▶ LEVEL      = b.Property(construct).Value        ← the estimate itself
         └─▶ SENSITIVITY, reported beside the level, never added into it:
               for each relationship INTO the construct, source property present:
-                eff, known := rel.Effective()   ← assertion | established | recent
+                eff, known := rel.Effective()   ← assertion | measured | established | recent
                 if !known { continue }          ← absent from the sum, not a zero
                 sum += eff · sign(direction)
         └─▶ ActionCost {ResourceCost=level, ResourceSensitivity=sum,
@@ -1523,7 +1523,7 @@ distinctions a naive renderer would flatten:
 - a relationship nothing has been observed about has **no** strength, and is drawn
   dashed rather than as a measured `0.00`;
 - the three strength layers are shown together with the one that *answers* marked,
-  because precedence is by authority — assertion over established over recent — and
+  because precedence is by authority — assertion over measured over established over recent — and
   not arithmetic;
 - the journal states its window (`held`, `dropped`, `oldest_revision`) so an empty
   list is not readable as "nothing happened";
@@ -2222,6 +2222,8 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 **Confounding.** At act time — and, for a resumed action, at the tick that gives it a baseline — the loop snapshots every workload's share of node CPU (`Action.shares_at_act`). An outcome is *confounded* when another workload, live at verify time, has since moved by more than `step` relative to its share then *and* by more than 0.02 of the node absolute; a workload that arrived since moved from nothing, and one that was using more than 0.02 at act and is no longer live has left, taking its load with it. The absolute bar keeps a small pod's relative jitter (0.01 → 0.02) from discrediting every outcome. Rises are the exception: capping a workload frees CPU and the contended workloads beside it take it up, which is the relief working rather than something else moving, so workloads present at act whose rises together stay within what the capped workload gave up (plus 0.02) are *absorbed* rather than moved. What it gave up is known only while the map holds its share; without one nothing counts as freed. An absorbed rise is excused only when the outcome agreed: when contention did not drop as predicted, the same rise may be a workload that grew on its own and hid the cap's effect, and excusing it would turn a confound into a null outcome that teaches, so a revert beside an absorbed rise is confounded. A larger rise, a fall, an arrival and a departure always count. The verify decision lists `moved`, `left` and `absorbed`. A confounded outcome is recorded on the relationship's `interventions` counts and changes nothing else.
 
 **Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
+
+**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node, clamped to [0, 1] (`measuredEffect`; none when the share fell by no more than 0.02). The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. The verify decision records the outcome's `effect`.
 
 **Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1.
 
