@@ -6,7 +6,7 @@ back to map state. It is a demonstration, not a measurement: one run, no repetit
 
 ## The machine
 
-A Multipass VM (Ubuntu 24.04, arm64, 2 vCPU, 4 GB, cgroup v2) with k0s **v1.36.4+k0s.1** as a single
+A Multipass VM (Ubuntu 24.04, arm64, 4 vCPU, 8 GB, cgroup v2) with k0s **v1.36.4+k0s.1** as a single
 node, installed by `poc/scripts/02-k0s.sh`. The agent runs on the VM as root from
 `agent.yaml`, then `agent-relief.yaml`.
 
@@ -23,7 +23,8 @@ correlate with each other — except the twins, which share a wall-clock schedul
 | `io-wave` | direct-I/O writes | 97 s | its I/O → node I/O pressure |
 | `twin-a`, `twin-b` | CPU on one wall clock, throttled at 200m | 113 s | twin-a CPU ↔ twin-b CPU |
 | `noise` | CPU in random bursts | none | nothing |
-| `hog` | CPU, steady, two busy loops, limit 1.5 cores | none | relief phase only: its CPU → node CPU pressure, learned by intervention |
+| `hog` | CPU, steady, four busy loops, limit 3 cores | none | relief phase only: its CPU → node CPU contention, learned by intervention |
+| `victim` | CPU, two busy loops, limit 4 cores, never throttled, frozen by policy | none | relief phase only: what relief protects; the workload whose waiting is the contention |
 
 The relationships marked with a node quantity that has several drivers (node CPU pressure, node I/O
 pressure) were missed in earlier runs: no single pair reaches the threshold.
@@ -39,12 +40,14 @@ pressure) were missed in earlier runs: no single pair reaches the threshold.
 | P2 counterfactual + departure | 50 | the agent is asked for node memory without `mem-wave`, and the decision id kept; then `mem-wave` is deleted |
 | P2 observe | 50–65 | `mem-wave`'s properties go stale (2 min) and retire (10 min) |
 | P3 quiesce + restart | 65–72 | the other planted pods are deleted; the agent restarts from its snapshot on `agent-relief.yaml` |
-| P4 relief | 72–117 | `hog` applied; relief throttles it, verifies, keeps or reverts |
-| P5 release | 117–127 | `hog` deleted |
+| P4 relief | 72–117 | `hog` and `victim` applied; relief caps hog and verifies (first episode); `victim` deleted at 88, so contention ends and the cap is released; `victim` back at 95 (second episode) |
+| P5 release | 117–127 | `hog` and `victim` deleted |
 
-Relief runs alone because a result counts as evidence only when no other workload moved during its
-window, and the planted pods move continuously. It runs for 45 minutes because the policy's default
-cooldown is 10 minutes per workload and a relationship needs two agreeing results.
+Relief runs on its own pair because a result counts as evidence only when no other workload moved
+during its window, and the planted pods move continuously. Its signal is node CPU contention, the
+share of time some workload waited for a CPU another was using, so it needs a victim: `hog` alone
+at its limit is throttled, not contended. A relationship needs two agreeing results and the policy
+cools a workload down for 10 minutes after it is touched, hence two episodes.
 
 ```bash
 OUT=run-$(date +%F)

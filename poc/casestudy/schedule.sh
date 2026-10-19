@@ -76,7 +76,7 @@ phase_prepare() {
         mv "$STATE" "$aside"
         mark prep "snapshot moved aside" --arg path "$aside"
     fi
-    remove "${DISCOVERY[@]}" hog
+    remove "${DISCOVERY[@]}" hog victim
     mark prep "planted pods removed"
 }
 
@@ -96,7 +96,7 @@ phase_P1() {
 }
 
 phase_P2() {
-    [ -n "${T0:-}" ] && at 50
+    at 50
     local uid subject ids id estimate status decision
     uid=$(uid_of mem-wave)
     if [ -z "$uid" ]; then
@@ -150,26 +150,48 @@ phase_P3() {
     mark P3 "agent restarted from snapshot, relief on" --argjson revision "$after"
 }
 
+# Two relief episodes, because a relationship needs two agreeing outcomes and the
+# policy cools a workload down for ten minutes after it is touched. The victim leaving
+# ends the first (its cap is released); it comes back after its properties have gone
+# stale, so its earlier self is not counted as a workload that left mid-outcome.
 phase_P4() {
     at 72
     apply hog
     mark P4 "applied hog" --arg subject "pod:$(uid_of hog)"
+    apply victim
+    mark P4 "applied victim" --arg subject "pod:$(uid_of victim)"
     at 77
+    relief_active "first episode"
+    at 88
+    remove victim
+    mark P4 "deleted victim"
+    at 95
+    apply victim
+    mark P4 "applied victim" --arg subject "pod:$(uid_of victim)"
+    at 100
+    relief_active "second episode"
+}
+
+relief_active() {
     if [ "$(curl -sf "$API/relief" | jq -r '.phase')" != relieving ]; then
-        mark P4 "relief not active five minutes after hog"
-        echo "relief not active" >&2
+        mark P4 "relief not active five minutes into the $1"
+        echo "relief not active ($1)" >&2
     fi
 }
 
 phase_P5() {
     at 117
-    remove hog
-    mark P5 "deleted hog"
+    remove hog victim
+    mark P5 "deleted hog and victim"
     at 127
     mark P5 "run ends" --argjson revision "$(revision)"
 }
 
+# One phase against the running agent, at its real pace: the clock is set as though
+# the run had started that phase's offset ago.
 if [ -n "$ONLY" ]; then
+    declare -A START=([P0]=0 [P1]=10 [P2]=50 [P3]=65 [P4]=72 [P5]=117)
+    T0=$(awk -v n="$(date +%s)" -v m="${START[$ONLY]:?unknown phase $ONLY}" -v s="$SCALE" 'BEGIN { printf "%d", n - m * 60 * s }')
     "phase_$ONLY"
     exit 0
 fi

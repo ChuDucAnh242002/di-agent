@@ -1,0 +1,12 @@
+# The relief phase's victim: two busy loops with room to spare under a 4-core limit, so it
+# is never throttled — any CPU it waits for, another workload is using. Frozen by the
+# default policy rule, so the agent may relieve it but never cap it.
+apiVersion: v1
+kind: Pod
+metadata: { name: victim, labels: { check: casestudy, di-agent/freeze: "true" } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    command: ["sh", "-c", "for i in 1 2; do (while :; do :; done) & done; wait"]
+    resources: { requests: { cpu: 100m, memory: 8Mi }, limits: { cpu: "4", memory: 32Mi } }
