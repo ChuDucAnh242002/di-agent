@@ -2043,3 +2043,26 @@ func TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived(t *testing.T) {
 		t.Error("a derived property scoped to a subject was accepted")
 	}
 }
+
+func TestSubjectsListsTheLiveOnes(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, s := range []string{"pod:b", "pod:a", "pod:gone"} {
+		for _, metric := range []string{"cpu", "mem"} {
+			if err := m.Record(Observation{ID: metric + "@" + s, Value: 1, At: c.now(), Subject: s}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := m.Record(Observation{ID: "node_cpu", Value: 1, At: c.now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, metric := range []string{"cpu", "mem"} {
+		if err := m.RetireProperty(metric+"@pod:gone", "pod deleted", "operator:ada"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := m.Subjects()
+	if len(got) != 2 || got[0] != "pod:a" || got[1] != "pod:b" {
+		t.Errorf("Subjects() = %v, want [pod:a pod:b]: sorted, distinct, no node scope, no retired subject", got)
+	}
+}

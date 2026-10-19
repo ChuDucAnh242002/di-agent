@@ -367,3 +367,23 @@ func (m *Map) Explain(id string) (string, error) {
 func sortRelationships(rs []Relationship) {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID })
 }
+
+// Subjects lists the things narrower than the node that the map currently models:
+// the sorted, distinct subjects of its non-retired properties. A subject whose
+// properties are all retired has left the system and is not listed.
+func (m *Map) Subjects() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := map[string]struct{}{}
+	for _, p := range m.properties {
+		if p.Subject != "" && p.Status != Retired {
+			seen[p.Subject] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
