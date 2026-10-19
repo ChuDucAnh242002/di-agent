@@ -1,0 +1,12 @@
+# A steady CPU load for the relief phase: two busy loops, so it uses its whole 1.5-core
+# limit and any limit the agent sets below that binds. Burstable, one container, with a
+# CPU limit: the kind of pod the kubernetes runtime will resize in place.
+apiVersion: v1
+kind: Pod
+metadata: { name: hog, labels: { check: casestudy } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    command: ["sh", "-c", "for i in 1 2; do (while :; do :; done) & done; wait"]
+    resources: { requests: { cpu: 100m, memory: 8Mi }, limits: { cpu: 1500m, memory: 32Mi } }

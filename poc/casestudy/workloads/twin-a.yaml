@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata: { name: twin-a, labels: { check: casestudy } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    # Busy for the first 56 s of every 113 s of wall clock: the twins stay in phase
+    # however far apart they started.
+    command: ["sh", "-c", "while true; do if [ $(( $(date +%s) % 113 )) -lt 56 ]; then timeout 1 sh -c 'while :; do :; done'; else sleep 1; fi; done"]
+    resources: { requests: { cpu: 50m, memory: 8Mi }, limits: { cpu: 200m, memory: 32Mi } }

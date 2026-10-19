@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata: { name: mem-squeeze, labels: { check: casestudy } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    # 86 s of buffered writes through a 64 Mi limit: the page cache must be reclaimed
+    # as fast as it fills, which is memory pressure. Then 87 s idle: a 173 s cycle.
+    command: ["sh", "-c", "while true; do end=$(( $(date +%s) + 86 )); while [ $(date +%s) -lt $end ]; do dd if=/dev/zero of=/data/f bs=1M count=256 2>/dev/null; done; sleep 87; done"]
+    resources: { requests: { cpu: 50m, memory: 16Mi }, limits: { cpu: 300m, memory: 64Mi } }
+    volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, emptyDir: {} }]

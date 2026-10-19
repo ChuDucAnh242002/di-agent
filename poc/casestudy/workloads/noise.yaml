@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata: { name: noise, labels: { check: casestudy } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    # Random bursts of 1-8 s busy and 1-20 s idle: no period, so nothing should
+    # correlate with it.
+    command: ["sh", "-c", "while true; do b=$(awk 'BEGIN{srand(); print 1+int(rand()*8)}'); timeout $b sh -c 'while :; do :; done'; sleep $(awk 'BEGIN{srand(); print 1+int(rand()*20)}'); done"]
+    resources: { requests: { cpu: 50m, memory: 8Mi }, limits: { cpu: 200m, memory: 32Mi } }
