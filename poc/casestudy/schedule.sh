@@ -53,15 +53,25 @@ agent_start() {
     exit 1
 }
 
+# agent_stop asks the agent to stop and waits up to a minute for it to flush its
+# snapshot; one that has not gone by then is killed, and the mark says so.
 agent_stop() {
     local pid
     pid=$(pgrep -x agent || true)
     [ -z "$pid" ] && return 0
     kill -TERM $pid
+    for _ in $(seq 60); do
+        pgrep -x agent >/dev/null || return 0
+        sleep 1
+    done
+    pkill -KILL -x agent || true
+    mark agent "did not stop within 60 s; killed"
     while pgrep -x agent >/dev/null; do sleep 1; done
 }
 
-revision() { curl -sf "$API/state" | jq '.revision'; }
+# The map's revision, or null when the agent does not answer: a mark records the gap
+# rather than set -e ending the timetable mid-phase.
+revision() { curl -sf "$API/state" | jq '.revision' 2>/dev/null || echo null; }
 
 uid_of() { "${KUBECTL[@]}" get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
 

@@ -11,3 +11,7 @@ loops:
   relief: { enabled: true }
 persist:
   file: /var/lib/di-agent/state.json
+# No domain model: the map holds what the node exhibits and what it discovers or
+# measures. Without this the agent searches upward for a domain_spec.json and takes
+# whatever it finds (the 2026-10-19 run found one in the home directory).
+domain: { path: none }

@@ -5,7 +5,8 @@
 #
 # Every line of <out-dir>/capture.jsonl is {"t", "endpoint", "status", "body"}, t in the
 # node's epoch seconds. A poll that fails (the agent restarting, say) is written with
-# status 0 and body null, so a gap is recorded rather than skipped.
+# status 0 and body null, so a gap is recorded rather than skipped; a 200 whose body is
+# not JSON is written with body null and an "error". Either is a gap: body is null.
 
 set -uo pipefail
 
@@ -29,11 +30,22 @@ poll() {
     status="${body##*$'\n'}"
     status=$((10#${status:-0}))
     body="${body%$'\n'*}"
-    # The body goes through stdin: /state can be larger than one argument may be.
-    if [ "$status" -ne 200 ] || ! jq -c --argjson t "$t" --arg e "$endpoint" \
-        '{t: $t, endpoint: $e, status: 200, body: .}' <<<"$body" >>"$FILE" 2>/dev/null; then
+    if [ "$status" -ne 200 ]; then
         jq -cn --argjson t "$t" --arg e "$endpoint" --argjson s "$status" \
             '{t: $t, endpoint: $e, status: $s, body: null}' >>"$FILE"
+        return 1
+    fi
+    # The body goes through stdin: /state can be larger than one argument may be. A 200
+    # whose body is not JSON is a gap too, and says why rather than passing as an answer.
+    local line
+    # Buffered, so a body jq rejects halfway leaves no partial line behind.
+    if line=$(jq -ec --argjson t "$t" --arg e "$endpoint" \
+        '{t: $t, endpoint: $e, status: 200, body: .}' <<<"$body" 2>/dev/null) &&
+        [ "$(wc -l <<<"$line")" -eq 1 ]; then
+        printf '%s\n' "$line" >>"$FILE"
+    else
+        jq -cn --argjson t "$t" --arg e "$endpoint" \
+            '{t: $t, endpoint: $e, status: 200, body: null, error: "body is not JSON"}' >>"$FILE"
         return 1
     fi
 }
