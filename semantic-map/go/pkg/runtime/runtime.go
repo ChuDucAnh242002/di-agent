@@ -39,7 +39,8 @@ type Resource struct {
 // Workload is one thing the node runs that the agent may be asked to change.
 // Subject is the state map's name for it (`<kind>:<identity>`); Name is the
 // orchestrator's bare name for it, without a namespace. Can lists the actions the
-// runtime can apply to it, each with a reason when it cannot be precise. Self is
+// runtime knows for it, each mapped to a reason: empty when the runtime can apply
+// it, and otherwise why it cannot. Self is
 // true for the agent's own workload, which no rule may touch.
 type Workload struct {
 	Subject string            `json:"subject"`

@@ -588,6 +588,8 @@ table.grid tbody tr.pointed td:first-child { box-shadow: inset 3px 0 0 var(--pro
 .badge.outcome-kept { color: var(--status-good); border-color: color-mix(in srgb, var(--status-good) 45%, transparent); }
 .badge.outcome-reverted { color: var(--status-critical); border-color: color-mix(in srgb, var(--status-critical) 55%, transparent); }
 .badge.outcome-gone, .badge.outcome-expired { color: var(--ink-muted); border-style: dashed; }
+.undo-failing { margin-top: 3px; font-size: 11px; color: var(--status-critical); max-width: 260px; overflow-wrap: anywhere; }
+.window-note.stale-note { color: var(--status-serious); }
 
 .action-trace { display: flex; flex-direction: column; gap: 12px; padding: 10px 2px 14px; font-size: 12.5px; }
 .action-trace p { margin: 0; line-height: 1.5; }

@@ -51,8 +51,9 @@ type fixture struct {
 type flaky struct {
 	*runtime.DryRun
 	mu         sync.Mutex
-	changedErr int // Changed fails this many more times
-	revertErr  int // Revert fails this many more times
+	changedErr int             // Changed fails this many more times
+	revertErr  int             // Revert fails this many more times
+	stuck      map[string]bool // Revert always fails for these workloads
 	hide       map[string]bool
 }
 
@@ -75,9 +76,13 @@ func (f *flaky) Revert(ctx context.Context, u runtime.Undo) error {
 	if fail {
 		f.revertErr--
 	}
+	stuck := f.stuck[u.Subject]
 	f.mu.Unlock()
 	if fail {
 		return errors.New("conflict")
+	}
+	if stuck {
+		return errors.New("admission webhook denied the request")
 	}
 	return f.DryRun.Revert(ctx, u)
 }
@@ -126,7 +131,7 @@ func newHarness(t *testing.T, f fixture) *harness {
 	}
 	var rt2 runtime.Runtime = h.rt
 	if f.flaky {
-		h.fl = &flaky{DryRun: h.rt, hide: map[string]bool{}}
+		h.fl = &flaky{DryRun: h.rt, hide: map[string]bool{}, stuck: map[string]bool{}}
 		rt2 = h.fl
 	}
 	if f.wrap != nil {
@@ -1116,5 +1121,37 @@ func TestARetriedRevertCitesItsVerdict(t *testing.T) {
 	}
 	if got := h.decisions("revert")[0].Inputs["verify"]; got != verify[0].ID {
 		t.Fatalf("revert cites verify %v; want %s", got, verify[0].ID)
+	}
+}
+
+// TestAStuckReleaseDoesNotBlockTheOthers: the newest kept change, whose undo the
+// runtime keeps refusing, does not hold back the release of the others. Its
+// failures are counted on the action and in Status, and journalled once.
+func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}, flaky: true})
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.44)
+	h.until(time.Minute, 0.44, "an action on pod:b", func() bool { _, ok := h.applied()["pod:b"]; return ok })
+	h.run(2*time.Minute, 0.38)
+	if a, b := h.action("pod:a"), h.action("pod:b"); a.Outcome != OutcomeKept || b.Outcome != OutcomeKept {
+		t.Fatalf("outcomes %q, %q; want both kept", a.Outcome, b.Outcome)
+	}
+	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = true })
+	h.until(10*time.Minute, 0.05, "pod:a released", func() bool { return h.action("pod:a").Outcome == OutcomeReleased })
+	h.run(2*time.Minute, 0.05)
+	b := h.action("pod:b")
+	if b.Outcome != OutcomeKept || b.RevertAttempts < 2 || !strings.Contains(b.LastError, "webhook") {
+		t.Fatalf("pod:b %+v; want still kept, with its failed undos counted and the last error", b)
+	}
+	if st := h.l.Status(); st.Stuck != 1 {
+		t.Fatalf("status %+v; want one stuck change", st)
+	}
+	if n := len(h.decisions("stuck")); n != 1 {
+		t.Fatalf("%d stuck decisions; want the first failure journalled once", n)
+	}
+	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = false })
+	h.until(2*time.Minute, 0.05, "pod:b released", func() bool { return h.action("pod:b").Outcome == OutcomeReleased })
+	if st := h.l.Status(); st.Stuck != 0 {
+		t.Fatalf("status %+v; want nothing stuck once it went through", st)
 	}
 }

@@ -293,16 +293,20 @@ async function tick() {
  * Polling is as light as the answers allow. /relief and /relief/actions every tick;
  * /workloads (names and frozen state change slowly) every fourth tick, or at once
  * when the map's set of subjects changed. A 404 from /relief means relief is off in
- * the spec, and then none of the three is asked again until the page is reloaded.
- * A failure keeps what was last known rather than blanking the names.
+ * the spec; then only /relief is asked again, every tenth tick, so an agent
+ * restarted with relief on is noticed without a reload. A failure keeps what was
+ * last known rather than blanking the names, and says it is stale.
  */
+const OFF_PROBE_EVERY = 10;
 let actingTicks = 0;
+let offTicks = 0;
 let actingBusy = false;
 let actingAwaited = false;
 let workloadsKey = null;
 
 async function refreshActing() {
-  if (model.actingState === 'off' || actingBusy) return;
+  if (actingBusy) return;
+  if (model.actingState === 'off' && ++offTicks % OFF_PROBE_EVERY !== 0) return;
   actingBusy = true;
   try {
     const prev = model.acting;
@@ -327,7 +331,7 @@ async function refreshActing() {
     }
     actingTicks++;
     const changed = JSON.stringify([relief, actions, workloads]) !== JSON.stringify([prev.relief, prev.actions, prev.workloads])
-      || state !== model.actingState;
+      || state !== model.actingState || error !== model.actingError;
     model.actingState = state;
     model.actingError = error;
     if (changed) {

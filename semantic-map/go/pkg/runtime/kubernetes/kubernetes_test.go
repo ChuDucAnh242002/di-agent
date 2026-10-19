@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -569,5 +570,51 @@ current-context: x
 	}
 	if cfg.Timeout <= 0 || cfg.Timeout > time.Minute {
 		t.Fatalf("timeout %s; want a bound on every request", cfg.Timeout)
+	}
+}
+
+// TestRevertAtTheOriginalOnlyClearsTheRecord: a pod already at its original
+// limit, as after a resize that never took, needs no resize to be given back; the
+// record is cleared without one, so a resize the API keeps refusing cannot keep
+// the change in force.
+func TestRevertAtTheOriginalOnlyClearsTheRecord(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	failResize(cs, errors.New("timeout"))
+	ctx := context.Background()
+	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
+		t.Fatal("want the resize error")
+	}
+	got, err := r.Changed(ctx, "n1")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("changed %+v err %v; want the record the failed resize left", got, err)
+	}
+	resizes := 0
+	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		if a.GetSubresource() == "resize" {
+			resizes++
+		}
+		return false, nil, nil
+	})
+	if err := r.Revert(ctx, got[0]); err != nil {
+		t.Fatalf("revert: %v; want the record cleared with no resize", err)
+	}
+	if resizes != 0 {
+		t.Errorf("%d resize calls; the limit was already the original", resizes)
+	}
+	p := getPod(t, cs, "a")
+	if _, ok := p.Annotations[Annotation]; ok {
+		t.Fatalf("annotation still there: %v", p.Annotations)
+	}
+	if got := p.Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("limit %s, want 1", got)
+	}
+}
+
+// TestThePodKindIsAPolicyKind: a rule matching kind pod must validate, or no rule
+// could single out this runtime's workloads.
+func TestThePodKindIsAPolicyKind(t *testing.T) {
+	kind, _, _ := strings.Cut(subjectOf(*burstable("a", "n1", "ua", "100m", "1")), ":")
+	if !slices.Contains(spec.WorkloadKinds, kind) {
+		t.Fatalf("spec.WorkloadKinds %v lacks %q", spec.WorkloadKinds, kind)
 	}
 }

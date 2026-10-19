@@ -351,7 +351,10 @@ func (r *Runtime) Apply(ctx context.Context, subject string, c runtime.Change) (
 	return u, nil
 }
 
-// Revert resizes the pod back to the limit it had and removes the record. A limit
+// Revert resizes the pod back to the limit it had and removes the record. A pod
+// already at that limit, as after a resize that never took, is not resized: only
+// the record is cleared, so a resize the API keeps refusing cannot keep a change
+// in force that is not there. A limit
 // of nil is an error: the runtime never accepts a pod without one, so an undo
 // without one did not come from here. A pod whose record is another node's or unreadable is left
 // untouched and the revert is an error; with no record at all the undo in hand is
@@ -372,8 +375,10 @@ func (r *Runtime) Revert(ctx context.Context, u runtime.Undo) error {
 	if present && (!readable || rec.NodeID != r.env.NodeID) {
 		return fmt.Errorf("revert %s: the pod carries a %s record that is not node %s's; nothing restored", u.Subject, Annotation, r.env.NodeID)
 	}
-	if err := r.resize(ctx, p, millis(*u.Original.Limit)); err != nil {
-		return err
+	if want := millis(*u.Original.Limit); !atLimit(p, want) {
+		if err := r.resize(ctx, p, want); err != nil {
+			return err
+		}
 	}
 	if !present {
 		return nil // no record to clear: the undo in hand is authoritative
@@ -402,6 +407,16 @@ func (r *Runtime) Changed(ctx context.Context, nodeID string) ([]runtime.Undo, e
 		return out[i].Subject < out[j].Subject
 	})
 	return out, nil
+}
+
+// atLimit reports whether the pod's single container already has a CPU limit of
+// milli millicores.
+func atLimit(p corev1.Pod, milli int64) bool {
+	if len(p.Spec.Containers) != 1 {
+		return false
+	}
+	l, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	return ok && l.MilliValue() == milli
 }
 
 // decode is the undo on the pod's annotation: whether the annotation is there,

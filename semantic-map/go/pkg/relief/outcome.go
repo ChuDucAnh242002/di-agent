@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/runtime"
@@ -52,13 +53,38 @@ func (l *Loop) expire(ctx context.Context, now time.Time) {
 	l.mu.Unlock()
 	for _, a := range due {
 		if err := l.giveBack(ctx, now, a, OutcomeExpired, "expired", a.cooldown); err != nil {
-			l.cfg.Logf("relief: %v (retrying next tick)", err)
+			l.undoFailed(a, "expiring", err)
 		}
 	}
 }
 
+// undoFailed records that the runtime refused to undo a's change: counted and
+// kept on the action, so Actions and Status show a change stuck in force, logged
+// every time, and journalled only on the first refusal, so a runtime that refuses
+// for an hour is one record rather than 240. The change stays in force and the
+// undo is retried on the next tick. Called under the pass lock, with mu not held.
+func (l *Loop) undoFailed(a *Action, what string, err error) {
+	l.mu.Lock()
+	a.RevertAttempts++
+	a.LastError = err.Error()
+	n := a.RevertAttempts
+	l.mu.Unlock()
+	l.cfg.Logf("relief: %s %s on %s: %v (attempt %d, retrying next tick)", what, a.ID, a.Subject, err, n)
+	if n != 1 {
+		return
+	}
+	b := l.cfg.Map.Decide(l.id("stuck"), fmt.Sprintf("give back the change to %s?", a.Subject))
+	b.Input("act", a.DecisionID)
+	b.Input("undo", a.Undo)
+	b.Input("while", what)
+	b.Input("error", err.Error())
+	b.Caveat("the runtime refused to undo the change: it stays in force and is retried every tick; later refusals are counted on the action, not journalled")
+	b.Commit(map[string]any{"stuck": a.Subject})
+}
+
 // verify judges the action in flight once Settle has passed: kept if the drop
-// observed is at least half the drop predicted, reverted otherwise. The
+// observed is at least half the drop predicted, reverted otherwise. A resumed
+// action is always kept, as there is no pre-cap baseline to judge it by. The
 // judgement needs a fresh reading taken after Settle; one taken before it says
 // nothing about the cap's effect. A workload the runtime no longer lists is
 // gone, and its slot is freed once the runtime has let go of the change.
@@ -77,7 +103,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		// Revert anyway, so a runtime that still holds the change gives it up;
 		// the undo is dropped only once it has.
 		if err := l.cfg.Runtime.Revert(ctx, a.Undo); err != nil && !errors.Is(err, runtime.ErrGone) {
-			l.cfg.Logf("relief: letting go of %s's change: %v (retrying next tick)", a.Subject, err)
+			l.undoFailed(a, "letting go of", err)
 			return
 		}
 		l.gone(now, a, "the runtime no longer lists the workload")
@@ -92,7 +118,10 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	}
 
 	observed := a.PressureAtAct - pressure
-	keep := observed >= keepRatio*a.Plan.Predicted || (a.Resumed && a.Plan.Predicted == 0)
+	// A resumed action's baseline was read with its cap already in force, so the
+	// drop it caused is in neither reading: judging it would revert a cap that
+	// works. It is kept, and given back by release or expiry like any other.
+	keep := a.Resumed || observed >= keepRatio*a.Plan.Predicted
 	verdict := "revert"
 	if keep {
 		verdict = "keep"
@@ -106,8 +135,8 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	b.Input("pressure_at_act", a.PressureAtAct)
 	b.Note("pressure %.4f at act, %.4f now: observed drop %.4f against %.4f predicted; keep needs %.0f%% of it",
 		a.PressureAtAct, pressure, observed, a.Plan.Predicted, keepRatio*100)
-	if a.Resumed && a.Plan.Predicted == 0 {
-		b.Caveat("resumed after a restart with no journalled prediction: kept, as there is nothing to judge it against")
+	if a.Resumed {
+		b.Caveat("resumed after a restart: its baseline was taken with the change already in force, so there is no pre-cap pressure to judge it against; kept until release or expiry")
 	}
 	l.learn(b, id, a, keep, observed, now)
 	b.Commit(map[string]any{"verdict": verdict, "observed": observed, "predicted": a.Plan.Predicted})
@@ -151,7 +180,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 		l.gone(now, a, "the runtime no longer has the workload")
 		return
 	case err != nil:
-		l.cfg.Logf("relief: reverting %s on %s: %v (retrying next tick)", a.DecisionID, a.Subject, err)
+		l.undoFailed(a, "reverting", err)
 		return
 	}
 	cooldown := failedCooldown * a.cooldown
@@ -178,6 +207,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 		*a = *p
 		// The verify that caused the revert is the one an operator wants, not the earlier step's.
 		a.ID, a.Undo, a.Outcome, a.revertPending, a.VerifyID = id, undo, OutcomeKept, false, failed
+		a.RevertAttempts, a.LastError = 0, "" // the undo went through; the earlier cap is in force anew
 		if l.inFlight == a {
 			l.inFlight = nil
 		}
@@ -192,7 +222,9 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 
 // release gives back the most recent kept change, one per Settle, whenever the
 // node is not relieving: after pressure has eased, and after a restart that
-// found caps on a calm node. In Releasing, with nothing left, it ends the
+// found caps on a calm node. One the runtime will not give back does not hold up
+// the rest: the next most recent is tried in the same tick, and the refused one
+// is tried again on the next. In Releasing, with nothing left, it ends the
 // phase. An action in flight is judged first, so it is either kept and
 // released in turn or reverted.
 func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase) {
@@ -213,19 +245,34 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 		l.mu.Unlock()
 		return
 	}
-	a := l.kept[len(l.kept)-1]
-	cooldown := backoff(a.cooldown, l.cycles[a.Subject])
+	kept := make([]*Action, len(l.kept))
+	cooldowns := make([]time.Duration, len(l.kept))
+	for i, a := range l.kept {
+		kept[len(kept)-1-i] = a // newest first
+		cooldowns[len(kept)-1-i] = backoff(a.cooldown, l.cycles[a.Subject])
+	}
 	l.mu.Unlock()
 
-	err := l.cfg.Runtime.Revert(ctx, a.Undo)
-	switch {
-	case errors.Is(err, runtime.ErrGone):
-		l.gone(now, a, "the runtime no longer has the workload")
-		return
-	case err != nil:
-		l.cfg.Logf("relief: releasing %s on %s: %v (retrying next tick)", a.ID, a.Subject, err)
+	var skipped []string
+	for i, a := range kept {
+		err := l.cfg.Runtime.Revert(ctx, a.Undo)
+		switch {
+		case errors.Is(err, runtime.ErrGone):
+			l.gone(now, a, "the runtime no longer has the workload")
+			return
+		case err != nil:
+			l.undoFailed(a, "releasing", err)
+			skipped = append(skipped, a.ID)
+			continue
+		}
+		l.recordRelease(now, a, pressure, phase, cooldowns[i], skipped)
 		return
 	}
+}
+
+// recordRelease journals and records the release of a, whose revert went
+// through. skipped lists the newer actions the runtime would not give back first.
+func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
 	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node pressure has eased", a.Subject))
 	b.Property(NodePressure)
 	b.Input("act", a.DecisionID)
@@ -233,6 +280,10 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 	b.Input("pressure", pressure)
 	b.Input("phase", string(phase))
 	b.Note("released most recent first; cooling %s down for %s", a.Subject, cooldown)
+	if len(skipped) > 0 {
+		b.Input("skipped", skipped)
+		b.Note("newer changes the runtime would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
+	}
 	b.Commit(map[string]any{"released": a.Subject, "cooldown": cooldown.String()})
 	l.end(now, a, OutcomeReleased, cooldown)
 

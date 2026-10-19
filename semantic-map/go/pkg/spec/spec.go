@@ -16,6 +16,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -213,8 +214,11 @@ type Relief struct {
 // CPURelief tunes CPU relief. Enter and Exit are levels of node CPU pressure,
 // the PSI stall fraction cpu_pressure_ratio in [0,1] (the share of time tasks
 // wait for a CPU, not utilisation), with Exit below Enter so a hot node is not
-// released the moment it cools by a hair. A throttle that has not cut pressure
-// by MinEffect is judged to have failed attribution.
+// released the moment it cools by a hair. MinEffect is a planning floor: a step
+// whose predicted drop in pressure is below it is not taken. It is not the bar a
+// step is judged by afterwards: verify keeps a step whose observed drop is at
+// least half the drop it predicted, and reverts it otherwise. Expiry must be
+// longer than Settle, or a change would be given back before it is judged.
 type CPURelief struct {
 	Enter       float64       `yaml:"enter"`
 	Exit        float64       `yaml:"exit"`
@@ -446,21 +450,135 @@ func Default() Spec {
 	}
 }
 
-// Parse overlays one document on Default(). ${VAR} is replaced from the
-// environment before decoding, so a secret can stay out of the file; an unset
-// variable becomes empty.
+// Parse overlays one document on Default(). ${VAR} in a value is replaced from
+// the environment, so a secret can stay out of the file. A variable that is not
+// set is an error naming it, rather than an empty value that describes nothing;
+// one set to the empty string is empty. $$ is a literal $, and any other $ is
+// left as it is. Variables are expanded in values only, after the document is
+// read, so what a variable holds is the value it stands in for and never more
+// YAML, and a comment mentioning one is not expanded.
 func Parse(b []byte) (Spec, error) {
 	s := Default()
-	b = []byte(os.Expand(string(b), os.Getenv))
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
+	var doc yaml.Node
+	if err := yaml.NewDecoder(bytes.NewReader(b)).Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
+		return Spec{}, fmt.Errorf("spec: %w", err)
+	}
+	if doc.Kind == 0 {
+		return s, nil // an empty document is the default
+	}
+	if err := unknownKeys(b); err != nil {
+		return Spec{}, fmt.Errorf("spec: %w", err)
+	}
+	if err := expandNode(&doc); err != nil {
+		return Spec{}, fmt.Errorf("spec: %w", err)
+	}
+	// The expanded node keeps the file's line numbers, so an error names the line
+	// the operator wrote.
+	if err := doc.Decode(&s); err != nil {
 		return Spec{}, fmt.Errorf("spec: %w", err)
 	}
 	if err := s.Validate(); err != nil {
 		return Spec{}, err
 	}
 	return s, nil
+}
+
+// unknownKeys refuses every key the spec does not have, at the line it is on in
+// b. A node does not decode strictly, so the file as written is decoded strictly
+// on its own, and only its unknown-key errors are kept: a type error there is a
+// ${VAR} not yet expanded, and the expanded document's own decode reports any
+// that remain.
+func unknownKeys(b []byte) error {
+	probe := Default()
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	err := dec.Decode(&probe)
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		return nil // a syntax error was reported when the document was read
+	}
+	var unknown []string
+	for _, e := range te.Errors {
+		if strings.Contains(e, " not found in type ") {
+			unknown = append(unknown, e)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	return &yaml.TypeError{Errors: unknown}
+}
+
+// expandNode expands ${VAR} in every scalar under n, collecting every variable
+// that is not set and every malformed reference into one error. A plain scalar
+// that changed has its tag cleared, so its new text is typed afresh: enter:
+// ${SHARE} with SHARE=0.4 is a number, as if 0.4 had been written; a quoted one
+// stays a string.
+func expandNode(n *yaml.Node) error {
+	var errs []error
+	var walk func(*yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.ScalarNode {
+			v, err := expand(n.Value)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("line %d: %w", n.Line, err))
+				return
+			}
+			if v != n.Value {
+				n.Value = v
+				if n.Style&(yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) == 0 {
+					n.Tag = ""
+				}
+			}
+			return
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	walk(n)
+	return errors.Join(errs...)
+}
+
+// expand replaces each ${VAR} in s with the variable's value and each $$ with $.
+// Any other $ is kept. Every unset variable is named in the error.
+func expand(s string) (string, error) {
+	var (
+		out   strings.Builder
+		unset []string
+	)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' || i+1 == len(s) {
+			out.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '$':
+			out.WriteByte('$')
+			i++
+		case '{':
+			end := strings.IndexByte(s[i+2:], '}')
+			if end < 0 {
+				return "", fmt.Errorf("unterminated ${ in %q", s)
+			}
+			name := s[i+2 : i+2+end]
+			if name == "" {
+				return "", fmt.Errorf("empty ${} in %q", s)
+			}
+			v, ok := os.LookupEnv(name)
+			if !ok {
+				unset = append(unset, name)
+			}
+			out.WriteString(v)
+			i += 2 + end
+		default:
+			out.WriteByte('$')
+		}
+	}
+	if len(unset) > 0 {
+		return "", fmt.Errorf("environment variable not set: %s", strings.Join(unset, ", "))
+	}
+	return out.String(), nil
 }
 
 // Load reads a spec file; an empty path is the default spec.
@@ -478,6 +596,20 @@ func Load(path string) (Spec, error) {
 	}
 	return s, nil
 }
+
+// PolicyActions are the names a policy's allow and deny lists may hold. They are
+// the runtime's action names (runtime.ActionCPULimit, which a test in pkg/runtime
+// holds to this list), named here because the runtime imports this package.
+// "evict" is reserved: no runtime performs it, and the default policy denies it
+// so that a runtime that one day can will not do so by default.
+var PolicyActions = []string{"cpu.limit", "evict"}
+
+// WorkloadKinds are the subject kinds, the part of a workload's subject before
+// the colon, that a policy rule's match.kind may name: the kinds of the
+// workloads the agent's sources and runtimes name (pod and container from
+// Kubernetes, unit from systemd, app from Netdata's apps groups). Node-level
+// instances such as disk, net or cpu are not workloads and match nothing.
+var WorkloadKinds = []string{"app", "container", "pod", "unit"}
 
 // Validate reports every value that cannot be what the operator meant.
 func (s Spec) Validate() error {
@@ -539,7 +671,22 @@ func (s Spec) Validate() error {
 	positive("loops.relief.cpu.exit_for", c.ExitFor)
 	positive("loops.relief.cpu.settle", c.Settle)
 	positive("loops.relief.cpu.expiry", c.Expiry)
+	if c.Expiry <= c.Settle {
+		// A change that expires before it settles is given back before it is judged.
+		errs = append(errs, fmt.Errorf("loops.relief.cpu.expiry = %v must be longer than settle = %v", c.Expiry, c.Settle))
+	}
 
+	// actions checks that every name in an allow or deny list is an action the
+	// agent knows: a misspelt deny entry would deny nothing.
+	actions := func(name string, list []string) {
+		for _, a := range list {
+			if !slices.Contains(PolicyActions, a) {
+				errs = append(errs, fmt.Errorf("%s: %q is not an action, want one of %s", name, a, strings.Join(PolicyActions, ", ")))
+			}
+		}
+	}
+	actions("policy.defaults.allow", s.Policy.Defaults.Allow)
+	actions("policy.defaults.deny", s.Policy.Defaults.Deny)
 	positive("policy.defaults.cooldown", s.Policy.Defaults.Cooldown)
 	if s.Policy.Defaults.MaxActionsPerHour < 0 {
 		errs = append(errs, fmt.Errorf("policy.defaults.max_actions_per_hour = %d, want zero or more", s.Policy.Defaults.MaxActionsPerHour))
@@ -548,6 +695,12 @@ func (s Spec) Validate() error {
 	for i, rule := range s.Policy.Rules {
 		name := fmt.Sprintf("policy.rules[%d]", i)
 		notNegative(name+".cooldown", rule.Cooldown)
+		actions(name+".allow", rule.Allow)
+		actions(name+".deny", rule.Deny)
+		if k := rule.Match.Kind; k != "" && !slices.Contains(WorkloadKinds, k) {
+			// A misspelt kind matches nothing, so the rule would silently never apply.
+			errs = append(errs, fmt.Errorf("%s.match.kind = %q, want one of %s", name, k, strings.Join(WorkloadKinds, ", ")))
+		}
 		if rule.Floor != nil && s.Policy.Defaults.Floor != nil {
 			// What is checked is the floor the rule takes effect with: its own bounds
 			// over the defaults'.

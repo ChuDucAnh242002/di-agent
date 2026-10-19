@@ -209,7 +209,13 @@ export class Drawer {
       ['refused', relief.refused, ''],
     ];
     const state = `${relief.phase}${relief.paused ? ' · paused' : ''}${relief.runtime ? ` · ${relief.runtime}` : ''}`;
-    const strip = `<div class="action-strip">
+    // An answer that failed after an earlier one landed: what is drawn is the last
+    // known state, and it must say so rather than pass for current.
+    const stale = model.actingError ? `<div class="window-note stale-note">
+      <span><strong>Not current.</strong> The last refresh failed: ${escapeHTML(model.actingError)}. Showing the last answer.</span>
+    </div>` : '';
+    if (relief.stuck) tiles.push(['undo failing', relief.stuck, 'changes in force whose undo the runtime has refused; retried every tick']);
+    const strip = stale + `<div class="action-strip">
       ${tiles.map(([label, v, tip]) => `<div class="tile"${tip ? ` title="${escapeHTML(tip)}"` : ''}>
         <span class="label">${escapeHTML(label)}</span><span class="value">${escapeHTML(String(v))}</span></div>`).join('')}
       <div class="tile"><span class="label">loop</span><span class="value small">${escapeHTML(state)}</span></div>
@@ -240,7 +246,8 @@ export class Drawer {
             <td class="num nowrap">${fmt.num(a.plan?.from_cores, 2)} → ${fmt.num(a.plan?.to_cores, 2)}</td>
             <td class="num">${fmt.num(a.plan?.predicted, 4)}</td>
             <td class="num">${a.observed === undefined || a.observed === null ? '—' : fmt.num(a.observed, 4)}</td>
-            <td><span class="badge outcome-${escapeHTML(a.outcome || 'inflight')}">${escapeHTML(a.outcome || 'in flight')}</span></td>
+            <td><span class="badge outcome-${escapeHTML(a.outcome || 'inflight')}">${escapeHTML(a.outcome || 'in flight')}</span>${a.revert_attempts
+              ? `<div class="undo-failing" title="${escapeHTML(`${a.revert_attempts} failed attempt${a.revert_attempts > 1 ? 's' : ''}; retried every tick`)}">undo failing: ${escapeHTML(a.last_error || '')}</div>` : ''}</td>
             <td class="muted nowrap">${fmt.ago(a.acted_at)}</td>
             <td class="muted">${open ? '▴' : '▾'}</td>
           </tr>

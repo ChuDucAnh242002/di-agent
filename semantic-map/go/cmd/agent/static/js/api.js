@@ -112,8 +112,9 @@ export const api = {
 
   // ── acting: what the agent may change, and what it did ──────────────────
   //
-  // These are 404 when the spec leaves relief (or the runtime) off. That is a
-  // state, not a failure, so it comes back as null.
+  // /relief and /relief/actions are 404 when the spec leaves relief off; that is
+  // a state, not a failure, so it comes back as null. /workloads is served
+  // whenever a runtime is built, so a 404 there is a real error.
   relief: () => orNull(send('GET', '/relief')),
   reliefActions: () => orNull(send('GET', '/relief/actions')),
   workloads: () => orNull(send('GET', '/workloads')),

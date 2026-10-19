@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -366,7 +367,9 @@ func TestAResumedActionWithAPredictionTeachesNothing(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
 	resumeWithPrediction(h)
 	h.step(0.5)
-	d := h.firstVerify(2*time.Minute, 0.44)
+	// Flat: the baseline was taken with the cap in force, so pressure has no drop
+	// left to show, and a good cap must not be reverted for it.
+	d := h.firstVerify(2*time.Minute, 0.5)
 	if d.Answer["verdict"] != "keep" {
 		t.Fatalf("verify %v; want the resumed change kept", d.Answer)
 	}
@@ -380,6 +383,35 @@ func TestAResumedActionWithAPredictionTeachesNothing(t *testing.T) {
 	if ev == nil || ev["fed"] != false || !strings.HasPrefix(ev["why"].(string), "resumed") {
 		t.Fatalf("evidence input %v; want not fed, as resumed", d.Inputs["evidence"])
 	}
+}
+
+// TestAResumedActionIsKeptWhenPressureIsFlat: a change taken up after a restart
+// has no pre-cap baseline, as pressure was first read with the cap in force. It
+// is kept whatever pressure does, with a caveat saying why, and still expires.
+func TestAResumedActionIsKeptWhenPressureIsFlat(t *testing.T) {
+	// One action an hour, and the resumed change counts toward it: nothing steps
+	// pod:a again, so the change seen at the end is the resumed one.
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true,
+		policy: func(ps *spec.PolicySpec) { ps.Defaults.MaxActionsPerHour = 1 }})
+	resumeWithPrediction(h)
+	h.step(0.5)
+	d := h.firstVerify(2*time.Minute, 0.5)
+	if d.Answer["verdict"] != "keep" {
+		t.Fatalf("verify %v; want kept, as there is no pre-cap baseline", d.Answer)
+	}
+	if !strings.Contains(strings.Join(d.Caveats, " "), "resumed") {
+		t.Errorf("caveats %v; want one saying a resumed change is kept unjudged", d.Caveats)
+	}
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
+		t.Fatalf("action %+v; want kept", a)
+	}
+	if u, ok := h.applied()["pod:a"]; !ok || u.DecisionID != "relief-act-1-1" {
+		t.Fatalf("applied %v; want the resumed change still in force", h.applied())
+	}
+	if st := h.l.Status(); st.Reverted != 0 || !st.Cooling["pod:a"].IsZero() {
+		t.Fatalf("status %+v; want nothing reverted and no failed-cap cooldown", st)
+	}
+	h.until(time.Hour, 0.5, "the resumed change expiring", func() bool { return h.action("pod:a").Outcome == OutcomeExpired })
 }
 
 func TestAFurtherStepAfterResumeTeaches(t *testing.T) {
