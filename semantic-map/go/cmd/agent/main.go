@@ -314,8 +314,11 @@ func main() {
 	}
 	var reliefLoop *relief.Loop
 	if cfg.Loops.Relief.Enabled {
+		// Outcomes are evidence only when the runtime really changes the system: after a
+		// dry run, pressure moves with the workload's own load and nothing else.
 		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, NodeID: cfg.Node.ID,
-			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf})
+			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf,
+			Evidence: rt.Name() != "dry-run", Candidates: sm})
 		if err != nil {
 			log.Fatalf("loops.relief in %s: %v", *configPath, err)
 		}

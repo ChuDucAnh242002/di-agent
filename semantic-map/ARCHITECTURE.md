@@ -759,8 +759,11 @@ evaluation constructs live here as derived properties over the metrics that evid
 them, which keeps prior knowledge without the graph being about the framework.
 
 **Edges are relationships**, each carrying its provenance: `seeded` when only its structure came from prior
-knowledge, `learned` from observing this system, `asserted` by an operator. An agent
-that cannot say why it believes an edge cannot be audited, so provenance is data.
+knowledge, `learned` from observing this system, `asserted` by an operator, `intervened` when an action
+the agent took and verified created or confirmed it. `intervened` ranks above `discovered`: a
+discovered edge rests on correlation, which a shared cause can produce, while the agent moved
+the cause end itself and saw the effect end respond. Only the map's intervention record can
+write it, and the state census counts it as `intervened` beside the other provenances. An agent that cannot say why it believes an edge cannot be audited, so provenance is data.
 
 **Facts are the frame.** Beside its properties the map holds what the machine *is* — OS,
 kernel, CPU model and cores, memory, disk, boot time — read once at startup by a
@@ -2158,7 +2161,23 @@ The map answers what a system is doing; acting is the agent changing that system
 
 **The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below `floor.cpu_cores` or `floor.of_original` of its original limit, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
 
-**What is not here yet.** The loop acts on stated thresholds and its predictions come from the map as it is. Learning from outcomes, so that whether a prediction held changes what the agent does next, is the next stage and is not implemented. The thresholds are uncalibrated defaults, not measured.
+### Learning from outcomes
+
+A verified action is the one kind of evidence correlation cannot give: the agent moved the cause end itself and watched the effect end. The loop feeds it back three ways, and every verify decision records what it fed and why not — inputs `confounded` (whether, and which workloads moved or left), `subject_share` (the throttled workload's own share at act and at verify), `evidence` (fed or not, with the reason) and `intervention` (the relationship and what `RecordIntervention` changed).
+
+**What counts as evidence.** Only a verify verdict is an outcome: `keep` (observed at least half the predicted drop) is *agreed*, `revert` is *null*. Expiry, a workload that left, a manual revert and a refused change are not outcomes and teach nothing. Neither does an action with no prediction to judge against, nor any action resumed after a restart: its baseline was taken with the change already in force, so what it observes is noise. A further step on a resumed workload takes a fresh baseline and is evidence again. Nor does an outcome where the cap did not bind: if the workload's usage at verify (share × `cpu_cores`) is under 0.9 of its new limit, it asked for less on its own and the drop is its demand falling, not the cap. The keep/revert verdict is the same in every case; only what it teaches changes.
+
+**Dry runs teach nothing.** Outcomes feed the map only when the runtime really changes the system (`Config.Evidence`, which the daemon sets for every runtime but `dry-run`). Under a dry run nothing was capped, so a drop in pressure after a recorded "action" is the workload's own load cycle; a demonstration run showed every dry-run `keep` to be exactly that coincidence. Recording it would build relationships on actions that never happened.
+
+**Confounding.** At act time — and, for a resumed action, at the tick that gives it a baseline — the loop snapshots every workload's share of node CPU (`Action.shares_at_act`). An outcome is *confounded* when another workload, live at verify time, has since moved by more than `step` relative to its share then *and* by more than 0.02 of the node absolute; a workload that arrived since moved from nothing, and one that was using more than 0.02 at act and is no longer live has left, taking its load with it. The absolute bar keeps a small pod's relative jitter (0.01 → 0.02) from discrediting every outcome. A confounded outcome is recorded on the relationship's `interventions` counts and changes nothing else.
+
+**Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_pressure_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. Confounded outcomes never move either run.
+
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1.
+
+**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how the escalation queue drains without an operator. The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
+
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart.
 
 ### The Kubernetes runtime (`pkg/runtime/kubernetes`)
 

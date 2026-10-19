@@ -22,6 +22,10 @@ const (
 	EventRelationshipAsserted EventKind = "relationship.asserted"
 	EventRelationshipRetired  EventKind = "relationship.retired"
 
+	// EventIntervention records what an action the agent took did to a relationship's
+	// evidence, whether or not it changed the structure.
+	EventIntervention EventKind = "relationship.intervention"
+
 	// EventOperatorIntent records one operator action that spanned several
 	// relationships, alongside the individual assertions it produced.
 	//
@@ -351,7 +355,7 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 		if r.To != propertyID || r.Status == Retired {
 			continue
 		}
-		out = append(out, *r)
+		out = append(out, b.m.relationshipViewLocked(r))
 		for _, end := range []string{r.From, r.To} {
 			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
 				staleEnds[r.ID] = append(staleEnds[r.ID], end)

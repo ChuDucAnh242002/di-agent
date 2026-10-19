@@ -171,6 +171,10 @@ const (
 	// operator. It stays Discovered as strength is learned: provenance answers why the
 	// edge exists, the strength layers answer what it is worth.
 	Discovered Provenance = "discovered"
+
+	// Intervened: created or confirmed by an action the agent took and verified. Only
+	// RecordIntervention writes it; a declaration cannot claim it.
+	Intervened Provenance = "intervened"
 )
 
 // Relationship is a directed association between two properties.
@@ -244,6 +248,11 @@ type Relationship struct {
 	LastObserved  time.Time `json:"last_observed,omitzero"`
 	RetiredReason string    `json:"retired_reason,omitempty"`
 	Note          string    `json:"note,omitempty"`
+
+	// Interventions counts what the agent did to From and saw happen to To. It is not
+	// stored on the relationship: the map keeps the counters by pair, because they
+	// exist before any relationship does, and copies them here in every view.
+	Interventions *Interventions `json:"interventions,omitempty"`
 }
 
 // Effective is the strength the agent should reason with, and whether there is one
@@ -462,6 +471,9 @@ type Map struct {
 	properties    map[string]*Property
 	relationships map[string]*Relationship
 
+	// interventions holds the counters by pair "from->to"; see Interventions.
+	interventions map[string]*Interventions
+
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
@@ -505,6 +517,7 @@ func New(cfg Config, journal *Journal) *Map {
 		owner:         c.Owner,
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
+		interventions: make(map[string]*Interventions),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
@@ -1111,6 +1124,15 @@ func RelationshipID(from, to, label string) string {
 
 // DeclareRelationship creates or updates a relationship's definition.
 func (m *Map) DeclareRelationship(r Relationship) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.declareRelationshipLocked(r, false)
+}
+
+// declareRelationshipLocked is DeclareRelationship under the write lock. The public
+// path refuses Intervened; RecordIntervention passes allowIntervened, because that
+// provenance is a claim only the map's own evidence may make.
+func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) error {
 	if r.From == "" || r.To == "" {
 		return fmt.Errorf("relationship needs both endpoints")
 	}
@@ -1124,6 +1146,11 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	case "":
 		r.Provenance = Seeded
 	case Seeded, Asserted, Discovered:
+	case Intervened:
+		if !allowIntervened {
+			return fmt.Errorf("relationship %s->%s declares provenance %q; only the map's own verified interventions can claim it",
+				r.From, r.To, r.Provenance)
+		}
 	default:
 		// Learned is what the map writes when it folds evidence; a declaration
 		// cannot claim it, or a caller could fabricate a learned edge.
@@ -1137,10 +1164,8 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	r.Established, r.Assertion = nil, nil
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
+	r.Interventions = nil
 	r.ID = RelationshipID(r.From, r.To, r.Label)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, id := range []string{r.From, r.To} {
 		if _, ok := m.properties[id]; !ok {
@@ -1373,13 +1398,18 @@ func (m *Map) RetireRelationship(id, reason, actor string) error {
 	if !ok {
 		return fmt.Errorf("relationship %q not found", id)
 	}
+	m.retireRelationshipLocked(r, reason, actor, m.now())
+	return nil
+}
+
+// retireRelationshipLocked withdraws a relationship; a retired one is left alone.
+func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at time.Time) {
 	if r.Status == Retired {
-		return nil
+		return
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	m.bump(EventRelationshipRetired, id, actor, map[string]any{"reason": reason}, m.now())
-	return nil
+	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 
 // admitEventLocked reports whether an event identity is new, recording it if so.

@@ -38,6 +38,9 @@ type fixture struct {
 	noPressure bool // no pressure reading at start; only with no shares, which relate to it
 	flaky      bool
 	policy     func(*spec.PolicySpec)
+	noRelate   bool       // the shares relate to nothing: the map cannot rank or predict
+	evidence   bool       // outcomes feed the map, as on a runtime that really changes it
+	candidates Candidates // what the loop settles candidates through; nil for none
 }
 
 // flaky is a dry-run runtime that fails on request and can hide workloads from
@@ -114,7 +117,9 @@ func newHarness(t *testing.T, f fixture) *harness {
 		if strength == 0 {
 			strength = 1
 		}
-		relate(t, h.m, s, strength)
+		if !f.noRelate {
+			relate(t, h.m, s, strength)
+		}
 		h.rt.Put(pod(s))
 	}
 	var rt2 runtime.Runtime = h.rt
@@ -126,7 +131,7 @@ func newHarness(t *testing.T, f fixture) *harness {
 	relief.Enabled = true
 	l, err := New(Config{
 		Relief: relief, NodeID: "n1", Runtime: rt2, Policy: defaultPolicy(t, f.policy), Map: h.m,
-		Now: h.clock, Logf: t.Logf,
+		Now: h.clock, Logf: t.Logf, Evidence: f.evidence, Candidates: f.candidates,
 	})
 	if err != nil {
 		t.Fatal(err)

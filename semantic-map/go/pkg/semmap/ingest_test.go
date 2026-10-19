@@ -387,6 +387,50 @@ func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) 
 	}
 }
 
+// TestConfirmCandidate_ACoveredPairDeclaresNothingMore: a candidate settled after the
+// pair gained a relationship — the agent's interventions created one — is confirmed
+// without a second, discovered relationship on the same pair, which would count the
+// one dependency twice.
+func TestConfirmCandidate_ACoveredPairDeclaresNothingMore(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) == 0 {
+		t.Fatal("setup: no candidate")
+	}
+	from, to := "cpu_utilization@pod:a", "cpu_pressure_ratio"
+	for _, o := range []string{"v1", "v2"} {
+		if _, _, err := state.RecordIntervention(statemap.InterventionOutcome{From: from, To: to, Agreed: true, DecisionID: o}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{By: types.ReviewerIntervention}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := state.Relationships(from, to); len(rs) != 1 || rs[0].Provenance != statemap.Intervened {
+		t.Fatalf("relationships %+v; want only the intervened one", rs)
+	}
+	if left, _ := sm.PendingCandidates(); len(left) != len(cs)-1 {
+		t.Errorf("%d pending after confirming; want %d", len(left), len(cs)-1)
+	}
+}
+
 // TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending: the proposer marks
 // a candidate Confirmed before the facade declares the relationship. When the
 // declaration is refused — here an opposite-sign edge already exists — the error must

@@ -73,6 +73,7 @@ type StateCounts struct {
 	Learned            int `json:"learned"`
 	Asserted           int `json:"asserted"`
 	Discovered         int `json:"discovered"`
+	Intervened         int `json:"intervened"`
 	Unobserved         int `json:"properties_unobserved"`
 
 	// Subjects is the number of distinct non-empty subjects across non-retired
@@ -161,7 +162,7 @@ func (m *Map) State(q Query) StateView {
 		if r.Status == Retired && !wantStatus[Retired] {
 			continue
 		}
-		view.Relationships = append(view.Relationships, *r)
+		view.Relationships = append(view.Relationships, m.relationshipViewLocked(r))
 	}
 
 	sort.Slice(view.Properties, func(i, j int) bool {
@@ -190,7 +191,7 @@ func (m *Map) Relationship(id string) (Relationship, bool) {
 	if !ok {
 		return Relationship{}, false
 	}
-	return *r, true
+	return m.relationshipViewLocked(r), true
 }
 
 // Relationships returns every relationship, optionally filtered by endpoint.
@@ -205,7 +206,7 @@ func (m *Map) Relationships(from, to string) []Relationship {
 		if to != "" && r.To != to {
 			continue
 		}
-		out = append(out, *r)
+		out = append(out, m.relationshipViewLocked(r))
 	}
 	sortRelationships(out)
 	return out
@@ -274,6 +275,8 @@ func (m *Map) censusLocked() StateCounts {
 			c.Asserted++
 		case Discovered:
 			c.Discovered++
+		case Intervened:
+			c.Intervened++
 		}
 		if r.SignSuspect() {
 			c.RelationshipsSignSuspect++
@@ -336,10 +339,10 @@ func (m *Map) Explain(id string) (string, error) {
 	var incoming, outgoing []Relationship
 	for _, r := range m.relationships {
 		if r.To == id {
-			incoming = append(incoming, *r)
+			incoming = append(incoming, m.relationshipViewLocked(r))
 		}
 		if r.From == id {
-			outgoing = append(outgoing, *r)
+			outgoing = append(outgoing, m.relationshipViewLocked(r))
 		}
 	}
 	sortRelationships(incoming)

@@ -109,6 +109,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	if a.Resumed && a.Plan.Predicted == 0 {
 		b.Caveat("resumed after a restart with no journalled prediction: kept, as there is nothing to judge it against")
 	}
+	l.learn(b, id, a, keep, observed, now)
 	b.Commit(map[string]any{"verdict": verdict, "observed": observed, "predicted": a.Plan.Predicted})
 
 	l.mu.Lock()
@@ -334,6 +335,12 @@ func copyAction(a *Action) Action {
 	c := *a
 	c.Observed = cloneFloat(a.Observed)
 	c.Undo.Original = runtime.Resource{Request: cloneFloat(a.Undo.Original.Request), Limit: cloneFloat(a.Undo.Original.Limit)}
+	if a.SharesAtAct != nil {
+		c.SharesAtAct = make(map[string]float64, len(a.SharesAtAct))
+		for s, v := range a.SharesAtAct {
+			c.SharesAtAct[s] = v
+		}
+	}
 	c.prev, c.origin = nil, nil
 	return c
 }

@@ -490,6 +490,7 @@ const (
 	ReviewerRules          = "rules"           // tier 0, in the daemon
 	ReviewerDecisionModel  = "decision-model"  // tier 1, one forward pass
 	ReviewerReasoningAgent = "reasoning-agent" // tier 2, a model calling tools
+	ReviewerIntervention   = "intervention"    // the agent's own verified actions showed it
 )
 
 // What a review decided. Escalate means no tier was sure enough to act, and the

@@ -491,3 +491,18 @@ func TestState_StatusAndKindFilters(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlyTheMapMayClaimIntervened(t *testing.T) {
+	_, srv := stateFixture(t)
+	for _, prov := range []string{"intervened", "learned"} {
+		body := `{"from":"cpu_utilization","to":"memory_utilization","sign":1,"provenance":"` + prov + `"}`
+		resp, err := http.Post(srv.URL+"/state/relationships", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("provenance %q: status %d, want 400", prov, resp.StatusCode)
+		}
+	}
+}
