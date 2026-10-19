@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -279,3 +280,31 @@ func TestAMeasuredEffectReachesAPromotedRelationshipAndSurvivesARestart(t *testi
 }
 
 func nearly(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+// TestAnEstimateSaysWhatAMeasuredStrengthIs: a measured strength is a slope the
+// interventions observed, clamped to 1, not a correlation magnitude, and a linear
+// projection past the property's range is clipped; the decision says both, since a
+// projection of 0 read without them looks like an exact answer.
+func TestAnEstimateSaysWhatAMeasuredStrengthIs(t *testing.T) {
+	m := interventionMap(t)
+	for id, v := range map[string]float64{"cpu_limit": 0.5, "pressure": 0.2} {
+		if err := m.Record(Observation{ID: id, Value: v, At: m.now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustRecord(t, m, measured(true, false, "d1", 1))
+	mustRecord(t, m, measured(true, false, "d2", 1))
+	res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"cpu_limit": 0}})
+	if res.Err != "" || res.Hypothetical == nil || res.Hypothetical.ProjectedLevel != 0 {
+		t.Fatalf("result %+v; want a projection clipped to 0", res)
+	}
+	all := strings.Join(res.Caveats, "\n")
+	if strings.Contains(all, "correlation magnitude") {
+		t.Errorf("caveats call a measured strength a correlation magnitude:\n%s", all)
+	}
+	for _, want := range []string{"measured by the agent's interventions", "at the clamp of 1, a lower bound", "clipped to the range"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("caveats do not say %q:\n%s", want, all)
+		}
+	}
+}

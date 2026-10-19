@@ -232,8 +232,8 @@ type Relationship struct {
 	// the wrong measure once the agent acts on the source: a capped workload stops
 	// moving with the contention it caused, because the cap is what holds it still, so
 	// the learned layers settle near zero exactly when the relationship is strongest.
-	// In the 2026-10-19 run that left the relationship at 0.047, a predicted drop of
-	// 0.0009, and relief refusing while contention was back at 0.59.
+	// Each effect is clamped to [0, 1], so a measured 1 is a lower bound on the
+	// sensitivity, and the estimate's caveat says so.
 	Measured *float64 `json:"measured,omitempty"`
 
 	NObservations int        `json:"n_observations"`
