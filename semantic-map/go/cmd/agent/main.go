@@ -56,6 +56,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/relief"
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	_ "github.com/DiyazY/di-agent/pkg/runtime/kubernetes"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
