@@ -1087,6 +1087,8 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
 | `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
 | `loops.review.reasoning.backend` | `openai-tools`      | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. Unreachable, it skips only what needs it, each cycle. |
+| `loops.review.decision.timeout`  | `5m`                | How long one tier-1 call may take. A decision model on the node's own CPUs scoring a candidate with tier 2's analysis takes minutes; a call past this fails and the candidate waits for the next cycle. |
+| `loops.review.reasoning.timeout` | `10m`               | How long one tier-2 analysis may take, tool calls included. |
 | `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
 | `loops.review.reasoning.model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |
 | `loops.review.reasoning.keep_alive` | `10m`            | Ollama `keep_alive` for the tier 2 model. |

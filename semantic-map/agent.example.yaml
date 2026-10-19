@@ -96,6 +96,7 @@ loops:
             keep_alive: ""
             reasoning_effort: none
             api_key: ""
+            timeout: 5m0s
         reasoning:
             backend: openai-tools
             url: http://localhost:11434/v1
@@ -106,6 +107,7 @@ loops:
                 - get_state
                 - get_candidates
             api_key: ""
+            timeout: 10m0s
     relief:
         enabled: false
         interval: 15s

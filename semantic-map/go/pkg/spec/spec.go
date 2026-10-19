@@ -197,6 +197,9 @@ type Decision struct {
 	KeepAlive       string `yaml:"keep_alive"`
 	ReasoningEffort string `yaml:"reasoning_effort"`
 	APIKey          string `yaml:"api_key" secret:"true"`
+	// Timeout is how long one call may take. A decision model on the node's own CPUs
+	// scoring a candidate with a reasoning model's analysis needs minutes, not seconds.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Reasoning is review tier 2, the model that may call read-only tools.
@@ -207,6 +210,8 @@ type Reasoning struct {
 	KeepAlive string   `yaml:"keep_alive"`
 	Tools     []string `yaml:"tools"`
 	APIKey    string   `yaml:"api_key" secret:"true"`
+	// Timeout is how long one analysis may take, its tool calls included.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Relief is the loop that throttles a workload when the node's CPU stays hot.
@@ -415,11 +420,11 @@ func Default() Spec {
 				},
 				Decision: Decision{
 					Backend: "systemone", URL: "http://localhost:11434",
-					Model: "tev1:4b", ReasoningEffort: "none",
+					Model: "tev1:4b", ReasoningEffort: "none", Timeout: 5 * time.Minute,
 				},
 				Reasoning: Reasoning{
 					Backend: "openai-tools", URL: "http://localhost:11434/v1",
-					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m",
+					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m", Timeout: 10 * time.Minute,
 					Tools: slices.Clone(autonomy.DefaultTools),
 				},
 			},
