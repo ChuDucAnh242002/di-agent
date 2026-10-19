@@ -14,6 +14,9 @@ set -euo pipefail
 OUT="${1:?usage: $0 <out-dir> [--phase P0..P5]}"
 ONLY="${3:-}"
 [ "${2:-}" = "--phase" ] || [ -z "${2:-}" ] || { echo "unknown argument $2" >&2; exit 2; }
+# --phase with no name would otherwise run the whole timetable, whose first step stops
+# the running agent and moves its snapshot aside.
+[ "${2:-}" != "--phase" ] || [ -n "$ONLY" ] || { echo "--phase needs a phase name (P0..P5)" >&2; exit 2; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 API="${API:-http://localhost:9090}"
@@ -111,7 +114,7 @@ phase_P2() {
     uid=$(uid_of mem-wave)
     if [ -z "$uid" ]; then
         mark P2 "refused: mem-wave is not running, nothing deleted"
-        exit 1
+        return 1
     fi
     subject="pod:$uid"
 
@@ -122,10 +125,13 @@ phase_P2() {
     if [ -z "$ids" ]; then
         mark P2 "refused: no pending candidate from mem-wave memory to node memory, nothing deleted" \
             --arg subject "$subject"
-        exit 1
+        return 1
     fi
     for id in $ids; do
-        curl -sf -X POST "$API/candidates/$(jq -rn --arg i "$id" '$i | @uri')/confirm" >/dev/null
+        if ! curl -sf -X POST "$API/candidates/$(jq -rn --arg i "$id" '$i | @uri')/confirm" >/dev/null; then
+            mark P2 "refused: confirming $id failed, nothing deleted" --arg subject "$subject"
+            return 1
+        fi
         mark P2 "operator confirmed candidate" --arg candidate "$id"
     done
 
@@ -142,11 +148,11 @@ phase_P2() {
         # Asked now, the estimate would leave the relationship out and project no change.
         mark P2 "refused: the confirmed relationship has no observation after 5 min, nothing deleted" \
             --arg subject "$subject"
-        exit 1
+        return 1
     fi
     mark P2 "relationship observed" --arg subject "$subject" --argjson n_observations "$observed"
 
-    estimate=$(curl -s -w '\n%{http_code}' "$API/state/estimate?target=memory_utilization&without=$subject")
+    estimate=$(curl -s -w '\n%{http_code}' "$API/state/estimate?target=memory_utilization&without=$subject") || estimate=$'\n0'
     status="${estimate##*$'\n'}"
     estimate="${estimate%$'\n'*}"
     decision=$(jq -r '.decision_id // empty' <<<"$estimate" 2>/dev/null || true)
@@ -156,13 +162,16 @@ phase_P2() {
         ! jq -e --arg s "$subject" '.excluded | index($s)' >/dev/null <<<"$estimate"; then
         mark P2 "refused: the estimate did not exclude mem-wave, nothing deleted" \
             --arg subject "$subject" --arg status "$status"
-        exit 1
+        return 1
     fi
     mark P2 "estimate without mem-wave" --arg subject "$subject" --arg decision_id "$decision" \
         --argjson level "$(jq '.answer.level' <<<"$estimate")" \
         --argjson projected "$(jq '.hypothetical.projected_level' <<<"$estimate")"
 
-    remove mem-wave
+    if ! remove mem-wave; then
+        mark P2 "deleting mem-wave failed" --arg subject "$subject"
+        return 1
+    fi
     mark P2 "deleted mem-wave" --arg subject "$subject"
 }
 
@@ -174,9 +183,11 @@ phase_P3() {
     before=$(revision)
     agent_stop
     mark P3 "agent stopped" --argjson revision "$before"
+    local snapshot=false
+    [ -e "$STATE" ] && snapshot=true
     agent_start agent-relief.yaml
     after=$(revision)
-    mark P3 "agent restarted from snapshot, relief on" --argjson revision "$after"
+    mark P3 "agent restarted, relief on" --argjson revision "$after" --argjson from_snapshot "$snapshot"
 }
 
 # Two relief episodes, because a relationship needs two agreeing outcomes and the
@@ -222,13 +233,15 @@ if [ -n "$ONLY" ]; then
     declare -A START=([P0]=0 [P1]=10 [P2]=50 [P3]=65 [P4]=72 [P5]=117)
     T0=$(awk -v n="$(date +%s)" -v m="${START[$ONLY]:?unknown phase $ONLY}" -v s="$SCALE" 'BEGIN { printf "%d", n - m * 60 * s }')
     "phase_$ONLY"
-    exit 0
+    exit $?
 fi
 
 phase_prepare
 phase_P0
 phase_P1
-phase_P2
+# A refused P2 is marked and skipped; the rest of the timetable still runs, so the
+# planted pods are removed and relief is still exercised.
+phase_P2 || mark P2 "skipped; the timetable continues"
 phase_P3
 phase_P4
 phase_P5

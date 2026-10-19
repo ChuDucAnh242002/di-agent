@@ -53,15 +53,18 @@ Everything runs on the node, as root, from this directory, next to an `agent` bi
 
 ```bash
 sudo ./launch.sh run-$(date +%F)       # capture + timetable, detached; about 2 h 10 min
-# when run-*/schedule.out says "done", stop the capture:
-sudo pkill -f '[c]apture.sh'
+# when run-*/schedule.out says "done exit=0", stop this run's capture:
+sudo kill "$(cat run-*/capture.pid)"
 ```
 
-P2 refuses to delete `mem-wave` — and exits — unless discovery has a pending candidate for its
+A `done` with a non-zero exit is a timetable that stopped early; `phases.jsonl` says where.
+
+P2 refuses to delete `mem-wave` — marking why and leaving the rest of the timetable to run — unless discovery has a pending candidate for its
 memory against node memory, the confirmed relationship has at least one observation (a
 relationship confirmed a moment ago has no strength, and the estimate would leave it out), and
 the estimate returned 200 with a decision id and `mem-wave` in `excluded`.
-`repeat-p2.sh <out-dir>` runs that episode on its own against the running agent.
+`repeat-p2.sh <out-dir>` runs that episode on its own against the running agent, and exits non-zero when it refuses.
+`verify.sh <out-dir>` reruns P3–P5 on a fresh map: the verification run of the measured `Intervened` strength.
 
 Both write JSON lines stamped with the VM's clock: `capture.jsonl` (`t`, `endpoint`, `status`,
 `body`; a failed poll has `status: 0` and `body: null`) and `phases.jsonl` (`t`, `phase`, `event`, and
