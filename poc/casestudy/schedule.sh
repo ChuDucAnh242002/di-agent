@@ -117,6 +117,17 @@ phase_P2() {
         mark P2 "operator confirmed candidate" --arg candidate "$id"
     done
 
+    # A relationship confirmed a moment ago has no strength yet, and the estimate leaves
+    # it out of the projection (saying so in a caveat). Ask once it has been observed.
+    local observed=0
+    for _ in $(seq 60); do
+        observed=$(curl -sf "$API/state/relationships" | jq --arg f "memory_utilization@$subject" \
+            '[.relationships[] | select(.from == $f and .to == "memory_utilization") | .n_observations] | max // 0')
+        [ "$observed" -gt 0 ] && break
+        sleep 5
+    done
+    mark P2 "relationship observed" --arg subject "$subject" --argjson n_observations "$observed"
+
     estimate=$(curl -s -w '\n%{http_code}' "$API/state/estimate?target=memory_utilization&without=$subject")
     status="${estimate##*$'\n'}"
     estimate="${estimate%$'\n'*}"
