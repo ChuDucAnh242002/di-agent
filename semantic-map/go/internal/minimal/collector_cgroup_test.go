@@ -787,7 +787,8 @@ func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := bySubject(samples)
-	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.3} {
+	// podB is BestEffort, so the node takes podA's reading (TestABestEffortPodDoesNotSetNodeContention).
+	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.01} {
 		s := got[subject][types.CPUContentionRatio]
 		if s == nil {
 			t.Errorf("subject %q: no cpu_contention_ratio after two collects", subject)
@@ -838,5 +839,43 @@ func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 		if s := ms[types.CPUContentionRatio]; s != nil {
 			t.Errorf("subject %q: cpu_contention_ratio %v without any cpu.pressure; want no sample", subject, s.Value)
 		}
+	}
+}
+
+// TestABestEffortPodDoesNotSetNodeContention: a BestEffort pod has no CPU request, so on
+// a node that is merely busy it waits almost all the time — that is the share it was
+// promised, not contention. The node's signal is the worst-off workload that was
+// promised something; the BestEffort pod's own reading is still emitted.
+func TestABestEffortPodDoesNotSetNodeContention(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t) // podB is under kubepods/besteffort
+	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, podB, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000) // waited 1 s of 10
+	advance(t, podB, 600_000, 100, 0)
+	writeThrottledUsec(t, podB, 0)
+	writePressure(t, podB, 9_500_000) // waited 9.5 s of 10: BestEffort on a busy node
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0.1 {
+		t.Fatalf("node cpu_contention_ratio %v; want the burstable pod's 0.1, not the BestEffort pod's 0.95", s)
+	}
+	if s := got[podBSubject][types.CPUContentionRatio]; s == nil || s.Value != 0.95 {
+		t.Fatalf("BestEffort pod's own cpu_contention_ratio %v; want it still reported, 0.95", s)
 	}
 }

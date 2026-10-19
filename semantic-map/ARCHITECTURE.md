@@ -704,7 +704,7 @@ fraction.
 | `io_pressure_ratio`     | —         | worse    | PSI `io.some` stall share of the window (cgroup `io.pressure`); route removed (§2) |
 | `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
 | `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
-| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst-off subject's; unrouted; relief's signal (§16) |
+| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst-off non-BestEffort subject's; unrouted; relief's signal (§16) |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is
@@ -1104,8 +1104,12 @@ its own throttled share 29%, and lowering its limit to 1 core raised node pressu
 42%. Per subject, contention is the stall share left after the cgroup's own throttled
 time, clamped at zero; a cgroup without `throttled_usec` has no quota, so all its stall
 counts. The node's is the highest of its subjects' this tick — the share of the window
-in which some workload waited for a CPU another was using — and is absent when no
-subject has a reading, rather than a zero that would read as "nobody waiting". The two sources
+in which some workload waited for a CPU another was using — over the subjects that were
+promised CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
+nearly all the time, and letting it set the signal would have relief cap a workload that
+was promised CPU to serve one promised none. Its own reading is still emitted. The node's
+is absent when no such subject has a reading, rather than a zero that would read as
+"nobody waiting". The two sources
 account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
 cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
 subjects' figures are not the same quantity and are not expected to add up.
@@ -2215,7 +2219,7 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Dry runs teach nothing.** Outcomes feed the map only when the runtime really changes the system (`Config.Evidence`, which the daemon sets for every runtime but `dry-run`). Under a dry run nothing was capped, so a drop in pressure after a recorded "action" is the workload's own load cycle; a demonstration run showed every dry-run `keep` to be exactly that coincidence. Recording it would build relationships on actions that never happened.
 
-**Confounding.** At act time — and, for a resumed action, at the tick that gives it a baseline — the loop snapshots every workload's share of node CPU (`Action.shares_at_act`). An outcome is *confounded* when another workload, live at verify time, has since moved by more than `step` relative to its share then *and* by more than 0.02 of the node absolute; a workload that arrived since moved from nothing, and one that was using more than 0.02 at act and is no longer live has left, taking its load with it. The absolute bar keeps a small pod's relative jitter (0.01 → 0.02) from discrediting every outcome. Rises are the exception: capping a workload frees CPU and the contended workloads beside it take it up, which is the relief working rather than something else moving, so workloads present at act that rose count as moved only when together they rose by more than the capped workload gave up (plus 0.02). A fall, an arrival and a departure always count. Passing a rise over can only cost an agreeing outcome — a rise the cap did not explain makes contention look worse — never invent one; the bound keeps it from hiding a workload that grew on its own. A confounded outcome is recorded on the relationship's `interventions` counts and changes nothing else.
+**Confounding.** At act time — and, for a resumed action, at the tick that gives it a baseline — the loop snapshots every workload's share of node CPU (`Action.shares_at_act`). An outcome is *confounded* when another workload, live at verify time, has since moved by more than `step` relative to its share then *and* by more than 0.02 of the node absolute; a workload that arrived since moved from nothing, and one that was using more than 0.02 at act and is no longer live has left, taking its load with it. The absolute bar keeps a small pod's relative jitter (0.01 → 0.02) from discrediting every outcome. Rises are the exception: capping a workload frees CPU and the contended workloads beside it take it up, which is the relief working rather than something else moving, so workloads present at act whose rises together stay within what the capped workload gave up (plus 0.02) are *absorbed* rather than moved. What it gave up is known only while the map holds its share; without one nothing counts as freed. An absorbed rise is excused only when the outcome agreed: when contention did not drop as predicted, the same rise may be a workload that grew on its own and hid the cap's effect, and excusing it would turn a confound into a null outcome that teaches, so a revert beside an absorbed rise is confounded. A larger rise, a fall, an arrival and a departure always count. The verify decision lists `moved`, `left` and `absorbed`. A confounded outcome is recorded on the relationship's `interventions` counts and changes nothing else.
 
 **Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
 

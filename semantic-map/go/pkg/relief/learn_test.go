@@ -123,22 +123,22 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.3, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.02, t0)
 	at := map[string]float64{"pod:a": 0.4, "pod:c": 0.01}
-	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
+	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
 		t.Fatalf("moved %v; a pod going 0.01 → 0.02 of the node is not a confound", moved)
 	}
-	if confounded(m, at, "pod:a", 0.25) {
+	if confounded(m, at, "pod:a", 0.25, true) {
 		t.Fatal("confounded; want not")
 	}
 	// pod:a back at its share at act, so pod:c's rise is not CPU the cap freed.
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.04, t0)
-	if !confounded(m, at, "pod:a", 0.25) {
+	if !confounded(m, at, "pod:a", 0.25, true) {
 		t.Fatal("pod:c at 0.04 from 0.01 moved 0.03: want confounded")
 	}
 	// A workload that arrived since the act moved from nothing.
 	record(t, m, usage("pod:c"), "pod:c", 0.01, t0)
 	record(t, m, usage("pod:d"), "pod:d", 0.1, t0)
-	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
+	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
 		t.Fatalf("moved %v; want the newcomer pod:d", moved)
 	}
 }
@@ -539,17 +539,46 @@ func TestAVictimTakingUpTheFreedCPUDoesNotConfound(t *testing.T) {
 	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
 	record(t, m, usage("pod:hog"), "pod:hog", 0.38, t0)
 	record(t, m, usage("pod:victim"), "pod:victim", 0.5, t0)
-	if moved, left := movedSince(m, at, "pod:hog", 0.25); len(moved)+len(left) != 0 {
-		t.Fatalf("moved %v left %v; the victim took up the 0.12 the hog gave up", moved, left)
+	if moved, left, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved)+len(left) != 0 || len(absorbed) != 1 {
+		t.Fatalf("moved %v left %v absorbed %v; the victim took up the 0.12 the hog gave up", moved, left, absorbed)
 	}
 	// The victim rose by more than the hog gave up: something besides the cap moved it.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.7, t0)
-	if moved, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a rise of 0.32 against 0.12 freed is a confound", moved)
 	}
 	// A workload that fell lowered contention on its own.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.2, t0)
-	if moved, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a fall is a confound whatever the hog gave up", moved)
+	}
+}
+
+// TestAnAbsorbedRiseConfoundsARevert: a rise passed over as the victim taking up freed
+// CPU is only the relief working when the outcome agreed. When contention did not drop,
+// the same rise may be a workload growing on its own and hiding the cap's effect, so a
+// revert with an absorbed rise beside it is confounded rather than a null that teaches.
+func TestAnAbsorbedRiseConfoundsARevert(t *testing.T) {
+	absorbed := []string{"pod:victim"}
+	if c := confoundedBy(nil, nil, absorbed, true); len(c) != 0 {
+		t.Fatalf("confounded by %v; an agreeing outcome with the freed CPU taken up is the relief", c)
+	}
+	if c := confoundedBy(nil, nil, absorbed, false); len(c) != 1 || c[0] != "pod:victim" {
+		t.Fatalf("confounded by %v; a revert beside an absorbed rise must not teach", c)
+	}
+	if c := confoundedBy([]string{"pod:x"}, []string{"pod:y"}, nil, true); len(c) != 2 {
+		t.Fatalf("confounded by %v; moved and left confound whatever the verdict", c)
+	}
+}
+
+// TestNothingIsFreedByAWorkloadTheMapNoLongerHolds: with no live share for the capped
+// workload, what it gave up is unknown, not its whole share at act, so rises beside it
+// are not passed over.
+func TestNothingIsFreedByAWorkloadTheMapNoLongerHolds(t *testing.T) {
+	m := newMap(t, func() time.Time { return t0 })
+	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
+	record(t, m, usage("pod:victim"), "pod:victim", 0.6, t0)
+	if moved, _, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || len(absorbed) != 0 {
+		t.Fatalf("moved %v absorbed %v; nothing is known to have been freed", moved, absorbed)
 	}
 }

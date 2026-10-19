@@ -253,6 +253,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		return out, nil
 	}
 	seen := map[string]bool{}
+	var promised []*types.MetricSample // subjects promised CPU: the node's contention is theirs
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
@@ -295,6 +296,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
+			if labels["qos"] != "besteffort" {
+				promised = append(promised, samples...)
+			}
 			return filepath.SkipDir // a subject's children are not subjects
 		}
 		return nil
@@ -313,7 +317,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		}
 		c.lastSkipped = skipped
 	}
-	if worst, ok := worstContention(out); ok {
+	if worst, ok := worstContention(promised); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, now, "", nil))
 	}
 	for subject := range c.prev {
@@ -432,7 +436,10 @@ func contention(prev, snap *cpuSnapshot, elapsedUs int64) (float64, bool) {
 }
 
 // worstContention is the highest subject cpu_contention_ratio among samples, and
-// whether there was one.
+// whether there was one. Collect passes it only the subjects that were promised
+// CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
+// nearly all the time, and letting it set the node's signal would have relief cap
+// a workload that was promised CPU to serve one that was promised none.
 func worstContention(samples []*types.MetricSample) (float64, bool) {
 	worst, ok := 0.0, false
 	for _, s := range samples {
