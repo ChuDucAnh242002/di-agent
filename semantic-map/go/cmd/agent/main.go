@@ -287,7 +287,7 @@ func main() {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
-	explainer, err := buildExplainer(sm, cfg.Explain)
+	explainer, err := buildExplainer(sm, cfg.Explain, dom)
 	if err != nil {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
@@ -497,7 +497,17 @@ func runCollectionLoop(
 //
 // The bearer token is explain.api_key; write it as ${EXPLAIN_API_KEY} to keep the
 // credential out of the file.
-func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer, error) {
+// withDomain fills a prompt's {{DOMAIN}} with what the loaded domain model declares, or
+// says that none is loaded. A prompt names no construct itself: the constructs are data
+// this agent loaded, and a model told about others reasons about a map that is not here.
+func withDomain(prompt string, dom *domain.Spec) string {
+	if prompt == "" {
+		return ""
+	}
+	return strings.ReplaceAll(prompt, "{{DOMAIN}}", dom.PromptSummary())
+}
+
+func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) (explain.Explainer, error) {
 	if opt.Provider == "" || opt.Provider == "none" {
 		log.Printf("explain: provider=none (POST /explain will return 501)")
 		return explain.NewDisabled(), nil
@@ -517,8 +527,9 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer
 	// stage rather than failing startup, so an operator can run answer-only
 	// even with a partial prompt directory.
 	promptDir := filepath.Dir(opt.Prompt)
-	plannerPrompt := loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v1.md", "planner")
-	criticPrompt := loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v1.md", "critic")
+	prompt = withDomain(prompt, dom)
+	plannerPrompt := withDomain(loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v1.md", "planner"), dom)
+	criticPrompt := withDomain(loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v1.md", "critic"), dom)
 
 	var sessions *explain.SessionStore
 	if opt.Sessions {

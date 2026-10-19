@@ -2074,7 +2074,7 @@ A missing *derived* planner/critic prompt disables that stage with a log line; a
 
 ### Prompt versioning
 
-Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
 
 ### What v2 does not change
 
