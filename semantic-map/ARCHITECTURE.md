@@ -2105,14 +2105,14 @@ agent takes on its own authority. How much authority is an operator setting
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
 | 0 | rules in the daemon | Some candidates are settled by what they are. A `composition` candidate is a part against its whole, true by definition and the relationship `without=` answers from, so it is confirmed. There is one rule: the other kinds (`same-metric`, `same-subject`) make a shared driver or accounting *likelier*, which is a judgement about this system, so they are evidence for the models rather than verdicts. |
-| 1 | decision model | Escalation needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
+| 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
-| — | operator | What no tier was sure of keeps its place in the queue, with the review that escalated it. |
+| — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
 
 **Levels.** `suggest` (0) records every tier's verdict as a suggestion and applies none —
 today's behaviour with the reasoning written down. `rules` (1) lets tier 0 act. `bounded`
-(2) lets the model tiers confirm and defer; a model's rejection is escalated, because a
-rejection hides a pair. `full` (3) lets every tier act above its threshold. Thresholds
+(2) lets the model tiers confirm and defer; a model's rejection is left undecided, because a
+rejection hides a pair. `full` (3), the default, lets every tier act above its threshold; the lower levels are the manual modes an operator opts into. Thresholds
 differ by action for the same reason: confirmation is undone by retirement with history
 kept, deferral costs only time, rejection the most. The defaults (0.85 / 0.95 / 0.7) are
 not calibrated — there is no labelled set of candidates yet, and building one from an
@@ -2121,23 +2121,25 @@ operator's past reviews is a measurement round.
 **An agent's decision is provisional; an operator's is not.** An agent's rejection or
 deferral carries `Reason: "agent"`: the pair is still tested and the candidate returns to
 pending when its evidence moves past what the review saw (sign, kind, or `|r|` by more than
-two standard errors of Fisher's z). The same test decides when an escalated candidate is
+two standard errors of Fisher's z). The same test decides when an undecided candidate is
 reviewed again, which is what keeps the models from being asked the same question every
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
 **An outage is not a review.** A model that cannot answer — the server still loading, the
 network down, a request it refuses — leaves the candidate untouched: no decision, no
-`Review`, so it is due again next cycle. Recording it as an escalation would shelve the
-candidate until its evidence moved, which on a steady machine may be never. The cycle
-stops at the first failure, since the next candidate would fail the same way, and the
-error is counted in the status. Tier 2's tool loop has a hard end: calls past the budget
+`Review`, so it is due again next cycle. Recording it as undecided would shelve the
+candidate until its evidence moved, which on a steady machine may be never. A model that
+failed is not asked again that cycle, since the next candidate would fail the same way;
+what needs it waits, what does not — a rule, or tier 1 when only the reasoning model is
+down — is still reviewed, and the outage is counted once in the status. A default that
+names a reasoning model therefore cannot stall review on a node that has none. Tier 2's tool loop has a hard end: calls past the budget
 are answered with an error, and a model told to answer that calls tools again fails the
 review rather than looping.
 
 **Orientation.** An undirected candidate cannot be confirmed with an arbitrary end. The
 decision model is asked which end drives the other, with "unclear" as an option; the
-confirmation needs the confirm threshold on both questions, or it escalates.
+confirmation needs the confirm threshold on both questions, or it is undecided.
 
 **Traceability.** A review is `Map.Decide` like an estimate: both properties are read
 through the `DecisionBuilder`, and `Inputs` holds the candidate, its neighbours, the level
@@ -2150,8 +2152,8 @@ choice is a snapshot.
 
 **What it does not do.** `/explain` stays read-only: autonomy is a separate surface whose
 only writes are the four review actions. No hosted model is contacted; the URL is the
-operator's. Escalation ends at the operator: a tier 3 on a peer or a bigger model is not
-built, because where it should live is open.
+operator's. What no tier settles waits for its evidence to move: a tier 3 on a peer or a
+bigger model is not built, because where it should live is open.
 
 **Every part is substitutable.** The reviewer depends on interfaces — `Map` for the
 semantic map, `Rule` (tier 0), `Decider` (tier 1), `Reasoner` (tier 2), `Tool` (what tier 2
@@ -2163,7 +2165,7 @@ decision model's typed-question endpoint (`systemone`, Ollama only), or any
 OpenAI-compatible server returning token log-probabilities (`openai-logprobs`), where the
 question is asked as lettered options with a one-token answer and the distribution is the
 letters' probabilities, normalised. The second carries `OptionMass` — how much of the
-model's probability fell on any letter — and below one half the verdict escalates: a model
+model's probability fell on any letter — and below one half the verdict is undecided: a model
 that wanted to say something else has not answered the question. The verdict records the
 backend, model, question-set version and renderer, so substituting any of them leaves the
 records comparable. The `text` renderer (`text-v2`) opens with the machine's facts —
@@ -2178,7 +2180,7 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 
 | Test | Covers |
 | ---- | ------ |
-| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass is undecided; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
 | `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
 | `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
@@ -2225,9 +2227,9 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1.
 
-**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how the escalation queue drains without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
+**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how undecided candidates settle without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
 
-**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. The escalation queue therefore drains slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
 
 ### The Kubernetes runtime (`pkg/runtime/kubernetes`)
 

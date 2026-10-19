@@ -406,7 +406,7 @@ func Default() Spec {
 		Runtime: RuntimeSpec{Kind: "dry-run"},
 		Loops: Loops{
 			Review: Review{
-				Level: "off", Interval: time.Minute, PerCycle: 10,
+				Level: "full", Interval: time.Minute, PerCycle: 10,
 				Rules: []string{"composition"}, Renderer: "text",
 				Thresholds: ReviewThreshold{
 					Confirm: autonomy.DefaultThresholds.Confirm,
@@ -418,7 +418,7 @@ func Default() Spec {
 					Model: "tev1:4b", ReasoningEffort: "none",
 				},
 				Reasoning: Reasoning{
-					Backend: "none", URL: "http://localhost:11434/v1",
+					Backend: "openai-tools", URL: "http://localhost:11434/v1",
 					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m",
 					Tools: slices.Clone(autonomy.DefaultTools),
 				},

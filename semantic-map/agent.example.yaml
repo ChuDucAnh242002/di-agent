@@ -79,7 +79,7 @@ runtime:
     node: ""
 loops:
     review:
-        level: "off"
+        level: full
         interval: 1m0s
         per_cycle: 10
         rules:
@@ -97,7 +97,7 @@ loops:
             reasoning_effort: none
             api_key: ""
         reasoning:
-            backend: none
+            backend: openai-tools
             url: http://localhost:11434/v1
             model: qwen3.8:27b-nvfp4
             keep_alive: 10m

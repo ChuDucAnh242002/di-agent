@@ -7,8 +7,9 @@
 // per action. Tier 2 is a reasoning model that reads the map through tools and
 // writes an analysis, which the decision model then scores again, so the number an
 // action is taken on is always the decision model's, never a reasoning model's
-// opinion of itself. What no tier is sure enough about is escalated: it stays in the
-// operator's queue with the review recorded on it.
+// opinion of itself. What no tier is sure enough about is left undecided: it stays
+// pending, with the review recorded on it, and is reviewed again when its evidence
+// moves. Nothing waits on a person; an operator who wants to decide sets a lower level.
 //
 // The level decides which tier may act and on which actions; below it, a tier's
 // verdict is recorded as a suggestion. Every review, applied or not, is a decision
@@ -21,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -44,7 +46,7 @@ const (
 	// Rules lets tier 0 act; the model tiers suggest.
 	Rules
 	// Bounded lets the model tiers confirm and defer above threshold; a model's
-	// rejection is escalated instead.
+	// rejection is left undecided instead.
 	Bounded
 	// Full lets every tier act above threshold; the operator sees the record, and
 	// only what no tier was sure of reaches the queue.
@@ -152,7 +154,7 @@ type Verdict struct {
 
 // MinOptionMass is the share of a general model's probability that has to fall on
 // the options for its distribution over them to mean anything. Below it the model
-// wanted to say something else, and the verdict escalates.
+// wanted to say something else, and the verdict is undecided.
 const MinOptionMass = 0.5
 
 // Decider is tier 1.
@@ -189,7 +191,7 @@ type Config struct {
 	Interval   time.Duration // between review cycles; 0 means one minute
 	MaxPer     int           // candidates reviewed per cycle; 0 means 10
 	Thresholds Thresholds    // zero means DefaultThresholds
-	Decider    Decider       // nil: no model tiers, whatever rules cannot settle escalates
+	Decider    Decider       // nil: no model tiers, whatever rules cannot settle is undecided
 	Reasoner   Reasoner      // nil: no tier 2; needs a Decider to score its analysis
 	Logf       func(format string, args ...any)
 	Now        func() time.Time
@@ -206,13 +208,13 @@ type Status struct {
 	Cycles         int        `json:"cycles"`
 	LastCycle      time.Time  `json:"last_cycle,omitempty"`
 	// Cumulative counts of reviews by outcome. Applied and Suggested are actions a
-	// tier was sure of, taken or reserved by the level; Escalated is what no tier
+	// tier was sure of, taken or reserved by the level; Undecided is what no tier
 	// was sure of. Waiting is the last cycle's count of due candidates passed over
 	// because an end is not active, so the evidence is not moving.
 	Reviewed  int    `json:"reviewed"`
 	Applied   int    `json:"applied"`
 	Suggested int    `json:"suggested"`
-	Escalated int    `json:"escalated"`
+	Undecided int    `json:"undecided"`
 	Waiting   int    `json:"waiting"`
 	Errors    int    `json:"errors"`
 	LastError string `json:"last_error,omitempty"`
@@ -223,7 +225,10 @@ type Reviewer struct {
 	m   Map
 	cfg Config
 
-	cycle  sync.Mutex // one cycle at a time
+	cycle sync.Mutex // one cycle at a time
+	// down names the model tiers that failed this cycle, guarded by cycle: what needs
+	// one waits for the next cycle, and the rest of the queue goes on without it.
+	down   struct{ decider, reasoner bool }
 	mu     sync.Mutex
 	status Status
 	seq    uint64
@@ -310,6 +315,7 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 		return due[i].MIScore*float64(due[i].NObservations) > due[j].MIScore*float64(due[j].NObservations)
 	})
 	reviewed, waiting := 0, 0
+	r.down.decider, r.down.reasoner = false, false
 	for _, c := range due {
 		if reviewed >= r.cfg.MaxPer || ctx.Err() != nil {
 			break
@@ -320,9 +326,9 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 		}
 		ok, err := r.review(ctx, c, pending)
 		if err != nil {
-			// A model that failed for one candidate will fail for the next: the
-			// rest wait for the next cycle rather than each record the outage.
-			break
+			// A model that failed for one candidate will fail for the next, so it is
+			// not asked again this cycle; what does not need it is still reviewed.
+			continue
 		}
 		if ok {
 			reviewed++
@@ -340,7 +346,7 @@ type outcome struct {
 	tier   int
 	by     string
 	model  string
-	action string // confirm, reject, defer, or escalate
+	action string // confirm, reject, defer, or undecided
 	from   string // the end an undirected confirmation runs from
 	why    string
 }
@@ -368,13 +374,15 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 
 	o, err := r.decide(ctx, b, ev)
 	if err != nil {
-		r.failed(err)
+		if !errors.Is(err, errSkipped) {
+			r.failed(err)
+		}
 		return false, err
 	}
 	applied, err := r.apply(c, o, id)
 	if err != nil {
-		b.Caveat("applying %s failed: %v; the candidate was escalated instead", o.action, err)
-		o.action, applied = types.ReviewEscalate, false
+		b.Caveat("applying %s failed: %v; the candidate was left undecided instead", o.action, err)
+		o.action, applied = types.ReviewUndecided, false
 		_ = r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id))
 	}
 	b.Note("tier %d (%s): %s", o.tier, o.by, o.why)
@@ -393,8 +401,8 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	r.count(func(s *Status) {
 		s.Reviewed++
 		switch {
-		case o.action == types.ReviewEscalate:
-			s.Escalated++
+		case o.action == types.ReviewUndecided:
+			s.Undecided++
 		case applied:
 			s.Applied++
 		default:
@@ -425,6 +433,10 @@ func (r *Reviewer) endsActive(c *types.CandidateEdge) bool {
 	return true
 }
 
+// errSkipped is a candidate that needs a model which already failed this cycle: it
+// waits, unrecorded, and the outage is counted once.
+var errSkipped = errors.New("a model this candidate needs is down this cycle")
+
 // decide runs the tiers, recording what each read and answered. An error is a model
 // that could not answer; the review is then not recorded at all.
 func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev Evidence) (outcome, error) {
@@ -432,20 +444,28 @@ func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev E
 		return o, nil
 	}
 	if r.cfg.Decider == nil {
-		return outcome{tier: 0, by: types.ReviewerRules, action: types.ReviewEscalate,
+		return outcome{tier: 0, by: types.ReviewerRules, action: types.ReviewUndecided,
 			why: "no rule applies and no decision model is configured"}, nil
+	}
+	if r.down.decider {
+		return outcome{}, errSkipped
 	}
 	v, err := r.cfg.Decider.Decide(ctx, ev, "")
 	if err != nil {
+		r.down.decider = true
 		return outcome{}, fmt.Errorf("decision model: %w", err)
 	}
 	b.Input("tier1", v)
 	o := r.choose(v, ev, 1, types.ReviewerDecisionModel, r.cfg.Decider.Name())
-	if o.action != types.ReviewEscalate || r.cfg.Reasoner == nil {
+	if o.action != types.ReviewUndecided || r.cfg.Reasoner == nil {
 		return o, nil
+	}
+	if r.down.reasoner {
+		return outcome{}, errSkipped
 	}
 	a, err := r.cfg.Reasoner.Reason(ctx, ev)
 	if err != nil {
+		r.down.reasoner = true
 		return outcome{}, fmt.Errorf("reasoning model: %w", err)
 	}
 	b.Input("tier2_analysis", a)
@@ -460,9 +480,9 @@ func (r *Reviewer) decide(ctx context.Context, b *statemap.DecisionBuilder, ev E
 
 // choose turns a verdict into an outcome: the top action when its probability
 // reaches the action's threshold, and for an undirected confirmation an end the
-// relationship runs from at the same bar; otherwise escalation.
+// relationship runs from at the same bar; otherwise undecided.
 func (r *Reviewer) choose(v *Verdict, ev Evidence, tier int, by, model string) outcome {
-	o := outcome{tier: tier, by: by, model: model, action: types.ReviewEscalate}
+	o := outcome{tier: tier, by: by, model: model, action: types.ReviewUndecided}
 	top, p := argmax(v.Actions)
 	if top == "" {
 		o.why = "the model returned no probabilities"
@@ -497,7 +517,7 @@ func (r *Reviewer) choose(v *Verdict, ev Evidence, tier int, by, model string) o
 // the action. It reports whether the action was applied.
 func (r *Reviewer) apply(c *types.CandidateEdge, o outcome, id string) (bool, error) {
 	rv := r.reviewOf(o, id)
-	if o.action == types.ReviewEscalate || !r.cfg.Level.permits(o.tier, o.action) {
+	if o.action == types.ReviewUndecided || !r.cfg.Level.permits(o.tier, o.action) {
 		return false, r.m.AnnotateCandidate(c.CandidateID, rv)
 	}
 	switch o.action {
