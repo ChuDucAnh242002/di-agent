@@ -33,6 +33,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
 - [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
 - [15. Autonomous Candidate Review (`pkg/autonomy`)](#15-autonomous-candidate-review-pkgautonomy)
+- [16. Acting (`pkg/relief`, `pkg/policy`, `pkg/runtime`)](#16-acting-pkgrelief-pkgpolicy-pkgruntime)
 
 ---
 
@@ -415,7 +416,7 @@ The rule we hold to: **no new contract without a second implementation that need
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; an operator's `Reject` permanently suppresses within session |
 | **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
-| **Runtime**   | The orchestrator-neutral way the agent changes the system it models: list the node's workloads, cap one's CPU, give the cap back | Every change returns an `Undo` carrying the resource as it was (including "no limit"), so a revert is exact; `Changed(nodeID)` lists only this node's unreverted changes, never another's; a workload that has gone is `ErrGone`. First implementation `dry-run` (in memory); `kubernetes` planned. Policy (`pkg/policy`) decides what the agent may touch; a Runtime only does what it is told |
+| **Runtime**   | The orchestrator-neutral way the agent changes the system it models: list the node's workloads, cap one's CPU, give the cap back | Every change returns an `Undo` carrying the resource as it was (including "no limit"), so a revert is exact; a second change to a workload this node already changed keeps the first change's original, so one revert gives back what it had before the agent touched it; `Changed(nodeID)` lists only this node's unreverted changes, never another's; a workload that has gone is `ErrGone`. First implementation `dry-run` (in memory); `kubernetes` planned. Policy (`pkg/policy`) decides what the agent may touch; a Runtime only does what it is told |
 
 **Storage and Updater used to be here**, and their removal is the largest structural change
 the design has been through. Storage held a graph of construct edges; Updater incorporated
@@ -2137,3 +2138,24 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 
 All run against fake models. No test requires Ollama.
 
+---
+
+## 16. Acting (`pkg/relief`, `pkg/policy`, `pkg/runtime`)
+
+The map answers what a system is doing; acting is the agent changing that system, and every change is a decision record that can be reproduced from the map state that justified it. The first act is CPU relief: when the node is hot, cap the workload the map says is responsible, check that it helped, undo it if it did not, and give every cap back when the node cools.
+
+**Three parts, one direction of authority.** The *spec* (`loops.relief`) says how the loop behaves. The *policy* (`pkg/policy`) says what the agent may touch and how far: allow and deny lists, a floor, an hourly limit, a cooldown, and freezing a workload outright. The *runtime* (`pkg/runtime`) only does what it is told, orchestrator-neutrally, and returns an `Undo` that restores the resource exactly as it was, including "no limit". The loop decides; the policy bounds; the runtime executes. A runtime never decides and a policy never acts.
+
+**Trigger.** Pressure is the node's CPU share. Relief begins only when it stays above `enter` for `enter_for`, and ends only when it stays below `exit` for `exit_for`, with `exit` under `enter`, so a node hovering at the line does not flap. A reading counts only while it is fresh: a stale reading, or one that has stopped changing, never counts toward either run, and the loop makes no new change and no release decision on data that may describe a system that no longer exists. Only expiry, which needs no reading, still happens.
+
+**One action in flight.** The loop changes one workload at a time and waits `settle` before judging, so an outcome belongs to one action. It predicts before acting, from the map's relationship between the workload's share and node pressure, and journals that prediction with the attribution and the policy that allowed it. After `settle` it compares the observed drop with the prediction and a minimum effect. An action that did not help is reverted and its workload cooled down; a reverted action cools its workload down four times longer than a refused one. Predict before, verify after, revert what did not help: the verification is a recorded comparison, not a hope.
+
+**Stepping again, and giving back.** A workload that was helped but not enough may be stepped again from its current cap. It keeps one action, whose id is the first step's, and the runtime keeps the first original, so a revert always restores the limit the workload had before the agent first touched it, never an intermediate cap. When pressure is gone, caps are released newest first, one per `settle`, with a backoff that doubles for a workload that keeps cycling between throttle and release. Release also happens from Calm, so a loop restarted after pressure ended gives back what it finds.
+
+**Restarts.** A graceful shutdown keeps its changes, because reverting on every restart would bring the pressure straight back. On start the loop asks the runtime what this node changed (never another node's) and takes them up: the newest unexpired one is judged afresh, the rest are kept for release, expired ones are reverted. Nothing is applied until that has succeeded once, since a change made on top of caps the loop does not know of would record one of them as the original. Where the journal still holds the act that made a change, its prediction and first step are recovered. A change whose pre-agent limit cannot be established after a restart is never deepened: the floor measured as a share of the original would otherwise be a share of the agent's own cap and slide down with every restart. It stays for release and expiry, and the refusal is journalled once.
+
+**Kill switch.** `POST /relief/pause` stops the loop making and releasing changes. It does not abandon what is in flight: a paused loop still verifies, reverts a failed action, and gives back what expires, because pausing should never leave a harmful change stranded. An operator can revert one action by hand (outcome `manual`). With relief disabled in the spec the routes answer `404`; the loop does not exist.
+
+**The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below `floor.cpu_cores` or `floor.of_original` of its original limit, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
+
+**What is not here yet.** The loop acts on stated thresholds and its predictions come from the map as it is. Learning from outcomes, so that whether a prediction held changes what the agent does next, is the next stage and is not implemented. The thresholds are uncalibrated defaults, not measured.

@@ -531,6 +531,11 @@ func (m *Map) Revision() uint64 {
 	return m.revision
 }
 
+// StaleAfter is the silence after which the sweep marks a property stale. A
+// reader that cannot wait for the next sweep uses it to judge a reading's age
+// itself.
+func (m *Map) StaleAfter() time.Duration { return m.cfg.StaleAfter }
+
 // Journal exposes the change and decision record.
 func (m *Map) Journal() *Journal { return m.journal }
 
