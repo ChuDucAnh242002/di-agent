@@ -45,25 +45,25 @@ type Status struct {
 // refused since the latest step, and LastError is the latest refusal: a change
 // stuck in force is shown, not only logged.
 type Action struct {
-	ID            string             `json:"id"`
-	Subject       string             `json:"subject"`
-	DecisionID    string             `json:"decision_id"`
-	Plan          Plan               `json:"plan"`
-	Undo          runtime.Undo       `json:"undo"`
-	PressureAtAct float64            `json:"pressure_at_act"`
-	ActedAt       time.Time          `json:"acted_at"`
-	Observed      *float64           `json:"observed,omitempty"` // observed drop, after settle
-	Outcome       string             `json:"outcome"`
-	VerifyID      string             `json:"verify_id,omitempty"` // the decision that judged the latest step
-	Resumed       bool               `json:"resumed,omitempty"`
-	SharesAtAct   map[string]float64 `json:"shares_at_act,omitempty"`
+	ID              string             `json:"id"`
+	Subject         string             `json:"subject"`
+	DecisionID      string             `json:"decision_id"`
+	Plan            Plan               `json:"plan"`
+	Undo            runtime.Undo       `json:"undo"`
+	ContentionAtAct float64            `json:"contention_at_act"`
+	ActedAt         time.Time          `json:"acted_at"`
+	Observed        *float64           `json:"observed,omitempty"` // observed drop, after settle
+	Outcome         string             `json:"outcome"`
+	VerifyID        string             `json:"verify_id,omitempty"` // the decision that judged the latest step
+	Resumed         bool               `json:"resumed,omitempty"`
+	SharesAtAct     map[string]float64 `json:"shares_at_act,omitempty"`
 	// RevertAttempts and LastError: failed undos of the change in force.
 	RevertAttempts int    `json:"revert_attempts,omitempty"`
 	LastError      string `json:"last_error,omitempty"`
 
 	cooldown      time.Duration // the workload's policy cooldown, the base of every cooldown after this
 	revertPending bool          // judged not to have helped; the revert has not yet succeeded
-	needBaseline  bool          // resumed without a fresh reading; PressureAtAct and ActedAt await one
+	needBaseline  bool          // resumed without a fresh reading; ContentionAtAct and ActedAt await one
 	origin        *float64      // the limit before the agent's first step, for the of_original floor
 	prev          *Action       // the action as it stood before its latest step
 	originRefused bool          // a further step was refused for want of origin, and journalled
@@ -280,7 +280,7 @@ func (l *Loop) Tick(ctx context.Context) {
 		}
 	}
 	if a := l.inFlight; a != nil && a.needBaseline && fresh {
-		a.PressureAtAct, a.ActedAt, a.SharesAtAct, a.needBaseline = pressure, now, shares, false
+		a.ContentionAtAct, a.ActedAt, a.SharesAtAct, a.needBaseline = pressure, now, shares, false
 	}
 	phase, paused := l.phase, l.paused
 	l.mu.Unlock()
@@ -380,7 +380,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			a.ID = l.id("act")
 		}
 		if fresh {
-			a.PressureAtAct, a.ActedAt, a.SharesAtAct = pressure, now, shares
+			a.ContentionAtAct, a.ActedAt, a.SharesAtAct = pressure, now, shares
 		} else {
 			a.needBaseline = true
 		}
@@ -453,7 +453,7 @@ func (l *Loop) Revert(ctx context.Context, id string) error {
 // age is checked here as well: a source that has just gone quiet leaves a value
 // that is active for up to a sweep interval longer and describes nothing now.
 func (l *Loop) pressure(now time.Time) (float64, time.Time, bool) {
-	p, ok := l.cfg.Map.Property(NodePressure)
+	p, ok := l.cfg.Map.Property(NodeContention)
 	fresh := ok && p.Status == statemap.Active && !p.LastObserved.IsZero() &&
 		now.Sub(p.LastObserved) <= l.cfg.Map.StaleAfter()
 	return p.Value, p.LastObserved, fresh
@@ -560,8 +560,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	k := kept[plan.Subject]
 
 	id := l.id("act")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("cap %s's CPU to relieve node pressure?", plan.Subject))
-	b.Property(NodePressure)
+	b := l.cfg.Map.Decide(id, fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
+	b.Property(NodeContention)
 	b.Property(NodeUsage + "@" + plan.Subject)
 	b.Facts()
 	shares := workloadShares(l.cfg.Map)
@@ -569,7 +569,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		Action: runtime.ActionCPULimit, CPULimit: plan.ToCores, Expires: now.Add(l.c.Expiry), DecisionID: id,
 	})
 	if err != nil {
-		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node pressure?", plan.Subject))
+		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
 		r.Input("plan", plan)
 		r.Input("policy", eff)
 		r.Input("rule", eff.Rule)
@@ -596,7 +596,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		b.Input("previous", map[string]any{"act": k.DecisionID, "plan": k.Plan, "action": k.ID})
 		b.Note("a further step on the change %s already in force", k.ID)
 	}
-	b.Note("capping %s from %.3f to %.3f cores; predicted drop in node pressure %.4f", plan.Subject,
+	b.Note("capping %s from %.3f to %.3f cores; predicted drop in node CPU contention %.4f", plan.Subject,
 		plan.FromCores, plan.ToCores, plan.Predicted)
 	if plan.Basis == BasisUsage {
 		b.Caveat("%s", usageCaveat)
@@ -614,7 +614,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		l.history = appendHistory(removeAction(l.history, a), a)
 		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome, a.VerifyID = id, plan, undo, nil, "", ""
 		a.RevertAttempts, a.LastError = 0, ""
-		a.PressureAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
+		a.ContentionAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
 		a.SharesAtAct = shares
 	} else {
 		origin := plan.FromCores
@@ -622,7 +622,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 			origin = *w.CPU.Limit
 		}
 		a = &Action{ID: id, Subject: plan.Subject, DecisionID: id, Plan: plan, Undo: undo,
-			PressureAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin, SharesAtAct: shares}
+			ContentionAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin, SharesAtAct: shares}
 		if last, ok := l.released[plan.Subject]; ok && now.Sub(last) < backoffWindow {
 			l.cycles[plan.Subject]++
 		} else {
@@ -658,8 +658,8 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	l.noted = why
 	l.nRefused++
 	l.mu.Unlock()
-	b := l.cfg.Map.Decide(l.id("refused"), "relieve node CPU pressure?")
-	b.Property(NodePressure)
+	b := l.cfg.Map.Decide(l.id("refused"), "relieve node CPU contention?")
+	b.Property(NodeContention)
 	for k, v := range inputs {
 		b.Input(k, v)
 	}
@@ -725,7 +725,7 @@ func (l *Loop) refuseUnanchored(a *Action) {
 		return
 	}
 	why := fmt.Sprintf("origin of %s's change is unknown: no original limit was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
-	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU further to relieve node pressure?", a.Subject))
+	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU further to relieve node CPU contention?", a.Subject))
 	b.Input("action", a.ID)
 	b.Input("undo", a.Undo)
 	b.Caveat("%s", why)

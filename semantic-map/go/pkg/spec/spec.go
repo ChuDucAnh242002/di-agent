@@ -216,11 +216,12 @@ type Relief struct {
 	CPU      CPURelief     `yaml:"cpu"`
 }
 
-// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU pressure,
-// the PSI stall fraction cpu_pressure_ratio in [0,1] (the share of time tasks
-// wait for a CPU, not utilisation), with Exit below Enter so a hot node is not
+// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU contention,
+// cpu_contention_ratio in [0,1]: the share of time some workload waited for a CPU
+// another was using — PSI stall less the workload's own throttling, not
+// utilisation — with Exit below Enter so a hot node is not
 // released the moment it cools by a hair. MinEffect is a planning floor: a step
-// whose predicted drop in pressure is below it is not taken. It is not the bar a
+// whose predicted drop in contention is below it is not taken. It is not the bar a
 // step is judged by afterwards: verify keeps a step whose observed drop is at
 // least half the drop it predicted, and reverts it otherwise. Expiry must be
 // longer than Settle, or a change would be given back before it is judged.

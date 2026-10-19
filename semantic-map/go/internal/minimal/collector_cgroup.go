@@ -53,6 +53,15 @@ import (
 // declared as "fraction" on [0,1]: the share of the window in which at least one task
 // waited for that resource. Each is absent where the kernel exposes no PSI for it.
 //
+// cpu_contention_ratio is the CPU stall a subject suffered beyond its own limit: the
+// cpu.pressure "some" stall share less the cgroup's own throttled time (cpu.stat
+// throttled_usec), clamped at zero. On cgroup v2 a cgroup held back by its own quota
+// counts that time as CPU stall, and the root sums every cgroup's, so a pod running
+// at its limit makes cpu_pressure_ratio rise with nothing else on the node waiting —
+// and lowering its limit raises it further. The node's cpu_contention_ratio is the
+// worst-off subject's: the share of the window in which some workload waited for a
+// CPU another was using. It needs subjects; with -cgroup-subjects off it is absent.
+//
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
 // declared as "fraction" on [0,1]. It is zero on bare metal and is what separates
@@ -134,6 +143,10 @@ type cpuSnapshot struct {
 	usageUsec   uint64
 	nrPeriods   uint64
 	nrThrottled uint64
+	// throttledUsec is cpu.stat's cumulative throttled time; hasThrottledUsec is
+	// false where the line is absent (no cpu controller, so nothing can throttle).
+	throttledUsec    uint64
+	hasThrottledUsec bool
 	// stall holds each PSI file's cumulative "some" stall time, in psiResources
 	// order; hasStall is false where the file is absent (a kernel booted with psi=0,
 	// or a cgroup without it).
@@ -163,6 +176,7 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.IOPressureRatio,
 	types.MemoryPressureRatio,
 	types.CPUStealRatio,
+	types.CPUContentionRatio,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -299,6 +313,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		}
 		c.lastSkipped = skipped
 	}
+	if worst, ok := worstContention(out); ok {
+		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, now, "", nil))
+	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
 			delete(c.prev, subject)
@@ -316,7 +333,8 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		return nil, err
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
-	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
+	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled,
+		throttledUsec: cpu.throttledUsec, hasThrottledUsec: cpu.hasThrottledUsec}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
 		snap.stall[i], snap.hasStall[i] = v, err == nil
@@ -373,6 +391,11 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 			samples = append(samples, c.sample(r.metric, unitNodeShare, pressure, now, prev.ts, subject, labels))
 		}
 	}
+	if subject != "" {
+		if v, ok := contention(prev, snap, elapsedUs); ok {
+			samples = append(samples, c.sample(types.CPUContentionRatio, unitNodeShare, v, now, prev.ts, subject, labels))
+		}
+	}
 	// Steal is a share of CPU time, so it is measured in /proc/stat's own ticks on
 	// both sides of the ratio rather than against wall time, which would need
 	// USER_HZ and the CPU count to agree with the kernel's.
@@ -381,6 +404,43 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		samples = append(samples, c.sample(types.CPUStealRatio, unitNodeShare, steal, now, prev.ts, subject, labels))
 	}
 	return samples, nil
+}
+
+// contention is the CPU stall share of the window not explained by the cgroup's own
+// throttling. psiResources[0] is cpu.pressure. A counter that went backwards (the
+// cgroup was recreated) gives no reading; a cgroup with no throttled_usec on either
+// side has no quota to be held back by, so all of its stall is contention.
+func contention(prev, snap *cpuSnapshot, elapsedUs int64) (float64, bool) {
+	if !snap.hasStall[0] || !prev.hasStall[0] || snap.stall[0] < prev.stall[0] {
+		return 0, false
+	}
+	var throttled uint64
+	switch {
+	case snap.hasThrottledUsec && prev.hasThrottledUsec:
+		if snap.throttledUsec < prev.throttledUsec {
+			return 0, false
+		}
+		throttled = snap.throttledUsec - prev.throttledUsec
+	case snap.hasThrottledUsec != prev.hasThrottledUsec:
+		return 0, false
+	}
+	stall := snap.stall[0] - prev.stall[0]
+	if throttled >= stall {
+		return 0, true
+	}
+	return clamp(float64(stall-throttled)/float64(elapsedUs), 0, 1), true
+}
+
+// worstContention is the highest subject cpu_contention_ratio among samples, and
+// whether there was one.
+func worstContention(samples []*types.MetricSample) (float64, bool) {
+	worst, ok := 0.0, false
+	for _, s := range samples {
+		if s.MetricType == types.CPUContentionRatio && s.Subject != "" && (!ok || s.Value > worst) {
+			worst, ok = s.Value, true
+		}
+	}
+	return worst, ok
 }
 
 // cmdLabel returns the basename of argv0 of the first process in the cgroup, or "".
@@ -501,9 +561,11 @@ func (c *CgroupCollector) sample(mt types.MetricType, unit string, value float64
 // ── cgroup v2 file readers ────────────────────────────────────────────────────
 
 type rawCPUStat struct {
-	usageUsec   uint64
-	nrPeriods   uint64
-	nrThrottled uint64
+	usageUsec        uint64
+	nrPeriods        uint64
+	nrThrottled      uint64
+	throttledUsec    uint64
+	hasThrottledUsec bool
 }
 
 // readCPUStat parses the cgroups v2 cpu.stat key-value file.
@@ -536,6 +598,8 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 			stat.nrPeriods = v
 		case "nr_throttled":
 			stat.nrThrottled = v
+		case "throttled_usec":
+			stat.throttledUsec, stat.hasThrottledUsec = v, true
 		}
 	}
 	if err := scanner.Err(); err != nil {

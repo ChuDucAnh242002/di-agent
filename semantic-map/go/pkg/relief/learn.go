@@ -97,17 +97,37 @@ func workloadShares(m *statemap.Map) map[string]float64 {
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
 // them.
+//
+// Rises are the exception. Capping a workload frees CPU, and the contended
+// workloads beside it take it up: that is the relief working, not something else
+// moving. So workloads that were there at act and rose count as moved only when
+// together they rose by more than throttled gave up (with 0.02 of slack); a fall,
+// an arrival and a departure always count. A rise that a cap did not explain makes
+// contention look worse than the action left it, so passing one over can only
+// cost an agreeing outcome, never invent one; the bound keeps it from hiding a
+// workload that grew on its own.
 func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) (moved, left []string) {
 	live := workloadShares(m)
+	var risen []string
+	rise := 0.0
 	for s, now := range live {
 		if s == throttled {
 			continue
 		}
-		then := at[s]
+		then, was := at[s]
 		d := math.Abs(now - then)
-		if d > step*then && d > confoundAbs {
-			moved = append(moved, s)
+		if d <= step*then || d <= confoundAbs {
+			continue
 		}
+		if was && now > then {
+			risen = append(risen, s)
+			rise += now - then
+			continue
+		}
+		moved = append(moved, s)
+	}
+	if freed := at[throttled] - live[throttled]; rise > math.Max(freed, 0)+confoundAbs {
+		moved = append(moved, risen...)
 	}
 	for s, then := range at {
 		if _, ok := live[s]; !ok && s != throttled && then > confoundAbs {
@@ -156,7 +176,7 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 	why := ""
 	switch {
 	case !l.cfg.Evidence:
-		why = "the runtime does not change the system (" + l.cfg.Runtime.Name() + "): pressure moved on its own"
+		why = "the runtime does not change the system (" + l.cfg.Runtime.Name() + "): contention moved on its own"
 	case a.Resumed:
 		why = "resumed: its baseline was taken with the change already in force"
 	case a.Plan.Predicted <= 0:
@@ -175,7 +195,7 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 
 	from := NodeUsage + "@" + a.Subject
 	rel, changed, err := l.cfg.Map.RecordIntervention(statemap.InterventionOutcome{
-		From: from, To: NodePressure, Agreed: agreed, Confounded: conf, DecisionID: verifyID,
+		From: from, To: NodeContention, Agreed: agreed, Confounded: conf, DecisionID: verifyID,
 	})
 	iv := map[string]any{"relationship": rel, "changed": changed}
 	if err != nil {
@@ -231,8 +251,8 @@ func (l *Loop) settle(b *statemap.DecisionBuilder, verifyID, from string, now ti
 		return
 	}
 	for _, c := range pending {
-		directed := !c.Undirected && c.FromID == from && c.ToID == NodePressure
-		undirected := c.Undirected && ((c.FromID == from && c.ToID == NodePressure) || (c.FromID == NodePressure && c.ToID == from))
+		directed := !c.Undirected && c.FromID == from && c.ToID == NodeContention
+		undirected := c.Undirected && ((c.FromID == from && c.ToID == NodeContention) || (c.FromID == NodeContention && c.ToID == from))
 		if !directed && !undirected || c.Direction == types.Negative {
 			continue
 		}

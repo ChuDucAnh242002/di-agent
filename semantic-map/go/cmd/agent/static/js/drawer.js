@@ -270,7 +270,7 @@ export class Drawer {
     // Like a Discovery row: the capped workload's usage and the pressure it was
     // there to relieve. Opening points, closing lets go.
     if (closing ? this.isPointed('actions', id) : !this.isPointed('actions', id)) {
-      this.point('actions', id, { nodes: [`cpu_utilization@${a.subject}`, 'cpu_pressure_ratio'] });
+      this.point('actions', id, { nodes: [`cpu_utilization@${a.subject}`, 'cpu_contention_ratio'] });
     }
     this.actionTrace = null;
     this.openAction = closing ? null : id;
@@ -1078,14 +1078,14 @@ function actionTrace(a, t) {
   const notice = ins.notice;
   parts.push(stage(1, 'Notice', notice
     ? `<p>Node CPU pressure <strong>${fmt.num(notice.pressure, 3)}</strong> had held past the entry level; the loop entered <strong>${escapeHTML(String(notice.phase))}</strong>${notice.since ? ` ${fmt.ago(notice.since)}` : ''}.</p>`
-    : `<p class="muted">No notice recorded: ${act ? 'the act decision carries none' : 'the act decision could not be read'}. Pressure at act was ${fmt.num(a.pressure_at_act, 3)}.</p>`));
+    : `<p class="muted">No notice recorded: ${act ? 'the act decision carries none' : 'the act decision could not be read'}. Contention at act was ${fmt.num(a.contention_at_act, 3)}.</p>`));
 
   const cands = Array.isArray(ins.attribution) ? ins.attribution : [];
   parts.push(stage(2, 'Attribution', cands.length ? `<table class="grid"><thead><tr><th>workload</th><th class="num">share of node</th><th class="num">predicted drop</th><th>basis</th></tr></thead><tbody>
     ${cands.map((c, i) => `<tr${c.subject === a.subject ? ' class="chosen"' : ''}>
       <td class="mono">${escapeHTML(c.subject)}${c.subject === a.subject ? ' ← chosen' : ''}</td>
       <td class="num">${fmt.num(c.share, 3)}</td><td class="num">${fmt.num(c.drop, 4)}</td>
-      <td class="muted" title="${c.basis === 'usage' ? 'the map said nothing about this workload; ranked by how much it uses' : 'the map\'s own relationship from this workload to node pressure'}">${escapeHTML(c.basis)}</td></tr>`).join('')}
+      <td class="muted" title="${c.basis === 'usage' ? 'the map said nothing about this workload; ranked by how much it uses' : 'the map\'s own relationship from this workload to node CPU contention'}">${escapeHTML(c.basis)}</td></tr>`).join('')}
     </tbody></table>` : `<p class="muted">No candidate list recorded.</p>`));
 
   const p = a.plan || {};
@@ -1114,11 +1114,11 @@ function actionTrace(a, t) {
       <dt>verdict</dt><dd><strong>${escapeHTML(String(ans.verdict ?? '—'))}</strong></dd>
       <dt>observed drop</dt><dd>${fmt.num(ans.observed, 4)}</dd>
       <dt>predicted drop</dt><dd>${fmt.num(ans.predicted, 4)}</dd>
-      <dt>pressure at act</dt><dd>${fmt.num(vi.pressure_at_act, 4)}</dd>
+      <dt>contention at act</dt><dd>${fmt.num(vi.contention_at_act, 4)}</dd>
       <dt>workload share at act → verify</dt><dd>${vi.subject_share ? `${fmt.num(vi.subject_share.at_act, 3)} → ${fmt.num(vi.subject_share.at_verify, 3)}` : '—'}</dd>
       <dt>confounded</dt><dd>${conf.confounded ? `yes — moved: ${escapeHTML(plain(conf.moved || []))}${(conf.left || []).length ? `; left: ${escapeHTML(plain(conf.left))}` : ''}` : 'no'}</dd></dl>
       <p style="margin:8px 0 0"><strong>${ev?.fed ? 'Fed the map.' : 'Taught the map nothing.'}</strong>
-        ${ev?.fed ? (ev.confounded ? 'Recorded as confounded evidence, which does not change what it learned.' : 'An intervention was recorded on the capped workload\'s usage → node pressure.') : escapeHTML(ev?.why || 'no reason recorded')}</p>
+        ${ev?.fed ? (ev.confounded ? 'Recorded as confounded evidence, which does not change what it learned.' : 'An intervention was recorded on the capped workload\'s usage → node CPU contention.') : escapeHTML(ev?.why || 'no reason recorded')}</p>
       ${(v.caveats || []).length ? `<ul class="caveats">${v.caveats.map((c) => `<li>${escapeHTML(c)}</li>`).join('')}</ul>` : ''}
       <div class="muted mono" style="margin-top:4px">${escapeHTML(v.id)}</div>`;
   } else if (a.verify_id) {

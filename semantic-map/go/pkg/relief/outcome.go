@@ -117,7 +117,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		return
 	}
 
-	observed := a.PressureAtAct - pressure
+	observed := a.ContentionAtAct - pressure
 	// A resumed action's baseline was read with its cap already in force, so the
 	// drop it caused is in neither reading: judging it would revert a cap that
 	// works. It is kept, and given back by release or expiry like any other.
@@ -127,16 +127,16 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		verdict = "keep"
 	}
 	id := l.id("verify")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s relieve node CPU pressure?", a.Subject))
-	b.Property(NodePressure)
+	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s relieve node CPU contention?", a.Subject))
+	b.Property(NodeContention)
 	b.Input("act", a.DecisionID)
 	b.Input("predicted", a.Plan.Predicted)
 	b.Input("observed", observed)
-	b.Input("pressure_at_act", a.PressureAtAct)
-	b.Note("pressure %.4f at act, %.4f now: observed drop %.4f against %.4f predicted; keep needs %.0f%% of it",
-		a.PressureAtAct, pressure, observed, a.Plan.Predicted, keepRatio*100)
+	b.Input("contention_at_act", a.ContentionAtAct)
+	b.Note("contention %.4f at act, %.4f now: observed drop %.4f against %.4f predicted; keep needs %.0f%% of it",
+		a.ContentionAtAct, pressure, observed, a.Plan.Predicted, keepRatio*100)
 	if a.Resumed {
-		b.Caveat("resumed after a restart: its baseline was taken with the change already in force, so there is no pre-cap pressure to judge it against; kept until release or expiry")
+		b.Caveat("resumed after a restart: its baseline was taken with the change already in force, so there is no pre-cap contention to judge it against; kept until release or expiry")
 	}
 	l.learn(b, id, a, keep, observed, now)
 	b.Commit(map[string]any{"verdict": verdict, "observed": observed, "predicted": a.Plan.Predicted})
@@ -275,8 +275,8 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 // recordRelease journals and records the release of a, whose revert went
 // through. skipped lists the newer actions the runtime would not give back first.
 func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
-	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node pressure has eased", a.Subject))
-	b.Property(NodePressure)
+	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node CPU contention has eased", a.Subject))
+	b.Property(NodeContention)
 	b.Input("act", a.DecisionID)
 	b.Input("undo", a.Undo)
 	b.Input("pressure", pressure)

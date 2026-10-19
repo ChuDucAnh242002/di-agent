@@ -676,11 +676,11 @@ loops:
     enabled: true
     interval: 15s       # how often the loop looks
     cpu:
-      enter: 0.25       # CPU pressure (PSI stall fraction) that starts relief, held for enter_for
-      exit: 0.10        # pressure below which caps are given back, held for exit_for
+      enter: 0.25       # CPU contention (stall less own throttling) that starts relief, held for enter_for
+      exit: 0.10        # contention below which caps are given back, held for exit_for
 ```
 
-The trigger is the node's CPU pressure, `cpu_pressure_ratio`: the PSI stall fraction, the share of time tasks wait for a CPU, not CPU utilisation. A node can be fully used and not under pressure, and the loop acts only on the waiting.
+The trigger is the node's CPU contention, `cpu_contention_ratio`: the share of time some workload waited for a CPU another was using — PSI stall less each workload's own throttling — not CPU utilisation, and not `cpu_pressure_ratio`, which counts a pod held back by its own limit as pressure. A node can be fully used and not contended, and the loop acts only on the waiting. It comes from the cgroup collector with subjects on (the default).
 
 The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the runtime count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
 

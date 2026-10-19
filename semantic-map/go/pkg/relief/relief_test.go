@@ -108,7 +108,7 @@ func newHarness(t *testing.T, f fixture) *harness {
 	h.m = newMap(t, h.clock)
 	record(t, h.m, NodeUsage, "", 0.8, h.now)
 	if !f.noPressure {
-		record(t, h.m, NodePressure, "", 0, h.now)
+		record(t, h.m, NodeContention, "", 0, h.now)
 	}
 	if !f.noFact {
 		cores(t, h.m, 4)
@@ -166,7 +166,7 @@ func (h *harness) advance(d time.Duration) {
 func (h *harness) step(p float64) {
 	h.t.Helper()
 	h.advance(tick)
-	record(h.t, h.m, NodePressure, "", p, h.now)
+	record(h.t, h.m, NodeContention, "", p, h.now)
 	h.l.Tick(h.ctx)
 }
 
@@ -371,7 +371,7 @@ func TestAnExpiredChangeIsRevertedInAnyPhase(t *testing.T) {
 
 func TestReconcileResumesAndRevertsExpired(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3, "pod:c": 0.2}})
-	record(t, h.m, NodePressure, "", 0.5, h.now)
+	record(t, h.m, NodeContention, "", 0.5, h.now)
 	b := h.m.Decide("relief-act-1-1", "earlier act")
 	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1})
 	b.Commit(nil)
@@ -387,7 +387,7 @@ func TestReconcileResumesAndRevertsExpired(t *testing.T) {
 	}
 	st := h.l.Status()
 	if st.InFlight == nil || st.InFlight.Subject != "pod:a" || !near(st.InFlight.Plan.Predicted, 0.1) ||
-		!st.InFlight.ActedAt.Equal(h.now) || !near(st.InFlight.PressureAtAct, 0.5) {
+		!st.InFlight.ActedAt.Equal(h.now) || !near(st.InFlight.ContentionAtAct, 0.5) {
 		t.Fatalf("in flight %+v; want pod:a resumed with its journalled prediction", st.InFlight)
 	}
 	ap := h.applied()
@@ -404,7 +404,7 @@ func TestReconcileResumesAndRevertsExpired(t *testing.T) {
 
 func TestReconcileKeepsFurtherChangesForRelease(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
-	record(t, h.m, NodePressure, "", 0.5, h.now)
+	record(t, h.m, NodeContention, "", 0.5, h.now)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
 		Applied: 1.2, Expires: h.now.Add(20 * time.Minute), DecisionID: "relief-act-1-1"})
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:b", Action: runtime.ActionCPULimit,
@@ -428,7 +428,7 @@ func TestReconcileKeepsFurtherChangesForRelease(t *testing.T) {
 
 func TestPausedItDoesNotAct(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
-	record(t, h.m, NodePressure, "", 0.5, h.now)
+	record(t, h.m, NodeContention, "", 0.5, h.now)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:b", Action: runtime.ActionCPULimit,
 		Applied: 0.9, Expires: h.now.Add(3 * time.Minute), DecisionID: "relief-act-1-1"})
 	if err := h.l.Reconcile(h.ctx); err != nil {
@@ -567,7 +567,7 @@ func TestStalePressureTakesNoAction(t *testing.T) {
 	// The source goes quiet: no readings, and the map marks pressure stale.
 	h.advance(3 * time.Minute)
 	h.m.Sweep()
-	if p, _ := h.m.Property(NodePressure); p.Status == statemap.Active {
+	if p, _ := h.m.Property(NodeContention); p.Status == statemap.Active {
 		t.Fatal("setup: pressure still active")
 	}
 	for i := 0; i < 20; i++ {
@@ -636,7 +636,7 @@ func TestAFrozenReadingIsNotEvidence(t *testing.T) {
 		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 		h.run(50*time.Second, 0.5)
 		h.quiet(20)
-		if p, _ := h.m.Property(NodePressure); p.Status != statemap.Active {
+		if p, _ := h.m.Property(NodeContention); p.Status != statemap.Active {
 			t.Fatal("setup: the map has marked pressure stale; this case is about before it does")
 		}
 		if n := len(h.rt.Applied()); n != 0 || h.l.Status().Phase != Calm {
@@ -725,11 +725,11 @@ func TestAResumedChangeWaitsForAFreshBaseline(t *testing.T) {
 	if err := h.l.Reconcile(h.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if f := h.l.Status().InFlight; f == nil || !f.ActedAt.IsZero() || f.PressureAtAct != 0 {
+	if f := h.l.Status().InFlight; f == nil || !f.ActedAt.IsZero() || f.ContentionAtAct != 0 {
 		t.Fatalf("in flight %+v; want no baseline without a reading", f)
 	}
 	h.step(0.5)
-	if f := h.l.Status().InFlight; f == nil || !near(f.PressureAtAct, 0.5) || !f.ActedAt.Equal(h.now) {
+	if f := h.l.Status().InFlight; f == nil || !near(f.ContentionAtAct, 0.5) || !f.ActedAt.Equal(h.now) {
 		t.Fatalf("in flight %+v; want the first fresh reading as its baseline", f)
 	}
 }
@@ -788,7 +788,7 @@ func TestAFailedSecondStepReturnsToTheFirst(t *testing.T) {
 
 func TestKeptChangesAreReleasedOutsideRelieving(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
-	record(t, h.m, NodePressure, "", 0.05, h.now)
+	record(t, h.m, NodeContention, "", 0.05, h.now)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
 		Applied: 1.2, Expires: h.now.Add(20 * time.Minute), DecisionID: "relief-act-1-1"})
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:b", Action: runtime.ActionCPULimit,
@@ -845,7 +845,7 @@ func TestNoPlanIsNotReattributedEveryTick(t *testing.T) {
 func (h *harness) resumeCapped(decisionID string) {
 	h.t.Helper()
 	h.rt.Put(limited(pod("pod:a"), 1.2))
-	record(h.t, h.m, NodePressure, "", 0.5, h.now)
+	record(h.t, h.m, NodeContention, "", 0.5, h.now)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: decisionID})
 	if err := h.l.Reconcile(h.ctx); err != nil {
