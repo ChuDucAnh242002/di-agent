@@ -5,12 +5,13 @@
 # Usage: ./provision.sh [vm-name]          (default di-node)
 #
 # Idempotent: each step checks before it acts.
-#   1. the VM: Ubuntu 24.04, 4 vCPU, 8 GB, 20 GB, launched only if absent;
+#   1. the VM: Ubuntu 24.04, 6 vCPU, 12 GB, 20 GB, launched only if absent (an existing one
+#      smaller than that is stopped and resized);
 #   2. k0s, pinned, through ../scripts/02-k0s.sh, and Netdata through ../scripts/03-netdata.sh;
+#   2b. the agent's own decision model, held to fixed limits (tier1.sh);
 #   3. the tunnel key: ~/.ssh/<vm>-tunnel on the host, created if missing, its public half
-#      in the VM's ~ubuntu/.ssh/authorized_keys once. The agent's review models run on the
-#      host, not on the node — a 4-vCPU node running a decision model takes the CPU the
-#      workloads it models need — and tunnel.sh carries them across with this key;
+#      in the VM's ~ubuntu/.ssh/authorized_keys once. tunnel.sh uses it to carry the host's
+#      reasoning model to the node; the decision model is the node's own;
 #   4. this directory copied to /home/ubuntu/casestudy on the node.
 # The agent binary is built and copied separately (README).
 set -euo pipefail
@@ -20,12 +21,20 @@ KEY="$HOME/.ssh/$VM-tunnel"
 
 if ! multipass info "$VM" >/dev/null 2>&1; then
     echo "[provision] launching $VM"
-    multipass launch 24.04 --name "$VM" --cpus 4 --memory 8G --disk 20G
+    multipass launch 24.04 --name "$VM" --cpus 6 --memory 12G --disk 20G
     multipass exec "$VM" -- cloud-init status --wait
+elif [ "$(multipass get "local.$VM.cpus")" -lt 6 ]; then
+    echo "[provision] resizing $VM to 6 vCPU, 12 GB"
+    multipass stop "$VM"
+    multipass set "local.$VM.cpus=6"
+    multipass set "local.$VM.memory=12G"
+    multipass start "$VM"
 fi
 multipass exec "$VM" -- bash -c 'command -v k0s >/dev/null' || bash ../scripts/02-k0s.sh "$VM"
 multipass exec "$VM" -- bash -c 'command -v netdata >/dev/null || [ -x /opt/netdata/bin/netdata ]' ||
     bash ../scripts/03-netdata.sh "$VM"
+multipass transfer tier1.sh "$VM:/tmp/tier1.sh"
+multipass exec "$VM" -- sudo bash /tmp/tier1.sh
 
 [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -C "$VM-ollama-tunnel" -f "$KEY"
 multipass transfer "$KEY.pub" "$VM:/tmp/tunnel.pub"

@@ -21,7 +21,7 @@ jq -cn --argjson t "$(date +%s.%N)" --arg s "pod:$uid" \
 echo "[$(date +%T)] applied mem-wave pod:$uid"
 n=0
 for _ in $(seq 120); do
-    n=$(curl -sf "$API/candidates?status=pending" | jq --arg f "memory_utilization@pod:$uid" \
+    n=$(curl -sf "$API/candidates?status=all" | jq --arg f "memory_utilization@pod:$uid" \
         '[.[] | select(.FromID == $f and .ToID == "memory_utilization")] | length' || echo 0)
     [ "${n:-0}" -gt 0 ] && break
     sleep 15

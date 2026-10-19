@@ -118,38 +118,26 @@ phase_P2() {
     fi
     subject="pod:$uid"
 
-    # The operator confirms what discovery proposed about mem-wave and node memory, so the
-    # estimate has a relationship to reason from. With review off nothing else confirms it.
-    ids=$(curl -sf "$API/candidates?status=pending" | jq -r --arg s "$subject" \
-        '.[] | select(.FromID == "memory_utilization@" + $s and .ToID == "memory_utilization") | .CandidateID')
-    if [ -z "$ids" ]; then
-        mark P2 "refused: no pending candidate from mem-wave memory to node memory, nothing deleted" \
-            --arg subject "$subject"
-        return 1
-    fi
-    for id in $ids; do
-        if ! curl -sf -X POST "$API/candidates/$(jq -rn --arg i "$id" '$i | @uri')/confirm" >/dev/null; then
-            mark P2 "refused: confirming $id failed, nothing deleted" --arg subject "$subject"
-            return 1
-        fi
-        mark P2 "operator confirmed candidate" --arg candidate "$id"
-    done
-
-    # A relationship confirmed a moment ago has no strength yet, and the estimate leaves
-    # it out of the projection (saying so in a caveat). Ask once it has been observed.
-    local observed=0
-    for _ in $(seq 60); do
+    # The agent's review loop settles what discovery proposed about mem-wave and node
+    # memory — a composition candidate, confirmed by rule — and nothing here confirms
+    # anything. P2 waits for that relationship to exist and to have been observed, since
+    # one confirmed a moment ago has no strength and the estimate would leave it out.
+    local observed=0 by="" review=""
+    for _ in $(seq 120); do
         observed=$(curl -sf "$API/state/relationships" | jq --arg f "memory_utilization@$subject" \
             '[.relationships[] | select(.from == $f and .to == "memory_utilization") | .n_observations] | max // 0' || echo 0)
         [ "$observed" -gt 0 ] && break
         sleep 5
     done
     if [ "$observed" -eq 0 ]; then
-        # Asked now, the estimate would leave the relationship out and project no change.
-        mark P2 "refused: the confirmed relationship has no observation after 5 min, nothing deleted" \
+        mark P2 "refused: the agent has not confirmed mem-wave's memory against node memory after 10 min, nothing deleted" \
             --arg subject "$subject"
         return 1
     fi
+    review=$(curl -sf "$API/candidates?status=all" | jq -c --arg f "memory_utilization@$subject" \
+        '[.[] | select(.FromID == $f and .ToID == "memory_utilization") | .Review // empty] | last // null' || echo null)
+    by=$(jq -r '.By // "unknown"' <<<"$review" 2>/dev/null || echo unknown)
+    mark P2 "agent confirmed the relationship" --arg subject "$subject" --arg by "$by" --argjson review "$review"
     mark P2 "relationship observed" --arg subject "$subject" --argjson n_observations "$observed"
 
     estimate=$(curl -s -w '\n%{http_code}' "$API/state/estimate?target=memory_utilization&without=$subject") || estimate=$'\n0'

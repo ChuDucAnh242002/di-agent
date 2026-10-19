@@ -6,9 +6,11 @@ back to map state. It is a demonstration, not a measurement: one run, no repetit
 
 ## The machine
 
-A Multipass VM (Ubuntu 24.04, arm64, 4 vCPU, 8 GB, cgroup v2) with k0s **v1.36.4+k0s.1** as a single
-node, installed by `poc/scripts/02-k0s.sh`. The agent runs on the VM as root from
-`agent.yaml`, then `agent-relief.yaml`.
+A Multipass VM (Ubuntu 24.04, arm64, 6 vCPU, 12 GB, cgroup v2) with k0s **v1.36.4+k0s.1** as a single
+node, installed by `poc/scripts/02-k0s.sh`, and the agent's own decision model (`tev1:4b` on Ollama,
+`tier1.sh`: CPUs 4–5 only, at most two CPUs, CPU weight 20 against a pod's 100, 7 GB). The agent runs on
+the VM as root from `agent.yaml`, then `agent-relief.yaml`, with the review loop deciding on its own:
+rules, the local decision model, and the host's reasoning model through `tunnel.sh`.
 
 ## Provisioning
 
@@ -21,13 +23,13 @@ multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sud
 ./tunnel.sh di-node &      # the node's localhost:11435 is the host's Ollama while this runs
 ```
 
-The review models run on the host (`ollama pull tev1:4b qwen3.8:27b-nvfp4`), not on the node: a decision
-model on a 4-vCPU node takes the CPU the workloads it models need, and relief then finds the hog
-starved below its floor. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
+The decision model is the node's own: a node that cannot decide without the network is not
+autonomous. `tier1.sh` holds it to two fixed CPUs, a low CPU weight and 7 GB, so it cannot take what the
+workloads need (unlimited, on the 4-vCPU node, it starved the hog below relief's floor). The reasoning
+model is the host's (`ollama pull qwen3.8:27b-nvfp4`), reached through `tunnel.sh`. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
 `tunnel.sh` reconnects if the link drops. Ollama on the host keeps listening on 127.0.0.1 only.
 
-`demo.sh <out-dir>` (on the node) is a 48-minute compressed run with the review loop deciding on its
-own (`agent-demo.yaml`): planted pods arrive and leave, then two relief episodes on the hog.
+`demo.sh <out-dir>` (on the node) is a 48-minute compressed run (`agent-demo.yaml`): planted pods arrive and leave, then two relief episodes on the hog.
 
 ## The workloads and what each should produce
 
@@ -42,8 +44,8 @@ correlate with each other — except the twins, which share a wall-clock schedul
 | `io-wave` | direct-I/O writes | 97 s | its I/O → node I/O pressure |
 | `twin-a`, `twin-b` | CPU on one wall clock, throttled at 200m | 113 s | twin-a CPU ↔ twin-b CPU |
 | `noise` | CPU in random bursts | none | nothing |
-| `hog` | CPU, steady, four busy loops, limit 3 cores | none | relief phase only: its CPU → node CPU contention, learned by intervention |
-| `victim` | CPU, two busy loops, limit 4 cores, never throttled, frozen by policy | none | relief phase only: what relief protects; the workload whose waiting is the contention |
+| `hog` | CPU, steady, six busy loops, limit 4.5 cores | none | relief phase only: its CPU → node CPU contention, learned by intervention |
+| `victim` | CPU, three busy loops, limit 6 cores, never throttled, frozen by policy | none | relief phase only: what relief protects; the workload whose waiting is the contention |
 
 The relationships marked with a node quantity that has several drivers (node CPU pressure, node I/O
 pressure) were missed in earlier runs: no single pair reaches the threshold.
@@ -78,10 +80,11 @@ sudo kill "$(cat run-*/capture.pid)"
 
 A `done` with a non-zero exit is a timetable that stopped early; `phases.jsonl` says where.
 
-P2 refuses to delete `mem-wave` — marking why and leaving the rest of the timetable to run — unless discovery has a pending candidate for its
-memory against node memory, the confirmed relationship has at least one observation (a
-relationship confirmed a moment ago has no strength, and the estimate would leave it out), and
-the estimate returned 200 with a decision id and `mem-wave` in `excluded`.
+Nothing in the timetable confirms a relationship: the agent's review loop does. P2 refuses to delete
+`mem-wave` — marking why and leaving the rest of the timetable to run — unless the agent has confirmed its
+memory against node memory and that relationship has at least one observation (a relationship confirmed a
+moment ago has no strength, and the estimate would leave it out), and the estimate returned 200 with a
+decision id and `mem-wave` in `excluded`. The mark records which reviewer confirmed it.
 `repeat-p2.sh <out-dir>` runs that episode on its own against the running agent, and exits non-zero when it refuses.
 `verify.sh <out-dir>` reruns P3–P5 on a fresh map: the verification run of the measured `Intervened` strength.
 

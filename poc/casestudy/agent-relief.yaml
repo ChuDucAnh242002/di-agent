@@ -1,5 +1,5 @@
-# The case study's agent: the kubernetes runtime, no review loop (every confirmed
-# relationship is the operator's or an intervention's), the map kept on disk.
+# The case study's agent: the kubernetes runtime, the review loop deciding on its own,
+# the map kept on disk.
 # agent-relief.yaml is identical except that relief is on; the run switches to it at P3.
 node: { addr: "0.0.0.0:9090" }
 sources:
@@ -7,7 +7,13 @@ sources:
   netdata: { url: http://localhost:19999 }
 runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
 loops:
-  review: { level: "off" }
+  # The agent reviews discovery's candidates on its own: rules, then tier 1 on this node
+  # (tier1.sh: Ollama held to two CPUs and 7 GB), then the reasoning model on the host
+  # through tunnel.sh. Nothing waits for a person.
+  review:
+    level: full
+    decision: { backend: systemone, url: "http://localhost:11434", model: "tev1:4b" }
+    reasoning: { backend: openai-tools, url: "http://localhost:11435/v1", model: "qwen3.8:27b-nvfp4" }
   relief: { enabled: true }
 persist:
   file: /var/lib/di-agent/state.json
