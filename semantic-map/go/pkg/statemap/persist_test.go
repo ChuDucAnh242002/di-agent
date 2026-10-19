@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestCanSaveCreatesTheDirectoryAndLeavesNothing: the start-up check makes the
@@ -55,6 +56,10 @@ func TestASaveWaitingItsTurnSavesTheLaterState(t *testing.T) {
 	m.saveMu.Lock() // a save in progress
 	done := make(chan error, 1)
 	go func() { done <- m.Save(path) }()
+	// Long enough for a save that did not wait its turn to have taken its snapshot
+	// already, so without the turn-taking this test fails; with it, the wait only
+	// delays the save.
+	time.Sleep(50 * time.Millisecond)
 	if err := m.Observe("cpu", 0.7, c.now()); err != nil {
 		t.Fatal(err)
 	}
