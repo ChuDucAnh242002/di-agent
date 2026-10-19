@@ -916,8 +916,10 @@ searches upward from the working directory for `domain_spec.json`, and if there 
 none it runs **without a domain model**: every observed property is still admitted,
 subjects are still modelled, relationships are still discovered and estimates still
 answered, but nothing is routed into a construct, and `GET /cost`, `POST /recommend`,
-`POST /simulate` and `POST /agent/tune` answer `501` saying so. The startup log
-states which mode the agent is in. A `domain.path` path that does not load is an error,
+`POST /simulate` and `POST /agent/tune` answer `501` saying so. `domain.path: none`
+runs without one even when a `domain_spec.json` sits above the working directory — the
+search will otherwise find a stray copy in a home directory. The startup log states which
+mode the agent is in and, when a model is loaded, the file it came from. A `domain.path` path that does not load is an error,
 not a fallback. When you do deploy a specification, treat it as part of the
 release: two daemons on the same binary and different specifications are different
 agents. The daemon also refuses a stray argument after its flags (a spec path

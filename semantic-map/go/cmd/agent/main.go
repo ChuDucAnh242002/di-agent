@@ -119,25 +119,15 @@ func main() {
 	// and discovers how they relate; what it cannot do is reason over constructs
 	// nobody declared. A path that was named and does not load is still an error,
 	// because silently running without the model someone asked for is worse.
-	var dom *domain.Spec
-	switch {
-	case cfg.Domain.Path != "":
-		var err error
-		if dom, err = domain.Load(cfg.Domain.Path); err != nil {
-			log.Fatalf("domain spec: %v", err)
-		}
-	default:
-		if p, err := domain.FindSpec(""); err == nil {
-			if dom, err = domain.Load(p); err != nil {
-				log.Fatalf("domain spec: %v", err)
-			}
-		}
+	dom, domFrom, err := loadDomain(cfg.Domain.Path, "")
+	if err != nil {
+		log.Fatalf("domain spec: %v", err)
 	}
 	if dom != nil {
-		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting))
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics, from %s",
+			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting), domFrom)
 	} else {
-		log.Printf("domain model: none (no domain.path and no domain_spec.json found): every " +
+		log.Printf("domain model: none (domain.path is none, or no domain_spec.json was found): every " +
 			"observed property is recorded and relationships are discovered; cost, " +
 			"recommendations and tuning return 501")
 	}
@@ -500,6 +490,29 @@ func runCollectionLoop(
 // withDomain fills a prompt's {{DOMAIN}} with what the loaded domain model declares, or
 // says that none is loaded. A prompt names no construct itself: the constructs are data
 // this agent loaded, and a model told about others reasons about a map that is not here.
+// loadDomain returns the domain model and the file it came from. "none" runs without
+// one; a named path must load; an empty path searches upward from searchFrom (the
+// working directory when empty) and runs without one when nothing is found. The path is
+// returned so the log says which file supplied the constructs: a search can find a spec
+// nobody meant this agent to have.
+func loadDomain(path, searchFrom string) (*domain.Spec, string, error) {
+	switch path {
+	case "none":
+		return nil, "", nil
+	case "":
+		found, err := domain.FindSpec(searchFrom)
+		if err != nil {
+			return nil, "", nil
+		}
+		path = found
+	}
+	dom, err := domain.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return dom, path, nil
+}
+
 func withDomain(prompt string, dom *domain.Spec) string {
 	if prompt == "" {
 		return ""
