@@ -304,7 +304,7 @@ semantic-map/
         │   ├── runner.go       Build a SemanticMap per KD, stream parquet rows,
         │   │                   snapshot edges. Skips HTTP — driven on pkg/semmap
         │   │                   directly. See top-of-file comment for rationale.
-        │   ├── divergence.go   effective (assertion|established|recent); Range,
+        │   ├── divergence.go   effective (assertion|measured|established|recent); Range,
         │   │                   sample StdDev, sorted by Range desc (most
         │   │                   discriminative first)
         │   ├── output.go       Table / JSON / CSV formatters
@@ -754,18 +754,20 @@ curl -s localhost:8080/state \
   | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, effective, basis, sign_conflicts, sign_agreements}'
 ```
 
-**The three strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
-calls it `ema_weight`), `established` (the long-run learned baseline), `assertion` (an
-operator's override), the `effective` value the agent reasons with, and `basis` naming
-which of the three that came from. Read `effective`: `recent` is the fastest-moving
-layer and answers only when neither of the others exists. `effective` and the two pointer layers are **absent rather than
+**The strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
+calls it `ema_weight`), `established` (the long-run learned baseline), `measured` (what
+the agent's own interventions on the pair observed: the mean drop in the target per unit
+drop in the source), `assertion` (an operator's override), the `effective` value the
+agent reasons with, and `basis` naming which layer that came from — assertion, then
+measured, then established, then recent. Read `effective`: `recent` is the fastest-moving
+layer and answers only when none of the others exists. `effective` and the pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
 nothing and absence is not that claim.
 
 ```bash
 # what each relationship is worth, and on what basis
 curl -s localhost:8080/edges \
-  | jq '.[] | {proposition_id, basis, effective, established, assertion, ema_weight, n_observations}'
+  | jq '.[] | {proposition_id, basis, effective, measured, established, assertion, ema_weight, n_observations}'
 
 # relationships the agent has no measurement for yet
 curl -s localhost:8080/edges | jq '[.[] | select(.basis == "unknown") | .proposition_id]'
@@ -865,8 +867,9 @@ magnitude over the last `map.pair_history` pairs, on `[0, 1]`. It is folded twic
 same pairs: a **recent** estimate at `profile.alpha` (default 0.20, memory ≈ 5 pairs) and an
 **established** baseline at `profile.alpha_slow` (default 0.001, memory ≈ 1000 pairs,
 bias-corrected). `Effective()` picks between them by authority rather than by arithmetic
-— an operator assertion first, else the established baseline, else the recent estimate,
-else `unknown` — and `basis` on every edge names which one answered.
+— an operator assertion first, else what the agent's interventions measured, else the
+established baseline, else the recent estimate, else `unknown` — and `basis` on every
+edge names which one answered.
 
 ```bash
 # agent.yaml
