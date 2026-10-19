@@ -5,10 +5,11 @@
 # Usage: ./provision.sh [vm-name]          (default di-node)
 #
 # Idempotent: each step checks before it acts.
-#   1. the VM: Ubuntu 24.04, 6 vCPU, 12 GB, 20 GB, launched only if absent (an existing one
+#   1. the VM: Ubuntu 24.04, 10 vCPU, 16 GB, 20 GB, launched only if absent (an existing one
 #      smaller than that is stopped and resized);
 #   2. k0s, pinned, through ../scripts/02-k0s.sh, and Netdata through ../scripts/03-netdata.sh;
-#   2b. the agent's own decision model, held to fixed limits (tier1.sh);
+#   2b. CPUs 0-5 for pods, 6-9 reserved from Kubernetes (node-cpus.sh), and the agent's own
+#      decision model pinned to those four under fixed limits (tier1.sh);
 #   3. the tunnel key: ~/.ssh/<vm>-tunnel on the host, created if missing, its public half
 #      in the VM's ~ubuntu/.ssh/authorized_keys once. tunnel.sh uses it to carry the host's
 #      reasoning model to the node; the decision model is the node's own;
@@ -21,18 +22,20 @@ KEY="$HOME/.ssh/$VM-tunnel"
 
 if ! multipass info "$VM" >/dev/null 2>&1; then
     echo "[provision] launching $VM"
-    multipass launch 24.04 --name "$VM" --cpus 6 --memory 12G --disk 20G
+    multipass launch 24.04 --name "$VM" --cpus 10 --memory 16G --disk 20G
     multipass exec "$VM" -- cloud-init status --wait
-elif [ "$(multipass get "local.$VM.cpus")" -lt 6 ]; then
-    echo "[provision] resizing $VM to 6 vCPU, 12 GB"
+elif [ "$(multipass get "local.$VM.cpus")" -lt 10 ]; then
+    echo "[provision] resizing $VM to 10 vCPU, 16 GB"
     multipass stop "$VM"
-    multipass set "local.$VM.cpus=6"
-    multipass set "local.$VM.memory=12G"
+    multipass set "local.$VM.cpus=10"
+    multipass set "local.$VM.memory=16G"
     multipass start "$VM"
 fi
 multipass exec "$VM" -- bash -c 'command -v k0s >/dev/null' || bash ../scripts/02-k0s.sh "$VM"
 multipass exec "$VM" -- bash -c 'command -v netdata >/dev/null || [ -x /opt/netdata/bin/netdata ]' ||
     bash ../scripts/03-netdata.sh "$VM"
+multipass transfer node-cpus.sh "$VM:/tmp/node-cpus.sh"
+multipass exec "$VM" -- sudo bash /tmp/node-cpus.sh
 multipass transfer tier1.sh "$VM:/tmp/tier1.sh"
 multipass exec "$VM" -- sudo bash /tmp/tier1.sh
 

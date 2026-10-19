@@ -6,9 +6,9 @@ back to map state. It is a demonstration, not a measurement: one run, no repetit
 
 ## The machine
 
-A Multipass VM (Ubuntu 24.04, arm64, 6 vCPU, 12 GB, cgroup v2) with k0s **v1.36.4+k0s.1** as a single
-node, installed by `poc/scripts/02-k0s.sh`, and the agent's own decision model (`tev1:4b` on Ollama,
-`tier1.sh`: CPUs 4–5 only, at most two CPUs, CPU weight 20 against a pod's 100, 7 GB). The agent runs on
+A Multipass VM (Ubuntu 24.04, arm64, 10 vCPU, 16 GB, cgroup v2; CPUs 0–5 for pods, 6–9 for the agent's model, `node-cpus.sh`) with k0s **v1.36.4+k0s.1** as a single
+node, installed by `poc/scripts/02-k0s.sh`, and the agent's own decision model (`tev1:4b-node`, `tev1:4b` at a 2048-token context, on Ollama;
+`tier1.sh`: CPUs 6–9 only, CPU weight 20, 8 GB soft and 9 GB hard). The agent runs on
 the VM as root from `agent.yaml`, then `agent-relief.yaml`, with the review loop deciding on its own:
 rules, the local decision model, and the host's reasoning model through `tunnel.sh`.
 
@@ -24,7 +24,7 @@ multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sud
 ```
 
 The decision model is the node's own: a node that cannot decide without the network is not
-autonomous. `tier1.sh` holds it to two fixed CPUs, a low CPU weight and 7 GB, so it cannot take what the
+autonomous. `node-cpus.sh` and `tier1.sh` give it four CPUs no pod can use, a low CPU weight and 9 GB, so it cannot take what the
 workloads need (unlimited, on the 4-vCPU node, it starved the hog below relief's floor). The reasoning
 model is the host's (`ollama pull qwen3.8:27b-nvfp4`), reached through `tunnel.sh`. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
 `tunnel.sh` reconnects if the link drops. Ollama on the host keeps listening on 127.0.0.1 only.
