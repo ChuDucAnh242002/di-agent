@@ -177,6 +177,29 @@ func TestAVariableSetEmptyIsEmpty(t *testing.T) {
 	}
 }
 
+// TestANullishVariableIsNotTheDefault: a plain ${VAR} set to "" or "null" stays
+// that text, so a string field is empty and a number field is refused rather than
+// left at its default.
+func TestANullishVariableIsNotTheDefault(t *testing.T) {
+	for _, v := range []string{"", "null", "~"} {
+		t.Setenv("KEY", v)
+		got, err := Parse([]byte("explain:\n  api_key: ${KEY}\n"))
+		if err != nil || got.Explain.APIKey != v {
+			t.Errorf("KEY=%q: APIKey = %q, err %v; want %q", v, got.Explain.APIKey, err, v)
+		}
+		if _, err := Parse([]byte("loops:\n  relief:\n    cpu:\n      enter: ${KEY}\n")); err == nil {
+			t.Errorf("KEY=%q: enter loaded; want it refused, not left at its default", v)
+		}
+	}
+}
+
+func TestAnUnterminatedVariableDoesNotEchoTheValue(t *testing.T) {
+	_, err := Parse([]byte("explain:\n  api_key: hunter2${oops\n"))
+	if err == nil || strings.Contains(err.Error(), "hunter2") || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("err = %v; want one naming the line, not the value", err)
+	}
+}
+
 // TestDollarsAreLiteral: $$ is one literal $, and a $ not opening ${ is left
 // alone, so a value such as a password or a regular expression survives.
 func TestDollarsAreLiteral(t *testing.T) {

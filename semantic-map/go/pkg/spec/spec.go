@@ -528,6 +528,13 @@ func expandNode(n *yaml.Node) error {
 				n.Value = v
 				if n.Style&(yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) == 0 {
 					n.Tag = ""
+					// A value that reads as null would leave the field at its
+					// default without a word. Kept a string, an empty api_key is
+					// empty and an empty enter is refused as not a number.
+					switch v {
+					case "", "~", "null", "Null", "NULL":
+						n.Tag = "!!str"
+					}
 				}
 			}
 			return
@@ -559,7 +566,7 @@ func expand(s string) (string, error) {
 		case '{':
 			end := strings.IndexByte(s[i+2:], '}')
 			if end < 0 {
-				return "", fmt.Errorf("unterminated ${ in %q", s)
+				return "", errors.New("unterminated ${ (write $$ for a literal $)")
 			}
 			name := s[i+2 : i+2+end]
 			if name == "" {

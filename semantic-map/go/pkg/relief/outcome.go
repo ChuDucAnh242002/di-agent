@@ -147,7 +147,9 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		a.Outcome = OutcomeKept
 		l.inFlight = nil
 		l.kept = append(l.kept, a)
-		l.nKept++
+		if !a.Resumed {
+			l.nKept++ // a resumed keep is forced, not a prediction that held
+		}
 		l.mu.Unlock()
 		return
 	}
@@ -224,7 +226,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 // node is not relieving: after pressure has eased, and after a restart that
 // found caps on a calm node. One the runtime will not give back does not hold up
 // the rest: the next most recent is tried in the same tick, and the refused one
-// is tried again on the next. In Releasing, with nothing left, it ends the
+// is tried again at the next release, a Settle later. In Releasing, with nothing left, it ends the
 // phase. An action in flight is judged first, so it is either kept and
 // released in turn or reverted.
 func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase) {
@@ -334,11 +336,12 @@ func (l *Loop) gone(now time.Time, a *Action, why string) {
 }
 
 // end closes an action: it leaves the slot it held and its workload cools down
-// from now.
+// from now. A closed action has no undo pending, so no undo failing either.
 func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a.Outcome, a.revertPending = outcome, false
+	a.RevertAttempts, a.LastError = 0, ""
 	if l.inFlight == a {
 		l.inFlight = nil
 	}

@@ -408,8 +408,8 @@ func TestAResumedActionIsKeptWhenPressureIsFlat(t *testing.T) {
 	if u, ok := h.applied()["pod:a"]; !ok || u.DecisionID != "relief-act-1-1" {
 		t.Fatalf("applied %v; want the resumed change still in force", h.applied())
 	}
-	if st := h.l.Status(); st.Reverted != 0 || !st.Cooling["pod:a"].IsZero() {
-		t.Fatalf("status %+v; want nothing reverted and no failed-cap cooldown", st)
+	if st := h.l.Status(); st.Reverted != 0 || st.Kept != 0 || !st.Cooling["pod:a"].IsZero() {
+		t.Fatalf("status %+v; want nothing judged, as a forced keep is no prediction that held, and no failed-cap cooldown", st)
 	}
 	h.until(time.Hour, 0.5, "the resumed change expiring", func() bool { return h.action("pod:a").Outcome == OutcomeExpired })
 }

@@ -1154,4 +1154,7 @@ func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
 	if st := h.l.Status(); st.Stuck != 0 {
 		t.Fatalf("status %+v; want nothing stuck once it went through", st)
 	}
+	if b := h.action("pod:b"); b.RevertAttempts != 0 || b.LastError != "" {
+		t.Fatalf("pod:b %+v; want a released change to show no failing undo", b)
+	}
 }
