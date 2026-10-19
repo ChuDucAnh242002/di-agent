@@ -183,7 +183,7 @@ func TestTheStepRespectsTheFloors(t *testing.T) {
 	}
 
 	// A floor at or above usage leaves no step to take.
-	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = &spec.Floor{CPUCores: 0.4} })
+	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.NewFloor(0.4, 0) })
 	if _, ok, why := MakePlan(m, Attribute(m, ws, high, c), ws, high, c, one); ok || !strings.Contains(why, "floor") {
 		t.Fatalf("ok=%v why=%q; want refused at the floor", ok, why)
 	}
@@ -272,5 +272,30 @@ func TestTheStepNeverGoesBelowTheRequest(t *testing.T) {
 	// 0.4 of 4 cores = 1.6; the step alone would reach 1.2, but the request is 1.4.
 	if !near(p.FromCores, 1.6) || !near(p.ToCores, 1.4) {
 		t.Fatalf("plan %+v; want 1.6 → 1.4 cores", p)
+	}
+}
+
+// TestTheUsagePredictionUsesTheFlooredCut: a floor that stops the step short of
+// a full Step cuts less, and the usage prediction is of the cut actually made.
+func TestTheUsagePredictionUsesTheFlooredCut(t *testing.T) {
+	m := planFixture(t, 1)
+	record(t, m, usage("pod:b"), "pod:b", 0.6, t0)
+	w := pod("pod:b")
+	req := 2.0
+	w.CPU.Request = &req
+	ws := []runtime.Workload{w}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	if !ok {
+		t.Fatalf("no plan: %s", why)
+	}
+	// 0.6 of 4 cores = 2.4; the step would reach 1.8, the request holds it at 2.0:
+	// a cut of 1 − 2.0/2.4 = 1/6, not the step's 0.25.
+	if !near(p.ToCores, 2.0) || p.Basis != BasisUsage {
+		t.Fatalf("plan %+v; want a usage plan to 2.0 cores", p)
+	}
+	if want := 0.6 * (1 - 2.0/2.4) * 0.5 / 0.8; !near(p.Predicted, want) {
+		t.Fatalf("predicted %v; want %v, the floored cut", p.Predicted, want)
 	}
 }

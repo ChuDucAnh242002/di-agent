@@ -406,7 +406,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		// print ("collection loop disabled") is the message for a deliberate choice.
 		sc, err := scripted.LoadScenario(cfg.ScriptPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
 		}
 		// The script stamps simulated time one tick per Collect while the map sweeps
 		// on the wall clock. An interval above the tick makes every property go stale
@@ -414,13 +414,13 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		// nothing ever goes stale. Not a drift to warn about: a configuration the
 		// daemon must not start with.
 		if tick := time.Duration(sc.TickSeconds) * time.Second; cfg.CollectInterval > 0 && cfg.CollectInterval != tick {
-			return nil, nil, fmt.Errorf("-script %s ticks every %s but -collect-interval is %s: simulated time would run "+
-				"off the wall clock the map sweeps on, retiring or immortalising every property; set -collect-interval=%s",
+			return nil, nil, fmt.Errorf("sources.script %s ticks every %s but sources.interval is %s: simulated time would run "+
+				"off the wall clock the map sweeps on, retiring or immortalising every property; set sources.interval: %s",
 				sc.Name, tick, cfg.CollectInterval, tick)
 		}
 		script, err := scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
 		if err != nil {
-			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
 		}
 		return sm, script, nil
 	}

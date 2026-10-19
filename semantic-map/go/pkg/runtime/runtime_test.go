@@ -3,9 +3,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/spec"
 )
 
 func f64(v float64) *float64 { return &v }
@@ -218,5 +221,16 @@ func TestASecondChangeKeepsTheFirstOriginal(t *testing.T) {
 	u, _ = d.Apply(ctx, "pod:a", Change{Action: ActionCPULimit, CPULimit: 1.0})
 	if *u.Original.Limit != 2.0 {
 		t.Fatalf("original %v; want the current limit, not another node's", *u.Original.Limit)
+	}
+}
+
+// TestThePolicyKnowsEveryAction: the spec refuses an allow or deny entry that is
+// not in its own list, which it keeps because this package imports it; every
+// action a runtime performs must be there, or no policy could allow it.
+func TestThePolicyKnowsEveryAction(t *testing.T) {
+	for _, a := range []string{ActionCPULimit} {
+		if !slices.Contains(spec.PolicyActions, a) {
+			t.Errorf("spec.PolicyActions %v lacks %q", spec.PolicyActions, a)
+		}
 	}
 }

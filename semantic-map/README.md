@@ -79,7 +79,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -218,7 +218,7 @@ semantic-map/
     │       │                                           state model)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
-    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
+    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via map.proposer.enabled)
     │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via map.tuner: true)
@@ -559,9 +559,9 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
-| GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
-| GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `cooling` | relief   |
-| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction (the plan's `effect` is the learned factor it was scaled by), observed drop, `outcome` and `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding) | relief   |
+| GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
+| GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the runtime has refused; absent when none), `cooling` | relief   |
+| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction and `verify_id` (the decision that judged it; absent until verified) (the plan's `effect` is the learned factor it was scaled by), observed drop, `outcome`, `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the runtime has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
@@ -635,7 +635,7 @@ The agent takes its whole configuration from one YAML document. There are two fl
 | `-config <path>` | The spec file. Empty runs the defaults. |
 | `-print-config` | Print the effective spec as YAML (the file over the defaults) and exit. |
 
-The file overlays the defaults, so it names only what it changes. A key the agent does not know is refused at startup, because a misspelt threshold that silently keeps its default is a setting that describes nothing. `${VAR}` in the file is replaced from the environment before it is read, so a secret stays out of the file (`explain.api_key: ${EXPLAIN_API_KEY}`); an unset variable becomes empty. This replaces the old `EXPLAIN_API_KEY` fallback, which the agent no longer reads on its own, and the `AUTONOMY_*_API_KEY` variables likewise: name them in `loops.review.decision.api_key` and `loops.review.reasoning.api_key`.
+The file overlays the defaults, so it names only what it changes. A key the agent does not know is refused at startup, because a misspelt threshold that silently keeps its default is a setting that describes nothing. `${VAR}` in a value is replaced from the environment, so a secret stays out of the file (`explain.api_key: ${EXPLAIN_API_KEY}`). A variable that is not set is refused at startup, naming every one missing, rather than read as empty; one set to the empty string is empty. `$$` is a literal `$`, and any other `$` is kept as written, so a password or a pattern survives. Variables are expanded in values after the file is read, never in keys' structure or comments: what a variable holds is the value it stands for, not more YAML, and a plain value is typed afresh (`enter: ${ENTER}` with `ENTER=0.3` is a number; quote it to keep a string). In a flow mapping (`{api_key: ${KEY}}`) the braces end the value, so quote it there: `{api_key: "${KEY}"}`. This replaces the old `EXPLAIN_API_KEY` fallback, which the agent no longer reads on its own, and the `AUTONOMY_*_API_KEY` variables likewise: name them in `loops.review.decision.api_key` and `loops.review.reasoning.api_key`.
 
 `agent -print-config` prints every setting with its default, and [`agent.example.yaml`](agent.example.yaml) is that output. Copy it and delete what you do not change. A running agent shows the spec it runs on, secrets redacted, at `GET /config`.
 
@@ -654,7 +654,9 @@ loops:
     level: full
 ```
 
-Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own; `facts` likewise names the fact sources outright (`facts: []` reads none).
+Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
+
+Values that cannot be what was meant are refused at startup, every one named. In the policy: an `allow` or `deny` entry that is not an action (`cpu.limit`, or `evict`, which no runtime performs and the defaults deny), in the defaults or any rule, since a misspelt deny would deny nothing; and a `match.kind` that is not a workload kind (`pod`, `container`, `unit`, `app`), since a misspelt kind would match nothing. In relief: `loops.relief.cpu.expiry` must be longer than `settle`, or a change would be given back before it is judged. `min_effect` is a planning floor: a step whose predicted drop in pressure is below it is not taken. A step is then judged against its own prediction: kept when the observed drop is at least half the predicted one, reverted otherwise; a change taken up after a restart is always kept, as its baseline was read with the cap in force.
 
 ### The runtime and the relief loop
 
@@ -671,9 +673,13 @@ loops:
     enabled: true
     interval: 15s       # how often the loop looks
     cpu:
-      enter: 0.25       # node CPU share that starts relief, held for enter_for
-      exit: 0.10        # share below which caps are given back, held for exit_for
+      enter: 0.25       # CPU pressure (PSI stall fraction) that starts relief, held for enter_for
+      exit: 0.10        # pressure below which caps are given back, held for exit_for
 ```
+
+The trigger is the node's CPU pressure, `cpu_pressure_ratio`: the PSI stall fraction, the share of time tasks wait for a CPU, not CPU utilisation. A node can be fully used and not under pressure, and the loop acts only on the waiting.
+
+The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the runtime count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
 
 Outcomes teach the map — interventions on relationships, each workload's learned effect, candidates settled — only on a runtime that really changes the system, never on `dry-run` (ARCHITECTURE §16, "Learning from outcomes"). At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
 
@@ -684,6 +690,16 @@ Outcomes teach the map — interventions on relationships, each workload's learn
 kubectl apply -f deploy/kubernetes/rbac.yaml
 ```
 
+The agent's own pod must carry its UID in `POD_UID`, from the downward API, or the agent refuses to start in-cluster: it is how the agent recognises itself among the pods it may cap.
+
+```yaml
+env:
+  - name: POD_UID
+    valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+```
+
+Run from a host with a `kubeconfig` and no `POD_UID`, it starts and logs that its own pod cannot be recognised.
+
 ```yaml
 node:
   id: worker-1            # a pod with this node name; or set runtime.node
@@ -692,7 +708,7 @@ runtime:
   kubeconfig: ""          # empty: in-cluster; else a kubeconfig path
 ```
 
-It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (the downward API `metadata.uid`) marks the agent's own pod, which no rule may touch. The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
+It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (above) marks the agent's own pod, which no rule may touch. Every API request times out after 30s, and a relief pass, or a manual revert, gives up on the runtime after `loops.relief.interval` (at least 10s). The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
 
 ### The state model
 
@@ -895,10 +911,10 @@ answered, but nothing is routed into a construct, and `GET /cost`, `POST /recomm
 states which mode the agent is in. A `domain.path` path that does not load is an error,
 not a fallback. When you do deploy a specification, treat it as part of the
 release: two daemons on the same binary and different specifications are different
-agents. The daemon also rejects positional arguments, because Go's
-`flag` package stops parsing at the first one — `map.proposer.enabled: false` (a space
-instead of `=`) silently discarded every flag after it and cost this project a
-full round of invalid measurements.
+agents. The daemon also refuses a stray argument after its flags (a spec path
+given without `-config`, or `-print-config false` written with a space), because
+Go's `flag` package stops parsing at the first one and would drop it and every
+flag after it without a word.
 
 ### Replay (Netdata parquet datasets)
 
@@ -1450,13 +1466,14 @@ Every response carries a `usage` block so you can see what each feature costs:
 
 `llm_turns` counts planner, answering, critic, and revision turns separately.
 
-### v2 flags
+### v2 settings
 
-```
--explain-planner-prompt   path to planner prompt   (default: <prompt-dir>/planner-v1.md)
--explain-critic-prompt    path to critic prompt    (default: <prompt-dir>/critic-v1.md)
--explain-keep-alive       model residency hint     (default: 30m — big latency win on repeat calls)
--explain-sessions         enable session memory    (default: true)
+```yaml
+explain:
+  planner_prompt: ""   # path to the planner prompt; empty is <dir of explain.prompt>/planner-v1.md
+  critic_prompt: ""    # path to the critic prompt; empty is <dir of explain.prompt>/critic-v1.md
+  keep_alive: 30m      # model residency hint: a big latency win on repeat calls
+  sessions: true       # session memory
 ```
 
 A missing planner or critic prompt disables that stage with a log line rather than failing startup.
@@ -1519,8 +1536,9 @@ and model, and the reasoning tools — from registries in `pkg/autonomy`. Each t
 own URL, so the decision model can run on the node and the reasoning model elsewhere. A
 new backend, rule, tool or renderer is a type implementing `Decider`, `Reasoner`, `Rule`,
 `Tool` or `Renderer`, registered under a name in an `init` function; nothing else changes.
-Bearer tokens for a backend come from `AUTONOMY_DECISION_API_KEY` and
-`AUTONOMY_REASONING_API_KEY`, never a flag.
+Bearer tokens for a backend are `loops.review.decision.api_key` and
+`loops.review.reasoning.api_key`; write them as `${VAR}` to read them from the
+environment and keep them out of the file. The agent reads no variable on its own.
 
 The thresholds are uncalibrated defaults set by what each action costs to undo.
 

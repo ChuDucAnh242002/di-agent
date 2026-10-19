@@ -148,7 +148,7 @@ func influencedBy(res statemap.EstimateResult, subject string) bool {
 // current usage when there is none), and never below the workload's CPU request. A Basis "map" candidate is predicted by
 // assuming its usage scaled to the new limit; a Basis "usage" candidate, which
 // the map cannot predict, by its share of the node's pressure per unit of
-// usage. effect scales a prediction by what acting on the subject has done before
+// usage, times the fraction of its usage the step actually cuts. effect scales a prediction by what acting on the subject has done before
 // against predictions of the same basis; 1 means no history.
 func MakePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject, basis string) float64) (p Plan, ok bool, why string) {
 	return makePlan(m, cands, ws, pol, c, effect, nil)
@@ -185,7 +185,8 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 		} else if w.CPU.Limit != nil {
 			original = *w.CPU.Limit
 		}
-		to := math.Max(from*(1-c.Step), math.Max(eff.Settings.Floor.CPUCores, eff.Settings.Floor.OfOriginal*original))
+		floorCores, floorShare := eff.Settings.Floor.Values()
+		to := math.Max(from*(1-c.Step), math.Max(floorCores, floorShare*original))
 		if w.CPU.Request != nil {
 			// A limit below the request is refused by the orchestrator, so the request is a floor.
 			to = math.Max(to, *w.CPU.Request)
@@ -218,7 +219,8 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 				reasons = append(reasons, cand.Subject+": no node pressure or usage to predict from")
 				continue
 			}
-			plan.Predicted = cand.Share * c.Step * (pressure.Value / usage.Value) * plan.Effect
+			// The cut actually made, which a floor can hold short of Step.
+			plan.Predicted = cand.Share * (1 - to/from) * (pressure.Value / usage.Value) * plan.Effect
 		}
 		if plan.Predicted < c.MinEffect {
 			reasons = append(reasons, fmt.Sprintf("%s: predicted drop %.4f is below min_effect %g", cand.Subject, plan.Predicted, c.MinEffect))

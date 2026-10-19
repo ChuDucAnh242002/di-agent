@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,8 +42,26 @@ const (
 	LabelOwnerKind     = "k8s/owner-kind"
 )
 
+// PodUIDEnv is the environment variable that names the agent's own pod, set from
+// the downward API's metadata.uid. Without it the agent cannot recognise itself
+// among the pods it may cap.
+const PodUIDEnv = "POD_UID"
+
+// callTimeout bounds every request to the API server, so one that stops
+// answering cannot hold the relief loop.
+const callTimeout = 30 * time.Second
+
 func init() {
 	runtime.Register("kubernetes", func(env runtime.Env) (runtime.Runtime, error) {
+		if os.Getenv(PodUIDEnv) == "" {
+			if env.Spec.Kubeconfig == "" {
+				return nil, fmt.Errorf("runtime.kind kubernetes in a cluster needs %s, the agent's own pod UID, "+
+					"from the downward API (env %s: valueFrom.fieldRef.fieldPath: metadata.uid); "+
+					"without it the agent cannot recognise its own pod and could cap itself", PodUIDEnv, PodUIDEnv)
+			}
+			log.Printf("runtime: %s is unset, so the agent's own pod cannot be recognised among this node's pods; "+
+				"run it outside the cluster, or set %s from metadata.uid", PodUIDEnv, PodUIDEnv)
+		}
 		client, err := newClient(env.Spec.Kubeconfig)
 		if err != nil {
 			return nil, err
@@ -53,6 +73,19 @@ func init() {
 // newClient is the in-cluster client when no kubeconfig is named, else the one the
 // file describes. Neither connects: the first call does.
 func newClient(kubeconfig string) (kubernetes.Interface, error) {
+	cfg, err := restConfig(kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("runtime.kubeconfig: %w", err)
+	}
+	return client, nil
+}
+
+// restConfig is the client configuration for a kubeconfig, or in-cluster.
+func restConfig(kubeconfig string) (*rest.Config, error) {
 	var cfg *rest.Config
 	var err error
 	if kubeconfig == "" {
@@ -66,11 +99,8 @@ func newClient(kubeconfig string) (kubernetes.Interface, error) {
 			return nil, fmt.Errorf("runtime.kubeconfig %s: %w", kubeconfig, err)
 		}
 	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("runtime.kubeconfig: %w", err)
-	}
-	return client, nil
+	cfg.Timeout = callTimeout
+	return cfg, nil
 }
 
 // Runtime acts on the pods of one node.
@@ -134,7 +164,7 @@ func (r *Runtime) Workloads(ctx context.Context) ([]runtime.Workload, error) {
 	if err != nil {
 		return nil, err
 	}
-	self := os.Getenv("POD_UID")
+	self := os.Getenv(PodUIDEnv)
 	out := make([]runtime.Workload, 0, len(ps))
 	for _, p := range ps {
 		out = append(out, runtime.Workload{
@@ -231,7 +261,36 @@ func cannot(p corev1.Pod, nodeID string) string {
 	if p.Status.QOSClass == corev1.PodQOSGuaranteed {
 		return "Guaranteed: changing the limit alone would change the pod's QoS class"
 	}
+	if restartsOnCPUResize(p.Spec.Containers[0]) {
+		return "resizePolicy restarts the container for a CPU change"
+	}
 	return ""
+}
+
+// restartsOnCPUResize reports a container whose CPU resizePolicy is
+// RestartContainer: every cap and every revert would restart it.
+func restartsOnCPUResize(c corev1.Container) bool {
+	for _, rp := range c.ResizePolicy {
+		if rp.ResourceName == corev1.ResourceCPU && rp.RestartPolicy == corev1.RestartContainer {
+			return true
+		}
+	}
+	return false
+}
+
+// wouldBeGuaranteed reports whether a CPU limit of milli on the single container
+// would make the pod Guaranteed: the CPU request equal to the new limit and the
+// memory request equal to the memory limit. The QoS class may not change on a
+// resize, so such a limit is refused rather than sent.
+func wouldBeGuaranteed(p corev1.Pod, milli int64) bool {
+	r := p.Spec.Containers[0].Resources
+	req, ok := r.Requests[corev1.ResourceCPU]
+	if !ok || req.MilliValue() != milli {
+		return false
+	}
+	memReq, okReq := r.Requests[corev1.ResourceMemory]
+	memLim, okLim := r.Limits[corev1.ResourceMemory]
+	return okReq && okLim && memReq.Cmp(memLim) == 0
 }
 
 // hasSidecar reports a native sidecar: an init container that keeps running.
@@ -265,6 +324,10 @@ func (r *Runtime) Apply(ctx context.Context, subject string, c runtime.Change) (
 		original = prev.Original
 	}
 	milli := millis(c.CPULimit)
+	if wouldBeGuaranteed(p, milli) {
+		return runtime.Undo{}, fmt.Errorf("%s/%s cannot take a cpu.limit of %dm: equal to its request, with memory "+
+			"request equal to limit, it would make the pod Guaranteed, a QoS class change", p.Namespace, p.Name, milli)
+	}
 	u := runtime.Undo{
 		Runtime:    "kubernetes",
 		NodeID:     r.env.NodeID,
@@ -288,7 +351,10 @@ func (r *Runtime) Apply(ctx context.Context, subject string, c runtime.Change) (
 	return u, nil
 }
 
-// Revert resizes the pod back to the limit it had and removes the record. A limit
+// Revert resizes the pod back to the limit it had and removes the record. A pod
+// already at that limit, as after a resize that never took, is not resized: only
+// the record is cleared, so a resize the API keeps refusing cannot keep a change
+// in force that is not there. A limit
 // of nil is an error: the runtime never accepts a pod without one, so an undo
 // without one did not come from here. A pod whose record is another node's or unreadable is left
 // untouched and the revert is an error; with no record at all the undo in hand is
@@ -309,8 +375,10 @@ func (r *Runtime) Revert(ctx context.Context, u runtime.Undo) error {
 	if present && (!readable || rec.NodeID != r.env.NodeID) {
 		return fmt.Errorf("revert %s: the pod carries a %s record that is not node %s's; nothing restored", u.Subject, Annotation, r.env.NodeID)
 	}
-	if err := r.resize(ctx, p, millis(*u.Original.Limit)); err != nil {
-		return err
+	if want := millis(*u.Original.Limit); !atLimit(p, want) {
+		if err := r.resize(ctx, p, want); err != nil {
+			return err
+		}
 	}
 	if !present {
 		return nil // no record to clear: the undo in hand is authoritative
@@ -327,7 +395,8 @@ func (r *Runtime) Changed(ctx context.Context, nodeID string) ([]runtime.Undo, e
 	}
 	var out []runtime.Undo
 	for _, p := range ps {
-		if u, present, readable := decode(p); present && readable && u.NodeID == nodeID {
+		// A record that names another pod, copied here by a template or by hand, is not this pod's change.
+		if u, present, readable := decode(p); present && readable && u.NodeID == nodeID && u.Subject == subjectOf(p) {
 			out = append(out, u)
 		}
 	}
@@ -338,6 +407,16 @@ func (r *Runtime) Changed(ctx context.Context, nodeID string) ([]runtime.Undo, e
 		return out[i].Subject < out[j].Subject
 	})
 	return out, nil
+}
+
+// atLimit reports whether the pod's single container already has a CPU limit of
+// milli millicores.
+func atLimit(p corev1.Pod, milli int64) bool {
+	if len(p.Spec.Containers) != 1 {
+		return false
+	}
+	l, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	return ok && l.MilliValue() == milli
 }
 
 // decode is the undo on the pod's annotation: whether the annotation is there,

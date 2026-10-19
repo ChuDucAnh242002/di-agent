@@ -482,6 +482,19 @@ export class GraphView {
         'stroke-linejoin': 'round',
       });
       label.textContent = name;
+      // What the agent has done to this workload, beside its name: throttled while
+      // a cap is in force, frozen while policy forbids touching it.
+      if (!machine) {
+        for (const [on, text, colour] of [
+          [model.throttled(subject), model.acting.relief?.runtime === 'dry-run' ? 'throttled (dry-run)' : 'throttled', 'var(--status-serious)'],
+          [model.frozen(subject), 'frozen', 'var(--prov-asserted)'],
+        ]) {
+          if (!on) continue;
+          const tag = el('tspan', { fill: colour, 'font-weight': 600, class: `hull-badge ${text.split(' ')[0]}` });
+          tag.textContent = `  [${text}]`;
+          label.append(tag);
+        }
+      }
       g.append(rect, label);
       // Pinned when the operator put the box somewhere: every member stays.
       let pin = null;

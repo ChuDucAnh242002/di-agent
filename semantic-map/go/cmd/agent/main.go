@@ -312,6 +312,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("policy.rules in %s: %v", *configPath, err)
 	}
+	for _, rule := range policy.MissingDefaultFreezes(cfg.Policy) {
+		log.Printf("policy: policy.rules replaces the default rules and has none to %s; "+
+			"copy it from `agent -print-config` unless leaving it out is meant", rule)
+	}
 	var reliefLoop *relief.Loop
 	if cfg.Loops.Relief.Enabled {
 		// Outcomes are evidence only when the runtime really changes the system: after a
@@ -564,21 +568,19 @@ type explainReader struct{ *semmap.SemanticMap }
 
 func (r explainReader) Peers() *peers.Registry { return r.SemanticMap.Peers() }
 
-// checkNoPositionalArgs rejects stray positional arguments after flag parsing.
-//
-// Go's flag package stops parsing at the first non-flag argument, so
-// `-proposer false` (space instead of `=`) is read as `-proposer` followed by
-// the positional "false" — and every flag after it is silently discarded. That
-// failure mode produced convergence runs whose -alpha, -convergence, -priors
-// and -kd were all ignored while the daemon started and served normally on
-// hardcoded ontology defaults. Failing loud is cheaper than the silent version.
+// checkNoPositionalArgs rejects a stray argument after the flags. The agent
+// takes only -config and -print-config; everything else lives in the spec file.
+// Go's flag package stops at the first argument that is not a flag, so a path
+// given without -config, or `-print-config false` written with a space, would be
+// dropped along with any flag after it, and the agent would start on settings
+// the operator did not give.
 func checkNoPositionalArgs(n int, first string) error {
 	if n == 0 {
 		return nil
 	}
-	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
-		"the form -flag=false (not -flag false), otherwise every flag after it "+
-		"is silently ignored", first)
+	return fmt.Errorf("unexpected argument %q: the agent takes only -config <path> and "+
+		"-print-config (a boolean, written -print-config=false, not -print-config false); "+
+		"every other setting is in the spec file", first)
 }
 
 // checkCanRecord refuses a configuration that can never record anything: without a
@@ -590,8 +592,8 @@ func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
 		return nil
 	}
 	return fmt.Errorf("admit: false without a domain model records nothing: no property " +
-		"is declared, so every observation would be refused. Give -domain, restore a " +
-		"snapshot with -state-file, or drop -no-admit")
+		"is declared, so every observation would be refused. Set domain.path, restore a " +
+		"snapshot with persist.file, or set map.admit: true")
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

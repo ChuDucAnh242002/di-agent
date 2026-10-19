@@ -3,6 +3,7 @@ package relief
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -38,9 +39,10 @@ type fixture struct {
 	noPressure bool // no pressure reading at start; only with no shares, which relate to it
 	flaky      bool
 	policy     func(*spec.PolicySpec)
-	noRelate   bool       // the shares relate to nothing: the map cannot rank or predict
-	evidence   bool       // outcomes feed the map, as on a runtime that really changes it
-	candidates Candidates // what the loop settles candidates through; nil for none
+	noRelate   bool                                  // the shares relate to nothing: the map cannot rank or predict
+	evidence   bool                                  // outcomes feed the map, as on a runtime that really changes it
+	candidates Candidates                            // what the loop settles candidates through; nil for none
+	wrap       func(*runtime.DryRun) runtime.Runtime // the runtime the loop sees, over the dry run
 }
 
 // flaky is a dry-run runtime that fails on request and can hide workloads from
@@ -49,8 +51,9 @@ type fixture struct {
 type flaky struct {
 	*runtime.DryRun
 	mu         sync.Mutex
-	changedErr int // Changed fails this many more times
-	revertErr  int // Revert fails this many more times
+	changedErr int             // Changed fails this many more times
+	revertErr  int             // Revert fails this many more times
+	stuck      map[string]bool // Revert always fails for these workloads
 	hide       map[string]bool
 }
 
@@ -73,9 +76,13 @@ func (f *flaky) Revert(ctx context.Context, u runtime.Undo) error {
 	if fail {
 		f.revertErr--
 	}
+	stuck := f.stuck[u.Subject]
 	f.mu.Unlock()
 	if fail {
 		return errors.New("conflict")
+	}
+	if stuck {
+		return errors.New("admission webhook denied the request")
 	}
 	return f.DryRun.Revert(ctx, u)
 }
@@ -124,8 +131,11 @@ func newHarness(t *testing.T, f fixture) *harness {
 	}
 	var rt2 runtime.Runtime = h.rt
 	if f.flaky {
-		h.fl = &flaky{DryRun: h.rt, hide: map[string]bool{}}
+		h.fl = &flaky{DryRun: h.rt, hide: map[string]bool{}, stuck: map[string]bool{}}
 		rt2 = h.fl
+	}
+	if f.wrap != nil {
+		rt2 = f.wrap(h.rt)
 	}
 	relief := spec.Default().Loops.Relief
 	relief.Enabled = true
@@ -528,6 +538,15 @@ func TestEveryStepIsADecision(t *testing.T) {
 	if len(verify) != 1 || verify[0].Inputs["act"] != a.DecisionID {
 		t.Fatalf("verify decisions %+v; want one citing %s", verify, a.DecisionID)
 	}
+	if a.VerifyID != verify[0].ID {
+		t.Errorf("verify_id = %q; want %q", a.VerifyID, verify[0].ID)
+	}
+	if d, ok := h.m.Journal().Decision(a.VerifyID); !ok || d.Inputs["act"] != a.DecisionID {
+		t.Errorf("verify_id %q does not resolve to the verify decision: %+v", a.VerifyID, d)
+	}
+	if st := h.l.Status(); st.Runtime == "" {
+		t.Errorf("status carries no runtime name: %+v", st)
+	}
 }
 
 func TestNoCoresTheLoopRefusesOnce(t *testing.T) {
@@ -909,4 +928,233 @@ func TestAResumedChangeOfUnknownOriginIsNotSteppedAgain(t *testing.T) {
 			t.Fatal("no refusal at the floor")
 		}
 	})
+}
+
+// lyingApply records a change and then reports failure, as a resize that took
+// effect although its call timed out.
+type lyingApply struct {
+	*runtime.DryRun
+	mu   sync.Mutex
+	fail int // this many more Applies record the change and fail
+}
+
+func (r *lyingApply) Apply(ctx context.Context, subject string, c runtime.Change) (runtime.Undo, error) {
+	u, err := r.DryRun.Apply(ctx, subject, c)
+	if err != nil {
+		return u, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail > 0 {
+		r.fail--
+		return runtime.Undo{}, errors.New("resize default/a: context deadline exceeded")
+	}
+	return u, nil
+}
+
+// TestAFailedApplyThatTookEffectIsAdopted: a change the runtime recorded although
+// Apply failed is found by the next reconcile, held, and given back at expiry.
+func TestAFailedApplyThatTookEffectIsAdopted(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun) runtime.Runtime { return &lyingApply{DryRun: d, fail: 1} }})
+	h.act("pod:a")
+	acted := h.now
+	if st := h.l.Status(); st.InFlight != nil || st.Refused != 1 {
+		t.Fatalf("status %+v; want the failed apply refused", st)
+	}
+	h.step(0.5)
+	st := h.l.Status()
+	if st.InFlight == nil || st.InFlight.Subject != "pod:a" || !st.InFlight.Resumed {
+		t.Fatalf("in flight %+v; want the change the runtime holds adopted as resumed", st.InFlight)
+	}
+	h.l.Pause()
+	h.until(2*time.Hour, 0.5, "expiry", func() bool { return len(h.rt.Applied()) == 0 })
+	if !h.now.Equal(acted.Add(time.Hour)) {
+		t.Fatalf("given back at %v; want at expiry, an hour after %v", h.now, acted)
+	}
+	if a := h.action("pod:a"); a.Outcome != OutcomeExpired {
+		t.Fatalf("pod:a %+v; want expired", a)
+	}
+}
+
+// blocking is a runtime whose calls wait for their context while block is set,
+// as an orchestrator that has stopped answering.
+type blocking struct {
+	*runtime.DryRun
+	mu    sync.Mutex
+	block bool
+}
+
+func (b *blocking) wait(ctx context.Context) error {
+	b.mu.Lock()
+	on := b.block
+	b.mu.Unlock()
+	if !on {
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (b *blocking) Workloads(ctx context.Context) ([]runtime.Workload, error) {
+	if err := b.wait(ctx); err != nil {
+		return nil, err
+	}
+	return b.DryRun.Workloads(ctx)
+}
+
+func (b *blocking) Changed(ctx context.Context, node string) ([]runtime.Undo, error) {
+	if err := b.wait(ctx); err != nil {
+		return nil, err
+	}
+	return b.DryRun.Changed(ctx, node)
+}
+
+func (b *blocking) Apply(ctx context.Context, subject string, c runtime.Change) (runtime.Undo, error) {
+	if err := b.wait(ctx); err != nil {
+		return runtime.Undo{}, err
+	}
+	return b.DryRun.Apply(ctx, subject, c)
+}
+
+func (b *blocking) Revert(ctx context.Context, u runtime.Undo) error {
+	if err := b.wait(ctx); err != nil {
+		return err
+	}
+	return b.DryRun.Revert(ctx, u)
+}
+
+// within fails the test if fn has not returned after d.
+func within(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { fn(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %s", what, d)
+	}
+}
+
+// TestAHungOrchestratorDoesNotHangTheLoop: every pass and every manual revert
+// gives up on the runtime after the loop's timeout.
+func TestAHungOrchestratorDoesNotHangTheLoop(t *testing.T) {
+	var b *blocking
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun) runtime.Runtime { b = &blocking{DryRun: d}; return b }})
+	h.l.timeout = 50 * time.Millisecond
+	h.act("pod:a")
+	id := h.l.Status().InFlight.ID
+	h.advance(2 * time.Minute) // the next tick verifies, and so asks the runtime for its workloads
+	b.mu.Lock()
+	b.block = true
+	b.mu.Unlock()
+	within(t, 5*time.Second, "Tick", func() { h.step(0.5) })
+	var err error
+	within(t, 5*time.Second, "Revert", func() { err = h.l.Revert(h.ctx, id) })
+	if err == nil {
+		t.Fatal("a revert the runtime never answered succeeded")
+	}
+	if _, ok := h.applied()["pod:a"]; !ok {
+		t.Fatal("the change was dropped although the runtime never gave it back")
+	}
+}
+
+// TestARestartDoesNotResetTheHourlyBudget: changes taken up after a restart count
+// toward max_actions_per_hour, at their journalled act time or else now.
+func TestARestartDoesNotResetTheHourlyBudget(t *testing.T) {
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t, fixture{
+			shares: map[string]float64{"pod:a": 0.3, "pod:b": 0.3, "pod:c": 0.3},
+			policy: func(ps *spec.PolicySpec) { ps.Defaults.MaxActionsPerHour = 2 },
+		})
+		for i, s := range []string{"pod:a", "pod:b"} {
+			h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: s, Action: runtime.ActionCPULimit,
+				Applied: 0.9, Expires: h.now.Add(50 * time.Minute), DecisionID: fmt.Sprintf("earlier-act-%d", i+1)})
+		}
+		return h
+	}
+	t.Run("no journal: counted from now", func(t *testing.T) {
+		h := setup(t)
+		if err := h.l.Reconcile(h.ctx); err != nil {
+			t.Fatal(err)
+		}
+		h.run(40*time.Minute, 0.5)
+		if n := len(h.decisions("act")); n != 0 {
+			t.Fatalf("%d acts within the hour; two resumed changes already spent max_actions_per_hour 2", n)
+		}
+	})
+	t.Run("journalled: counted from the act", func(t *testing.T) {
+		h := setup(t)
+		b := h.m.Decide("earlier-act-1", "earlier act")
+		b.Commit(nil)
+		h.advance(61 * time.Minute)
+		for _, s := range []string{"pod:a", "pod:b", "pod:c"} {
+			record(t, h.m, usage(s), s, 0.3, h.now)
+		}
+		record(t, h.m, NodeUsage, "", 0.8, h.now)
+		for _, s := range []string{"pod:a", "pod:b"} {
+			u := h.applied()[s]
+			u.Expires = h.now.Add(50 * time.Minute)
+			h.rt.PutUndo(u)
+		}
+		if err := h.l.Reconcile(h.ctx); err != nil {
+			t.Fatal(err)
+		}
+		h.run(40*time.Minute, 0.5)
+		if n := len(h.decisions("act")); n != 1 {
+			t.Fatalf("%d acts; want one: pod:a's act is over an hour old, pod:b's counts from now", n)
+		}
+	})
+}
+
+// TestARetriedRevertCitesItsVerdict: a revert the runtime refused at first still
+// records the verify decision that caused it when it succeeds.
+func TestARetriedRevertCitesItsVerdict(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, flaky: true})
+	h.act("pod:a")
+	h.fl.set(func(f *flaky) { f.revertErr = 1 })
+	h.until(5*time.Minute, 0.5, "the revert", func() bool { return len(h.decisions("revert")) == 1 })
+	verify := h.decisions("verify")
+	if len(verify) != 1 {
+		t.Fatalf("%d verify decisions", len(verify))
+	}
+	if got := h.decisions("revert")[0].Inputs["verify"]; got != verify[0].ID {
+		t.Fatalf("revert cites verify %v; want %s", got, verify[0].ID)
+	}
+}
+
+// TestAStuckReleaseDoesNotBlockTheOthers: the newest kept change, whose undo the
+// runtime keeps refusing, does not hold back the release of the others. Its
+// failures are counted on the action and in Status, and journalled once.
+func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}, flaky: true})
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.44)
+	h.until(time.Minute, 0.44, "an action on pod:b", func() bool { _, ok := h.applied()["pod:b"]; return ok })
+	h.run(2*time.Minute, 0.38)
+	if a, b := h.action("pod:a"), h.action("pod:b"); a.Outcome != OutcomeKept || b.Outcome != OutcomeKept {
+		t.Fatalf("outcomes %q, %q; want both kept", a.Outcome, b.Outcome)
+	}
+	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = true })
+	h.until(10*time.Minute, 0.05, "pod:a released", func() bool { return h.action("pod:a").Outcome == OutcomeReleased })
+	h.run(2*time.Minute, 0.05)
+	b := h.action("pod:b")
+	if b.Outcome != OutcomeKept || b.RevertAttempts < 2 || !strings.Contains(b.LastError, "webhook") {
+		t.Fatalf("pod:b %+v; want still kept, with its failed undos counted and the last error", b)
+	}
+	if st := h.l.Status(); st.Stuck != 1 {
+		t.Fatalf("status %+v; want one stuck change", st)
+	}
+	if n := len(h.decisions("stuck")); n != 1 {
+		t.Fatalf("%d stuck decisions; want the first failure journalled once", n)
+	}
+	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = false })
+	h.until(2*time.Minute, 0.05, "pod:b released", func() bool { return h.action("pod:b").Outcome == OutcomeReleased })
+	if st := h.l.Status(); st.Stuck != 0 {
+		t.Fatalf("status %+v; want nothing stuck once it went through", st)
+	}
+	if b := h.action("pod:b"); b.RevertAttempts != 0 || b.LastError != "" {
+		t.Fatalf("pod:b %+v; want a released change to show no failing undo", b)
+	}
 }

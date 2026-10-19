@@ -108,6 +108,25 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 	if !frozen["pod:a"] || frozen["pod:b"] {
 		t.Errorf("frozen = %v, want pod:a frozen and pod:b not", frozen)
 	}
+
+	// The settings a policy carries are snake_case like the rest of the API, not Go field names.
+	var raw []struct {
+		Policy struct {
+			Settings map[string]any `json:"settings"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"allow", "deny", "floor", "max_actions_per_hour", "cooldown"} {
+		if _, ok := raw[0].Policy.Settings[key]; !ok {
+			t.Errorf("policy.settings has no %q: %v", key, raw[0].Policy.Settings)
+		}
+	}
+	// A duration reads as it does in agent.yaml and /config, not as nanoseconds.
+	if got := raw[0].Policy.Settings["cooldown"]; got != "10m0s" {
+		t.Errorf("policy.settings.cooldown = %v (%T), want \"10m0s\"", got, got)
+	}
 }
 
 func TestPolicyRouteExplainsOne(t *testing.T) {
@@ -122,6 +141,9 @@ func TestPolicyRouteExplainsOne(t *testing.T) {
 	}
 	if eff.Rule != -1 || eff.Frozen {
 		t.Errorf("pod:b = rule %d frozen %v, want -1 and false", eff.Rule, eff.Frozen)
+	}
+	if eff.Settings.Cooldown != 10*time.Minute {
+		t.Errorf("cooldown read back as %s, want 10m", eff.Settings.Cooldown)
 	}
 	if c := get(mux, "/policy").Code; c != http.StatusBadRequest {
 		t.Errorf("missing subject: %d, want 400", c)

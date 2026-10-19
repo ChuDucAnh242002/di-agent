@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -432,6 +435,17 @@ func TestCanReasons(t *testing.T) {
 		{"pod-level resources", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) { p.Spec.Resources = &corev1.ResourceRequirements{Limits: rl("2")} }),
 			"pod-level resources or sidecars: the agent cannot account for them"},
 		{"pending", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending }), "not running"},
+		{"restarts on resize", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) {
+			p.Spec.Containers[0].ResizePolicy = []corev1.ContainerResizePolicy{
+				{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+				{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.RestartContainer},
+			}
+		}), "resizePolicy restarts the container for a CPU change"},
+		{"resize without restart", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) {
+			p.Spec.Containers[0].ResizePolicy = []corev1.ContainerResizePolicy{
+				{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+			}
+		}), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -492,5 +506,115 @@ func TestRevertWithNoAnnotationRestoresTheOriginal(t *testing.T) {
 	}
 	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
 		t.Fatalf("limit %s, want 1", got)
+	}
+}
+
+// TestInClusterNeedsPodUID: without POD_UID the agent cannot recognise its own
+// pod, and nothing else stops it capping itself, so the factory refuses.
+func TestInClusterNeedsPodUID(t *testing.T) {
+	t.Setenv("POD_UID", "")
+	_, err := runtime.Build("kubernetes", runtime.Env{NodeID: "n1", Spec: spec.RuntimeSpec{Kind: "kubernetes"}})
+	if err == nil || !strings.Contains(err.Error(), "POD_UID") || !strings.Contains(err.Error(), "metadata.uid") {
+		t.Fatalf("err %v; want one naming POD_UID and the downward API's metadata.uid", err)
+	}
+}
+
+// TestALimitThatWouldMakeThePodGuaranteedIsRefused: a CPU limit equal to the
+// request, on a pod whose memory request equals its limit, changes the QoS class.
+func TestALimitThatWouldMakeThePodGuaranteedIsRefused(t *testing.T) {
+	mem := resource.MustParse("64Mi")
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "500m", "1", func(p *corev1.Pod) {
+		c := &p.Spec.Containers[0].Resources
+		c.Requests[corev1.ResourceMemory], c.Limits[corev1.ResourceMemory] = mem, mem
+	}))
+	ctx := context.Background()
+	_, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5})
+	if err == nil || !strings.Contains(err.Error(), "Guaranteed") {
+		t.Fatalf("err %v; want the QoS change refused", err)
+	}
+	p := getPod(t, cs, "a")
+	if _, ok := p.Annotations[Annotation]; ok || p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
+		t.Fatalf("pod touched: %v %v", p.Annotations, p.Spec.Containers[0].Resources.Limits)
+	}
+	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.6}); err != nil {
+		t.Fatalf("a limit above the request: %v", err)
+	}
+}
+
+// TestChangedSkipsARecordForAnotherPod: a record copied onto a pod it does not
+// describe, as by a template or a manual edit, is not this pod's change.
+func TestChangedSkipsARecordForAnotherPod(t *testing.T) {
+	stray, _ := json.Marshal(runtime.Undo{NodeID: "n1", Subject: "pod:other", Original: runtime.Resource{Limit: f64(1)}})
+	r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated(string(stray))))
+	if got, err := r.Changed(context.Background(), "n1"); err != nil || len(got) != 0 {
+		t.Fatalf("changed %+v err %v; want none", got, err)
+	}
+}
+
+// TestTheClientTimesOut: a request to an API server that does not answer ends.
+func TestTheClientTimesOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	doc := `apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "https://127.0.0.1:1"}}]
+users: [{name: u, user: {token: t}}]
+contexts: [{name: x, context: {cluster: c, user: u}}]
+current-context: x
+`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := restConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Timeout <= 0 || cfg.Timeout > time.Minute {
+		t.Fatalf("timeout %s; want a bound on every request", cfg.Timeout)
+	}
+}
+
+// TestRevertAtTheOriginalOnlyClearsTheRecord: a pod already at its original
+// limit, as after a resize that never took, needs no resize to be given back; the
+// record is cleared without one, so a resize the API keeps refusing cannot keep
+// the change in force.
+func TestRevertAtTheOriginalOnlyClearsTheRecord(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	failResize(cs, errors.New("timeout"))
+	ctx := context.Background()
+	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
+		t.Fatal("want the resize error")
+	}
+	got, err := r.Changed(ctx, "n1")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("changed %+v err %v; want the record the failed resize left", got, err)
+	}
+	resizes := 0
+	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		if a.GetSubresource() == "resize" {
+			resizes++
+		}
+		return false, nil, nil
+	})
+	if err := r.Revert(ctx, got[0]); err != nil {
+		t.Fatalf("revert: %v; want the record cleared with no resize", err)
+	}
+	if resizes != 0 {
+		t.Errorf("%d resize calls; the limit was already the original", resizes)
+	}
+	p := getPod(t, cs, "a")
+	if _, ok := p.Annotations[Annotation]; ok {
+		t.Fatalf("annotation still there: %v", p.Annotations)
+	}
+	if got := p.Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("limit %s, want 1", got)
+	}
+}
+
+// TestThePodKindIsAPolicyKind: a rule matching kind pod must validate, or no rule
+// could single out this runtime's workloads.
+func TestThePodKindIsAPolicyKind(t *testing.T) {
+	kind, _, _ := strings.Cut(subjectOf(*burstable("a", "n1", "ua", "100m", "1")), ":")
+	if !slices.Contains(spec.WorkloadKinds, kind) {
+		t.Fatalf("spec.WorkloadKinds %v lacks %q", spec.WorkloadKinds, kind)
 	}
 }

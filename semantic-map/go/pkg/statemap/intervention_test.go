@@ -172,6 +172,28 @@ func TestRedeclaredEdgeSurvivesOneNull(t *testing.T) {
 	}
 }
 
+// TestAssertionIsNeverRetiredByInterventions: an operator's assertion outranks
+// the agent's evidence either way. The nulls are still counted, and the run is
+// reset so the next two do not retire it either.
+func TestAssertionIsNeverRetiredByInterventions(t *testing.T) {
+	m := interventionMap(t)
+	if err := m.DeclareRelationship(Relationship{From: "cpu_limit", To: "pressure", Sign: 1, Provenance: Asserted}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"d1", "d2", "d3"} {
+		if _, changed := mustRecord(t, m, outcome(false, false, d)); changed != "" {
+			t.Fatalf("%s: changed %q", d, changed)
+		}
+	}
+	r, _ := m.Relationship("cpu_limit->pressure")
+	if r.Status != Active || r.Provenance != Asserted {
+		t.Fatalf("relationship %+v; an assertion must stay", r)
+	}
+	if iv := r.Interventions; iv == nil || iv.Null != 3 || iv.NullRun != 1 {
+		t.Fatalf("interventions %+v; want 3 nulls counted and the run reset after two", iv)
+	}
+}
+
 func TestAssertionIsNeverOverwrittenByPromotion(t *testing.T) {
 	m := interventionMap(t)
 	if err := m.DeclareRelationship(Relationship{From: "cpu_limit", To: "pressure", Sign: 1, Provenance: Asserted}); err != nil {

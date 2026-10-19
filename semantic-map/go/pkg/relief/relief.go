@@ -21,12 +21,14 @@ import (
 type Status struct {
 	Phase           Phase                `json:"phase"`
 	Paused          bool                 `json:"paused"`
+	Runtime         string               `json:"runtime"` // what the changes go through: dry-run changes nothing
 	InFlight        *Action              `json:"in_flight,omitempty"`
 	Actions         int                  `json:"actions"`
 	Kept            int                  `json:"kept"`
 	Reverted        int                  `json:"reverted"`
 	Refused         int                  `json:"refused"`
 	PredictionsHeld float64              `json:"predictions_held"` // kept / (kept+reverted)
+	Stuck           int                  `json:"stuck,omitempty"`  // changes in force whose undo the runtime has refused
 	Cooling         map[string]time.Time `json:"cooling,omitempty"`
 }
 
@@ -39,7 +41,9 @@ type Status struct {
 // made it, and its outcome is never evidence, as its baseline was taken with the
 // change already in force. SharesAtAct is every workload's share of node CPU when the action's
 // baseline was taken, so its outcome can be told apart from another workload
-// moving at the same time.
+// moving at the same time. RevertAttempts counts the undos the runtime has
+// refused since the latest step, and LastError is the latest refusal: a change
+// stuck in force is shown, not only logged.
 type Action struct {
 	ID            string             `json:"id"`
 	Subject       string             `json:"subject"`
@@ -50,8 +54,12 @@ type Action struct {
 	ActedAt       time.Time          `json:"acted_at"`
 	Observed      *float64           `json:"observed,omitempty"` // observed drop, after settle
 	Outcome       string             `json:"outcome"`
+	VerifyID      string             `json:"verify_id,omitempty"` // the decision that judged the latest step
 	Resumed       bool               `json:"resumed,omitempty"`
 	SharesAtAct   map[string]float64 `json:"shares_at_act,omitempty"`
+	// RevertAttempts and LastError: failed undos of the change in force.
+	RevertAttempts int    `json:"revert_attempts,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
 
 	cooldown      time.Duration // the workload's policy cooldown, the base of every cooldown after this
 	revertPending bool          // judged not to have helped; the revert has not yet succeeded
@@ -94,7 +102,8 @@ type Loop struct {
 	c     spec.CPURelief
 	epoch int64
 
-	effects effects // what acting on each workload has done; safe on its own
+	effects effects       // what acting on each workload has done; safe on its own
+	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
 	pass       sync.Mutex // serialises the passes that change the system
 	seq        int        // decision counter; touched only under pass
@@ -143,11 +152,16 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Relief.CPU, epoch: now.Unix(),
+		cfg: c, c: c.Relief.CPU, epoch: now.Unix(), timeout: max(c.Relief.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Relief.CPU), phase: Calm, since: now,
 		cooling: map[string]time.Time{}, released: map[string]time.Time{}, cycles: map[string]int{},
 	}, nil
 }
+
+// minCallTimeout is the least a pass waits on the runtime, however short the
+// interval: an orchestrator under the very pressure the loop relieves answers
+// slowly.
+const minCallTimeout = 10 * time.Second
 
 // Start reconciles with what the runtime says this node changed, then ticks
 // every Relief.Interval until ctx ends. A failed reconcile is retried by every
@@ -180,11 +194,16 @@ func (l *Loop) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
-	st := Status{Phase: l.trigger.Phase(), Paused: l.paused,
+	st := Status{Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(),
 		Actions: l.nActs, Kept: l.nKept, Reverted: l.nReverted, Refused: l.nRefused}
 	if l.inFlight != nil {
 		a := copyAction(l.inFlight)
 		st.InFlight = &a
+	}
+	for _, a := range l.liveLocked() {
+		if a.RevertAttempts > 0 {
+			st.Stuck++
+		}
 	}
 	if judged := l.nKept + l.nReverted; judged > 0 {
 		st.PredictionsHeld = float64(l.nKept) / float64(judged)
@@ -216,13 +235,20 @@ func (l *Loop) Actions() []Action {
 // it is fresh: present, active, and younger than the map's StaleAfter, judged
 // here rather than left to the next sweep. The trigger is fed the reading's own
 // time, so a reading that has stopped changing cannot complete a run by being
-// read again. Without a fresh reading the trigger holds and no change is made
-// or released, because a decision on a reading that is not current is a
-// decision about a system that may no longer exist; only expiry, which needs no
-// reading, still happens.
+// read again. Without a fresh reading the trigger holds and no new change is
+// made and nothing is released, because a decision on a reading that is not
+// current is a decision about a system that may no longer exist. What needs no
+// reading still happens: expiry, a pending revert retried, and the dropping of a
+// change whose workload the runtime no longer lists.
+//
+// The whole pass, every runtime call in it, is bounded by the loop's timeout
+// (Relief.Interval, at least 10s), so an orchestrator that stops answering
+// cannot hold the pass lock and with it every manual revert.
 func (l *Loop) Tick(ctx context.Context) {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	now := l.cfg.Now()
 	if !l.reconciled {
 		if err := l.reconcile(ctx, now); err != nil {
@@ -299,6 +325,8 @@ func (l *Loop) Tick(ctx context.Context) {
 func (l *Loop) Reconcile(ctx context.Context) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	now := l.cfg.Now()
 	if err := l.reconcile(ctx, now); err != nil {
 		return err
@@ -308,14 +336,17 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 }
 
 // reconcile is Reconcile under the pass lock. The most recent unexpired change
-// becomes the action in flight, judged afresh, with its prediction taken from
-// the decision that made it if the journal still holds it; with none, it is
-// kept, because there is nothing to judge it against. Its baseline is the
+// becomes the action in flight, with its prediction taken from the decision that
+// made it if the journal still holds it. Verify keeps it either way: its baseline
+// is read with the change in force, so there is no drop to judge. Its baseline is the
 // pressure now if that is fresh, else the first fresh reading after. Older
 // unexpired changes are kept, for release. Expired ones are kept in force for
 // the caller's expire to give back, so one the runtime will not yet give back is
 // retried every tick.
-// A change stamped by another node is never touched.
+// A change stamped by another node is never touched. Each unexpired change counts
+// toward the hourly limit from the time the journal says it was made, or from now
+// when the journal no longer has it, so a restart does not hand the loop a fresh
+// budget.
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	undos, err := l.cfg.Runtime.Changed(ctx, l.cfg.NodeID)
 	if err != nil {
@@ -331,6 +362,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	l.mu.Unlock()
 
 	var expired, resumed []*Action
+	var acts []time.Time
 	for _, u := range undos {
 		if u.NodeID != l.cfg.NodeID || live[u.Subject] {
 			continue
@@ -356,11 +388,18 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			expired = append(expired, a)
 		} else {
 			resumed = append(resumed, a)
+			at := now
+			if d, ok := l.cfg.Map.Journal().Decision(u.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
+				at = d.At
+			}
+			acts = append(acts, at)
 		}
 	}
 	sort.SliceStable(resumed, func(i, j int) bool { return resumed[i].Undo.Expires.Before(resumed[j].Undo.Expires) })
 
 	l.mu.Lock()
+	l.acted = append(l.acted, acts...)
+	sort.Slice(l.acted, func(i, j int) bool { return l.acted[i].Before(l.acted[j]) })
 	for _, a := range expired {
 		a.Outcome = OutcomeKept
 		l.history = appendHistory(l.history, a)
@@ -387,10 +426,14 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 var ErrNoAction = errors.New("no such action in force")
 
 // Revert undoes an action by hand and cools its workload down, as an operator
-// overriding the loop. Only an action still in force can be reverted.
+// overriding the loop. Only an action still in force can be reverted. A runtime
+// that does not answer within the loop's timeout is an error, and the action
+// stays in force.
 func (l *Loop) Revert(ctx context.Context, id string) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
 	l.mu.Lock()
 	var a *Action
 	for _, c := range l.liveLocked() {
@@ -532,11 +575,16 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		r.Input("rule", eff.Rule)
 		r.Input("error", err.Error())
 		r.Note("the runtime refused the change; cooling %s down for %s", plan.Subject, eff.Settings.Cooldown)
+		r.Note("the change may have taken effect regardless; the next pass asks the runtime what it holds")
 		r.Commit(map[string]any{"refused": "runtime: " + err.Error()})
 		l.mu.Lock()
 		l.cooling[plan.Subject] = now.Add(eff.Settings.Cooldown)
 		l.nRefused++
 		l.mu.Unlock()
+		// A failed Apply can still have taken effect, as a resize whose call timed
+		// out: reconciling again adopts whatever the runtime recorded, so expiry and
+		// release give it back.
+		l.reconciled = false
 		return
 	}
 
@@ -564,7 +612,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		a.prev = &before
 		l.kept = removeAction(l.kept, a)
 		l.history = appendHistory(removeAction(l.history, a), a)
-		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome = id, plan, undo, nil, ""
+		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome, a.VerifyID = id, plan, undo, nil, "", ""
+		a.RevertAttempts, a.LastError = 0, ""
 		a.PressureAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
 		a.SharesAtAct = shares
 	} else {

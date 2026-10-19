@@ -570,3 +570,33 @@ dialog .hint { font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; }
    highlight's colour: a candidate is a relationship that would be discovered. */
 table.grid tbody tr.pointed { background: color-mix(in srgb, var(--prov-discovered) 14%, transparent); }
 table.grid tbody tr.pointed td:first-child { box-shadow: inset 3px 0 0 var(--prov-discovered); }
+
+/* ── Actions pane: what the agent did ─────────────────────────────────────── */
+
+.action-strip {
+  display: flex; gap: 1px; background: var(--border); border-bottom: 1px solid var(--border);
+}
+.action-strip .tile {
+  flex: 1; min-width: 0; padding: 7px 12px; background: var(--surface-1);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.action-strip .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-muted); }
+.action-strip .value { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.action-strip .value.small { font-size: 13px; line-height: 1.5; }
+
+.badge.outcome-inflight { color: var(--status-serious); border-color: color-mix(in srgb, var(--status-serious) 45%, transparent); }
+.badge.outcome-kept { color: var(--status-good); border-color: color-mix(in srgb, var(--status-good) 45%, transparent); }
+.badge.outcome-reverted { color: var(--status-critical); border-color: color-mix(in srgb, var(--status-critical) 55%, transparent); }
+.badge.outcome-gone, .badge.outcome-expired { color: var(--ink-muted); border-style: dashed; }
+.undo-failing { margin-top: 3px; font-size: 11px; color: var(--status-critical); max-width: 260px; overflow-wrap: anywhere; }
+.window-note.stale-note { color: var(--status-serious); }
+
+.action-trace { display: flex; flex-direction: column; gap: 12px; padding: 10px 2px 14px; font-size: 12.5px; }
+.action-trace p { margin: 0; line-height: 1.5; }
+.action-trace .stage { display: flex; gap: 10px; align-items: flex-start; }
+.action-trace .stage .n {
+  flex: none; width: 18px; height: 18px; border-radius: 50%; margin-top: 1px;
+  background: var(--surface-sunken); border: 1px solid var(--border-strong);
+  font-size: 10.5px; font-weight: 600; text-align: center; line-height: 16px; color: var(--ink-secondary);
+}
+.action-trace tr.chosen td { font-weight: 600; }
