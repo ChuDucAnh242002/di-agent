@@ -12,13 +12,16 @@ import (
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
-// The node-level properties relief reads. Pressure is what triggers it, because
-// a node at full use with nobody waiting is busy rather than in trouble; usage
-// is a share of node capacity in [0,1], and so is each subject's
-// cpu_utilization@<subject>.
+// The node-level properties relief reads. Contention is what triggers it, because
+// a node at full use with nobody waiting is busy rather than in trouble — and it is
+// contention rather than cpu_pressure_ratio because a cgroup's stall counts the time
+// its own quota held it back: a pod at its limit raises node pressure with nobody
+// else waiting, and lowering its limit raises it further, so the lever would move
+// the signal the wrong way. Usage is a share of node capacity in [0,1], and so is
+// each subject's cpu_utilization@<subject>.
 const (
-	NodePressure = "cpu_pressure_ratio"
-	NodeUsage    = "cpu_utilization"
+	NodeContention = "cpu_contention_ratio"
+	NodeUsage      = "cpu_utilization"
 )
 
 // Basis says what a candidate's ranking or a plan's prediction rests on: the
@@ -102,7 +105,7 @@ func Attribute(m *statemap.Map, ws []runtime.Workload, pol *policy.Policy, c spe
 			continue
 		}
 		cand := Candidate{Subject: w.Subject, Share: s, Basis: BasisUsage}
-		res := m.Estimate(statemap.EstimateRequest{Target: NodePressure, Without: []string{w.Subject}})
+		res := m.Estimate(statemap.EstimateRequest{Target: NodeContention, Without: []string{w.Subject}})
 		if res.Err == "" && res.Hypothetical != nil && influencedBy(res, w.Subject) {
 			cand.Basis, cand.Drop = BasisMap, -res.Hypothetical.Delta
 			byMap = append(byMap, cand)
@@ -204,7 +207,7 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 		switch cand.Basis {
 		case BasisMap:
 			res := m.Estimate(statemap.EstimateRequest{
-				Target: NodePressure,
+				Target: NodeContention,
 				Assume: map[string]float64{NodeUsage + "@" + cand.Subject: cand.Share * to / from},
 			})
 			if res.Err != "" || res.Hypothetical == nil {
@@ -213,10 +216,10 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 			}
 			plan.Predicted, plan.EstimateID = -res.Hypothetical.Delta*plan.Effect, res.DecisionID
 		default:
-			pressure, okP := m.Property(NodePressure)
+			pressure, okP := m.Property(NodeContention)
 			usage, okU := m.Property(NodeUsage)
 			if !okP || !okU || usage.Value <= 0 {
-				reasons = append(reasons, cand.Subject+": no node pressure or usage to predict from")
+				reasons = append(reasons, cand.Subject+": no node CPU contention or usage to predict from")
 				continue
 			}
 			// The cut actually made, which a floor can hold short of Step.

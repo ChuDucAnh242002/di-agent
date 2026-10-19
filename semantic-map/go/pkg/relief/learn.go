@@ -97,17 +97,43 @@ func workloadShares(m *statemap.Map) map[string]float64 {
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
 // them.
-func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) (moved, left []string) {
+//
+// Rises are the exception. Capping a workload frees CPU, and the contended
+// workloads beside it take it up: that is the relief working, not something else
+// moving. So workloads that were there at act and rose together by no more than
+// throttled gave up (with 0.02 of slack) are returned as absorbed rather than
+// moved; a larger rise, a fall, an arrival and a departure always count as moved.
+// What throttled gave up is known only while the map holds its share: without
+// one nothing counts as freed. Whether an absorbed rise is innocent depends on the
+// verdict, which confoundedBy decides.
+func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) (moved, left, absorbed []string) {
 	live := workloadShares(m)
+	var risen []string
+	rise := 0.0
 	for s, now := range live {
 		if s == throttled {
 			continue
 		}
-		then := at[s]
+		then, was := at[s]
 		d := math.Abs(now - then)
-		if d > step*then && d > confoundAbs {
-			moved = append(moved, s)
+		if d <= step*then || d <= confoundAbs {
+			continue
 		}
+		if was && now > then {
+			risen = append(risen, s)
+			rise += now - then
+			continue
+		}
+		moved = append(moved, s)
+	}
+	freed := 0.0
+	if now, ok := live[throttled]; ok {
+		freed = math.Max(at[throttled]-now, 0)
+	}
+	if rise > freed+confoundAbs {
+		moved = append(moved, risen...)
+	} else {
+		absorbed = risen
 	}
 	for s, then := range at {
 		if _, ok := live[s]; !ok && s != throttled && then > confoundAbs {
@@ -116,15 +142,30 @@ func movedSince(m *statemap.Map, at map[string]float64, throttled string, step f
 	}
 	sort.Strings(moved)
 	sort.Strings(left)
-	return moved, left
+	sort.Strings(absorbed)
+	return moved, left, absorbed
+}
+
+// confoundedBy is the workloads an outcome cannot be separated from. Moved and left
+// always are. An absorbed rise is the relief working only when the outcome agreed:
+// when contention did not drop as predicted, the same rise may be a workload that
+// grew on its own and hid the cap's effect, and passing it over would turn a
+// confound into a null outcome that teaches — two of which retire the relationship.
+func confoundedBy(moved, left, absorbed []string, agreed bool) []string {
+	out := append(append([]string{}, moved...), left...)
+	if !agreed {
+		out = append(out, absorbed...)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // confounded reports whether another workload moved, arrived or left while the
 // throttled one's outcome was being observed, so the change in node pressure
 // cannot be put down to the action alone.
-func confounded(m *statemap.Map, at map[string]float64, throttled string, step float64) bool {
-	moved, left := movedSince(m, at, throttled, step)
-	return len(moved)+len(left) > 0
+func confounded(m *statemap.Map, at map[string]float64, throttled string, step float64, agreed bool) bool {
+	moved, left, absorbed := movedSince(m, at, throttled, step)
+	return len(confoundedBy(moved, left, absorbed, agreed)) > 0
 }
 
 // learn makes a judged action evidence, when it is: an intervention recorded on
@@ -139,9 +180,10 @@ func confounded(m *statemap.Map, at map[string]float64, throttled string, step f
 // is no prediction, or when the cap did not bind: a workload using well under its
 // new limit at verify asked for less on its own, so the drop is not the cap's.
 func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, agreed bool, observed float64, now time.Time) {
-	moved, left := movedSince(l.cfg.Map, a.SharesAtAct, a.Subject, l.c.Step)
-	conf := len(moved)+len(left) > 0
-	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved, "left": left})
+	moved, left, absorbed := movedSince(l.cfg.Map, a.SharesAtAct, a.Subject, l.c.Step)
+	by := confoundedBy(moved, left, absorbed, agreed)
+	conf := len(by) > 0
+	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved, "left": left, "absorbed": absorbed})
 
 	ss := map[string]any{"at_act": nil, "at_verify": nil}
 	if v, ok := a.SharesAtAct[a.Subject]; ok {
@@ -156,7 +198,7 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 	why := ""
 	switch {
 	case !l.cfg.Evidence:
-		why = "the runtime does not change the system (" + l.cfg.Runtime.Name() + "): pressure moved on its own"
+		why = "the runtime does not change the system (" + l.cfg.Runtime.Name() + "): contention moved on its own"
 	case a.Resumed:
 		why = "resumed: its baseline was taken with the change already in force"
 	case a.Plan.Predicted <= 0:
@@ -170,12 +212,12 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 	}
 	b.Input("evidence", map[string]any{"fed": true, "confounded": conf})
 	if conf {
-		b.Note("other workloads moved while the outcome was observed (%s): recorded, teaches nothing", strings.Join(moved, ", "))
+		b.Note("other workloads moved while the outcome was observed (%s): recorded, teaches nothing", strings.Join(by, ", "))
 	}
 
 	from := NodeUsage + "@" + a.Subject
 	rel, changed, err := l.cfg.Map.RecordIntervention(statemap.InterventionOutcome{
-		From: from, To: NodePressure, Agreed: agreed, Confounded: conf, DecisionID: verifyID,
+		From: from, To: NodeContention, Agreed: agreed, Confounded: conf, DecisionID: verifyID,
 	})
 	iv := map[string]any{"relationship": rel, "changed": changed}
 	if err != nil {
@@ -231,8 +273,8 @@ func (l *Loop) settle(b *statemap.DecisionBuilder, verifyID, from string, now ti
 		return
 	}
 	for _, c := range pending {
-		directed := !c.Undirected && c.FromID == from && c.ToID == NodePressure
-		undirected := c.Undirected && ((c.FromID == from && c.ToID == NodePressure) || (c.FromID == NodePressure && c.ToID == from))
+		directed := !c.Undirected && c.FromID == from && c.ToID == NodeContention
+		undirected := c.Undirected && ((c.FromID == from && c.ToID == NodeContention) || (c.FromID == NodeContention && c.ToID == from))
 		if !directed && !undirected || c.Direction == types.Negative {
 			continue
 		}

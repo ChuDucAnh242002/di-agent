@@ -53,7 +53,7 @@ func usage(subject string) string { return NodeUsage + "@" + subject }
 // relate declares subject's usage as driving node pressure with strength s.
 func relate(t *testing.T, m *statemap.Map, subject string, s float64) {
 	t.Helper()
-	r := statemap.Relationship{From: usage(subject), To: NodePressure, Sign: 1, Label: "drives"}
+	r := statemap.Relationship{From: usage(subject), To: NodeContention, Sign: 1, Label: "drives"}
 	if err := m.DeclareRelationship(r); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func one(string, string) float64 { return 1 }
 func planFixture(t *testing.T, s float64) *statemap.Map {
 	t.Helper()
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodePressure, "", 0.5, t0)
+	record(t, m, NodeContention, "", 0.5, t0)
 	record(t, m, NodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	relate(t, m, "pod:a", s)
@@ -105,7 +105,7 @@ func subjects(cs []Candidate) []string {
 func TestAVictimIsNotACandidate(t *testing.T) {
 	m := planFixture(t, 1)
 	record(t, m, usage("pod:v"), "pod:v", 0.02, t0)
-	record(t, m, NodePressure+"@pod:v", "pod:v", 0.9, t0)
+	record(t, m, NodeContention+"@pod:v", "pod:v", 0.9, t0)
 	cs := Attribute(m, []runtime.Workload{pod("pod:a"), pod("pod:v")}, defaultPolicy(t, nil), reliefCfg())
 	for _, c := range cs {
 		if c.Subject == "pod:v" {
@@ -161,7 +161,7 @@ func TestAWorkloadThatCannotBeResizedIsSkipped(t *testing.T) {
 
 func TestTheStepRespectsTheFloors(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodePressure, "", 0.5, t0)
+	record(t, m, NodeContention, "", 0.5, t0)
 	record(t, m, NodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.1, t0)
 	relate(t, m, "pod:a", 1)
@@ -219,7 +219,7 @@ func TestAUsageCandidateIsPredictedFromItsShare(t *testing.T) {
 
 func TestNoCoresNoPlan(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodePressure, "", 0.5, t0)
+	record(t, m, NodeContention, "", 0.5, t0)
 	record(t, m, NodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	relate(t, m, "pod:a", 1)
@@ -239,11 +239,11 @@ func near(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
 // is what the plan predicts by assuming a new cpu_utilization@<subject>.
 func TestOnlyItsOwnUsageRanksAWorkloadByTheMap(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodePressure, "", 0.5, t0)
+	record(t, m, NodeContention, "", 0.5, t0)
 	record(t, m, NodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:q"), "pod:q", 0.4, t0)
 	record(t, m, "queue@pod:q", "pod:q", 0.9, t0)
-	r := statemap.Relationship{From: "queue@pod:q", To: NodePressure, Sign: 1, Label: "drives"}
+	r := statemap.Relationship{From: "queue@pod:q", To: NodeContention, Sign: 1, Label: "drives"}
 	if err := m.DeclareRelationship(r); err != nil {
 		t.Fatal(err)
 	}

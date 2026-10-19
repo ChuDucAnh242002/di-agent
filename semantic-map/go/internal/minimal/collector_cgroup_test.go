@@ -737,3 +737,145 @@ func TestPodsAreNamedFromTheKubeletsLogDirectory(t *testing.T) {
 		t.Errorf("pod B labels %v after its directory appeared; want namespace=web pod=api-7d4b9", b)
 	}
 }
+
+// writeThrottledUsec appends cpu.stat's cumulative throttled time to the file the
+// last writeCgroup or advance left.
+func writeThrottledUsec(t *testing.T, dir string, usec uint64) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, "cpu.stat"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "throttled_usec %d\n", usec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCPUContentionIsStallNotExplainedByOwnThrottling: a cgroup's CPU "some" stall
+// counts the time its own quota held it back, so a pod at its limit reports pressure
+// with nothing else on the node waiting. cpu_contention_ratio is the stall share left
+// after the cgroup's own throttled time, per subject, and the node's is the worst-off
+// subject's — not the root's stall, which carries every subject's throttling.
+func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
+	writePressure(t, root, 0)
+	writePressure(t, podA, 0)
+	writePressure(t, podB, 0)
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, podB, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, root, 6_000_000) // the root carries both pods' stall
+	// podA sits at its own limit: stalled 3.0 s, of which its quota held it 2.9 s.
+	advance(t, podA, 2_000_000, 200, 110)
+	writeThrottledUsec(t, podA, 2_900_000)
+	writePressure(t, podA, 3_000_000)
+	// podB waited 4 s for CPU and was throttled for 1 s of it.
+	advance(t, podB, 600_000, 100, 10)
+	writeThrottledUsec(t, podB, 1_000_000)
+	writePressure(t, podB, 4_000_000)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	// podB is BestEffort, so the node takes podA's reading (TestABestEffortPodDoesNotSetNodeContention).
+	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.01} {
+		s := got[subject][types.CPUContentionRatio]
+		if s == nil {
+			t.Errorf("subject %q: no cpu_contention_ratio after two collects", subject)
+			continue
+		}
+		if d := s.Value - want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: cpu_contention_ratio %v, want %v", subject, s.Value, want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: unit %q range %v, want fraction on [0,1]", subject, s.Unit, s.Range)
+		}
+	}
+
+	// Throttled longer than stalled (the two counters are sampled a moment apart):
+	// contention is clamped at zero, never negative.
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 3_000_000, 300, 220)
+	writeThrottledUsec(t, podA, 2_900_000+3_100_000)
+	writePressure(t, podA, 3_000_000+3_000_000)
+	advance(t, podB, 700_000, 200, 10)
+	writeThrottledUsec(t, podB, 1_000_000)
+	writePressure(t, podB, 4_000_000)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = bySubject(samples)
+	if s := got["pod:"+testUID][types.CPUContentionRatio]; s == nil || s.Value != 0 {
+		t.Errorf("throttled beyond its stall: cpu_contention_ratio %v, want 0", s)
+	}
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0 {
+		t.Errorf("node cpu_contention_ratio %v with no subject contended, want 0", s)
+	}
+
+	// A subject without cpu.pressure gives no contention, and a node with no subject
+	// reading gives none either, rather than a zero that reads as "nobody waiting".
+	clock = clock.Add(10 * time.Second)
+	for _, d := range []string{podA, podB} {
+		if err := os.Remove(filepath.Join(d, "cpu.pressure")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for subject, ms := range bySubject(samples) {
+		if s := ms[types.CPUContentionRatio]; s != nil {
+			t.Errorf("subject %q: cpu_contention_ratio %v without any cpu.pressure; want no sample", subject, s.Value)
+		}
+	}
+}
+
+// TestABestEffortPodDoesNotSetNodeContention: a BestEffort pod has no CPU request, so on
+// a node that is merely busy it waits almost all the time — that is the share it was
+// promised, not contention. The node's signal is the worst-off workload that was
+// promised something; the BestEffort pod's own reading is still emitted.
+func TestABestEffortPodDoesNotSetNodeContention(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t) // podB is under kubepods/besteffort
+	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, podB, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000) // waited 1 s of 10
+	advance(t, podB, 600_000, 100, 0)
+	writeThrottledUsec(t, podB, 0)
+	writePressure(t, podB, 9_500_000) // waited 9.5 s of 10: BestEffort on a busy node
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0.1 {
+		t.Fatalf("node cpu_contention_ratio %v; want the burstable pod's 0.1, not the BestEffort pod's 0.95", s)
+	}
+	if s := got[podBSubject][types.CPUContentionRatio]; s == nil || s.Value != 0.95 {
+		t.Fatalf("BestEffort pod's own cpu_contention_ratio %v; want it still reported, 0.95", s)
+	}
+}

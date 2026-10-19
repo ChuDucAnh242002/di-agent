@@ -240,6 +240,8 @@ type OutcomeSimulation struct {
 //	IOPressureRatio      PSI io.some stall fraction
 //	MemoryPressureRatio  PSI memory.some stall fraction
 //	CPUStealRatio        share of CPU time the hypervisor gave to others (node-level)
+//	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
+//	                     node's is the worst-off subject's (cgroup collector)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -263,6 +265,7 @@ const (
 	IOPressureRatio     MetricType = "io_pressure_ratio"
 	MemoryPressureRatio MetricType = "memory_pressure_ratio"
 	CPUStealRatio       MetricType = "cpu_steal_ratio"
+	CPUContentionRatio  MetricType = "cpu_contention_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
