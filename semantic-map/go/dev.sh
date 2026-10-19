@@ -27,6 +27,10 @@ KD="${KD:-}"
 PRIORS="${PRIORS:-}"
 ALPHA="${ALPHA:-0.2}"
 CONVERGENCE="${CONVERGENCE:-500}"
+# Where the map is kept. Empty, the default here, keeps it in memory so every
+# dev run and demo starts cold; the agent's own default, /var/lib/di-agent,
+# needs root.
+STATE_FILE="${STATE_FILE:-}"
 
 # AGENT_BIN="/tmp/semantic-map-agent"
 AGENT_BIN="./cmd/agent/tmp/di-agent-poc"
@@ -147,6 +151,8 @@ profile:
   priors: "$PRIORS"
   alpha: $ALPHA
   convergence: $CONVERGENCE
+persist:
+  file: "$STATE_FILE"
 SPEC
     local args=(-config "$SPEC_FILE")
 

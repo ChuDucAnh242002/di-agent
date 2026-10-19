@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -22,6 +23,9 @@ func TestDefaultsAreTodaysFlags(t *testing.T) {
 	}
 	if d.Policy.Defaults.MaxActionsPerHour != 6 {
 		t.Errorf("MaxActionsPerHour = %d", d.Policy.Defaults.MaxActionsPerHour)
+	}
+	if d.Persist.File != "/var/lib/di-agent/state.json" {
+		t.Errorf("Persist.File = %q; the map is kept unless told not to", d.Persist.File)
 	}
 	if d.Runtime.Kind != "dry-run" {
 		t.Errorf("Runtime.Kind = %q", d.Runtime.Kind)
@@ -277,5 +281,37 @@ func TestErrorsNameTheLineAsWritten(t *testing.T) {
 		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, want one at %s", err, want)
 		}
+	}
+}
+
+// TestPersistCanBeTurnedOff: "" keeps the map in memory, over the default path.
+func TestPersistCanBeTurnedOff(t *testing.T) {
+	got, err := Parse([]byte("persist:\n  file: \"\"\n"))
+	if err != nil || got.Persist.File != "" {
+		t.Fatalf("Persist.File = %q, err %v; want empty", got.Persist.File, err)
+	}
+}
+
+// TestTheExampleIsTheDefaults: agent.example.yaml is what -print-config prints, so
+// it cannot drift from the defaults it documents.
+func TestTheExampleIsTheDefaults(t *testing.T) {
+	b, err := os.ReadFile("../../../agent.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotYAML, err := got.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Default().YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotYAML) != string(want) {
+		t.Fatalf("agent.example.yaml differs from the defaults; regenerate it with agent -print-config")
 	}
 }

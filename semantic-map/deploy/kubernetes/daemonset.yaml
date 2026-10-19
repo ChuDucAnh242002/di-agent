@@ -1,0 +1,85 @@
+# One di-agent per node, with the `kubernetes` runtime. Apply rbac.yaml first.
+#
+# The image is not published: build one holding the agent binary at
+# /usr/local/bin/di-agent and set `image` below.
+#
+# The map is kept on the node, in /var/lib/di-agent, so it survives the pod being
+# restarted, rescheduled onto the same node, or upgraded: an agent that has watched
+# a machine for a week comes back with what it learned. The snapshot is stamped
+# with the node's name and is refused by any other node.
+#
+# The node's own filesystem is mounted read-only at /host: the agent reads the
+# node's cgroups, pod logs, and the facts that say what machine this is (its
+# hostname, OS, CPU, memory and disk) there, not the container's.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: di-agent
+  namespace: kube-system
+data:
+  agent.yaml: |
+    node:
+      id: ${NODE_NAME}
+    sources:
+      cgroup:
+        root: /host/sys/fs/cgroup
+        pod_logs: /host/var/log/pods
+    facts:
+      - kind: host
+        root: /host
+    persist:
+      file: /var/lib/di-agent/state.json
+    runtime:
+      kind: kubernetes
+    loops:
+      relief:
+        enabled: false   # true to let the agent cap CPU; watch /relief first
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: di-agent
+  namespace: kube-system
+  labels: {app: di-agent}
+spec:
+  selector:
+    matchLabels: {app: di-agent}
+  template:
+    metadata:
+      labels: {app: di-agent}
+    spec:
+      serviceAccountName: di-agent
+      # Every node runs an agent, tainted ones and the control plane included.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: di-agent:dev
+          command: ["/usr/local/bin/di-agent", "-config", "/etc/di-agent/agent.yaml"]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            # How the agent recognises its own pod, which no rule may touch.
+            - name: POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          volumeMounts:
+            - {name: config, mountPath: /etc/di-agent, readOnly: true}
+            - {name: state, mountPath: /var/lib/di-agent}
+            - {name: host, mountPath: /host, readOnly: true}
+      # A pod stopped by a drain or an upgrade gets SIGTERM and saves the map before
+      # it exits, well within the grace period.
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: config
+          configMap: {name: di-agent}
+        - name: state
+          hostPath: {path: /var/lib/di-agent, type: DirectoryOrCreate}
+        - name: host
+          hostPath: {path: /, type: Directory}
