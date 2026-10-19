@@ -639,3 +639,23 @@ func TestNoEffectIsMeasuredWhenTheShareDidNotMove(t *testing.T) {
 		t.Fatalf("effect %v ok=%v; a rise in contention is an effect of zero", e, ok)
 	}
 }
+
+// TestAMeasuredEffectReplacesTheMapPredictionsCorrection: the map-basis factor
+// corrects a map prediction for what acting has done against it. Once an outcome
+// writes a measured strength, the map's prediction already carries what the
+// interventions saw, and a factor learned against the old strength would correct it
+// a second time.
+func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.l.effects.Observe("pod:a", BasisMap, 2)
+	h.judged("pod:a", 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
+	h.run(2*time.Minute, 0.40)
+	if r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok || r.Measured == nil {
+		t.Fatalf("relationship %+v; want a measured strength", r)
+	}
+	if f := h.l.effects.Of("pod:a", BasisMap); f != 1 {
+		t.Fatalf("map-basis factor %v after a measured effect; want 1, nothing left to correct", f)
+	}
+}

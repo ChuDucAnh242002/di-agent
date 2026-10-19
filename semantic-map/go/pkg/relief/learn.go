@@ -68,6 +68,13 @@ func (e *effects) Observe(subject, basis string, ratio float64) {
 	e.m[k] = math.Min(effectMax, math.Max(effectMin, v))
 }
 
+// Forget drops subject's effect for predictions of basis, which is 1 again.
+func (e *effects) Forget(subject, basis string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.m, effectKey{subject, basis})
+}
+
 // Of is subject's learned effect for predictions of basis, 1 when nothing has
 // been learned about it.
 func (e *effects) Of(subject, basis string) float64 {
@@ -254,6 +261,12 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 		// so the effect converges on the workload's real response rather than on 1.
 		ratio := observed * effect / a.Plan.Predicted
 		l.effects.Observe(a.Subject, a.Plan.Basis, ratio)
+		if o.HasEffect && err == nil {
+			// The relationship's strength is now what the interventions measured, so a
+			// map prediction carries it; a factor learned against the old strength
+			// would correct it twice.
+			l.effects.Forget(a.Subject, BasisMap)
+		}
 		b.Input("effect", map[string]any{"basis": a.Plan.Basis, "ratio": ratio, "now": l.effects.Of(a.Subject, a.Plan.Basis)})
 	}
 
