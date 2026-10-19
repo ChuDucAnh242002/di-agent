@@ -25,6 +25,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [6. Coordination](#6-coordination)
 - [7. PoC — Live Multi-VM Demo](#7-poc--live-multi-vm-demo)
 - [8. Natural-Language Explain (`/explain`)](#8-natural-language-explain-explain)
+- [9. Autonomous Candidate Review (`loops.review.level`)](#9-autonomous-candidate-review--autonomy)
 
 ---
 
@@ -34,10 +35,11 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 
 ```bash
 # 1. Start the daemon (edge-minimal profile, in-memory).
-# -domain loads the domain model; without it (and with no domain_spec.json found
+# domain.path loads the domain model; without it (and with no domain_spec.json found
 # above the working directory) the agent runs with none. See §3.
 cd semantic-map/go
-go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json &
+printf 'domain:\n  path: ../domain_spec.json\n' > /tmp/agent.yaml
+go run ./cmd/agent -config /tmp/agent.yaml &
 ```
 
 ```bash
@@ -88,7 +90,7 @@ semantic-map/
 │
 ├── domain_spec.json            THE DOMAIN MODEL — constructs, propositions, metric routing,
 │                               adjustment policy, tuner intent rules. The daemon loads this
-│                               at startup (-domain) and runs without a domain model when
+│                               at startup (domain.path) and runs without a domain model when
 │                               there is none; no construct or proposition identifier
 │                               exists in any binary.
 │
@@ -97,6 +99,7 @@ semantic-map/
 ├── prior_weights.json          Init-pipeline output: which propositions the agent carries, which
 │                               it declines, and where it overrides a declared direction. No strengths.
 ├── requirements.txt            scipy (spearmanr); the pipeline's only outside dependency
+├── agent.example.yaml          The agent's spec at its defaults — `agent -print-config`'s output, to copy and edit
 │
 ├── prior_init/                 Structural initialization pipeline (Step 4)
 │   ├── pipeline.py             Entry point — reads P1–P5 constants, writes prior_weights.json
@@ -141,6 +144,23 @@ semantic-map/
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
+    │   ├── spec/               The agent's one configuration document, agent.yaml (concrete, NOT a contract)
+    │   │   ├── spec.go         Spec types + Default(), Parse (defaults overlaid, ${VAR} expanded, unknown keys refused), Load, Validate, Redacted, YAML
+    │   │   └── spec_test.go    Defaults, overlay, validation, redaction, round trip
+    │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
+    │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys
+    │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
+    │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
+    │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
+    │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
+    │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
+    │   │   ├── rules.go        Tier 0: Rule, and the composition rule
+    │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
+    │   │   ├── logprobs.go     Tier 1 openai-logprobs: a general model's letter probabilities
+    │   │   ├── reasoner.go     Tier 2 openai-tools: a tool-calling model reading the map
+    │   │   ├── tools.go        Tool, and the read-only tools over the map
+    │   │   ├── openai.go       The OpenAI-compatible chat client both share
+    │   │   └── evidence.go     Renderer, and the candidate's evidence as text
     │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
     │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
     │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
@@ -162,6 +182,7 @@ semantic-map/
     │   │   ├── learn.go        Paired estimator — relationships learn their own strength
     │   │   ├── query.go        State(Query) + Explain(id) — census-carrying views
     │   │   ├── journal.go      Bounded change log + DecisionBuilder (records inputs as read)
+    │   │   ├── facts.go        Fact — what the machine is (OS, CPU, memory, disk), journalled on change
     │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
     │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
@@ -195,7 +216,7 @@ semantic-map/
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
     │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
-    │       │                                           default via -tuner=true)
+    │       │                                           default via map.tuner: true)
     │       └── tests/
     │           ├── compliance_test.go   Runs all Go compliance suites
     │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
@@ -216,7 +237,8 @@ semantic-map/
     │   └── profiles_test.go      KD validation + prior_weights.json discovery
     │
     ├── cmd/agent/              Daemon binary
-    │   ├── main.go             Flag parsing + profile build + ListenAndServe
+    │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
+    │   ├── config_route.go     GET /config: the running spec, secrets redacted
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
@@ -469,7 +491,7 @@ subjects' readings of one metric, where a shared driver is the likelier explanat
 which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
-`-proposer-fdr` over every pair being tested, so the more pairs are tested the more
+`map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
 
 How many pairs are being tested is in `GET /state`, not here: an empty list means only
@@ -482,7 +504,7 @@ that no *tested* pair has cleared the threshold.
   "fdr": 0.05, "p_bar": 0.0021, "p_values_tested": 741}
 ```
 
-`budget` is `-proposer-max-pairs` as resolved at start (`0`: no limit). When
+`budget` is `map.proposer.max_pairs` as resolved at start (`0`: no limit). When
 `tested_pairs` is below `eligible_pairs` the budget is rationing: the most variable
 properties get pairs first, and `displaced` counts pairs dropped to make room.
 `idle_pairs` are tested pairs with an end not observed within the pair window: they still
@@ -528,6 +550,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
+| GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
+| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
@@ -554,7 +578,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/peers/refresh`              | — poll every peer now                                    | Peer state |
 | GET  | `/state/where`                      | `?property=` — per-node answers, deliberately not averaged | Peer state |
 
-`POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `-explain-provider=none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
+`POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `explain.provider: none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 
 JSON error shape for Phase 1 endpoints:
 
@@ -578,14 +602,43 @@ GOOS=linux GOARCH=arm64 go build -o agent-arm64 ./cmd/agent
 # Deploy
 scp agent-arm64 pi@192.168.1.x:/usr/local/bin/agent
 
-# Run on RPi4
-agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
-  -domain /etc/semantic-map/domain_spec.json \
-  -priors /etc/semantic-map/prior_weights.json -kd k0s
+# Run on RPi4, described by a file (see below)
+agent -config /etc/semantic-map/agent.yaml
 
-# Run locally (development)
-go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
+# Run locally (development): the defaults, with a domain model
+printf 'domain:\n  path: ../domain_spec.json\n' > /tmp/agent.yaml
+go run ./cmd/agent -config /tmp/agent.yaml
 ```
+
+### The agent is described by `agent.yaml`
+
+The agent takes its whole configuration from one YAML document. There are two flags and no others:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `-config <path>` | The spec file. Empty runs the defaults. |
+| `-print-config` | Print the effective spec as YAML (the file over the defaults) and exit. |
+
+The file overlays the defaults, so it names only what it changes. A key the agent does not know is refused at startup, because a misspelt threshold that silently keeps its default is a setting that describes nothing. `${VAR}` in the file is replaced from the environment before it is read, so a secret stays out of the file (`explain.api_key: ${EXPLAIN_API_KEY}`); an unset variable becomes empty. This replaces the old `EXPLAIN_API_KEY` fallback, which the agent no longer reads on its own, and the `AUTONOMY_*_API_KEY` variables likewise: name them in `loops.review.decision.api_key` and `loops.review.reasoning.api_key`.
+
+`agent -print-config` prints every setting with its default, and [`agent.example.yaml`](agent.example.yaml) is that output. Copy it and delete what you do not change. A running agent shows the spec it runs on, secrets redacted, at `GET /config`.
+
+```yaml
+# agent.yaml: a k0s node polling its local Netdata, with the review loop on
+node:
+  id: node_1
+profile:
+  kd: k0s
+  priors: /etc/semantic-map/prior_weights.json
+sources:
+  netdata:
+    url: http://localhost:19999
+loops:
+  review:
+    level: full
+```
+
+Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own; `facts` likewise names the fact sources outright (`facts: []` reads none).
 
 ### The state model
 
@@ -595,6 +648,9 @@ every sample, queryable and traceable.
 ```bash
 # what is this system doing right now
 curl -s localhost:8080/state | jq '.counts'
+
+# what the machine is: OS, CPU, memory, disk, read at startup
+curl -s localhost:8080/state | jq -r '.facts[] | "\(.key)\t\(.value) \(.unit // "")"'
 
 # how many property pairs discovery is testing, of how many it could
 curl -s localhost:8080/state | jq '.discovery'
@@ -660,27 +716,29 @@ polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarit
 A metric the specification never declared still becomes a property: `/ingest-sample`
 answers 202 with `routed:false` rather than rejecting it, because a reading the system
 produced is not a typo to discard, and the journal records the admission. Silence
-marks a property stale (`-stale-after`) and optionally retires it (`-retire-after`);
-`-no-admit` closes the model for a deployment that wants that.
+marks a property stale (`map.stale_after`) and optionally retires it (`map.retire_after`);
+`map.admit: false` closes the model for a deployment that wants that.
 
 ### One agent per machine
 
 The map is node-local: each agent models the machine it runs on, and its graph holds
-that machine's evidence. `-node-id` is its identity (falling back to the hostname),
-and the default `-ingest-scope=self` rejects telemetry labelled with another
+that machine's evidence. `node.id` is its identity (falling back to the hostname),
+and the default `node.ingest_scope: self` rejects telemetry labelled with another
 machine's ID rather than folding it in. Every map is stamped with its owner, so a
 property is attributable once state crosses a node boundary, and a snapshot copied
 from another host is refused instead of adopted as local history.
 
 ```bash
 # A deployment: one agent per node, modelling that node
-agent -profile edge-minimal -domain ../domain_spec.json -node-id node_1
+# agent.yaml: node: {id: node_1}
+agent -config agent.yaml
 
 # Replaying a whole testbed into one daemon — an aggregate, not a deployment
-agent -profile edge-minimal -domain ../domain_spec.json -ingest-scope=any
+# agent.yaml: node: {ingest_scope: any}
+agent -config agent.yaml
 ```
 
-`-ingest-scope=any` exists for exactly that replay case and logs a startup warning:
+`node.ingest_scope: any` exists for exactly that replay case and logs a startup warning:
 the resulting edge weights are means over machines that may be different physical
 systems. `GET /cost?node=X` returns 409 when X is not this agent, pointing at that
 machine's own endpoint when it is a known peer.
@@ -688,11 +746,12 @@ machine's own endpoint when it is a known peer.
 ### Asking other nodes
 
 A node-local map means any question wider than one machine is a question for other
-agents. Each agent fetches its peers' maps (`-peer-state-poll`, default 30s) and holds
+agents. Each agent fetches its peers' maps (`peers.state_poll`, default 30s) and holds
 them under the owner each peer reported.
 
 ```bash
-agent -domain ../domain_spec.json -node-id node_1 -peers http://node_2:8080
+# agent.yaml: node: {id: node_1}, peers: {urls: [http://node_2:8080]}
+agent -config agent.yaml
 
 # this node and every peer, side by side
 curl -s localhost:8080/state/cluster | jq '.cluster.self_id, .cluster.peers | keys, .stale_peers'
@@ -716,24 +775,25 @@ before and cannot be reached now keeps its last snapshot and is listed under
 `unreachable`, because during a partition that snapshot is all this agent has. An
 address that never identified itself appears under `silent` and does not become a node,
 since inventing one from a URL would put a machine that may not exist into the cluster
-view. And a snapshot older than `-peer-state-stale` (default 90s) is labelled history
+view. And a snapshot older than `peers.state_stale` (default 90s) is labelled history
 rather than withheld.
 
 ### How relationships learn
 
 A relationship advances on a *pair*: both endpoints observed within
-`-pair-window-seconds` (default 15s). What it learns is `|r|`, the correlation
-magnitude over the last `-pair-history` pairs, on `[0, 1]`. It is folded twice from the
-same pairs: a **recent** estimate at `-alpha` (default 0.20, memory ≈ 5 pairs) and an
-**established** baseline at `-alpha-slow` (default 0.001, memory ≈ 1000 pairs,
+`map.pair_window` (default 15s). What it learns is `|r|`, the correlation
+magnitude over the last `map.pair_history` pairs, on `[0, 1]`. It is folded twice from the
+same pairs: a **recent** estimate at `profile.alpha` (default 0.20, memory ≈ 5 pairs) and an
+**established** baseline at `profile.alpha_slow` (default 0.001, memory ≈ 1000 pairs,
 bias-corrected). `Effective()` picks between them by authority rather than by arithmetic
 — an operator assertion first, else the established baseline, else the recent estimate,
 else `unknown` — and `basis` on every edge names which one answered.
 
 ```bash
-agent -profile edge-minimal -domain ../domain_spec.json \
-  -priors ../prior_weights.json -kd k0s \
-  -pair-window-seconds 15 -pair-support 8 -pair-history 60
+# agent.yaml
+#   profile: {priors: ../prior_weights.json, kd: k0s}
+#   map: {pair_window: 15s, pair_support: 8, pair_history: 60}
+agent -config agent.yaml
 ```
 
 Two consequences worth knowing before reading a number off `/edges`:
@@ -762,27 +822,27 @@ Two consequences worth knowing before reading a number off `/edges`:
   from the declaration and is not inferred; what the pair gives the Reasoner is a
   sensitivity for each construct's own cost term, not two independent measurements.
 
-`-pair-window-seconds` is a tolerance, not smoothing: collectors sample on independent
+`map.pair_window` is a tolerance, not smoothing: collectors sample on independent
 grids (`system.*` on 0, 5, 10 …, PSI on 2, 6, 12 …), so without it no pair ever forms.
-`-pair-support` is how many pairs a relationship needs before its strength moves at all
+`map.pair_support` is how many pairs a relationship needs before its strength moves at all
 — below that, `n_observations` stays at zero, because confidence has to keep reporting
 that nothing has been learned. There was a `-relational` flag here selecting between
 this estimator and one that moved an edge on any single sample; only this reading was
 defensible, so the choice went. See ARCHITECTURE.md §5 for what it does and does not
 claim.
 
-`-domain` is optional. The daemon carries no constructs, propositions, metric
-routes, adjustment bounds or tuner keywords of its own. Without `-domain` it
+`domain.path` is optional. The daemon carries no constructs, propositions, metric
+routes, adjustment bounds or tuner keywords of its own. Without `domain.path` it
 searches upward from the working directory for `domain_spec.json`, and if there is
 none it runs **without a domain model**: every observed property is still admitted,
 subjects are still modelled, relationships are still discovered and estimates still
 answered, but nothing is routed into a construct, and `GET /cost`, `POST /recommend`,
 `POST /simulate` and `POST /agent/tune` answer `501` saying so. The startup log
-states which mode the agent is in. A `-domain` path that does not load is an error,
+states which mode the agent is in. A `domain.path` path that does not load is an error,
 not a fallback. When you do deploy a specification, treat it as part of the
 release: two daemons on the same binary and different specifications are different
 agents. The daemon also rejects positional arguments, because Go's
-`flag` package stops parsing at the first one — `-proposer false` (a space
+`flag` package stops parsing at the first one — `map.proposer.enabled: false` (a space
 instead of `=`) silently discarded every flag after it and cost this project a
 full round of invalid measurements.
 
@@ -852,35 +912,37 @@ the shape of the real thing.
 
 ---
 
-| Flag                | Default          | Description                                                              |
+**Reference: every setting, by its path in `agent.yaml`.** Each default is what the flag it replaced defaulted to; `agent -print-config` prints them all.
+
+| Setting               | Default          | Description                                                              |
 | ------------------- | ---------------- | ------------------------------------------------------------------------ |
-| `-profile`          | `edge-minimal`   | Deployment profile name                                                  |
-| `-addr`             | `:8080`          | HTTP listen address                                                      |
-| `-alpha`            | `0.2`            | EMA decay factor                                                         |
-| `-convergence`      | `500`            | Observations until confidence = 1.0                                      |
-| `-min-trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
-| `-priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
-| `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `-kd` answer identically until telemetry arrives. |
-| `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
-| `-cgroup-subjects`  | `true`           | Walk pod cgroups (and `-cgroup-units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
-| `-cgroup-units`     | `""`             | Comma-separated globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `k0s*.service,containerd.service`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
-| `-cgroup-max-subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
-| `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
-| `-cgroup-pod-logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. |
-| `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
-| `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
-| `-netdata-include`  | CPU, memory, I/O, network, disk | Comma-separated `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
-| `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
-| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
-| `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
-| `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
-| `-proposer-min-spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
-| `-proposer-fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
-| `-proposer-max-pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
-| `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
-| `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
-| `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+| `profile.name`          | `edge-minimal`   | Deployment profile name                                                  |
+| `node.addr`             | `:8080`          | HTTP listen address                                                      |
+| `profile.alpha`            | `0.2`            | EMA decay factor                                                         |
+| `profile.convergence`      | `500`            | Observations until confidence = 1.0                                      |
+| `profile.min_trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
+| `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
+| `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
+| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
+| `sources.cgroup.root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
+| `sources.cgroup.subjects`  | `true`           | Walk pod cgroups (and `sources.cgroup.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
+| `sources.cgroup.units`     | `[]`             | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
+| `sources.cgroup.max_subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
+| `sources.cgroup.cmd_label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
+| `sources.cgroup.pod_logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. |
+| `node.id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
+| `sources.netdata.url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `sources.cgroup.root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
+| `sources.netdata.include`  | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
+| `sources.script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `sources.interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
+| `map.proposer.enabled`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `map.proposer.threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
+| `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
+| `map.proposer.min_spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
+| `map.proposer.fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
+| `map.proposer.max_pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
+| `map.tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
+| `profile.regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `profile.alpha` and `profile.convergence` when set. |
+| `peers.urls`            | `[]`             | A list of peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
 
 #### Scenario file format
 
@@ -894,40 +956,65 @@ A scenario is JSON with a name, `seed`, `tick_seconds`, `duration_seconds`, opti
 
 Property names are metric types (`[A-Za-z0-9._-]`); the runner addresses a subject's property as `<property>@<subject>`. The loader validates all of this and refuses a file it cannot run: every `of` must name an existing subject property (or, for `logistic`, a non-logistic node property), a `linear` counterfactual needs `tolerance > 0` and a `saturated` one `min_error > 0`, its target must be a node property and its `assume` keys must name existing subject properties. Past `duration_seconds` the script emits nothing and logs once that the scenario finished.
 
-See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
+See `scenarios/` for five seed scenario files to drive `sources.script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 
-| Flag                     | Default | Meaning                                                                            |
+| Setting                    | Default | Meaning                                                                            |
 | ------------------------ | ------- | ---------------------------------------------------------------------------------- |
-| `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
-| `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default, `10m`, is five default stale windows — long enough that a restarting collector is not mistaken for a departed subject — and does not follow `-stale-after`. `0` leaves retirement to an operator. Retirement is soft. |
-| `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
-| `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. With no domain model and no restored `-state-file`, nothing is declared, so the agent refuses to start rather than drop every sample. |
-| `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |
-| `-pair-window-seconds`   | `15`    | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
-| `-pair-support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
-| `-pair-history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
-| `-state-file`            | `""`    | Path to persist the map and its journal. Empty keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
-| `-save-interval`         | `1m`    | Snapshot cadence when `-state-file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
-| `-journal-size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
-| `-ingest-scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
-| `-peer-state-poll`       | `30s`   | How often to fetch each peer's map. `0` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
-| `-peer-state-stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
+| `map.stale_after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
+| `map.retire_after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default, `10m`, is five default stale windows — long enough that a restarting collector is not mistaken for a departed subject — and does not follow `map.stale_after`. `0` leaves retirement to an operator. Retirement is soft. |
+| `map.sweep_interval`        | `0s`    | How often lifecycle transitions are applied. `0` derives an interval from `map.stale_after`. |
+| `map.admit`              | `true`  | Admit an observation of an undeclared metric as a new property and journal the admission. `false` refuses it; the default admits it, because a model that cannot represent something new describes the system as it was when someone wrote it down. With no domain model and no restored `persist.file`, nothing is declared, so the agent refuses to start rather than drop every sample. |
+| `map.learn`              | `true`  | Learn each relationship from paired observations. `false` disables the paired estimator: every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |
+| `map.pair_window`   | `15s`   | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
+| `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
+| `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
+| `persist.file`            | `""`    | Path to persist the map and its journal. Empty keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
+| `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
+| `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
+| `facts[].root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |
+| `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
+| `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
+| `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
 
-**Explain layer** (all optional; `POST /explain` returns 501 unless `-explain-provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
+**Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
-| Flag                       | Default                          | Meaning                                                                 |
+| Setting                      | Default                          | Meaning                                                                 |
 | -------------------------- | -------------------------------- | ----------------------------------------------------------------------- |
-| `-explain-provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
-| `-explain-url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
-| `-explain-model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
-| `-explain-prompt`          | `cmd/agent/prompts/explain-v1.md`| Answering-agent system prompt. Required when the provider is enabled.   |
-| `-explain-planner-prompt`  | `<prompt-dir>/planner-v1.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
-| `-explain-critic-prompt`   | `<prompt-dir>/critic-v1.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
-| `-explain-keep-alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
-| `-explain-sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
-| `-explain-api-key`         | `""`                             | Bearer token for the backend. `EXPLAIN_API_KEY` in the environment takes precedence. |
+| `explain.provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
+| `explain.url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
+| `explain.model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
+| `explain.prompt`          | `cmd/agent/prompts/explain-v1.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `explain.planner_prompt`  | `<prompt-dir>/planner-v1.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
+| `explain.critic_prompt`   | `<prompt-dir>/critic-v1.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
+| `explain.keep_alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
+| `explain.sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
+| `explain.api_key`         | `""`                             | Bearer token for the backend. Write `${EXPLAIN_API_KEY}` to read it from the environment; the agent no longer reads that variable on its own. |
+
+**Autonomous review** (off by default). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
+
+| Setting                       | Default               | Meaning |
+| --------------------------- | --------------------- | ------- |
+| `loops.review.level`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
+| `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
+| `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
+| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
+| `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
+| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle escalates. |
+| `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
+| `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
+| `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
+| `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
+| `loops.review.reasoning.backend` | `none`              | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. |
+| `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
+| `loops.review.reasoning.model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |
+| `loops.review.reasoning.keep_alive` | `10m`            | Ollama `keep_alive` for the tier 2 model. |
+| `loops.review.reasoning.tools` | `get_property,get_state,get_candidates` | Read-only tools the tier 2 model may call, a list. |
+| `loops.review.thresholds.confirm`         | `0.85`                | Probability a model tier needs to confirm, and to orient an undirected candidate. |
+| `loops.review.thresholds.reject`          | `0.95`                | Probability a model tier needs to reject. |
+| `loops.review.thresholds.defer`           | `0.7`                 | Probability a model tier needs to defer. |
 
 ---
 
@@ -1036,15 +1123,16 @@ overridden is recorded in `scope` rather than applied silently.
 
 ### Loading the artefact at startup
 
-The daemon loads the file via `-priors`. `-kd` names the distribution running on this
+The daemon loads the file via `profile.priors`. `profile.kd` names the distribution running on this
 node; it is validated against the file's `distributions` list and the daemon refuses to
 start if the name is not there.
 
 ```bash
-agent -priors /etc/semantic-map/prior_weights.json -kd k0s
+# agent.yaml: profile: {priors: /etc/semantic-map/prior_weights.json, kd: k0s}
+agent -config agent.yaml
 ```
 
-**Both agents built with different `-kd` values produce identical answers until telemetry
+**Both agents built with different `profile.kd` values produce identical answers until telemetry
 arrives**, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts directly.
 That is the inversion of the old expectation — the scenario used to be called
 `PerKDDecisionsDiffer` — and it is the point: nothing distinguishes two agents but what
@@ -1067,14 +1155,14 @@ file's `scope` block records what the current artefact covers.
 
 Multiple daemons can know about each other, query each other's `/cost`, and offload tasks based on trust-weighted savings. This is the multi-agent layer — the spine of the *decentralized* framework.
 
-### `--peers` flag
+### `peers.urls`
 
-Pass a comma-separated list of peer URLs at daemon start:
+Name the peer URLs in the spec at daemon start:
 
-```bash
-go run ./cmd/agent \
-  -profile edge-minimal -addr :8080 \
-  -peers http://node_1:8080,http://node_2:8080
+```yaml
+# agent.yaml
+peers:
+  urls: [http://node_1:8080, http://node_2:8080]
 ```
 
 Each URL is added to the in-memory peer registry with a default trust of `0.5`. The daemon logs `registered N peers: …` on startup. Additional peers can be added at runtime via `POST /peers`.
@@ -1194,7 +1282,7 @@ The daemon ships a natural-language operator interface at `POST /explain`. It re
 
 ### Enable it
 
-The default is off (`-explain-provider=none`), so `POST /explain` returns 501 with instructions until you opt in. To enable, point the daemon at a local OpenAI-compatible backend — Ollama is the smallest starting point:
+The default is off (`explain.provider: none`), so `POST /explain` returns 501 with instructions until you opt in. To enable, point the daemon at a local OpenAI-compatible backend — Ollama is the smallest starting point:
 
 ```bash
 # 1. Install and start a local LLM (out of band, one-time)
@@ -1202,15 +1290,16 @@ brew install ollama
 ollama serve &                       # runs on :11434 by default
 ollama pull qwen2.5:7b-instruct
 
-# 2. Start the daemon with -explain-provider=openai-compatible
+# 2. Start the daemon with explain.provider: openai-compatible
 cd semantic-map/go
-go run ./cmd/agent \
-    -profile edge-minimal \
-    -addr :8080 \
-    -explain-provider openai-compatible \
-    -explain-url http://localhost:11434/v1 \
-    -explain-model qwen2.5:7b-instruct \
-    -explain-prompt cmd/agent/prompts/explain-v1.md &
+cat > /tmp/agent.yaml <<'SPEC'
+explain:
+  provider: openai-compatible
+  url: http://localhost:11434/v1
+  model: qwen2.5:7b-instruct
+  prompt: cmd/agent/prompts/explain-v1.md
+SPEC
+go run ./cmd/agent -config /tmp/agent.yaml &
 
 # 3. Ask a question
 curl -s -X POST http://localhost:8080/explain \
@@ -1218,7 +1307,7 @@ curl -s -X POST http://localhost:8080/explain \
     -d '{"question":"Which edges are driving my ResourceCost?"}' | jq
 ```
 
-Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `llama-server`, LM Studio, vLLM, or the hosted OpenAI API. Point `-explain-url` at its base and set the model name.
+Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `llama-server`, LM Studio, vLLM, or the hosted OpenAI API. Point `explain.url` at its base and set the model name.
 
 ### What you get back
 
@@ -1247,7 +1336,7 @@ If the LLM asks *"should I…?"* it can also return a `proposal` — a suggested
 
 - **Groundedness.** Every value the LLM cites is checked against live graph state before the answer leaves the daemon. Fabricated proposition IDs, wrong EMA values, and references to deprecated edges are rejected — the LLM gets a critique and up to two more attempts. See [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain) for the reflection-loop shape.
 - **Read-only.** The LLM's tool set is `get_cost`, `get_edges`, `get_history`, `get_peers`, `get_recommend`, `get_graph`. No mutation tool exists in the registry; the LLM literally cannot call `POST /agent/tune` or `POST /ontology/deprecate`. That preserves the human-judgment anchor from [ARCHITECTURE.md §8](ARCHITECTURE.md#8-connection-to-research).
-- **Determinism where it counts.** The reasoner and the state model stay pure Go, and the initialization pipeline is a build-time Python step that touches no node. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.
+- **Determinism where it counts.** The reasoner and the state model stay pure Go, and the initialization pipeline is a build-time Python step that touches no node. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `explain.provider: none`.
 
 ### v2 features (opt-in per request)
 
@@ -1317,3 +1406,67 @@ Every response carries a `usage` block so you can see what each feature costs:
 ```
 
 A missing planner or critic prompt disables that stage with a log line rather than failing startup.
+
+---
+
+## 9. Autonomous Candidate Review (`loops.review.level`)
+
+The proposer's candidates wait for an operator. With `loops.review.level` set, the agent reviews
+them itself, as far as the level allows, and every review is a decision record.
+
+```bash
+# A node (8 GB): a decision model only; what it is unsure of escalates to the operator.
+# agent.yaml: loops: {review: {level: full}}
+ollama pull tev1:4b
+./agent -config agent.yaml
+
+# A machine with memory to spare: a stronger decision model and a reasoning tier.
+# agent.yaml: loops.review: {level: full, decision: {model: "nimble-v3:9b-nvfp4"}, reasoning: {backend: openai-tools}}
+ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
+./agent -config agent.yaml
+
+# Any OpenAI-compatible server instead of Ollama (llama.cpp's llama-server, vLLM):
+# agent.yaml: loops.review: {level: full, decision: {backend: openai-logprobs, url: "http://localhost:8081/v1", model: <model>}}
+./agent -config agent.yaml
+
+curl -s localhost:8080/autonomy
+curl -s 'localhost:8080/candidates?status=all' | jq '.[] | {CandidateID, Status, Reason, Review}'
+curl -s localhost:8080/state/decisions/<Review.DecisionID>
+```
+
+A candidate goes up the tiers only as far as it has to:
+
+| Tier | Decider | What it does |
+| ---- | ------- | ------------ |
+| 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
+| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, escalating when less than half the model's probability fell on any letter. |
+| 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
+| — | operator | What no tier was sure of is escalated: it stays in `GET /candidates` with `Review.Action: "escalate"`. |
+
+The level decides who may act:
+
+| Level | Rules act | Model tiers act |
+| ----- | --------- | --------------- |
+| `suggest` (0) | no | no — every review is recorded as a suggestion (`Review.Applied: false`) |
+| `rules` (1) | yes | no |
+| `bounded` (2) | yes | confirm and defer; a model's rejection is escalated |
+| `full` (3) | yes | yes |
+
+An agent's rejection or deferral is not final: the pair is still tested, and the candidate
+returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
+not reviewed again until then, so the models are not asked the same question every cycle.
+A candidate whose end is stale waits. The decision record holds the candidate, both
+properties as read, the text each model was given, each model's answer, the tool calls,
+and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
+a reader of the map can see the level it was shaped under.
+
+Every part is chosen by name — the rules, the evidence renderer, each tier's backend, URL
+and model, and the reasoning tools — from registries in `pkg/autonomy`. Each tier has its
+own URL, so the decision model can run on the node and the reasoning model elsewhere. A
+new backend, rule, tool or renderer is a type implementing `Decider`, `Reasoner`, `Rule`,
+`Tool` or `Renderer`, registered under a name in an `init` function; nothing else changes.
+Bearer tokens for a backend come from `AUTONOMY_DECISION_API_KEY` and
+`AUTONOMY_REASONING_API_KEY`, never a flag.
+
+The thresholds are uncalibrated defaults set by what each action costs to undo.
+

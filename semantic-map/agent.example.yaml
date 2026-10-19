@@ -1,0 +1,158 @@
+node:
+    addr: :8080
+    id: ""
+    ingest_scope: self
+profile:
+    name: edge-minimal
+    kd: ""
+    priors: ""
+    regime: ""
+    alpha: 0.2
+    alpha_slow: 0.001
+    convergence: 500
+    min_trust: 0.5
+sources:
+    interval: 10s
+    cgroup:
+        root: /sys/fs/cgroup
+        subjects: true
+        units: []
+        max_subjects: 256
+        cmd_label: false
+        pod_logs: /var/log/pods
+    netdata:
+        url: ""
+        include:
+            - system.cpu
+            - system.ram
+            - system.io
+            - system.net
+            - disk.io
+            - disk.util
+            - disk.await
+            - net.net
+            - cpu.cpu
+    script: ""
+facts:
+    - kind: host
+      root: ""
+map:
+    proposer:
+        enabled: true
+        threshold: 0.85
+        min_pairs: 30
+        min_spread: 0.01
+        fdr: 0.05
+        max_pairs: 0
+    pair_window: 15s
+    pair_support: 0
+    pair_history: 0
+    stale_after: 2m0s
+    retire_after: 10m0s
+    learn: true
+    admit: true
+    sweep_interval: 0s
+    journal_size: 0
+    tuner: true
+persist:
+    file: ""
+    interval: 1m0s
+peers:
+    urls: []
+    state_poll: 30s
+    state_stale: 1m30s
+domain:
+    path: ""
+explain:
+    provider: none
+    url: http://localhost:11434/v1
+    model: qwen2.5:7b-instruct
+    prompt: ""
+    api_key: ""
+    planner_prompt: ""
+    critic_prompt: ""
+    keep_alive: 30m
+    sessions: true
+runtime:
+    kind: dry-run
+    kubeconfig: ""
+    node: ""
+loops:
+    review:
+        level: "off"
+        interval: 1m0s
+        per_cycle: 10
+        rules:
+            - composition
+        renderer: text
+        thresholds:
+            confirm: 0.85
+            reject: 0.95
+            defer: 0.7
+        decision:
+            backend: systemone
+            url: http://localhost:11434
+            model: tev1:4b
+            keep_alive: ""
+            reasoning_effort: none
+            api_key: ""
+        reasoning:
+            backend: none
+            url: http://localhost:11434/v1
+            model: qwen3.8:27b-nvfp4
+            keep_alive: 10m
+            tools:
+                - get_property
+                - get_state
+                - get_candidates
+            api_key: ""
+    relief:
+        enabled: false
+        interval: 15s
+        cpu:
+            enter: 0.25
+            exit: 0.1
+            enter_for: 1m0s
+            exit_for: 3m0s
+            step: 0.25
+            min_effect: 0.03
+            victim_share: 0.05
+            settle: 2m0s
+            expiry: 1h0m0s
+policy:
+    defaults:
+        allow:
+            - cpu.limit
+        deny:
+            - evict
+        floor:
+            cpu_cores: 0.1
+            of_original: 0.5
+        max_actions_per_hour: 6
+        cooldown: 10m0s
+    rules:
+        - match:
+            kind: ""
+            name: ""
+            labels:
+                di-agent/freeze:
+                    - "true"
+          freeze: true
+          allow: []
+          deny: []
+          floor: null
+          max_actions_per_hour: 0
+          cooldown: 0s
+        - match:
+            kind: ""
+            name: ""
+            labels:
+                k8s/priority-class:
+                    - system-node-critical
+                    - system-cluster-critical
+          freeze: true
+          allow: []
+          deny: []
+          floor: null
+          max_actions_per_hour: 0
+          cooldown: 0s

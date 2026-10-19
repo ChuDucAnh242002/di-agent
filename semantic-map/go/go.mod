@@ -6,6 +6,7 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/parquet-go/parquet-go v0.25.1
 	github.com/spf13/cobra v1.8.1
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (

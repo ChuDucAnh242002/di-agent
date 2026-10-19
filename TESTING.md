@@ -50,12 +50,20 @@ go build -o /tmp/di-agent/ ./cmd/agent ./cmd/mapctl
 sed -e 's/"tick_seconds": 10/"tick_seconds": 1/' -e 's/"period": 600/"period": 60/' \
     ../scenarios/linear.json > /tmp/di-agent/linear-fast.json
 
-/tmp/di-agent/agent -addr 127.0.0.1:8080 \
-    -script /tmp/di-agent/linear-fast.json -collect-interval 1s \
-    -stale-after 20s -retire-after 60s
+cat > /tmp/di-agent/agent.yaml <<'SPEC'
+node:
+  addr: 127.0.0.1:8080
+sources:
+  script: /tmp/di-agent/linear-fast.json
+  interval: 1s
+map:
+  stale_after: 20s
+  retire_after: 60s
+SPEC
+/tmp/di-agent/agent -config /tmp/di-agent/agent.yaml
 ```
 
-Run the agent from `semantic-map/go`: it finds `domain_spec.json` by searching upward from the working directory, or you can pass `-domain <path>`. Without one it still runs, with no domain model: properties, subjects, discovery and estimates work, while cost and tuning answer `501`.
+Run the agent from `semantic-map/go`: it finds `domain_spec.json` by searching upward from the working directory, or you can set `domain.path`. Without one it still runs, with no domain model: properties, subjects, discovery and estimates work, while cost and tuning answer `501`.
 
 In `linear`, one pod (`pod:a`) runs a sine-wave CPU load between 0.10 and 0.60. The node's `pressure` is exactly `0.05 + pod:a's cpu`. Leave the agent running and use a second terminal:
 
@@ -104,7 +112,7 @@ The push returns `202` with `"routed": false`. Any `metric_type` is admitted as 
 
 **The operator console.** Open <http://localhost:8080/ui/>. It loads nothing from a CDN. Watch the force graph while the pod's load cycles. The drawer tabs (Journal, Decisions, Discovery, Subjects, Backbone) show the same state as the commands above.
 
-Try the other scenarios at their native tick: `-script ../scenarios/<name>.json -collect-interval 10s`. The `sed` above only rescales `linear`, because the others set noise periods and arrival times in seconds as well. Allow up to the `within_seconds` in each file's `expect` block (20–25 minutes). That block states what a correct agent does:
+Try the other scenarios at their native tick: `sources.script: ../scenarios/<name>.json` with `sources.interval: 10s`. The `sed` above only rescales `linear`, because the others set noise periods and arrival times in seconds as well. Allow up to the `within_seconds` in each file's `expect` block (20–25 minutes). That block states what a correct agent does:
 
 | Scenario | A correct agent… |
 | -------- | ---------------- |
@@ -122,15 +130,23 @@ Try the other scenarios at their native tick: `-script ../scenarios/<name>.json 
 ```bash
 brew install ollama && brew services start ollama        # or run `ollama serve` in another terminal
 ollama pull qwen2.5:7b-instruct                           # or use any OpenAI-compatible server
-/tmp/di-agent/agent -addr 127.0.0.1:8080 -explain-provider openai-compatible \
-    -script /tmp/di-agent/linear-fast.json -collect-interval 1s
+cat > /tmp/di-agent/agent.yaml <<'SPEC'
+node:
+  addr: 127.0.0.1:8080
+sources:
+  script: /tmp/di-agent/linear-fast.json
+  interval: 1s
+explain:
+  provider: openai-compatible
+SPEC
+/tmp/di-agent/agent -config /tmp/di-agent/agent.yaml
 ```
 
 Answers are checked before they leave the daemon. If the model cites a value the map does not hold, the daemon returns `422` and lists the mismatches. A `422` is the validator doing its job, not a crash.
 
 ## 5. Optional: on a real Linux node
 
-On Linux with cgroup v2, drop `-script` and the agent walks `/sys/fs/cgroup`, modelling each pod (and any systemd unit you name with `-cgroup-units`) as a subject. Point `-netdata-url` at a local Netdata for node-level telemetry. [`OPERATING.md`](OPERATING.md) covers systemd, multi-node peers and what the agent touches on your system.
+On Linux with cgroup v2, drop `sources.script` and the agent walks `/sys/fs/cgroup`, modelling each pod (and any systemd unit you name in `sources.cgroup.units`) as a subject. Point `sources.netdata.url` at a local Netdata for node-level telemetry. [`OPERATING.md`](OPERATING.md) covers systemd, multi-node peers and what the agent touches on your system.
 
 ---
 
@@ -143,7 +159,7 @@ On Linux with cgroup v2, drop `-script` and the agent walks `/sys/fs/cgroup`, mo
 
 ## Known rough edges
 
-- `-collect-interval` must equal the scenario's `tick_seconds`. The daemon refuses to start otherwise, and says so.
+- `sources.interval` must equal the scenario's `tick_seconds`. The daemon refuses to start otherwise, and says so.
 
 ## Reporting
 
