@@ -87,9 +87,12 @@ type EdgeDescriptor struct {
 	// measured then entered every decision with weight (1 − confidence).
 	Established *float64
 	Assertion   *float64
+	// Measured is what the agent's own interventions on this pair observed; nil when
+	// none has measured anything. It outranks Established and yields to Assertion.
+	Measured *float64
 
 	// Effective is the value the agent reasons with, nil when there is not one yet,
-	// and Basis names which of the three layers it came from.
+	// and Basis names which layer it came from.
 	Effective *float64
 	Basis     string
 

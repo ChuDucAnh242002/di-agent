@@ -87,6 +87,10 @@ type CgroupCollector struct {
 
 	mu   sync.Mutex
 	prev map[string]*cpuSnapshot // key: subject ("" = root)
+	// lastCollect is when the previous Collect ran: the window node contention
+	// covers. It is the collector's own, since node contention is computed from
+	// subjects and must move on when the root's cpu.stat cannot be read.
+	lastCollect time.Time
 	// Each condition below is said once (or, for the cap, whenever the count
 	// changes): a collector that goes silent is the failure this project treats as
 	// worse than an error, because nothing about an empty map looks wrong.
@@ -243,6 +247,13 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// The node's contention is anchored on the window it measures, as every windowed
+	// sample is: from the previous collect to this one.
+	window := now
+	if !c.lastCollect.IsZero() {
+		window = c.lastCollect
+	}
+	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
 	if rootErr != nil && !c.rootWarned {
 		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at -cgroup-root?",
@@ -318,7 +329,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		c.lastSkipped = skipped
 	}
 	if worst, ok := worstContention(promised); ok {
-		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, now, "", nil))
+		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
@@ -411,7 +422,10 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 }
 
 // contention is the CPU stall share of the window not explained by the cgroup's own
-// throttling. psiResources[0] is cpu.pressure. A counter that went backwards (the
+// throttling. It is an approximation that errs toward zero: throttled_usec sums the
+// time each per-CPU runqueue of the cgroup spent throttled, while the PSI "some" total
+// is wall-clock, so a cgroup throttled on several CPUs at once has more subtracted than
+// its throttling explains, and its contention reads low — never high. psiResources[0] is cpu.pressure. A counter that went backwards (the
 // cgroup was recreated) gives no reading; a cgroup with no throttled_usec on either
 // side has no quota to be held back by, so all of its stall is contention.
 func contention(prev, snap *cpuSnapshot, elapsedUs int64) (float64, bool) {

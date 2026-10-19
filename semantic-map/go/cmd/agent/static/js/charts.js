@@ -117,13 +117,15 @@ export function sparkline(series, { width = 352, height = 54, unit = '' } = {}) 
  * The three strength layers, with the one that answers marked.
  *
  * This is the shape of the agent's own precedence rule — an operator's assertion
- * outranks the long-run estimate, which outranks the most recent pairs — and it is
+ * outranks what the agent's own actions measured, which outranks the long-run
+ * estimate, which outranks the most recent pairs — and it is
  * the thing a reader most often gets wrong when handed three numbers in a row.
  */
 export function strengthLayers(rel) {
   const eff = effective(rel);
   const rows = [
     ['assertion', rel.assertion, 'asserted', 'an operator set this directly'],
+    ['measured', rel.measured, 'measured', "the effect the agent's own actions on this pair observed"],
     ['established', rel.established, 'established', 'the long-run estimate from this machine'],
     ['recent', rel.n_observations > 0 ? rel.recent : null, 'recent', 'the last window of paired observations'],
   ];

@@ -226,7 +226,13 @@ func makePlan(m *statemap.Map, cands []Candidate, ws []runtime.Workload, pol *po
 			plan.Predicted = cand.Share * (1 - to/from) * (pressure.Value / usage.Value) * plan.Effect
 		}
 		if plan.Predicted < c.MinEffect {
-			reasons = append(reasons, fmt.Sprintf("%s: predicted drop %.4f is below min_effect %g", cand.Subject, plan.Predicted, c.MinEffect))
+			r := fmt.Sprintf("%s: predicted drop %.4f is below min_effect %g", cand.Subject, plan.Predicted, c.MinEffect)
+			if to > from*(1-c.Step) {
+				// Otherwise a workload capped near its floor reads as one the map
+				// expects little of, when it is the step that is small.
+				r += fmt.Sprintf(" (the floor holds the step to %.3f cores, from %.3f)", to, from)
+			}
+			reasons = append(reasons, r)
 			continue
 		}
 		return plan, true, ""

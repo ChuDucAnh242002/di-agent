@@ -225,6 +225,17 @@ type Relationship struct {
 	// its system, the less an operator could steer it. An assertion does not decay.
 	Assertion *float64 `json:"assertion,omitempty"`
 
+	// Measured is the effect the agent's own interventions on this pair observed: the
+	// mean, over unconfounded outcomes, of the target's change per unit change of the
+	// source, both normalised by their ranges — the same units the estimate projects
+	// in. It outranks both learned layers and yields to an assertion. Co-variation is
+	// the wrong measure once the agent acts on the source: a capped workload stops
+	// moving with the contention it caused, because the cap is what holds it still, so
+	// the learned layers settle near zero exactly when the relationship is strongest.
+	// Each effect is clamped to [0, 1], so a measured 1 is a lower bound on the
+	// sensitivity, and the estimate's caveat says so.
+	Measured *float64 `json:"measured,omitempty"`
+
 	NObservations int        `json:"n_observations"`
 	Provenance    Provenance `json:"provenance"`
 
@@ -269,6 +280,9 @@ func (r *Relationship) Effective() (float64, bool) {
 	if r.Assertion != nil {
 		return clamp01(*r.Assertion), true
 	}
+	if r.Measured != nil {
+		return clamp01(*r.Measured), true
+	}
 	if r.Established != nil {
 		return clamp01(*r.Established), true
 	}
@@ -296,6 +310,8 @@ func (r *Relationship) Basis() string {
 	switch {
 	case r.Assertion != nil:
 		return "asserted"
+	case r.Measured != nil:
+		return "measured"
 	case r.Established != nil:
 		return "established"
 	case r.NObservations > 0:

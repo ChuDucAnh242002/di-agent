@@ -319,7 +319,7 @@ GET /cost?task=pod-scheduling&node=master
         ├─▶ LEVEL      = b.Property(construct).Value        ← the estimate itself
         └─▶ SENSITIVITY, reported beside the level, never added into it:
               for each relationship INTO the construct, source property present:
-                eff, known := rel.Effective()   ← assertion | established | recent
+                eff, known := rel.Effective()   ← assertion | measured | established | recent
                 if !known { continue }          ← absent from the sum, not a zero
                 sum += eff · sign(direction)
         └─▶ ActionCost {ResourceCost=level, ResourceSensitivity=sum,
@@ -1103,7 +1103,10 @@ one pod alone at a 1.5-core limit put node pressure at 27% with nothing else wai
 its own throttled share 29%, and lowering its limit to 1 core raised node pressure to
 42%. Per subject, contention is the stall share left after the cgroup's own throttled
 time, clamped at zero; a cgroup without `throttled_usec` has no quota, so all its stall
-counts. The node's is the highest of its subjects' this tick — the share of the window
+counts. It is an approximation that errs toward zero: `throttled_usec` sums the time each
+of the cgroup's per-CPU runqueues spent throttled, while the PSI total is wall-clock, so a
+cgroup throttled on several CPUs at once has more subtracted than its throttling explains
+and reads low, never high. The node's is the highest of its subjects' this tick — the share of the window
 in which some workload waited for a CPU another was using — over the subjects that were
 promised CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
 nearly all the time, and letting it set the signal would have relief cap a workload that
@@ -1523,7 +1526,7 @@ distinctions a naive renderer would flatten:
 - a relationship nothing has been observed about has **no** strength, and is drawn
   dashed rather than as a measured `0.00`;
 - the three strength layers are shown together with the one that *answers* marked,
-  because precedence is by authority — assertion over established over recent — and
+  because precedence is by authority — assertion over measured over established over recent — and
   not arithmetic;
 - the journal states its window (`held`, `dropped`, `oldest_revision`) so an empty
   list is not readable as "nothing happened";
@@ -1817,7 +1820,7 @@ Operator → POST /explain (question)
              ▼
         pkg/explain (OpenAICompatibleExplainer)
              │
-             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (system prompt: cmd/agent/prompts/explain-v2.md)
              │  (tool schemas: get_cost, get_edges, get_history,
              │                 get_peers, get_recommend, get_graph)
              │
@@ -1867,13 +1870,13 @@ Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary 
 explain.provider      none | openai-compatible          (default: none)
 explain.url           http://localhost:11434/v1         (default)
 explain.model         qwen2.5:7b-instruct               (default)
-explain.prompt        cmd/agent/prompts/explain-v1.md   (default)
+explain.prompt        cmd/agent/prompts/explain-v2.md   (default)
 explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 
@@ -2059,9 +2062,9 @@ Every response carries `usage`:
 explain.provider         none | openai-compatible          (default: none)
 explain.url              http://localhost:11434/v1
 explain.model            qwen2.5:7b-instruct
-explain.prompt           cmd/agent/prompts/explain-v1.md
-explain.planner_prompt   (derived: <prompt dir>/planner-v1.md)
-explain.critic_prompt    (derived: <prompt dir>/critic-v1.md)
+explain.prompt           cmd/agent/prompts/explain-v2.md
+explain.planner_prompt   (derived: <prompt dir>/planner-v2.md)
+explain.critic_prompt    (derived: <prompt dir>/critic-v2.md)
 explain.keep_alive       30m
 explain.sessions         true
 explain.api_key          ""   (write ${EXPLAIN_API_KEY} to read it from the environment)
@@ -2071,7 +2074,7 @@ A missing *derived* planner/critic prompt disables that stage with a log line; a
 
 ### Prompt versioning
 
-Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+Three prompts, each versioned by filename (v1 is kept unedited; v2 removed the hard-coded constructs): `explain-v2.md`, `planner-v2.md`, `critic-v2.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
 
 ### What v2 does not change
 
@@ -2223,7 +2226,9 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
 
-**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1.
+**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node, clamped to [0, 1] (`measuredEffect`; none when the share fell by no more than 0.02). The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. The verify decision records the outcome's `effect`.
+
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
 
 **Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how the escalation queue drains without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
 

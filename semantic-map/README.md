@@ -257,9 +257,9 @@ semantic-map/
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
     │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
     │   ├── prompts/            Versioned LLM system prompts (loaded at startup)
-    │   │   ├── explain-v1.md   Answering agent — graph semantics, tools, response schema
-    │   │   ├── planner-v1.md   Planner agent — planning rules + worked examples
-    │   │   └── critic-v1.md    Critic agent — what Gate 1 already covers, what only it can catch
+    │   │   ├── explain-v2.md   Answering agent — graph semantics, tools, response schema
+    │   │   ├── planner-v2.md   Planner agent — planning rules + worked examples
+    │   │   └── critic-v2.md    Critic agent — what Gate 1 already covers, what only it can catch
     │   └── static/             Embedded operator console — no external assets
     │       ├── index.html      Shell: header, census strip, canvas, inspector, drawer
     │       ├── style.css       Design tokens (sign / status / provenance / ink) + layout
@@ -304,7 +304,7 @@ semantic-map/
         │   ├── runner.go       Build a SemanticMap per KD, stream parquet rows,
         │   │                   snapshot edges. Skips HTTP — driven on pkg/semmap
         │   │                   directly. See top-of-file comment for rationale.
-        │   ├── divergence.go   effective (assertion|established|recent); Range,
+        │   ├── divergence.go   effective (assertion|measured|established|recent); Range,
         │   │                   sample StdDev, sorted by Range desc (most
         │   │                   discriminative first)
         │   ├── output.go       Table / JSON / CSV formatters
@@ -754,18 +754,20 @@ curl -s localhost:8080/state \
   | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, effective, basis, sign_conflicts, sign_agreements}'
 ```
 
-**The three strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
-calls it `ema_weight`), `established` (the long-run learned baseline), `assertion` (an
-operator's override), the `effective` value the agent reasons with, and `basis` naming
-which of the three that came from. Read `effective`: `recent` is the fastest-moving
-layer and answers only when neither of the others exists. `effective` and the two pointer layers are **absent rather than
+**The strength layers.** A relationship reports `recent` (the fast EMA; `/edges`
+calls it `ema_weight`), `established` (the long-run learned baseline), `measured` (what
+the agent's own interventions on the pair observed: the mean drop in the target per unit
+drop in the source), `assertion` (an operator's override), the `effective` value the
+agent reasons with, and `basis` naming which layer that came from — assertion, then
+measured, then established, then recent. Read `effective`: `recent` is the fastest-moving
+layer and answers only when none of the others exists. `effective` and the pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
 nothing and absence is not that claim.
 
 ```bash
 # what each relationship is worth, and on what basis
 curl -s localhost:8080/edges \
-  | jq '.[] | {proposition_id, basis, effective, established, assertion, ema_weight, n_observations}'
+  | jq '.[] | {proposition_id, basis, effective, measured, established, assertion, ema_weight, n_observations}'
 
 # relationships the agent has no measurement for yet
 curl -s localhost:8080/edges | jq '[.[] | select(.basis == "unknown") | .proposition_id]'
@@ -865,8 +867,9 @@ magnitude over the last `map.pair_history` pairs, on `[0, 1]`. It is folded twic
 same pairs: a **recent** estimate at `profile.alpha` (default 0.20, memory ≈ 5 pairs) and an
 **established** baseline at `profile.alpha_slow` (default 0.001, memory ≈ 1000 pairs,
 bias-corrected). `Effective()` picks between them by authority rather than by arithmetic
-— an operator assertion first, else the established baseline, else the recent estimate,
-else `unknown` — and `basis` on every edge names which one answered.
+— an operator assertion first, else what the agent's interventions measured, else the
+established baseline, else the recent estimate, else `unknown` — and `basis` on every
+edge names which one answered.
 
 ```bash
 # agent.yaml
@@ -916,8 +919,10 @@ searches upward from the working directory for `domain_spec.json`, and if there 
 none it runs **without a domain model**: every observed property is still admitted,
 subjects are still modelled, relationships are still discovered and estimates still
 answered, but nothing is routed into a construct, and `GET /cost`, `POST /recommend`,
-`POST /simulate` and `POST /agent/tune` answer `501` saying so. The startup log
-states which mode the agent is in. A `domain.path` path that does not load is an error,
+`POST /simulate` and `POST /agent/tune` answer `501` saying so. `domain.path: none`
+runs without one even when a `domain_spec.json` sits above the working directory — the
+search will otherwise find a stray copy in a home directory. The startup log states which
+mode the agent is in and, when a model is loaded, the file it came from. A `domain.path` path that does not load is an error,
 not a fallback. When you do deploy a specification, treat it as part of the
 release: two daemons on the same binary and different specifications are different
 agents. The daemon also refuses a stray argument after its flags (a spec path
@@ -1065,9 +1070,9 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `explain.provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
 | `explain.url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
 | `explain.model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
-| `explain.prompt`          | `cmd/agent/prompts/explain-v1.md`| Answering-agent system prompt. Required when the provider is enabled.   |
-| `explain.planner_prompt`  | `<prompt-dir>/planner-v1.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
-| `explain.critic_prompt`   | `<prompt-dir>/critic-v1.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
+| `explain.prompt`          | `cmd/agent/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `explain.planner_prompt`  | `<prompt-dir>/planner-v2.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
+| `explain.critic_prompt`   | `<prompt-dir>/critic-v2.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
 | `explain.keep_alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
 | `explain.sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
 | `explain.api_key`         | `""`                             | Bearer token for the backend. Write `${EXPLAIN_API_KEY}` to read it from the environment; the agent no longer reads that variable on its own. |
@@ -1376,7 +1381,7 @@ explain:
   provider: openai-compatible
   url: http://localhost:11434/v1
   model: qwen2.5:7b-instruct
-  prompt: cmd/agent/prompts/explain-v1.md
+  prompt: cmd/agent/prompts/explain-v2.md
 persist:
   file: ""
 SPEC
@@ -1481,8 +1486,8 @@ Every response carries a `usage` block so you can see what each feature costs:
 
 ```yaml
 explain:
-  planner_prompt: ""   # path to the planner prompt; empty is <dir of explain.prompt>/planner-v1.md
-  critic_prompt: ""    # path to the critic prompt; empty is <dir of explain.prompt>/critic-v1.md
+  planner_prompt: ""   # path to the planner prompt; empty is <dir of explain.prompt>/planner-v2.md
+  critic_prompt: ""    # path to the critic prompt; empty is <dir of explain.prompt>/critic-v2.md
   keep_alive: 30m      # model residency hint: a big latency win on repeat calls
   sessions: true       # session memory
 ```

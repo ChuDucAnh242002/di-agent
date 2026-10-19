@@ -144,6 +144,7 @@ type EdgeDTO struct {
 	Direction        string   `json:"direction"`
 	Established      *float64 `json:"established,omitempty"`
 	Assertion        *float64 `json:"assertion,omitempty"`
+	Measured         *float64 `json:"measured,omitempty"`
 	Effective        *float64 `json:"effective,omitempty"`
 	Basis            string   `json:"basis,omitempty"`
 	EMAWeight        float64  `json:"ema_weight"`
@@ -280,6 +281,7 @@ func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 		PropositionID:    e.PropositionID,
 		Direction:        directionToString(e.Direction),
 		Established:      e.Established,
+		Measured:         e.Measured,
 		Assertion:        e.Assertion,
 		Effective:        e.Effective,
 		Basis:            e.Basis,

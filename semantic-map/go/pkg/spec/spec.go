@@ -138,7 +138,8 @@ type Peers struct {
 	StateStale time.Duration `yaml:"state_stale"`
 }
 
-// Domain is the path to domain_spec.json; empty searches upward from the working directory.
+// Domain is the path to domain_spec.json; empty searches upward from the working directory,
+// and "none" runs without a domain model whatever the search would find.
 type Domain struct {
 	Path string `yaml:"path"`
 }
