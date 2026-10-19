@@ -308,3 +308,25 @@ func TestAnEstimateSaysWhatAMeasuredStrengthIs(t *testing.T) {
 		}
 	}
 }
+
+// TestARelationshipRetiredByInterventionsMeasuresAfresh: two null outcomes retire a
+// relationship because acting had no effect; one later created again on the pair is
+// a new claim and reasons from the outcomes that created it, not from a mean that
+// still holds the effects before the retirement and the nulls that caused it.
+func TestARelationshipRetiredByInterventionsMeasuresAfresh(t *testing.T) {
+	m := interventionMap(t)
+	mustRecord(t, m, measured(true, false, "d1", 1))
+	mustRecord(t, m, measured(true, false, "d2", 1))
+	mustRecord(t, m, measured(false, false, "d3", 0))
+	if _, changed := mustRecord(t, m, measured(false, false, "d4", 0)); changed != "retired" {
+		t.Fatalf("changed %q; want retired", changed)
+	}
+	mustRecord(t, m, measured(true, false, "d5", 0.4))
+	id, changed := mustRecord(t, m, measured(true, false, "d6", 0.4))
+	if changed != "created" {
+		t.Fatalf("changed %q; want created again", changed)
+	}
+	if r, _ := m.Relationship(id); r.Measured == nil || !nearly(*r.Measured, 0.4) {
+		t.Fatalf("measured %v; want 0.4, the outcomes since the retirement", r.Measured)
+	}
+}

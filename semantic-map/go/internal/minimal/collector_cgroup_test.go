@@ -913,3 +913,45 @@ func TestNodeContentionIsAnchoredOnItsWindow(t *testing.T) {
 		t.Fatalf("event id %s; want the one anchored on the window start %s", s.EventID, want)
 	}
 }
+
+// TestNodeContentionMovesOnWhenTheRootIsUnreadable: node contention is the worst
+// promised subject's, so it does not need the root's cpu.stat; a root that becomes
+// unreadable after a good read must not pin every later node sample to the same
+// window, which would give them one event id and the map would keep only the first.
+func TestNodeContentionMovesOnWhenTheRootIsUnreadable(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "cpu.stat")); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	stall := uint64(0)
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(10 * time.Second)
+		stall += 1_000_000
+		advance(t, podA, 2_000_000, 200, 0)
+		writeThrottledUsec(t, podA, 0)
+		writePressure(t, podA, stall)
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := bySubject(samples)[""][types.CPUContentionRatio]
+		if s == nil {
+			t.Fatalf("collect %d: no node cpu_contention_ratio", i)
+		}
+		ids = append(ids, s.EventID)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both node contention samples have event id %s; want each anchored on its own window", ids[0])
+	}
+}

@@ -183,6 +183,9 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	case outcome == "null" && iv.NullRun >= 2 && live != nil:
 		m.retireRelationshipLocked(live, "two interventions had no effect", "intervention", now)
 		iv.AgreedRun, iv.NullRun = 0, 0
+		// A relationship created on this pair again is a new claim, measured by the
+		// outcomes that create it; the retired one keeps the measurement it had.
+		iv.EffectSum, iv.EffectN = 0, 0
 		return id, "retired", nil
 	}
 	return id, "", nil
