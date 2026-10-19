@@ -299,3 +299,22 @@ func TestTheUsagePredictionUsesTheFlooredCut(t *testing.T) {
 		t.Fatalf("predicted %v; want %v, the floored cut", p.Predicted, want)
 	}
 }
+
+// TestARefusalSaysTheFloorHeldTheStep: a workload already capped near its floor
+// can only be stepped a little further, and a refusal for the small drop that
+// follows must say the floor made the step small, not leave it reading as a weak
+// prediction. Seen live: a hog capped from 3 to 1.518 cores, floor 0.5 of 3.
+func TestARefusalSaysTheFloorHeldTheStep(t *testing.T) {
+	m := planFixture(t, 1)
+	record(t, m, usage("pod:a"), "pod:a", 0.3795, t0)
+	ws := []runtime.Workload{limited(pod("pod:a"), 1.518)}
+	pol := defaultPolicy(t, nil) // floor 0.1 cores, 0.5 of the original limit
+	c := reliefCfg()
+	_, ok, why := makePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one, map[string]float64{"pod:a": 3})
+	if ok {
+		t.Fatal("planned; want refused, the step is 1.518 → 1.5 cores")
+	}
+	if !strings.Contains(why, "below min_effect") || !strings.Contains(why, "the floor holds the step to 1.500 cores") {
+		t.Fatalf("why=%q; want the min_effect refusal to name the floor that held the step", why)
+	}
+}
