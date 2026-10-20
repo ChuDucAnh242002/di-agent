@@ -16,7 +16,9 @@
 #                                    cache and stalls every review; the hard cap alone bounds it.
 #   model tev1:4b-node               tev1:4b with num_ctx 2048: a review prompt is ~800 tokens,
 #                                    and the base model's num_ctx of 8192 (6.4 GB) overrides
-#                                    OLLAMA_CONTEXT_LENGTH
+#                                    OLLAMA_CONTEXT_LENGTH; and num_thread 4, one per CPU it has:
+#                                    by default its runner threads outnumber them and it waits on
+#                                    itself (contention 0.6 with nothing else on its CPUs)
 #   OLLAMA_MAX_LOADED_MODELS=1, OLLAMA_NUM_PARALLEL=1, OLLAMA_KEEP_ALIVE=-1
 #                                    one model, one request at a time, kept loaded
 # Ollama listens on 127.0.0.1:11434 only.
@@ -42,6 +44,6 @@ systemctl daemon-reload
 systemctl restart ollama
 for _ in $(seq 30); do curl -sf localhost:11434/api/tags >/dev/null && break; sleep 1; done
 ollama list | grep -q "^$BASE " || ollama pull "$BASE"
-printf 'FROM %s\nPARAMETER num_ctx 2048\n' "$BASE" >/tmp/tier1.Modelfile
+printf 'FROM %s\nPARAMETER num_ctx 2048\nPARAMETER num_thread 4\n' "$BASE" >/tmp/tier1.Modelfile
 ollama create "$MODEL" -f /tmp/tier1.Modelfile >/dev/null
 systemctl show ollama -p AllowedCPUs -p CPUQuotaPerSecUSec -p CPUWeight -p MemoryMax
