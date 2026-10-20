@@ -11,7 +11,7 @@
 //     happened.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, directionSign, isEditing, factValue } from './model.js';
+import { fmt, escapeHTML, effective, directionSign, isEditing, factValue, consumers, machineSummary } from './model.js';
 
 const JOURNAL_BUFFER = 400;
 
@@ -41,7 +41,7 @@ export class Drawer {
     // The row whose part of the map is highlighted on the canvas: {pane, id}.
     this.pointed = null;
     this.panes = {};
-    for (const name of ['actions', 'journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
+    for (const name of ['actions', 'journal', 'decisions', 'discovery', 'subjects', 'resources', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
     }
     this.wireTabs();
@@ -155,6 +155,7 @@ export class Drawer {
       case 'decisions': return this.renderDecisions();
       case 'discovery': return this.renderDiscovery();
       case 'subjects': return this.renderSubjects();
+      case 'resources': return this.renderResources();
       case 'cluster': return this.renderCluster();
       case 'backbone': return this.renderBackbone();
       case 'ask': return this.renderAsk();
@@ -167,6 +168,7 @@ export class Drawer {
     set('c-journal', this.events.length);
     set('c-decisions', this.decisions.length);
     set('c-subjects', model?.counts?.subjects ?? 0);
+    set('c-resources', model ? consumers(model).rows.length : 0);
     set('c-cluster', (this.peers?.peers?.length ?? 0)
       + Object.keys(this.peers?.silent || {}).length);
     const cEl = document.getElementById('c-discovery');
@@ -617,6 +619,51 @@ export class Drawer {
     });
     this.panes.subjects.querySelectorAll('[data-subject]').forEach((row) => {
       row.addEventListener('click', () => this.ctx.filterSubject(row.dataset.subject));
+    });
+  }
+
+  // ── resources ─────────────────────────────────────────────────────────────
+
+  /** The machine, and who is using it: pods, the node's units, the agent and its model. */
+  renderResources() {
+    const model = this.ctx.model();
+    const c = consumers(model);
+    const cpu = (v) => (v === null ? '—' : `${v.toFixed(2)} cores`);
+    const mem = (v) => (v === null ? '—' : fmt.bytes(Math.round(v)));
+    const bar = (v, total) => (v === null || !total ? '' : `<span class="meter" style="display:inline-block;width:72px;vertical-align:middle"><i style="width:${Math.min(100, (100 * v) / total).toFixed(1)}%"></i></span>`);
+    const row = (r) => `
+          <tr data-subject="${escapeHTML(r.subject)}">
+            <td class="mono" title="${escapeHTML(r.subject)}">${escapeHTML(r.name)}</td>
+            <td class="muted">${escapeHTML(r.role)}</td>
+            <td class="num">${cpu(r.cpu)}</td><td>${bar(r.cpu, c.cores)}</td>
+            <td class="num">${mem(r.mem)}</td><td>${bar(r.mem, c.memTotal)}</td>
+            <td><span class="badge status-${r.status}">${r.status}</span></td>
+          </tr>`;
+    this.panes.resources.innerHTML = `<div class="pane-pad">
+      <p style="margin:0 0 8px"><strong>${escapeHTML(machineSummary(model))}</strong></p>
+      <table class="grid">
+        <thead><tr><th>consumer</th><th>what it is</th><th class="num">CPU</th><th></th>
+          <th class="num">memory</th><th></th><th>status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>the node</strong></td><td class="muted">all of it</td>
+            <td class="num">${cpu(c.node.cpu)}</td><td>${bar(c.node.cpu, c.cores)}</td>
+            <td class="num">${mem(c.node.mem)}</td><td>${bar(c.node.mem, c.memTotal)}</td><td></td></tr>
+          ${c.rows.map(row).join('')}
+          <tr><td><em>rest of the system</em></td><td class="muted">no subject accounts for it</td>
+            <td class="num">${cpu(c.rest.cpu)}</td><td>${bar(c.rest.cpu, c.cores)}</td>
+            <td class="num">${mem(c.rest.mem)}</td><td>${bar(c.rest.mem, c.memTotal)}</td><td></td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="font-size:11.5px;margin:9px 0 0;line-height:1.5">
+        Every value is the map's: a subject's CPU and memory are fractions of the node, shown here
+        in cores and bytes. The rest is the node less every subject — the kernel, sessions and the
+        units not modelled (<span class="mono">sources.cgroup.units</span>) — computed when shown,
+        never stored; it is blank where the subjects add up to more than the node, since a cgroup's
+        memory counts the page cache it has read and the node's in-use memory does not.
+      </p>
+    </div>`;
+    this.panes.resources.querySelectorAll('[data-subject]').forEach((r) => {
+      r.addEventListener('click', () => this.ctx.filterSubject(r.dataset.subject));
     });
   }
 
