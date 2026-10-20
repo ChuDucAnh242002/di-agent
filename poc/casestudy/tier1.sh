@@ -13,16 +13,19 @@
 #                                    more. On two CPUs a review took 1-2 min against the agent's
 #                                    timeout; on four, 40-80 s.
 #   CPUWeight=20, IOWeight=20        below a pod's default 100
-#   MemoryMax=13G, no MemoryHigh     tier 1 ~6.3 GB resident, tier 2 ~6 GB, and the page cache of
-#                                    reading each once. A MemoryHigh below that throttles reclaim
+#   MemoryMax=13G, no MemoryHigh     one model resident (tier 1 6.2 GB, tier 2 6.7 GB) and the page
+#                                    cache of reading them, which the kernel reclaims. A MemoryHigh below that throttles reclaim
 #                                    and stalls every review; the hard cap alone bounds it.
 #   models <name>-node               each with num_thread 6, one per CPU it has (by default the
 #                                    runner's threads outnumber them and it waits on itself), and a
 #                                    context sized to its prompts: 2048 for tier 1 (a review is ~800
 #                                    tokens; the base model's own 8192 overrides OLLAMA_CONTEXT_LENGTH),
 #                                    8192 for tier 2, whose tool calls bring map state into the prompt
-#   OLLAMA_MAX_LOADED_MODELS=2, OLLAMA_NUM_PARALLEL=1, OLLAMA_KEEP_ALIVE=-1
-#                                    both tiers kept loaded, one request at a time
+#   OLLAMA_MAX_LOADED_MODELS=1, OLLAMA_NUM_PARALLEL=1, OLLAMA_KEEP_ALIVE=-1
+#                                    one model resident at a time, one request at a time: the two
+#                                    together are 12.9 GB and, with page cache, past the cap — the
+#                                    kernel killed Ollama every ~8 min (run 2026-10-20e) and the node
+#                                    sat at 14 of 15 GB. Tier 2 loads when it is needed, in seconds.
 # Ollama listens on 127.0.0.1:11434 only.
 set -euo pipefail
 DECIDE="${1:-tev1:4b}"
@@ -37,7 +40,7 @@ CPUWeight=20
 MemoryMax=13G
 IOWeight=20
 Environment="OLLAMA_HOST=127.0.0.1:11434"
-Environment="OLLAMA_MAX_LOADED_MODELS=2"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
 Environment="OLLAMA_NUM_PARALLEL=1"
 Environment="OLLAMA_KEEP_ALIVE=-1"
 Environment="OLLAMA_FLASH_ATTENTION=1"
