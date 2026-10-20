@@ -20,15 +20,15 @@ From the host, in this directory:
 ./provision.sh di-node     # VM, k0s, Netdata, the tunnel key, this directory on the node
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go -C ../../semantic-map/go build -ldflags "-s -w -X main.BuildCommit=$(git rev-parse --short HEAD)" -o "$PWD/agent" ./cmd/agent
 multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sudo mv /tmp/agent.new /home/ubuntu/casestudy/agent.new
-./tunnel.sh di-node &      # the node's localhost:11435 is the host's Ollama while this runs
 ```
 
-The decision model is the node's own: a node that cannot decide without the network is not
-autonomous. `node-cpus.sh` and `tier1.sh` give it four CPUs no pod can use, a low CPU weight and 9 GB, so it cannot take what the
-workloads need (unlimited, on the 4-vCPU node, it starved the hog below relief's floor). The reasoning
-model is the host's (`ollama pull qwen3.8:27b-nvfp4`), reached through `tunnel.sh`. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
-`tunnel.sh` reconnects if the link drops; `tunnel.sh --install di-node` runs it as a launchd agent on the host
-(at login, restarted if it exits, independent of any terminal), `--uninstall` removes it.
+Both review models are the node's own: a node that cannot decide without the network is not
+autonomous. `node-cpus.sh` and `tier1.sh` give them six CPUs no pod can use, a low CPU weight and 13 GB,
+so they cannot take what the workloads need (unlimited, on the 4-vCPU node, the decision model starved
+the hog below relief's floor). A larger reasoning model on a peer or the host is optional: `tunnel.sh`
+carries the host's Ollama to the node's `localhost:11435` (`--install` keeps it under launchd), using the
+key `provision.sh` authorises. The case study used the host's `qwen3.8:27b` once and dropped it — it ran
+the host out of GPU memory mid-review — and may return to one.
 
 The agent runs as `di-agent.service` (`systemd-run`), and the configs model the node's other consumers as
 `unit:` subjects: the agent itself, its decision model (`ollama.service`), k0s, containerd and Netdata. CPUs
