@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,6 +96,8 @@ type CgroupCollector struct {
 	lastSkipped  int
 
 	podNames map[string][2]string // pod UID → namespace, name; from PodLogRoot
+	// containerNames is container ID → name, from ContainerLogRoot.
+	containerNames map[string]string
 }
 
 func (c *CgroupCollector) log(format string, args ...any) {
@@ -129,6 +132,12 @@ type CgroupOptions struct {
 	// entry per pod; each pod subject is labelled namespace=<namespace> and
 	// pod=<name> from it. Empty names nothing: the subject stays the UID either way.
 	PodLogRoot string
+	// ContainerLogRoot is the kubelet's /var/log/containers, one link per container,
+	// <pod>_<namespace>_<container>-<id>.log. A pod with more than one container named
+	// there is broken down into container:<uid>.<name> subjects, each labelled with its
+	// pod as parent; a pod with one container is that container, and gets none. Empty
+	// breaks down nothing.
+	ContainerLogRoot string
 	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
 	// advance it instead of sleeping.
 	Now func() time.Time
@@ -298,6 +307,24 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			out = append(out, samples...)
 			if labels["qos"] != "besteffort" {
 				promised = append(promised, samples...)
+			}
+			// A pod's parts are not counted again in the node's contention: the pod's
+			// own reading already holds them.
+			for _, pt := range c.containerPartsLocked(p, &rescanned) {
+				sub := "container:" + labels["pod_uid"] + "." + sanitizeContainer(pt.name)
+				if len(seen) >= c.opts.MaxSubjects {
+					skipped++
+					break
+				}
+				seen[sub] = true
+				cl := make(map[string]string, len(labels)+2)
+				for k, v := range labels {
+					cl[k] = v
+				}
+				cl["kind"], cl["container"], cl["parent"] = "container", pt.name, info.subject
+				cl["cgroup"] = labels["cgroup"] + "/" + filepath.Base(pt.dir)
+				parts, _ := c.collectOneLocked(sub, pt.dir, cl, now)
+				out = append(out, parts...)
 			}
 			return filepath.SkipDir // a subject's children are not subjects
 		}
@@ -734,3 +761,75 @@ func (c *CgroupCollector) podNameLocked(uid string, rescanned *bool) ([2]string,
 	nn, ok := c.podNames[uid]
 	return nn, ok
 }
+
+// containerPart is one container's cgroup inside a pod's, and the name it runs under.
+type containerPart struct{ dir, name string }
+
+// containerPartsLocked is the named containers in a pod's cgroup, by name, when there
+// are two or more; none otherwise, since a single container is the pod. A child whose
+// ID has no log link — the sandbox, a container not yet linked — is not one of them.
+func (c *CgroupCollector) containerPartsLocked(podDir string, rescanned *bool) []containerPart {
+	if c.opts.ContainerLogRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(podDir)
+	if err != nil {
+		return nil
+	}
+	var parts []containerPart
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := containerID(e.Name())
+		name, ok := c.containerNames[id]
+		if !ok && !*rescanned {
+			c.rescanContainersLocked()
+			*rescanned = true
+			name, ok = c.containerNames[id]
+		}
+		if ok {
+			parts = append(parts, containerPart{dir: filepath.Join(podDir, e.Name()), name: name})
+		}
+	}
+	if len(parts) < 2 {
+		return nil
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].name < parts[j].name })
+	return parts
+}
+
+// containerID is the runtime's ID in a container cgroup's name: the name itself under
+// the cgroupfs driver, cri-containerd-<id>.scope (or crio-, docker-) under systemd.
+func containerID(dir string) string {
+	dir = strings.TrimSuffix(dir, ".scope")
+	for _, p := range []string{"cri-containerd-", "crio-", "docker-"} {
+		dir = strings.TrimPrefix(dir, p)
+	}
+	return dir
+}
+
+// rescanContainersLocked rereads the kubelet's container links,
+// <pod>_<namespace>_<container>-<id>.log; pod and namespace are DNS names with no '_'.
+func (c *CgroupCollector) rescanContainersLocked() {
+	entries, err := os.ReadDir(c.opts.ContainerLogRoot)
+	if err != nil {
+		return
+	}
+	c.containerNames = make(map[string]string, len(entries))
+	for _, e := range entries {
+		n := strings.TrimSuffix(e.Name(), ".log")
+		parts := strings.SplitN(n, "_", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		i := strings.LastIndex(parts[2], "-")
+		if i <= 0 {
+			continue
+		}
+		c.containerNames[parts[2][i+1:]] = parts[2][:i]
+	}
+}
+
+// sanitizeContainer makes a container name a subject identity part.
+func sanitizeContainer(name string) string { return sanitiseIdentity(name) }

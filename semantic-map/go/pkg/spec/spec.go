@@ -42,6 +42,16 @@ type Spec struct {
 	Runtime RuntimeSpec  `yaml:"runtime"`
 	Loops   Loops        `yaml:"loops"`
 	Policy  PolicySpec   `yaml:"policy"`
+	Groups  Groups       `yaml:"groups"`
+}
+
+// Groups says how the node's subjects are grouped: pods by a label an operator sets,
+// units by name. A group whose members use the machine (pods, units) is a group:
+// subject of the map, its CPU and memory the sums of its members'.
+type Groups struct {
+	Interval  time.Duration       `yaml:"interval"`
+	LabelKeys []string            `yaml:"label_keys"`
+	Units     map[string][]string `yaml:"units"`
 }
 
 // Node is the machine the agent models. ID empty falls back to the hostname.
@@ -432,6 +442,9 @@ func Default() Spec {
 				},
 			},
 		},
+		Groups: Groups{Interval: 30 * time.Second,
+			LabelKeys: []string{"di-agent/group", "app.kubernetes.io/part-of"},
+			Units:     map[string][]string{"system": {"*"}}},
 		Policy: PolicySpec{
 			Defaults: Settings{
 				Allow: []string{"cpu.limit"}, Deny: []string{"evict"},

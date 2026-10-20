@@ -156,3 +156,11 @@ policy:
           floor: null
           max_actions_per_hour: 0
           cooldown: 0s
+groups:
+    interval: 30s
+    label_keys:
+        - di-agent/group
+        - app.kubernetes.io/part-of
+    units:
+        system:
+            - '*'

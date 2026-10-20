@@ -1056,7 +1056,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `sources.cgroup.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `sources.cgroup.max_subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `sources.cgroup.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `sources.cgroup.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `sources.cgroup.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `sources.cgroup.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -2254,3 +2254,31 @@ The runtime lists the pods scheduled on this node (`spec.nodeName`, the spec's `
 A limit is also refused at `Apply` when it would make the pod Guaranteed: a CPU limit equal to the CPU request, on a container whose memory request equals its memory limit. The plan never goes below the request, so it can land on it; the runtime refuses rather than change the QoS class.
 
 Because pods without a limit are refused, a revert never restores "no limit": an `Undo` whose `Original.Limit` is nil is an error on this runtime, not `ErrGone`. A pod deleted or recreated between `Apply` and `Revert` is `ErrGone`.
+
+
+## Groups: what belongs to what
+
+Subjects keep flat, stable ids — `pod:<uid>`, `unit:ollama.service`, `net:enp0s1` — because
+decisions, relationships and counterfactuals refer to them, and a regrouping must not change what
+an earlier decision read. What a person needs, and what an agent asking "what if the storage pods
+left" needs, is structure over those ids, recomputed from what the node runs now (`pkg/groups`,
+every `groups.interval`).
+
+**Groups from what an operator already says.** A pod's group is the first set label of
+`groups.label_keys` (`di-agent/group`, then `app.kubernetes.io/part-of`); a `kube-system` pod with
+none is in `kube-system`; a unit's group is the first whose `groups.units` glob matches. CPU cores,
+disks and NICs with a device are `hardware`; virtual interfaces are `network`, except a host-side
+`veth`, which is its pod's: its `iflink` is the peer's index in the pod's namespace, and the pod's
+`/proc/<pid>/net/igmp` lists `eth0` under it. A container is its pod's by the collector's `parent`
+label. `GET /groups` serves the whole topology.
+
+**A group of consumers is a subject.** A group whose members use the machine (pods, units) is
+`group:<name>` in the map, with `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`:
+derived properties that *sum* their members (`Aggregate: sum`; other derived properties are a mean),
+recomputed from them and never stored, and the one derived property scoped to a subject, since a
+group is the one subject made of others. Pressures and window ratios do not add up, so a group has
+none. Membership moves with labels, journalled as a redeclaration; a group nothing belongs to any
+more is retired, so its sum stops speaking for workloads that left. `without=group:<name>` in an
+estimate takes every member away, so "what would node memory be without the storage group" is one
+question. `hardware` and `network` are structure only: their members have no CPU or memory of
+their own.

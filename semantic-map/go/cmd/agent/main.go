@@ -51,6 +51,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/groups"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/profiles"
@@ -338,6 +339,10 @@ func main() {
 	}
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
 	registerAutonomyRoutes(mux, reviewer)
+	grp := &grouper{state: state, cfg: groups.Config{LabelKeys: cfg.Groups.LabelKeys, Units: cfg.Groups.Units},
+		linux:     groups.Linux{SysRoot: "/sys", ProcRoot: "/proc", CgroupRoot: cfg.Sources.Cgroup.Root},
+		workloads: rt.Workloads, logf: log.Printf}
+	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
@@ -370,6 +375,9 @@ func main() {
 	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
+	}
+	if cfg.Groups.Interval > 0 {
+		go grp.run(ctx, cfg.Groups.Interval)
 	}
 
 	quit := make(chan os.Signal, 1)

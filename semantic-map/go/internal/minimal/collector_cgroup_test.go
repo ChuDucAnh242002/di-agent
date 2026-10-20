@@ -879,3 +879,44 @@ func TestABestEffortPodDoesNotSetNodeContention(t *testing.T) {
 		t.Fatalf("BestEffort pod's own cpu_contention_ratio %v; want it still reported, 0.95", s)
 	}
 }
+
+// TestAPodsContainersAreItsPartsWhenItHasSeveral: a pod with more than one container is
+// broken down into container:<uid>.<name> subjects, each naming its pod as parent, named
+// from the kubelet's /var/log/containers links (<pod>_<ns>_<container>-<id>.log). A pod
+// with one container is that container, so it gets no part that would only repeat it,
+// and a cgroup with no log (the sandbox) is no container anyone wrote.
+func TestAPodsContainersAreItsPartsWhenItHasSeveral(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	writeCgroup(t, filepath.Join(podA, "cri-containerd-def.scope"), 100_000, 0, 0, "50000000")
+	writeCgroup(t, filepath.Join(podA, "cri-containerd-0sandbox.scope"), 1_000, 0, 0, "1000000")
+	cl := t.TempDir()
+	for _, n := range []string{"cycler_default_db-abc.log", "cycler_default_exporter-def.log"} {
+		if err := os.Symlink("/dev/null", filepath.Join(cl, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 16, MemTotalBytes: 4 << 30,
+		ProcRoot: procRoot, ContainerLogRoot: cl})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := bySubject(samples)
+	for name, mem := range map[string]float64{"db": 200000000, "exporter": 50000000} {
+		s := by["container:"+testUID+"."+name][types.MemoryUtilization]
+		if s == nil {
+			t.Fatalf("no container:%s.%s; subjects %v", testUID, name, keys(by))
+		}
+		if s.Labels["parent"] != "pod:"+testUID || s.Labels["container"] != name || s.Labels["kind"] != "container" {
+			t.Errorf("%s labels %v; want its pod as parent and its name", name, s.Labels)
+		}
+		if want := mem / float64(4<<30); s.Value < want*0.99 || s.Value > want*1.01 {
+			t.Errorf("%s memory %v; want %v of the node", name, s.Value, want)
+		}
+	}
+	for s := range by {
+		if strings.Contains(s, "sandbox") || strings.HasPrefix(s, "container:11111111") {
+			t.Errorf("subject %s; want no part for the sandbox or for a single-container pod", s)
+		}
+	}
+}

@@ -568,6 +568,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
+| GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
@@ -584,7 +585,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses; `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
 | GET  | `/state/decisions`                  | `?limit=`                                                | State model |
 | GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
@@ -1008,7 +1009,7 @@ the shape of the real thing.
 | `sources.cgroup.units`     | `[]`             | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
 | `sources.cgroup.max_subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
 | `sources.cgroup.cmd_label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
-| `sources.cgroup.pod_logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. |
+| `sources.cgroup.pod_logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. The kubelet's per-container links beside it (`/var/log/containers`) break a pod with more than one container into `container:<uid>.<name>` subjects, each labelled with its pod as `parent`. |
 | `node.id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `sources.netdata.url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `sources.cgroup.root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
 | `sources.netdata.include`  | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
@@ -1076,6 +1077,9 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
+| `groups.label_keys`                  | `[di-agent/group, app.kubernetes.io/part-of]` | Pod labels naming a pod's group, first set wins; a `kube-system` pod with none is in `kube-system`. Label your storage pods `di-agent/group: storage` and the map holds what the storage group uses. |
+| `groups.units`                       | `{system: ["*"]}`     | Group name → globs of the units `sources.cgroup.units` models. CPU cores, disks and physical NICs are `hardware`, other virtual interfaces `network`, a `veth` is its pod's. |
+| `groups.interval`                    | `30s`                 | How often the topology is recomputed; `0` turns grouping off. |
 | `loops.review.level`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
