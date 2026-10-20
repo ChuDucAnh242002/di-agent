@@ -204,7 +204,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	}
 	c := &CgroupCollector{
 		nodeID: nodeID, cgroupRoot: cgroupRoot, sid: "cgroup:" + nodeID,
-		numCPU: float64(runtime.NumCPU()), opts: opts,
+		numCPU: machineCPUs(opts.ProcRoot), opts: opts,
 		prev: make(map[string]*cpuSnapshot),
 	}
 	c.memTotal = opts.MemTotalBytes
@@ -811,4 +811,27 @@ func (c *CgroupCollector) podNameLocked(uid string, rescanned *bool) ([2]string,
 	}
 	nn, ok := c.podNames[uid]
 	return nn, ok
+}
+
+// machineCPUs is the machine's CPU count, one cpuN line in /proc/stat each. Every CPU
+// fraction is a share of the node, so it divides by this — not runtime.NumCPU, which is the
+// CPUs the agent's own process may run on and is smaller when the agent is pinned (it was
+// six of twelve on the case-study node, and every share came out doubled). runtime.NumCPU
+// is the fallback when /proc/stat cannot be read.
+func machineCPUs(procRoot string) float64 {
+	b, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err == nil {
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) > 0 && len(f[0]) > 3 && strings.HasPrefix(f[0], "cpu") {
+				if _, err := strconv.Atoi(f[0][3:]); err == nil {
+					n++
+				}
+			}
+		}
+		if n > 0 {
+			return float64(n)
+		}
+	}
+	return float64(runtime.NumCPU())
 }

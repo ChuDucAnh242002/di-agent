@@ -994,3 +994,24 @@ func TestAUnitDoesNotSetNodeContention(t *testing.T) {
 		t.Fatalf("unit's own cpu_contention_ratio %v; want it still reported, 0.9", s)
 	}
 }
+
+// TestSharesAreOfTheMachinesCPUsNotTheAgents: every CPU fraction is a share of the node,
+// so it divides by the machine's CPUs. runtime.NumCPU is the CPUs the agent's own process
+// may run on: pinned to six of twelve, the agent reported its decision model at 0.998 of
+// the node and the node at its ceiling (case-study run 2026-10-20i). /proc/stat lists one
+// cpuN line per CPU the machine has.
+func TestSharesAreOfTheMachinesCPUsNotTheAgents(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	stat := "cpu  100 0 100 1000 0 0 0 0 0 0\n"
+	for i := 0; i < 12; i++ {
+		stat += "cpu" + strconv.Itoa(i) + " 10 0 10 100 0 0 0 0 0 0\n"
+	}
+	stat += "intr 0\nctxt 0\n"
+	if err := os.WriteFile(filepath.Join(procRoot, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if c.numCPU != 12 {
+		t.Fatalf("numCPU %v; want the machine's 12 from /proc/stat", c.numCPU)
+	}
+}
