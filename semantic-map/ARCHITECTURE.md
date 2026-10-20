@@ -2126,6 +2126,11 @@ reviewed again, which is what keeps the models from being asked the same questio
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
+**Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
+costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits
+behind the models' queue (on the case-study node a composition candidate waited an hour behind
+reasoning-tier reviews), and it does not count against `per_cycle`, which caps the models' work.
+
 **An outage is not a review.** A model that cannot answer — the server still loading, the
 network down, a request it refuses — leaves the candidate untouched: no decision, no
 `Review`, so it is due again next cycle. Recording it as undecided would shelve the

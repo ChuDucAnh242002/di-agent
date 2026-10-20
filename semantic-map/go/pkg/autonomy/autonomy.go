@@ -316,9 +316,27 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	})
 	reviewed, waiting := 0, 0
 	r.down.decider, r.down.reasoner = false, false
+	// Tier 0 first, over every due candidate: a rule costs nothing and a model call a
+	// minute or more on a node, so what a rule settles never waits behind the models'
+	// queue, and does not count against their cap.
+	settled := map[string]bool{}
+	for _, c := range due {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, ok := r.rules(Evidence{Candidate: *c}); !ok || !r.endsActive(c) {
+			continue
+		}
+		if ok, err := r.review(ctx, c, pending); err == nil && ok {
+			settled[c.CandidateID] = true
+		}
+	}
 	for _, c := range due {
 		if reviewed >= r.cfg.MaxPer || ctx.Err() != nil {
 			break
+		}
+		if settled[c.CandidateID] {
+			continue
 		}
 		if !r.endsActive(c) {
 			waiting++

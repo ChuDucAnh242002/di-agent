@@ -334,3 +334,31 @@ func TestAnOutageSkipsOnlyWhatNeedsTheModel(t *testing.T) {
 		t.Errorf("status %+v; want the outage counted once", s)
 	}
 }
+
+// TestRulesSettleWhatTheyCanBeforeAModelIsAsked: tier 0 costs nothing and a model call
+// costs a minute or more on the node, so a cycle settles every candidate a rule decides
+// before it spends models on the rest. Ordered strongest-first with the models' cap,
+// a composition candidate behind slower ones waited for an hour on the case-study node.
+func TestRulesSettleWhatTheyCanBeforeAModelIsAsked(t *testing.T) {
+	const comp = "memory_utilization@pod:wave->memory_utilization"
+	var cands []*types.CandidateEdge
+	for _, p := range []string{"a", "b", "c", "d", "e"} {
+		cands = append(cands, directed("cpu_utilization@pod:"+p+"->cpu_pressure", ""))
+	}
+	weak := directed(comp, types.CandidateKindComposition)
+	weak.MIScore = 0.01
+	cands = append(cands, weak)
+	m := newFakeMap(t, cands...)
+	unsure := map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}
+	d := &fixed{actions: unsure}
+	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: d, MaxPer: 2})
+	if c := m.cands[comp]; c.Status != types.Confirmed || c.Review == nil || c.Review.By != types.ReviewerRules {
+		t.Fatalf("composition %v review %+v; want the rule to confirm it in the first cycle", c.Status, c.Review)
+	}
+	if len(d.analyses) != 2 {
+		t.Fatalf("the model was asked %d times; want the cap of 2, the rule's candidate not counted", len(d.analyses))
+	}
+	if s := r.Status(); s.Reviewed != 3 {
+		t.Fatalf("reviewed %d; want the rule's one and the models' two", s.Reviewed)
+	}
+}
