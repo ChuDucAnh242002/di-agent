@@ -4,7 +4,7 @@
 # wall-clock schedule.
 apiVersion: v1
 kind: Pod
-metadata: { name: mem-wave, labels: { check: casestudy } }
+metadata: { name: mem-wave, labels: { check: casestudy, di-agent/group: memory } }
 spec:
   containers:
   - name: w

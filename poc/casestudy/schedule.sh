@@ -160,6 +160,14 @@ phase_P2() {
     mark P2 "estimate without mem-wave" --arg subject "$subject" --arg decision_id "$decision" \
         --argjson level "$(jq '.answer.level' <<<"$estimate")" \
         --argjson projected "$(jq '.hypothetical.projected_level' <<<"$estimate")"
+    # The same question of mem-wave's group, which mem-squeeze shares: one request takes
+    # every member away. Recorded, not required; nothing below depends on it.
+    local group
+    group=$(curl -s "$API/state/estimate?target=memory_utilization&without=group:memory" || true)
+    mark P2 "estimate without group:memory" --arg decision_id "$(jq -r '.decision_id // empty' <<<"$group" 2>/dev/null)" \
+        --argjson level "$(jq '.answer.level // null' <<<"$group" 2>/dev/null || echo null)" \
+        --argjson projected "$(jq '.hypothetical.projected_level // null' <<<"$group" 2>/dev/null || echo null)" \
+        --argjson excluded "$(jq -c '.excluded // []' <<<"$group" 2>/dev/null || echo '[]')"
 
     if ! remove mem-wave; then
         mark P2 "deleting mem-wave failed" --arg subject "$subject"

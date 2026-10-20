@@ -4,7 +4,7 @@
 # CPU limit: the kind of pod the kubernetes runtime will resize in place.
 apiVersion: v1
 kind: Pod
-metadata: { name: hog, labels: { check: casestudy } }
+metadata: { name: hog, labels: { check: casestudy, di-agent/group: relief } }
 spec:
   containers:
   - name: w

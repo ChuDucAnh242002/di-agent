@@ -41,6 +41,10 @@ The agent runs as `di-agent.service` (`systemd-run`), and the configs model the 
 Each moves one resource on its own period, on cycles that never line up, so pods should not
 correlate with each other — except the twins, which share a wall-clock schedule.
 
+Each pod carries a `di-agent/group` label — `compute` (cycler, twins, noise), `memory` (mem-wave, mem-squeeze),
+`storage` (io-wave), `relief` (hog, victim) — so the map holds each group's use of the node and P2 also asks
+node memory `without=group:memory`.
+
 | Pod | Moves | Period | Planted relationship |
 |---|---|---|---|
 | `cycler` | CPU, 45 s busy / 45 s idle, limit 1 core | 90 s | its CPU → node CPU; its CPU → node CPU pressure |
