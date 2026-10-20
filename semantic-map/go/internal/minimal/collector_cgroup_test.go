@@ -755,8 +755,9 @@ func writeThrottledUsec(t *testing.T, dir string, usec uint64) {
 // TestCPUContentionIsStallNotExplainedByOwnThrottling: a cgroup's CPU "some" stall
 // counts the time its own quota held it back, so a pod at its limit reports pressure
 // with nothing else on the node waiting. cpu_contention_ratio is the stall share left
-// after the cgroup's own throttled time, per subject, and the node's is the worst-off
-// subject's — not the root's stall, which carries every subject's throttling.
+// after the cgroup's own throttled time, per subject. The node's is not the root's stall,
+// which carries every subject's throttling: it is the waiting of a pod owed CPU it does not
+// get (owedContention), and podA's 0.01 is under the waiting floor, so the node's is 0.
 func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 	root, podA, podB, _, procRoot := fakeTree(t)
 	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
@@ -787,8 +788,8 @@ func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := bySubject(samples)
-	// podB is BestEffort, so the node takes podA's reading (TestABestEffortPodDoesNotSetNodeContention).
-	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.01} {
+	// podB is BestEffort, so only podA is promised CPU (TestABestEffortPodDoesNotSetNodeContention).
+	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0} {
 		s := got[subject][types.CPUContentionRatio]
 		if s == nil {
 			t.Errorf("subject %q: no cpu_contention_ratio after two collects", subject)

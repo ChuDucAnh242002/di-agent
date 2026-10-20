@@ -704,7 +704,7 @@ fraction.
 | `io_pressure_ratio`     | —         | worse    | PSI `io.some` stall share of the window (cgroup `io.pressure`); route removed (§2) |
 | `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
 | `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
-| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst-off pod's that was promised CPU — not a BestEffort pod's and not a unit's, whose waiting is not the runtime's to relieve; unrouted; relief's signal (§16) |
+| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst waiting of a pod owed CPU it does not get — its weighted fair share of the pods' CPUs (`cpu.weight`, capped by its `cpu.max`), by water-filling (`owedContention`) — not a BestEffort pod's or a unit's, whose waiting is not the runtime's to relieve, and not a pod's past its share, which waits on its own threads; unrouted; relief's signal (§16) |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is
