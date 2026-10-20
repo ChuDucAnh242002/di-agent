@@ -157,7 +157,29 @@ export class Model {
   }
 
   /** A subject's name, or the subject itself when it has none. */
-  nameOf(subject) { return this.names().get(subject) || subject; }
+  nameOf(subject) {
+    const g = this.topology?.groups?.find((x) => x.id === subject);
+    if (g) return `${g.name} · ${g.members.length}`;
+    const name = this.names().get(subject) || subject;
+    const in_ = this.topology?.groups?.find((x) => x.consumers && x.members.includes(subject));
+    return in_ ? `${name} · ${in_.name}` : name;
+  }
+
+  /**
+   * The enclosure a property is drawn in: its subject's, except that a container and a
+   * virtual interface are drawn in their pod's, and a core, disk or interface in its
+   * hardware or network group's — so the canvas shows workloads beside one box of
+   * machine parts rather than a box per core. Null for the machine's own properties.
+   * The topology is GET /groups; without it every subject has its own box.
+   */
+  boxOf(p) {
+    const s = subjectOf(p);
+    if (!s) return null;
+    const parent = this.topology?.parents?.[s];
+    if (parent) return parent;
+    const structure = this.topology?.groups?.find((g) => !g.consumers && g.members.includes(s));
+    return structure ? structure.id : s;
+  }
 
   /** A property id as shown: `metric@<name>` for a named subject, else unchanged. */
   display(id) {
@@ -301,6 +323,61 @@ export function consumers(model) {
     return r >= 0 ? r : total[k] !== null && r > -0.02 * total[k] ? 0 : null;
   };
   return { cores, memTotal, node, rows, rest: { cpu: rest('cpu'), mem: rest('mem') } };
+}
+
+/**
+ * The consumers as a tree an operator can open: each group the topology names (GET
+ * /groups) with its members, each pod with its containers and virtual interfaces, the
+ * consumers no group holds under "ungrouped", the hardware and network as structure,
+ * and the rest no subject accounts for. A consumer group's numbers are the map's own sums
+ * (cpu_utilization@group:<name>); every other number is what consumers() reads.
+ */
+export function resourceTree(model, topology) {
+  const c = consumers(model);
+  const groups = topology?.groups || [];
+  const parents = topology?.parents || {};
+  const children = {};
+  for (const [child, parent] of Object.entries(parents)) (children[parent] ||= []).push(child);
+  const val = (id) => {
+    const p = model.property(id);
+    return p && p.n_observations && p.status !== 'retired' ? p.value : null;
+  };
+  const scale = (f, total) => (f === null || total === null ? null : f * total);
+  const name = (s) => model.subjects().find((x) => x.id === s)?.name || s.slice(s.indexOf(':') + 1);
+  const part = (s) => {
+    const kind = s.slice(0, s.indexOf(':'));
+    const label = kind === 'container' ? (model.subjects().find((x) => x.id === s)?.properties[0]?.labels?.container || name(s)) : name(s);
+    return { id: s, label, role: kind === 'container' ? 'container' : kind === 'net' ? 'network interface' : kind,
+      cpu: scale(val(`cpu_utilization@${s}`), c.cores), mem: scale(val(`memory_utilization@${s}`), c.memTotal), children: [] };
+  };
+  const row = (r) => ({ id: r.subject, label: r.name, role: r.role, cpu: r.cpu, mem: r.mem, status: r.status,
+    children: (children[r.subject] || []).sort().map(part) });
+  const byCPU = (a, b) => (b.cpu ?? -1) - (a.cpu ?? -1);
+  const held = new Set();
+  const items = [];
+  for (const g of groups) {
+    if (g.consumers) {
+      const members = c.rows.filter((r) => g.members.includes(r.subject));
+      members.forEach((r) => held.add(r.subject));
+      items.push({ id: g.id, label: g.name, role: `group · ${g.source}`, group: true,
+        cpu: scale(val(`cpu_utilization@${g.id}`), c.cores), mem: scale(val(`memory_utilization@${g.id}`), c.memTotal),
+        children: members.map(row).sort(byCPU) });
+    }
+  }
+  const loose = c.rows.filter((r) => !held.has(r.subject)).map(row);
+  if (loose.length) {
+    const sum = (k) => loose.reduce((t, r) => (r[k] === null ? t : (t ?? 0) + r[k]), null);
+    items.push({ id: 'ungrouped', label: 'ungrouped', role: 'no group label', group: true,
+      cpu: sum('cpu'), mem: sum('mem'), children: loose.sort(byCPU) });
+  }
+  items.sort(byCPU);
+  for (const g of groups) {
+    if (!g.consumers) {
+      items.push({ id: g.id, label: g.name, role: g.source, group: true, structure: true, cpu: null, mem: null,
+        children: g.members.map(part) });
+    }
+  }
+  return { cores: c.cores, memTotal: c.memTotal, node: c.node, rest: c.rest, items };
 }
 
 /** The machine in one line, for its enclosure: name, then how much of it there is. */

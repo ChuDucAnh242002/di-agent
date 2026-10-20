@@ -118,6 +118,8 @@ export const api = {
   relief: () => orNull(send('GET', '/relief')),
   reliefActions: () => orNull(send('GET', '/relief/actions')),
   workloads: () => orNull(send('GET', '/workloads')),
+  // The node's groups and each part's whole; null from an agent that serves none.
+  groups: () => orNull(send('GET', '/groups')),
 
   // ── meta ─────────────────────────────────────────────────────────────────
   health: () => send('GET', '/healthz'),
