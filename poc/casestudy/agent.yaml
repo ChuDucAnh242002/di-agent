@@ -17,7 +17,7 @@ loops:
   review:
     level: full
     decision: { backend: systemone, url: "http://localhost:11434", model: "tev1:4b-node" }
-    reasoning: { backend: openai-tools, url: "http://localhost:11434/v1", model: "qwen3:8b-node" }
+    reasoning: { backend: openai-tools, url: "http://localhost:11434/v1", model: "qwen3:4b-node" }
   relief: { enabled: false }
 persist:
   file: /var/lib/di-agent/state.json

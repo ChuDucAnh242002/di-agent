@@ -8,7 +8,7 @@ back to map state. It is a demonstration, not a measurement: one run, no repetit
 
 A Multipass VM (Ubuntu 24.04, arm64, 12 vCPU, 16 GB, 40 GB disk, cgroup v2; CPUs 0–5 for pods, 6–11 for the agent's models, `node-cpus.sh`) with k0s **v1.36.4+k0s.1** as a single
 node, installed by `poc/scripts/02-k0s.sh`, and the agent's own decision model (`tev1:4b-node`, `tev1:4b` at a 2048-token context, on Ollama;
-`tier1.sh`: CPUs 6–11 only, CPU weight 20, 13 GB) and a reasoning model (`qwen3:8b-node`). The agent runs on
+`tier1.sh`: CPUs 6–11 only, CPU weight 20, 13 GB) and a reasoning model (`qwen3:4b-node`). The agent runs on
 the VM as root from `agent.yaml`, then `agent-relief.yaml`, with the review loop deciding on its own:
 rules, the decision model and the reasoning model, all on the node.
 
