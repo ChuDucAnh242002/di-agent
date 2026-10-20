@@ -44,10 +44,10 @@ func TestAGroupIsWhatItsMembersUse(t *testing.T) {
 	if err := m.DeclareGroup("group:storage", []string{"pod:pg", "pod:redis"}, map[string]string{"group": "storage"}); err != nil {
 		t.Fatal(err)
 	}
-	if v := value(t, m, "cpu_utilization@group:storage"); !nearly(v, 0.3) {
+	if v := value(t, m, "cpu_utilization@group:storage"); !groupNearly(v, 0.3) {
 		t.Fatalf("group CPU %v; want 0.2 + 0.1", v)
 	}
-	if v := value(t, m, "memory_utilization@group:storage"); !nearly(v, 0.15) {
+	if v := value(t, m, "memory_utilization@group:storage"); !groupNearly(v, 0.15) {
 		t.Fatalf("group memory %v; want 0.1 + 0.05", v)
 	}
 	if got := m.GroupMembers("group:storage"); !slices.Equal(got, []string{"pod:pg", "pod:redis"}) {
@@ -57,7 +57,7 @@ func TestAGroupIsWhatItsMembersUse(t *testing.T) {
 	if err := m.DeclareGroup("group:storage", []string{"pod:pg"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if v := value(t, m, "cpu_utilization@group:storage"); !nearly(v, 0.2) {
+	if v := value(t, m, "cpu_utilization@group:storage"); !groupNearly(v, 0.2) {
 		t.Fatalf("group CPU %v after redis left; want 0.2", v)
 	}
 }
@@ -97,9 +97,9 @@ func TestWithoutAGroupTakesEveryMemberAway(t *testing.T) {
 		t.Fatalf("result %+v", res)
 	}
 	// Both members to zero: 0.5*0.2 + 0.5*0.1 = 0.15 taken off.
-	if !nearly(res.Hypothetical.Delta, -0.15) {
+	if !groupNearly(res.Hypothetical.Delta, -0.15) {
 		t.Fatalf("delta %v; want both members floored, -0.15", res.Hypothetical.Delta)
 	}
 }
 
-func nearly(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+func groupNearly(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
