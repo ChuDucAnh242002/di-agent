@@ -59,7 +59,7 @@ import (
 // counts that time as CPU stall, and the root sums every cgroup's, so a pod running
 // at its limit makes cpu_pressure_ratio rise with nothing else on the node waiting —
 // and lowering its limit raises it further. The node's cpu_contention_ratio is the
-// worst-off subject's: the share of the window in which some workload waited for a
+// worst-off pod's that was promised CPU (not BestEffort, not a unit): the share of the window in which some workload waited for a
 // CPU another was using. It needs subjects; with -cgroup-subjects off it is absent.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
@@ -307,7 +307,10 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
-			if labels["qos"] != "besteffort" {
+			// Node contention is relief's trigger and relief acts on pods: a pod that was
+			// promised CPU sets it. A BestEffort pod's waiting is the share it was promised,
+			// and a unit's is not the runtime's to relieve; both are still emitted.
+			if labels["kind"] == "pod" && labels["qos"] != "besteffort" {
 				promised = append(promised, samples...)
 			}
 			return filepath.SkipDir // a subject's children are not subjects

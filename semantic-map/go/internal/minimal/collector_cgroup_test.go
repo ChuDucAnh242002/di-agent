@@ -955,3 +955,41 @@ func TestNodeContentionMovesOnWhenTheRootIsUnreadable(t *testing.T) {
 		t.Fatalf("both node contention samples have event id %s; want each anchored on its own window", ids[0])
 	}
 }
+
+// TestAUnitDoesNotSetNodeContention: node contention is relief's trigger, and relief acts
+// on the runtime's workloads. A unit's waiting is not theirs to relieve: the node's own
+// decision model, alone on CPUs no pod can use, waited 0.6 of the time on its own runner
+// threads, which held node contention above relief's exit level whatever was capped and
+// made every verification read as no effect. The unit's own reading is still emitted.
+func TestAUnitDoesNotSetNodeContention(t *testing.T) {
+	root, podA, _, unit, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, unit} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, unit, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, UnitGlobs: []string{"*"},
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000) // 0.1
+	advance(t, unit, 3_000_000, 0, 0)
+	writeThrottledUsec(t, unit, 0)
+	writePressure(t, unit, 9_000_000) // 0.9, on its own threads
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0.1 {
+		t.Fatalf("node cpu_contention_ratio %v; want the pod's 0.1, not the unit's 0.9", s)
+	}
+	if s := got["unit:k0sworker.service"][types.CPUContentionRatio]; s == nil || s.Value != 0.9 {
+		t.Fatalf("unit's own cpu_contention_ratio %v; want it still reported, 0.9", s)
+	}
+}
