@@ -292,7 +292,14 @@ export function consumers(model) {
     .sort((a, b) => (b.cpu ?? -1) - (a.cpu ?? -1));
   const node = { cpu: cpu(val('cpu_utilization')), mem: mem(val('memory_utilization')) };
   const sum = (k) => rows.reduce((t, r) => t + (r[k] ?? 0), 0);
-  const rest = (k) => (node[k] === null ? null : node[k] - sum(k) >= 0 ? node[k] - sum(k) : null);
+  // The node's value and each subject's are separate averages over slightly different
+  // windows, so a remainder within 2% of the machine below zero is none, not a contradiction.
+  const total = { cpu: cores, mem: memTotal };
+  const rest = (k) => {
+    if (node[k] === null) return null;
+    const r = node[k] - sum(k);
+    return r >= 0 ? r : total[k] !== null && r > -0.02 * total[k] ? 0 : null;
+  };
   return { cores, memTotal, node, rows, rest: { cpu: rest('cpu'), mem: rest('mem') } };
 }
 
