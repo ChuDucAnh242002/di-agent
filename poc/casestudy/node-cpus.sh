@@ -13,7 +13,7 @@
 # shows up as contention and a hog never slows a review.
 set -euo pipefail
 PODS="${1:-0-5}"
-SYSTEM_CPUS="${2:-4}"
+SYSTEM_CPUS="${2:-$(( $(nproc) - 6 ))}" # every CPU past the pods' six is the models'
 want="--kubelet-extra-args=--system-reserved=cpu=$SYSTEM_CPUS"
 conf=/etc/systemd/system/k0scontroller.service.d/cpus.conf
 mkdir -p "$(dirname "$conf")"

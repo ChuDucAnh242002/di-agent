@@ -5,14 +5,14 @@
 # Usage: ./provision.sh [vm-name]          (default di-node)
 #
 # Idempotent: each step checks before it acts.
-#   1. the VM: Ubuntu 24.04, 10 vCPU, 16 GB, 20 GB, launched only if absent (an existing one
+#   1. the VM: Ubuntu 24.04, 12 vCPU, 16 GB, 40 GB, launched only if absent (an existing one
 #      smaller than that is stopped and resized);
 #   2. k0s, pinned, through ../scripts/02-k0s.sh, and Netdata through ../scripts/03-netdata.sh;
 #   2b. CPUs 0-5 for pods, 6-9 reserved from Kubernetes (node-cpus.sh), and the agent's own
 #      decision model pinned to those four under fixed limits (tier1.sh);
 #   3. the tunnel key: ~/.ssh/<vm>-tunnel on the host, created if missing, its public half
-#      in the VM's ~ubuntu/.ssh/authorized_keys once. tunnel.sh uses it to carry the host's
-#      reasoning model to the node; the decision model is the node's own;
+#      in the VM's ~ubuntu/.ssh/authorized_keys once, for tunnel.sh, which can carry a model on
+#      the host to the node; the case study's models are the node's own (tier1.sh);
 #   4. this directory copied to /home/ubuntu/casestudy on the node.
 # The agent binary is built and copied separately (README).
 set -euo pipefail
@@ -22,12 +22,13 @@ KEY="$HOME/.ssh/$VM-tunnel"
 
 if ! multipass info "$VM" >/dev/null 2>&1; then
     echo "[provision] launching $VM"
-    multipass launch 24.04 --name "$VM" --cpus 10 --memory 16G --disk 20G
+    multipass launch 24.04 --name "$VM" --cpus 12 --memory 16G --disk 40G
     multipass exec "$VM" -- cloud-init status --wait
-elif [ "$(multipass get "local.$VM.cpus")" -lt 10 ]; then
-    echo "[provision] resizing $VM to 10 vCPU, 16 GB"
+elif [ "$(multipass get "local.$VM.cpus")" -lt 12 ]; then
+    echo "[provision] resizing $VM to 12 vCPU, 16 GB, 40 GB"
     multipass stop "$VM"
-    multipass set "local.$VM.cpus=10"
+    multipass set "local.$VM.cpus=12"
+    multipass set "local.$VM.disk=40G"
     multipass set "local.$VM.memory=16G"
     multipass start "$VM"
 fi

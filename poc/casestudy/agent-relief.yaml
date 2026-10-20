@@ -11,13 +11,13 @@ sources:
   cgroup: { units: [di-agent.service, ollama.service, k0scontroller.service, containerd.service, netdata.service] }
 runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
 loops:
-  # The agent reviews discovery's candidates on its own: rules, then tier 1 on this node
-  # (tier1.sh: Ollama on CPUs 6-9, which no pod can use, 9 GB), then the reasoning model on the host
-  # through tunnel.sh. Nothing waits for a person.
+  # The agent reviews discovery's candidates on its own, every tier on this node: rules, the
+  # decision model, then the reasoning model (tier1.sh: Ollama on CPUs 6-11, which no pod can
+  # use, 13 GB). Nothing waits for a person.
   review:
     level: full
     decision: { backend: systemone, url: "http://localhost:11434", model: "tev1:4b-node" }
-    reasoning: { backend: openai-tools, url: "http://localhost:11435/v1", model: "qwen3.8:27b-nvfp4" }
+    reasoning: { backend: openai-tools, url: "http://localhost:11434/v1", model: "qwen3:8b-node" }
   relief: { enabled: true }
 persist:
   file: /var/lib/di-agent/state.json
