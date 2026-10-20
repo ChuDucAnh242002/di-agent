@@ -14,7 +14,9 @@ pkill -TERM -x agent; for _ in $(seq 60); do pgrep -x agent >/dev/null || break;
 "${K[@]}" delete pod cycler mem-wave mem-squeeze io-wave twin-a twin-b noise hog victim --ignore-not-found --wait=true >/dev/null
 [ -e /var/lib/di-agent/state.json ] && mv /var/lib/di-agent/state.json "/var/lib/di-agent/state.json.pre-demo-$(date +%H%M%S)"
 [ -e agent.new ] && mv agent.new agent
-setsid nohup ./agent -config agent-demo.yaml >>"$OUT/agent.log" 2>&1 </dev/null &
+systemctl reset-failed di-agent.service 2>/dev/null || true
+systemd-run --unit=di-agent --collect --quiet -p AllowedCPUs=0-5 -p WorkingDirectory="$PWD" \
+    -p StandardOutput="append:$OUT/agent.log" -p StandardError="append:$OUT/agent.log" "$PWD/agent" -config "$PWD/agent-demo.yaml"
 for _ in $(seq 60); do curl -sf $API/healthz >/dev/null && break; sleep 1; done
 mark "agent started, fresh map, relief on, review full ($(curl -s $API/version | jq -r .build_commit))"
 setsid nohup ./capture.sh "$OUT" 30 </dev/null >"$OUT/capture.err" 2>&1 &

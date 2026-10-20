@@ -5,6 +5,10 @@ node: { addr: "0.0.0.0:9090" }
 sources:
   interval: 5s
   netdata: { url: http://localhost:19999 }
+  # The node's other consumers, beside its pods: the agent itself, its decision model, k0s
+  # (with its own containerd), the system containerd and Netdata. Every other unit is in
+  # the node total and in no subject.
+  cgroup: { units: [di-agent.service, ollama.service, k0scontroller.service, containerd.service, netdata.service] }
 runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
 loops:
   # The agent reviews discovery's candidates on its own: rules, then tier 1 on this node

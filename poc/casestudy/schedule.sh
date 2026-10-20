@@ -45,9 +45,14 @@ at() {
     return 0
 }
 
+# The agent runs as the unit di-agent.service, so it is under system.slice and its own
+# cgroup collector models it as unit:di-agent — the agent is one of the node's consumers.
 agent_start() {
     local config="$1"
-    (cd "$HERE" && setsid nohup ./agent -config "$config" >>"$OUT/agent.log" 2>&1 </dev/null &)
+    systemctl reset-failed di-agent.service 2>/dev/null || true
+    systemd-run --unit=di-agent --collect --quiet -p AllowedCPUs=0-5 -p WorkingDirectory="$HERE" \
+        -p StandardOutput="append:$OUT/agent.log" -p StandardError="append:$OUT/agent.log" \
+        "$HERE/agent" -config "$HERE/$config"
     for _ in $(seq 60); do
         curl -sf "$API/healthz" >/dev/null && return 0
         sleep 1
@@ -62,7 +67,7 @@ agent_stop() {
     local pid
     pid=$(pgrep -x agent || true)
     [ -z "$pid" ] && return 0
-    kill -TERM $pid
+    systemctl kill --signal=TERM di-agent.service 2>/dev/null || kill -TERM $pid
     for _ in $(seq 60); do
         pgrep -x agent >/dev/null || return 0
         sleep 1

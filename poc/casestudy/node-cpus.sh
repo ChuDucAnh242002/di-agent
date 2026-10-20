@@ -3,7 +3,9 @@
 # Runs on the node, as root; provision.sh calls it.
 #
 # Pods get CPUs 0-5, the six the case-study workloads are sized for; tier1.sh pins the
-# decision model to 6-9. The split is the kubepods cgroup's cpuset, which every pod's
+# decision model to 6-9, and the node's other heavy units (k0s, containerd, Netdata, and the
+# agent, which schedule.sh starts with AllowedCPUs=0-5) are held to 0-5 as well, so 6-9 are
+# the model's alone and its waiting is never another unit's doing. The split is the kubepods cgroup's cpuset, which every pod's
 # cgroup inherits, held by a small unit that re-applies it whenever k0s recreates the
 # cgroup. (Kubelet's static CPU manager does not do this: its --reserved-cpus stay in the
 # shared pool every non-exclusive pod runs in.) --system-reserved=cpu=4 makes the
@@ -26,13 +28,16 @@ UNIT
     rm -f /var/lib/k0s/kubelet/cpu_manager_state
     systemctl start k0scontroller
 fi
+# Cgroups systemd does not manage: kubepods (the kubelet's) and k0s's own containerd.
 cat >/usr/local/sbin/kubepods-cpus <<SCRIPT
 #!/bin/sh
-# Hold /sys/fs/cgroup/kubepods to CPUs $PODS (node-cpus.sh).
+# Hold the kubelet's and k0s's own cgroups to CPUs $PODS (node-cpus.sh).
 grep -qw cpuset /sys/fs/cgroup/cgroup.subtree_control || echo +cpuset >/sys/fs/cgroup/cgroup.subtree_control
+grep -qw cpuset /sys/fs/cgroup/system.slice/cgroup.subtree_control || echo +cpuset >/sys/fs/cgroup/system.slice/cgroup.subtree_control
 while :; do
-    f=/sys/fs/cgroup/kubepods/cpuset.cpus
-    [ -e "\$f" ] && [ "\$(cat \$f)" != "$PODS" ] && echo "$PODS" >"\$f"
+    for f in /sys/fs/cgroup/kubepods/cpuset.cpus /sys/fs/cgroup/system.slice/containerd.service/cpuset.cpus; do
+        [ -e "\$f" ] && [ "\$(cat \$f)" != "$PODS" ] && echo "$PODS" >"\$f"
+    done
     sleep 10
 done
 SCRIPT
@@ -52,6 +57,9 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now kubepods-cpus.service >/dev/null
 systemctl restart kubepods-cpus.service
+for u in k0scontroller.service netdata.service; do
+    systemctl set-property "$u" AllowedCPUs="$PODS"
+done
 for _ in $(seq 60); do k0s kubectl get nodes 2>/dev/null | grep -q " Ready" && break; sleep 5; done
 sleep 12
 echo "kubepods cpuset $(cat /sys/fs/cgroup/kubepods/cpuset.cpus.effective)"

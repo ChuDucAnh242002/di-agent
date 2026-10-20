@@ -27,7 +27,12 @@ The decision model is the node's own: a node that cannot decide without the netw
 autonomous. `node-cpus.sh` and `tier1.sh` give it four CPUs no pod can use, a low CPU weight and 9 GB, so it cannot take what the
 workloads need (unlimited, on the 4-vCPU node, it starved the hog below relief's floor). The reasoning
 model is the host's (`ollama pull qwen3.8:27b-nvfp4`), reached through `tunnel.sh`. `provision.sh` creates `~/.ssh/<vm>-tunnel` and authorises it on the node once;
-`tunnel.sh` reconnects if the link drops. Ollama on the host keeps listening on 127.0.0.1 only.
+`tunnel.sh` reconnects if the link drops; `tunnel.sh --install di-node` runs it as a launchd agent on the host
+(at login, restarted if it exits, independent of any terminal), `--uninstall` removes it.
+
+The agent runs as `di-agent.service` (`systemd-run`), and the configs model the node's other consumers as
+`unit:` subjects: the agent itself, its decision model (`ollama.service`), k0s, containerd and Netdata. CPUs
+6–9 are the decision model's alone: pods, k0s, containerd, Netdata and the agent are held to 0–5. Ollama on the host keeps listening on 127.0.0.1 only.
 
 `demo.sh <out-dir>` (on the node) is a 48-minute compressed run (`agent-demo.yaml`): planted pods arrive and leave, then two relief episodes on the hog.
 
