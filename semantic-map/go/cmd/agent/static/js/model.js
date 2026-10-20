@@ -252,6 +252,57 @@ export function factValue(f) {
   return f.value;
 }
 
+/** What each subject the map holds uses of the machine, from the map's own values. */
+const ROLES = {
+  'ollama.service': 'the agent\'s decision model',
+  'di-agent.service': 'the agent',
+  'k0scontroller.service': 'Kubernetes (k0s)',
+  'containerd.service': 'container runtime',
+  'netdata.service': 'telemetry (Netdata)',
+};
+
+/**
+ * The machine's consumers: every pod and unit the map models, with its CPU in cores and
+ * memory in bytes (both are fractions of the node in the map), largest CPU first, and the
+ * remainder no subject accounts for — the kernel, sessions, every unit not modelled.
+ * The remainder is computed here from the node's values and the subjects', never stored,
+ * and is null where the subjects add up to more than the node: cgroup memory counts the
+ * page cache a cgroup has read, the node's in-use figure does not.
+ */
+export function consumers(model) {
+  const cores = model.fact('cpu_cores')?.number ?? null;
+  const memTotal = model.fact('memory_total')?.number ?? null;
+  const val = (id) => {
+    const p = model.property(id);
+    return p && p.n_observations && p.status !== 'retired' ? p.value : null;
+  };
+  const cpu = (f) => (f === null || cores === null ? null : f * cores);
+  const mem = (f) => (f === null || memTotal === null ? null : f * memTotal);
+  const rows = model.subjects()
+    .filter((s) => (s.kind === 'pod' || s.kind === 'unit') && s.status !== 'retired')
+    .map((s) => {
+      const name = s.name || s.identity;
+      return {
+        subject: s.id, kind: s.kind, name, status: s.status,
+        role: s.kind === 'unit' ? (ROLES[name] || 'system unit') : (name.startsWith('kube-system/') ? 'system pod' : 'workload'),
+        cpu: cpu(val(`cpu_utilization@${s.id}`)),
+        mem: mem(val(`memory_utilization@${s.id}`)),
+      };
+    })
+    .sort((a, b) => (b.cpu ?? -1) - (a.cpu ?? -1));
+  const node = { cpu: cpu(val('cpu_utilization')), mem: mem(val('memory_utilization')) };
+  const sum = (k) => rows.reduce((t, r) => t + (r[k] ?? 0), 0);
+  // The node's value and each subject's are separate averages over slightly different
+  // windows, so a remainder within 2% of the machine below zero is none, not a contradiction.
+  const total = { cpu: cores, mem: memTotal };
+  const rest = (k) => {
+    if (node[k] === null) return null;
+    const r = node[k] - sum(k);
+    return r >= 0 ? r : total[k] !== null && r > -0.02 * total[k] ? 0 : null;
+  };
+  return { cores, memTotal, node, rows, rest: { cpu: rest('cpu'), mem: rest('mem') } };
+}
+
 /** The machine in one line, for its enclosure: name, then how much of it there is. */
 export function machineSummary(model) {
   const f = (k) => model.fact(k);
