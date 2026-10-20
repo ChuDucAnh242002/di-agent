@@ -13,10 +13,14 @@
 #                                    more. On two CPUs a review took 1-2 min against the agent's
 #                                    timeout; on four, 40-80 s.
 #   CPUWeight=20, IOWeight=20        below a pod's default 100
+#   MemoryMin=11G                    a floor as well as a ceiling: the models' memory is reserved,
+#                                    never reclaimed below it, so it is a dedicated amount and a
+#                                    constant offset in the node's memory rather than noise in it
 #   MemoryMax=13G, no MemoryHigh     both models resident (tier 1 6.2 GB, tier 2 ~3.5 GB) and the
 #                                    page cache of reading them, which the kernel reclaims. A MemoryHigh below that throttles reclaim
 #                                    and stalls every review; the hard cap alone bounds it.
-#   models <name>-node               each with num_thread 6, one per CPU it has (by default the
+#   models <name>-node               each with use_mlock (the weights pinned in memory, never paged
+#                                    out, so the footprint does not drift), num_thread 6, one per CPU it has (by default the
 #                                    runner's threads outnumber them and it waits on itself), and a
 #                                    context sized to its prompts: 2048 for tier 1 (a review is ~800
 #                                    tokens; the base model's own 8192 overrides OLLAMA_CONTEXT_LENGTH),
@@ -40,6 +44,7 @@ cat >/etc/systemd/system/ollama.service.d/limits.conf <<'UNIT'
 AllowedCPUs=6-11
 CPUQuota=600%
 CPUWeight=20
+MemoryMin=11G
 MemoryMax=13G
 IOWeight=20
 Environment="OLLAMA_HOST=127.0.0.1:11434"
@@ -53,7 +58,7 @@ systemctl restart ollama
 for _ in $(seq 30); do curl -sf localhost:11434/api/tags >/dev/null && break; sleep 1; done
 node_model() { # node_model <base> <num_ctx>: <base>-node, pulled if absent
     ollama list | grep -q "^$1 " || ollama pull "$1"
-    printf 'FROM %s\nPARAMETER num_ctx %s\nPARAMETER num_thread 6\n' "$1" "$2" >/tmp/tier1.Modelfile
+    printf 'FROM %s\nPARAMETER num_ctx %s\nPARAMETER num_thread 6\nPARAMETER use_mlock true\n' "$1" "$2" >/tmp/tier1.Modelfile
     ollama create "$1-node" -f /tmp/tier1.Modelfile >/dev/null
 }
 node_model "$DECIDE" 2048
