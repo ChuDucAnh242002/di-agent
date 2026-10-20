@@ -8,9 +8,9 @@ back to map state. It is a demonstration, not a measurement: one run, no repetit
 
 A Multipass VM (Ubuntu 24.04, arm64, 12 vCPU, 16 GB, 40 GB disk, cgroup v2; CPUs 0–5 for pods, 6–11 for the agent's models, `node-cpus.sh`) with k0s **v1.36.4+k0s.1** as a single
 node, installed by `poc/scripts/02-k0s.sh`, and the agent's own decision model (`tev1:4b-node`, `tev1:4b` at a 2048-token context, on Ollama;
-`tier1.sh`: CPUs 6–11 only, CPU weight 20, 13 GB) and a reasoning model (`qwen3:4b-node`). The agent runs on
+`tier1.sh`: CPUs 6–11 only, CPU weight 20, memory held between 6 and 9 GB). The agent runs on
 the VM as root from `agent.yaml`, then `agent-relief.yaml`, with the review loop deciding on its own:
-rules, the decision model and the reasoning model, all on the node.
+rules, then the decision model, on the node.
 
 ## Provisioning
 
@@ -22,10 +22,13 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go -C ../../semantic-map/go build -ldflags
 multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sudo mv /tmp/agent.new /home/ubuntu/casestudy/agent.new
 ```
 
-Both review models are the node's own: a node that cannot decide without the network is not
-autonomous. `node-cpus.sh` and `tier1.sh` give them six CPUs no pod can use, a low CPU weight and 13 GB,
-so they cannot take what the workloads need (unlimited, on the 4-vCPU node, the decision model starved
-the hog below relief's floor). A larger reasoning model on a peer or the host is optional: `tunnel.sh`
+The decision model is the node's own: a node that cannot decide without the network is not
+autonomous. `node-cpus.sh` and `tier1.sh` give it six CPUs no pod can use, a low CPU weight, and a memory
+band of 6–9 GB (a reserved floor and a cap), so it cannot take what the workloads need and its footprint
+is a constant in the node's memory. There is no reasoning tier on the node: beside the decision model, a
+local `qwen3:8b`, then `qwen3:4b`, ran Ollama past its cap, and loading one model at a time swung node
+memory by gigabytes and buried a workload's wave (see `tier1.sh`). A reasoning model on a peer or the host
+is optional: `tunnel.sh`
 carries the host's Ollama to the node's `localhost:11435` (`--install` keeps it under launchd), using the
 key `provision.sh` authorises. The case study used the host's `qwen3.8:27b` once and dropped it — it ran
 the host out of GPU memory mid-review — and may return to one.
