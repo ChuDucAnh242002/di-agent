@@ -1,0 +1,163 @@
+{
+ "charts": {
+  "app.netdata_cpu_utilization": {
+   "chart_labels": {
+    "app_group": "netdata"
+   },
+   "chart_type": "stacked",
+   "context": "app.cpu_utilization"
+  },
+  "cgroup_k8s_kubepods_burstable_pod8f3c1234-aaaa-bbbb-cccc-1234567890ab_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.cpu": {
+   "chart_labels": {},
+   "chart_type": "stacked",
+   "context": "k8s.cgroup.cpu"
+  },
+  "cpu.cpu0": {
+   "chart_labels": {
+    "cpu": "cpu0"
+   },
+   "chart_type": "stacked",
+   "context": "cpu.cpu"
+  },
+  "cpu.cpu0_interrupts": {
+   "chart_labels": {
+    "cpu": "cpu0"
+   },
+   "chart_type": "stacked",
+   "context": "cpu.interrupts"
+  },
+  "cpu.cpu1": {
+   "chart_labels": {
+    "cpu": "cpu1"
+   },
+   "chart_type": "stacked",
+   "context": "cpu.cpu"
+  },
+  "disk.sda": {
+   "chart_labels": {
+    "device": "sda",
+    "device_type": "physical",
+    "id": "scsi-0QEMU_QEMU_HARDDISK_hda",
+    "model": "QEMU HARDDISK",
+    "mount_point": "[none]",
+    "serial": "[none]"
+   },
+   "chart_type": "area",
+   "context": "disk.io"
+  },
+  "disk_await.sda": {
+   "chart_labels": {
+    "device": "sda",
+    "device_type": "physical",
+    "id": "scsi-0QEMU_QEMU_HARDDISK_hda",
+    "model": "QEMU HARDDISK",
+    "mount_point": "[none]",
+    "serial": "[none]"
+   },
+   "chart_type": "line",
+   "context": "disk.await"
+  },
+  "disk_space._boot": {
+   "chart_labels": {
+    "filesystem": "ext4",
+    "mount_point": "/boot",
+    "mount_root": "/"
+   },
+   "chart_type": "stacked",
+   "context": "disk.space"
+  },
+  "disk_util.sda": {
+   "chart_labels": {
+    "device": "sda",
+    "device_type": "physical",
+    "id": "scsi-0QEMU_QEMU_HARDDISK_hda",
+    "model": "QEMU HARDDISK",
+    "mount_point": "[none]",
+    "serial": "[none]"
+   },
+   "chart_type": "area",
+   "context": "disk.util"
+  },
+  "mem.available": {
+   "chart_labels": {},
+   "chart_type": "area",
+   "context": "mem.available"
+  },
+  "net.enp0s1": {
+   "chart_labels": {
+    "device": "enp0s1",
+    "interface_type": "real"
+   },
+   "chart_type": "area",
+   "context": "net.net"
+  },
+  "net.veth0a1b2c3d": {
+   "chart_labels": {
+    "device": "veth0a1b2c3d",
+    "interface_type": "virtual"
+   },
+   "chart_type": "area",
+   "context": "net.net"
+  },
+  "net_carrier.enp0s1": {
+   "chart_labels": {
+    "device": "enp0s1",
+    "interface_type": "real"
+   },
+   "chart_type": "line",
+   "context": "net.carrier"
+  },
+  "system.cpu": {
+   "chart_labels": {},
+   "chart_type": "stacked",
+   "context": "system.cpu"
+  },
+  "system.cpu_some_pressure": {
+   "chart_labels": {},
+   "chart_type": "line",
+   "context": "system.cpu_some_pressure"
+  },
+  "system.cpu_some_pressure_stall_time": {
+   "chart_labels": {},
+   "chart_type": "line",
+   "context": "system.cpu_some_pressure_stall_time"
+  },
+  "system.io": {
+   "chart_labels": {},
+   "chart_type": "area",
+   "context": "system.io"
+  },
+  "system.io_some_pressure_stall_time": {
+   "chart_labels": {},
+   "chart_type": "line",
+   "context": "system.io_some_pressure_stall_time"
+  },
+  "system.load": {
+   "chart_labels": {},
+   "chart_type": "line",
+   "context": "system.load"
+  },
+  "system.memory_some_pressure_stall_time": {
+   "chart_labels": {},
+   "chart_type": "line",
+   "context": "system.memory_some_pressure_stall_time"
+  },
+  "system.net": {
+   "chart_labels": {},
+   "chart_type": "area",
+   "context": "system.net"
+  },
+  "system.ram": {
+   "chart_labels": {},
+   "chart_type": "stacked",
+   "context": "system.ram"
+  },
+  "systemd_containerd.cpu_utilization": {
+   "chart_labels": {
+    "service_name": "containerd"
+   },
+   "chart_type": "stacked",
+   "context": "systemd.service.cpu.utilization"
+  }
+ }
+}

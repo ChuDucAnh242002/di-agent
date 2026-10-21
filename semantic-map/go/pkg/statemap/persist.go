@@ -2,9 +2,11 @@ package statemap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/stats"
@@ -36,7 +38,8 @@ import (
 // arrive and the observation counts and timestamps would not. That is the silent
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
-const SnapshotVersion = 3
+// Version 4 added the intervention counters.
+const SnapshotVersion = 4
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -51,6 +54,10 @@ type Snapshot struct {
 
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
+
+	// Interventions are the counters by pair "from->to", saved apart from the
+	// relationships because they exist before any relationship does.
+	Interventions map[string]Interventions `json:"interventions,omitempty"`
 
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
@@ -78,6 +85,12 @@ func (m *Map) Snapshot() Snapshot {
 	for _, r := range m.relationships {
 		s.Relationships = append(s.Relationships, *r)
 	}
+	for k, iv := range m.interventions {
+		if s.Interventions == nil {
+			s.Interventions = map[string]Interventions{}
+		}
+		s.Interventions[k] = *iv
+	}
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
 	s.JournalDropped = dropped
@@ -96,6 +109,8 @@ func (m *Map) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating snapshot directory: %w", err)
 	}
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	snap := m.Snapshot()
 	blob, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -122,13 +137,61 @@ func (m *Map) Save(path string) error {
 		_ = f.Close()
 		return fmt.Errorf("writing snapshot: %w", err)
 	}
+	// Flushed before the rename: without it a power cut can leave the new name
+	// pointing at a file whose bytes never reached the disk, an empty snapshot where
+	// a good one stood, and the next start refuses it.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("flushing snapshot: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing snapshot: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replacing snapshot: %w", err)
 	}
+	// And the directory after it, so the rename itself survives a power cut. The
+	// snapshot is in place by now, so a failure here says so rather than reading as
+	// a failed save.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("snapshot replaced, but flushing its directory failed: %w", err)
+	}
 	return nil
+}
+
+// syncDir flushes a directory. A filesystem that cannot flush one (some network
+// and FUSE mounts refuse with EINVAL or ENOTSUP) has nothing to flush, and is not
+// a failure.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
+		return err
+	}
+	return nil
+}
+
+// CanSave reports whether a snapshot can be written at path, by creating its
+// directory and a temporary file beside it. An agent checks this at start: a
+// path it cannot write would otherwise fail at every save, in the log while the
+// operator believes the map is being kept.
+func CanSave(path string) error {
+	if path == "" {
+		return fmt.Errorf("no snapshot path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".probe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
 }
 
 // Load restores a snapshot into an empty map.
@@ -189,6 +252,10 @@ func (m *Map) Load(path string) (bool, error) {
 			r.ID = RelationshipID(r.From, r.To, r.Label)
 		}
 		m.relationships[r.ID] = &r
+	}
+	for k, iv := range snap.Interventions {
+		iv := iv
+		m.interventions[k] = &iv
 	}
 	m.revision = snap.Revision
 	m.journal.restore(snap.Events, snap.JournalDropped)

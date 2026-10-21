@@ -2,9 +2,10 @@
 //
 // Two things live here that are easy to get wrong elsewhere.
 //
-// First, EFFECTIVE STRENGTH. A relationship's JSON carries three layers, and the
+// First, EFFECTIVE STRENGTH. A relationship's JSON carries up to four layers, and the
 // agent decides which one answers by authority rather than arithmetic: an operator's
-// assertion outranks the long-run estimate, which outranks the most recent few pairs,
+// assertion outranks what the agent's own interventions measured, which outranks the
+// long-run estimate, which outranks the most recent few pairs,
 // and a relationship nothing has been observed about has no strength to offer at all.
 // The agent reports its own answer as `effective` and `basis`, and the page uses that
 // rather than re-deriving it. `effective` is absent for an unknown relationship, which
@@ -29,6 +30,18 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 /** A property's subject, or null for a node-level property. */
 export const subjectOf = (p) => (p.subject && p.subject.length ? p.subject : null);
 
+/**
+ * What an operator calls a property's subject: a pod's namespace/name or a unit's
+ * name, from the labels its collector stamped, or null when it stamped none. The
+ * subject itself (pod:<uid>) stays the identity everywhere; this is only what is shown.
+ */
+export function subjectName(p) {
+  const l = p?.labels || {};
+  if (l.pod) return l.namespace ? `${l.namespace}/${l.pod}` : l.pod;
+  if (l.unit) return l.unit;
+  return null;
+}
+
 /** The scoped half of `metric@pod:a`, for a label that is not mostly subject. */
 export function shortLabel(id) {
   const at = id.indexOf('@');
@@ -44,13 +57,39 @@ export class Model {
     this.relChanged = new Set();// relationship ids that gained observations
     this.seenRevision = 0;
     this.firstSeen = new Map(); // property id → ms when this page first saw it
+    // What the agent may change and what it did: GET /relief, /relief/actions and
+    // /workloads. relief is null when the spec leaves the loop off.
+    this.acting = { relief: null, actions: [], workloads: [] };
+    this.workloadBy = new Map();
+    // 'unknown' until /relief has answered; 'on', or 'off' once it said 404.
+    this.actingState = 'unknown';
+    this.actingError = '';
+    this._names = null;         // names(), rebuilt only when /state or /workloads changes
   }
+
+  /** Fold in the acting endpoints; a missing one is an empty one. */
+  setActing({ relief, actions, workloads }) {
+    this.acting = { relief: relief || null, actions: actions || [], workloads: workloads || [] };
+    this.workloadBy = new Map(this.acting.workloads.map((w) => [w.subject, w]));
+    this._names = null;
+  }
+
+  /** The runtime's workload for a subject, or null when it does not list one. */
+  workloadOf(subject) { return this.workloadBy.get(subject) || null; }
+
+  /** An action is in force from the act until it ends: in flight (outcome '') or kept. */
+  throttled(subject) {
+    return this.acting.actions.some((a) => a.subject === subject && (a.outcome === '' || a.outcome === 'kept'));
+  }
+
+  frozen(subject) { return !!this.workloadOf(subject)?.policy?.frozen; }
 
   /** Fold a fresh /state response in, recording what moved. */
   ingest(view) {
     const now = Date.now();
     this.prev = this.view;
     this.view = view;
+    this._names = null;
     this.changed.clear();
     this.relChanged.clear();
 
@@ -91,6 +130,9 @@ export class Model {
   get relationships() { return this.view?.relationships || []; }
   get counts() { return this.view?.counts || {}; }
   get owner() { return this.view?.owner || ''; }
+  /** What the machine is — OS, CPU, memory, disk — as the agent read it at startup. */
+  get facts() { return this.view?.facts || []; }
+  fact(key) { return this.facts.find((f) => f.key === key) || null; }
   get revision() { return this.view?.revision || 0; }
 
   property(id) { return this.properties.find((p) => p.id === id) || null; }
@@ -100,6 +142,31 @@ export class Model {
   influencesOn(id) { return this.relationships.filter((r) => r.to === id); }
   /** Relationships pointing OUT of a property — what it moves. */
   influencesOf(id) { return this.relationships.filter((r) => r.from === id); }
+
+  /** Each subject that has a name, by subject; see subjectName and /workloads. */
+  names() {
+    if (this._names) return this._names;
+    const out = new Map();
+    // The runtime's own name for the workload wins over what a collector stamped.
+    for (const w of this.acting.workloads) if (w.name) out.set(w.subject, w.name);
+    for (const p of this.properties) {
+      const s = subjectOf(p), n = subjectName(p);
+      if (s && n && !out.has(s)) out.set(s, n);
+    }
+    this._names = out;
+    return out;
+  }
+
+  /** A subject's name, or the subject itself when it has none. */
+  nameOf(subject) { return this.names().get(subject) || subject; }
+
+  /** A property id as shown: `metric@<name>` for a named subject, else unchanged. */
+  display(id) {
+    const at = id.indexOf('@');
+    if (at === -1) return id;
+    const s = id.slice(at + 1), n = this.names().get(s);
+    return n ? `${id.slice(0, at)}@${n}` : id;
+  }
 
   /** Subjects the map currently models, each with the properties scoped to it. */
   subjects() {
@@ -115,11 +182,13 @@ export class Model {
         id,
         kind: id.includes(':') ? id.slice(0, id.indexOf(':')) : 'subject',
         identity: id.includes(':') ? id.slice(id.indexOf(':') + 1) : id,
+        name: props.map(subjectName).find(Boolean) || null,
         properties: props.sort((a, b) => a.id.localeCompare(b.id)),
         status: props.some((p) => p.status === 'active') ? 'active'
           : props.some((p) => p.status === 'stale') ? 'stale' : 'retired',
       }))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      // By what is shown: sorted by UID, named pods would come out in no visible order.
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }
 
   /** Membership edges: a derived property is recomputed from these, never stored. */
@@ -163,12 +232,37 @@ export const fmt = {
     return Number.isNaN(d.getTime()) ? '—'
       : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   },
+  bytes(n) {
+    if (n === null || n === undefined) return '—';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${i ? n.toFixed(1) : n} ${units[i]}`;
+  },
   /** A value shown with its unit, and normalised only when a range was declared. */
   value(p) {
     const v = fmt.num(p.value, 3);
     return p.unit ? `${v} ${p.unit}` : v;
   },
 };
+
+/** A fact's value as read: bytes in binary units, anything else as given. */
+export function factValue(f) {
+  if (f.number !== undefined && f.unit === 'bytes') return fmt.bytes(f.number);
+  if (f.number !== undefined && f.unit) return `${f.value} ${f.unit}`;
+  return f.value;
+}
+
+/** The machine in one line, for its enclosure: name, then how much of it there is. */
+export function machineSummary(model) {
+  const f = (k) => model.fact(k);
+  const parts = [model.owner || f('hostname')?.value || 'this machine'];
+  if (f('cpu_cores')) parts.push(`${f('cpu_cores').value} cores`);
+  if (f('memory_total')) parts.push(fmt.bytes(f('memory_total').number));
+  if (f('disk_total')) parts.push(`${fmt.bytes(f('disk_total').number)} disk`);
+  if (f('os')) parts.push(f('os').value);
+  return parts.join(' · ');
+}
 
 export function escapeHTML(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => (

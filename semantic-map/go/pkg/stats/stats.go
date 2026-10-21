@@ -93,6 +93,25 @@ func spread(v []float64) float64 {
 	return hi - lo
 }
 
+// Distinct returns, for each side, the readings that are not its commonest value plus
+// one for that value: the window's length when no value repeats, k+1 for a rate that
+// sits at zero and spikes k times. Pearson over a window that is mostly one value
+// carries the evidence of those readings, not of its length.
+func (w *PairWindow) Distinct() (x, y int) { return distinct(w.xs), distinct(w.ys) }
+
+func distinct(v []float64) int {
+	if len(v) == 0 {
+		return 0
+	}
+	counts := make(map[float64]int, len(v))
+	most := 0
+	for _, x := range v {
+		counts[x]++
+		most = max(most, counts[x])
+	}
+	return len(v) - most + 1
+}
+
 // Pearson returns the correlation over the window, and false when it is undefined.
 func (w *PairWindow) Pearson() (float64, bool) { return Pearson(w.xs, w.ys) }
 

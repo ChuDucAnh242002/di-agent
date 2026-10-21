@@ -23,18 +23,26 @@ echo "  COLLECT_INTERVAL=${COLLECT_INTERVAL}"
 echo "  PROPOSER=${PROPOSER}"
 echo "  NETDATA_URL=${NETDATA_URL}"
 echo "  DOMAIN_SPEC=${DOMAIN_SPEC}"
-echo "  CGROUP_ROOT=${CGROUP_ROOT}"
 
-# Execute with ALL required flags
-exec /usr/local/bin/di-agent \
-  -profile "${PROFILE}" \
-  -addr ":${PORT}" \
-  -domain "${DOMAIN_SPEC}" \
-  -netdata-url "${NETDATA_URL}" \
-  -cgroup-root "${CGROUP_ROOT}" \
-  -kd "${KD}" \
-  -node-id "${NODE_ID}" \
-  -regime "${REGIME}" \
-  -collect-interval "${COLLECT_INTERVAL}" \
-  -proposer="${PROPOSER}" \
-  "$@"
+# The agent is described by a spec file; write this container's from the variables.
+SPEC_FILE=${SPEC_FILE:-"/tmp/agent.yaml"}
+cat > "${SPEC_FILE}" <<SPEC
+node:
+  addr: ":${PORT}"
+  id: "${NODE_ID}"
+profile:
+  name: "${PROFILE}"
+  kd: "${KD}"
+  regime: "${REGIME}"
+domain:
+  path: "${DOMAIN_SPEC}"
+sources:
+  interval: ${COLLECT_INTERVAL}
+  netdata:
+    url: "${NETDATA_URL}"
+map:
+  proposer:
+    enabled: ${PROPOSER}
+SPEC
+
+exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"

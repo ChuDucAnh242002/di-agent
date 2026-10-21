@@ -6,10 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/statemap"
@@ -35,7 +38,7 @@ func TestAgentRunsWithoutADomainModel(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explain.NewDisabled())
-	registerStateRoutes(mux, state, sm.Discovery)
+	registerStateRoutes(mux, state, sm.Discovery, nil)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -111,5 +114,41 @@ func TestNoAdmitWithoutADomainModelIsRefused(t *testing.T) {
 		if err := checkCanRecord(c.hasSpec, c.noAdmit, c.restored); err != nil {
 			t.Errorf("spec=%v no-admit=%v restored=%d: %v", c.hasSpec, c.noAdmit, c.restored, err)
 		}
+	}
+}
+
+// TestADomainModelIsLoadedOnlyWhereItIsNamedOrFound: "none" runs without one even when
+// a domain_spec.json sits above the working directory — a spec left in a home directory
+// once gave a case-study agent constructs no config asked for — and whatever is loaded
+// is reported with the path it came from.
+func TestADomainModelIsLoadedOnlyWhereItIsNamedOrFound(t *testing.T) {
+	dir := t.TempDir()
+	real, err := domain.FindSpec("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "domain_spec.json"), spec, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	below := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(below, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if dom, from, err := loadDomain("none", below); err != nil || dom != nil || from != "" {
+		t.Fatalf("none: dom=%v from=%q err=%v; want no domain model", dom, from, err)
+	}
+	dom, from, err := loadDomain("", below)
+	if err != nil || dom == nil || from != filepath.Join(dir, "domain_spec.json") {
+		t.Fatalf("search: dom=%v from=%q err=%v; want the spec above, with its path", dom, from, err)
+	}
+	if _, _, err := loadDomain(filepath.Join(dir, "missing.json"), below); err == nil {
+		t.Fatal("a named path that does not load must be an error")
+	}
+	if dom, from, err := loadDomain("", t.TempDir()); err != nil || dom != nil || from != "" {
+		t.Fatalf("nothing above: dom=%v from=%q err=%v; want none", dom, from, err)
 	}
 }

@@ -194,10 +194,15 @@ func (c *Client) Version(ctx context.Context) (*VersionResponse, error) {
 	return &v, nil
 }
 
-// Candidates returns pending candidate edges (GET /candidates).
-func (c *Client) Candidates(ctx context.Context) ([]CandidateEdge, error) {
+// Candidates returns candidate edges (GET /candidates): the pending ones when status
+// is empty, every one the proposer has emitted for "all", or those of one status.
+func (c *Client) Candidates(ctx context.Context, status string) ([]CandidateEdge, error) {
 	var out []CandidateEdge
-	if err := c.getJSON(ctx, "/candidates", nil, &out); err != nil {
+	var q url.Values
+	if status != "" {
+		q = url.Values{"status": {status}}
+	}
+	if err := c.getJSON(ctx, "/candidates", q, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

@@ -173,14 +173,42 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// GET /candidates  — pending graph extension proposals
+	// GET /candidates  — pending graph extension proposals. ?status=all returns every
+	// candidate the proposer has emitted, in first-seen order, with its current status
+	// and, when deferred, the reason; ?status=<pending|confirmed|rejected|deferred>
+	// one status of them. Without the history, a candidate an operator rejected and
+	// one never proposed look the same.
 	mux.HandleFunc("GET /candidates", func(w http.ResponseWriter, r *http.Request) {
-		candidates, err := sm.PendingCandidates()
+		status := r.URL.Query().Get("status")
+		if status == "" || status == types.Pending.String() {
+			candidates, err := sm.PendingCandidates()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, candidates)
+			return
+		}
+		valid := status == "all"
+		for _, s := range []types.CandidateStatus{types.Confirmed, types.Rejected, types.Deferred} {
+			valid = valid || status == s.String()
+		}
+		if !valid {
+			http.Error(w, fmt.Sprintf("status %q is not all, pending, confirmed, rejected or deferred", status), http.StatusBadRequest)
+			return
+		}
+		history, err := sm.CandidateHistory()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, candidates)
+		out := make([]*types.CandidateEdge, 0, len(history))
+		for _, c := range history {
+			if status == "all" || c.Status.String() == status {
+				out = append(out, c)
+			}
+		}
+		writeJSON(w, out)
 	})
 }
 
@@ -605,7 +633,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 				return
 			}
 		}
-		if err := sm.ConfirmCandidate(id, req.From); err != nil {
+		if err := sm.ConfirmCandidate(id, req.From, operatorReview()); err != nil {
 			code := http.StatusInternalServerError
 			if errors.Is(err, contracts.ErrBadConfirmation) {
 				code = http.StatusBadRequest
@@ -618,7 +646,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/reject", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.RejectCandidate(id); err != nil {
+		if err := sm.RejectCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -627,12 +655,17 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/defer", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.DeferCandidate(id); err != nil {
+		if err := sm.DeferCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// operatorReview is the review an operator's action through the endpoints records.
+func operatorReview() types.CandidateReview {
+	return types.CandidateReview{By: types.ReviewerOperator, At: time.Now()}
 }
 
 // parseSince accepts an empty string (returns zero time), an RFC3339

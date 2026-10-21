@@ -53,6 +53,7 @@ type EdgeDTO struct {
 	Direction     string   `json:"direction"`
 	Established   *float64 `json:"established"`
 	Assertion     *float64 `json:"assertion"`
+	Measured      *float64 `json:"measured"`
 	Effective     *float64 `json:"effective"`
 	Basis         string   `json:"basis"`
 	EMAWeight     float64  `json:"ema_weight"`
@@ -178,6 +179,7 @@ type CandidateEdge struct {
 	Direction       int      `json:"Direction"`
 	MIScore         float64  `json:"MIScore"`
 	PValue          float64  `json:"PValue"`
+	PBar            float64  `json:"PBar"`
 	NObservations   int      `json:"NObservations"`
 	DeploymentsSeen int      `json:"DeploymentsSeen"`
 	Status          string   `json:"Status"`

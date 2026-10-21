@@ -247,7 +247,7 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	// declared it: an assumed [0,1] would make the variation gate measure movement
 	// against a scale nobody stated. Advisory: its errors must not block telemetry.
 	if m.proposer != nil {
-		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Value: value,
+		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Chart: sample.Chart, PartOf: sample.PartOf, Value: value,
 			At: time.Unix(sample.TimestampUnix, 0)}
 		if p, ok := m.state.Property(id); ok && p.RangeDeclared {
 			rng := p.Range
@@ -368,13 +368,17 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 }
 
 // ConfirmCandidate applies an operator's confirmation. from orients an undirected
-// candidate (either end) and is "" for a directed one. A candidate between two
-// properties of the state model becomes a state-map relationship with Discovered
-// provenance — never a Di-Select proposition, whose vocabulary is constructs. A
+// candidate (either end) and is "" or the candidate's own source for a directed one. A
+// candidate between two properties of the state model becomes a state-map
+// relationship with Discovered provenance — never a Di-Select proposition, whose
+// vocabulary is constructs — unless a live relationship already covers the pair with
+// that sign, when the candidate is settled and nothing more is declared. A
 // candidate between constructs (the explicit construct path) goes through the
 // ontology.
-func (m *SemanticMap) ConfirmCandidate(candidateID, from string) error {
-	prop, err := m.proposer.Confirm(candidateID, from)
+//
+// rv is the review that decided it: an operator's, or the agent's own.
+func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.CandidateReview) error {
+	prop, err := m.proposer.Confirm(candidateID, from, rv)
 	if err != nil {
 		return err
 	}
@@ -386,10 +390,16 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string) error {
 		if prop.Direction == types.Negative {
 			sign = -1
 		}
+		if m.state.Covered(prop.FromConstruct, prop.ToConstruct, sign) {
+			// The pair already has a relationship — the agent's own interventions, say,
+			// created one while the candidate waited. The candidate is settled; a second
+			// relationship on the pair would count one dependency twice.
+			return nil
+		}
 		err := m.state.DeclareRelationship(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
 			Provenance: statemap.Discovered,
-			Note:       "[discovered: " + prop.Description + "; confirmed by operator]",
+			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
 		})
 		if err != nil {
 			// The proposer marked the candidate Confirmed on the way out; with no
@@ -441,12 +451,34 @@ func (m *SemanticMap) isConstruct(id string) bool {
 	return false
 }
 
-func (m *SemanticMap) RejectCandidate(candidateID string) error {
-	return m.proposer.Reject(candidateID)
+func (m *SemanticMap) RejectCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Reject(candidateID, rv)
 }
 
-func (m *SemanticMap) DeferCandidate(candidateID string) error {
-	return m.proposer.Defer(candidateID)
+func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Defer(candidateID, rv)
+}
+
+// AnnotateCandidate records a review of a pending candidate that did not act on it:
+// an escalation, or a suggestion under an autonomy level that reserves the action.
+func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Annotate(candidateID, rv)
+}
+
+// confirmedBy names the reviewer in a discovered relationship's note, with the
+// decision that holds its reasoning when there is one.
+func confirmedBy(rv types.CandidateReview) string {
+	who := rv.By
+	if who == "" {
+		who = types.ReviewerOperator
+	}
+	if rv.Model != "" {
+		who += " " + rv.Model
+	}
+	if rv.DecisionID != "" {
+		who += ", decision " + rv.DecisionID
+	}
+	return who
 }
 
 // ── Read-side facade (introspection) ──────────────────────────────────────────

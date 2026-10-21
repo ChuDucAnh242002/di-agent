@@ -91,7 +91,7 @@ func newExplainer(t *testing.T, script []string) (*explain.OpenAICompatibleExpla
 		BaseURL:      srv.URL + "/v1", // just a shape; httptest server ignores path segments beyond the mux root
 		Model:        "test-model",
 		SystemPrompt: "test prompt v1",
-		PromptFile:   "explain-v1.md",
+		PromptFile:   "explain-v2.md",
 		HTTPTimeout:  5 * time.Second,
 	})
 	if err != nil {
@@ -104,7 +104,7 @@ func newExplainer(t *testing.T, script []string) (*explain.OpenAICompatibleExpla
 		BaseURL:      srv.URL,
 		Model:        "test-model",
 		SystemPrompt: "test prompt v1",
-		PromptFile:   "explain-v1.md",
+		PromptFile:   "explain-v2.md",
 		HTTPTimeout:  5 * time.Second,
 	})
 	if err != nil {

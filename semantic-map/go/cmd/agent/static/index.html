@@ -119,7 +119,10 @@
 </main>
 
 <section id="drawer" aria-label="live record">
+  <div class="drawer-resize" id="drawer-resize" role="separator" aria-orientation="horizontal"
+       title="drag to resize · double-click to reset"></div>
   <div class="drawer-tabs" role="tablist">
+    <button class="tab" role="tab" data-pane="actions" aria-selected="false">Actions <span class="count" id="c-actions">0</span></button>
     <button class="tab" role="tab" data-pane="journal" aria-selected="true">Journal <span class="count" id="c-journal">0</span></button>
     <button class="tab" role="tab" data-pane="decisions" aria-selected="false">Decisions <span class="count" id="c-decisions">0</span></button>
     <button class="tab" role="tab" data-pane="discovery" aria-selected="false">Discovery <span class="count" id="c-discovery">0</span></button>
@@ -131,6 +134,7 @@
     <button class="btn ghost small" id="drawer-toggle" title="collapse / expand">▾</button>
   </div>
   <div class="drawer-body">
+    <div class="drawer-pane" id="pane-actions" role="tabpanel"></div>
     <div class="drawer-pane active" id="pane-journal" role="tabpanel"></div>
     <div class="drawer-pane" id="pane-decisions" role="tabpanel"></div>
     <div class="drawer-pane" id="pane-discovery" role="tabpanel"></div>

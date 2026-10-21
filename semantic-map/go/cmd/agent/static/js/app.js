@@ -118,6 +118,7 @@ function ask({ title, fields, hint, ok = 'Apply' }) {
 const graph = new GraphView(document.getElementById('graph'), {
   tooltip,
   onSelect: (sel) => inspector.show(sel),
+  onHighlightCleared: () => drawer.unpoint(),
 });
 
 const inspector = new Inspector(document.getElementById('inspector'), {
@@ -136,6 +137,7 @@ const drawer = new Drawer(document.getElementById('drawer'), {
   ask,
   refresh: () => tick(),
   selectProperty: (id) => graph.select({ type: 'property', id }),
+  highlight: (spec) => graph.highlight(spec),
   filterSubject: (subject) => {
     const input = document.getElementById('search');
     input.value = subject;
@@ -263,6 +265,12 @@ async function tick() {
     }
     lastRevision = view.revision;
 
+    // Hull names and badges come from the acting endpoints; only the first tick waits.
+    const acting = refreshActing();
+    if (!actingAwaited) {
+      actingAwaited = true;
+      await Promise.race([acting, new Promise((r) => setTimeout(r, 1500))]);
+    }
     renderStats(model.counts);
     graph.render(model);
     inspector.refresh();
@@ -273,6 +281,65 @@ async function tick() {
     if (failures === 1) toast(`Lost the agent: ${err.message}`, 'err');
   } finally {
     inflight = false;
+  }
+}
+
+/**
+ * The acting endpoints, read alongside /state so a hull's name and badge match the
+ * Actions pane. They never hold the map back: only the first tick waits for them
+ * (briefly, so the drawer can choose its default pane); after that the last known
+ * answer is drawn and a changed one redraws when it lands.
+ *
+ * Polling is as light as the answers allow. /relief and /relief/actions every tick;
+ * /workloads (names and frozen state change slowly) every fourth tick, or at once
+ * when the map's set of subjects changed. A 404 from /relief means relief is off in
+ * the spec; then only /relief is asked again, every tenth tick, so an agent
+ * restarted with relief on is noticed without a reload. A failure keeps what was
+ * last known rather than blanking the names, and says it is stale.
+ */
+const OFF_PROBE_EVERY = 10;
+let actingTicks = 0;
+let offTicks = 0;
+let actingBusy = false;
+let actingAwaited = false;
+let workloadsKey = null;
+
+async function refreshActing() {
+  if (actingBusy) return;
+  if (model.actingState === 'off' && ++offTicks % OFF_PROBE_EVERY !== 0) return;
+  actingBusy = true;
+  try {
+    const prev = model.acting;
+    let relief = prev.relief, actions = prev.actions, workloads = prev.workloads;
+    let state = model.actingState, error = '';
+    try {
+      const r = await api.relief();
+      if (r === null) {
+        state = 'off'; relief = null; actions = []; workloads = [];
+      } else {
+        state = 'on'; relief = r;
+        const key = model.subjects().map((s) => s.id).join(',');
+        const wantWorkloads = actingTicks % 4 === 0 || key !== workloadsKey;
+        const [a, w] = await Promise.allSettled([api.reliefActions(), wantWorkloads ? api.workloads() : null]);
+        if (a.status === 'fulfilled') actions = a.value || [];
+        else error = a.reason.message;
+        if (wantWorkloads && w.status === 'fulfilled') { workloads = w.value || []; workloadsKey = key; }
+        else if (wantWorkloads) error = error || w.reason.message;
+      }
+    } catch (err) {
+      error = err.message;        // /relief itself failed: not "off", just unanswered
+    }
+    actingTicks++;
+    const changed = JSON.stringify([relief, actions, workloads]) !== JSON.stringify([prev.relief, prev.actions, prev.workloads])
+      || state !== model.actingState || error !== model.actingError;
+    model.actingState = state;
+    model.actingError = error;
+    if (changed) {
+      model.setActing({ relief, actions, workloads });
+      if (model.view) { graph.render(model); drawer.renderActive(); drawer.renderCounts(); }
+    }
+  } finally {
+    actingBusy = false;
   }
 }
 
@@ -357,6 +424,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     document.getElementById('search').focus();
   } else if (e.key === 'Escape' && !dialog.open) {
+    graph.highlight(null);
     graph.select(null);
   } else if (e.key === ' ' && e.target === document.body) {
     e.preventDefault();

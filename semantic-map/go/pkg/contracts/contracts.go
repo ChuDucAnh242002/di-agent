@@ -118,7 +118,9 @@ type RelationshipLookup interface {
 // fed, inside a time tolerance. Any two properties may pair. A scoped property
 // (non-empty subject) pairs with an unscoped one directed scoped -> unscoped; two
 // unscoped properties, or two scoped ones, pair undirected, since correlation does
-// not say which drives which. How many pairs are tested at once is the
+// not say which drives which, except that properties of one chart and one subject
+// that stay perfectly correlated are an arithmetic group, paired among themselves and
+// represented outside it by one member. How many pairs are tested at once is the
 // implementation's budget, and Discovery reports it. Observe is the explicit path
 // for a caller that already knows the pair; ObserveConstruct is the explicit
 // construct-pairing path kept for callers that drive it directly.
@@ -131,12 +133,25 @@ type RelationshipLookup interface {
 //     undirected candidate needs from, one of its two ends, and the proposition
 //     runs from it. Anything else fails with ErrBadConfirmation and leaves the
 //     candidate Pending.
-//   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
-//     or an operator's Defer, that pair is not re-emitted under either sign within
+//   - Reviews: Confirm, Reject, Defer and Annotate take the review that decided
+//     them, and the candidate carries the latest one, stamped with its evidence at
+//     the time. Annotate records a review without acting on it (an escalation, or a
+//     suggestion the autonomy level did not let the reviewer apply).
+//   - Settled candidates: a candidate is keyed on (from, to). After Confirm, or an
+//     operator's Reject or Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
-//     proposed again. A cap deferral, or an untested one (its pair displaced from
-//     the budget), is the proposer's own and provisional: it re-enters when the
-//     evidence holds again.
+//     proposed again. An agent's Reject or Defer is not settled: the pair is still
+//     tested, and the candidate returns to Pending once its evidence has moved since
+//     the review (CandidateReview.Outdated). A cap deferral, or an untested one (its pair displaced from
+//     the budget), or a grouped one (an end joined an arithmetic group it does not
+//     represent), one the corrected bar tightened past, or one whose correlation
+//     weakened below the threshold by more than its sampling error, is the proposer's own and provisional: it
+//     re-enters when the evidence holds again.
+//   - Current evidence: a pending candidate's numbers are those of its pair's
+//     latest fold, so a pending one can show an |r| inside the sampling-error
+//     margin under the threshold; a pair that falls below that margin, or past the
+//     bar, takes its candidate out of the queue. A pending candidate whose PBar is non-zero had a
+//     p-value at or under it when last updated.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.
@@ -149,9 +164,10 @@ type ProposerContract interface {
 	ObserveProperty(r types.PropertyReading) error
 	Forget(propertyID string) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	Confirm(candidateID, from string) (*types.Proposition, error)
-	Reject(candidateID string) error
-	Defer(candidateID string) error
+	Confirm(candidateID, from string, rv types.CandidateReview) (*types.Proposition, error)
+	Reject(candidateID string, rv types.CandidateReview) error
+	Defer(candidateID string, rv types.CandidateReview) error
+	Annotate(candidateID string, rv types.CandidateReview) error
 	GetHistory() ([]*types.CandidateEdge, error)
 	Discovery() (*types.DiscoveryCounts, error)
 }
@@ -202,16 +218,21 @@ type TunerContract interface {
 //     it never returns a non-nil error for a temporarily unavailable source.
 //   - Deterministic EventID: the same physical observation (source, node, subject,
 //     metric, anchor timestamp) always produces the same EventID.
-//   - Metric type stability: AvailableMetrics returns the same set for the entire
-//     lifetime of the instance; Collect never emits a MetricType outside it. Subjects
-//     change the instances of a type, never the set of types.
+//   - Declared types: every MetricType a Collect emits is in the AvailableMetrics
+//     answer read after that Collect. The set MAY change over the instance's
+//     lifetime: a collector driven by include patterns learns what exists only by
+//     asking its source, and that changes as disks, interfaces and workloads come
+//     and go. A fixed collector returns one set throughout.
 //   - Node ID completeness: every emitted MetricSample has a non-empty NodeID.
 //   - SourceID stability: SourceID returns the same string across restarts.
 //   - Subjects are implied by observation: a collector MAY set Subject on a sample; a
 //     subject exists iff something observed it this tick. A collector never emits a
 //     "gone" event — silence is the signal, and the map interprets it.
-//   - Declared meaning: a collector MUST set Unit and Range on every sample of a type
-//     it emits, and keep them stable per type.
+//   - Declared meaning: a collector MUST set Unit on every sample, and Range where
+//     the quantity has one (a share, a percentage; not a rate or a count), and keep
+//     both stable per type: a type is declared with the same unit and range on
+//     every sample, or with no range on any. The map assumes [0,1] for an
+//     undeclared range and says so wherever it normalises by it.
 type CollectorContract interface {
 	// Collect reads one batch of current metric samples from the source.
 	// Returns an empty slice (not an error) when no new data is available.
@@ -221,8 +242,9 @@ type CollectorContract interface {
 	// Used as a component in EventID generation.
 	SourceID() string
 
-	// AvailableMetrics returns the metric types this implementation can produce.
-	// The returned slice is static for the lifetime of the instance.
+	// AvailableMetrics returns the metric types this implementation can produce now:
+	// at least every type its last Collect emitted. It may grow or shrink as the
+	// source changes; see "Declared types" above.
 	AvailableMetrics() []types.MetricType
 }
 

@@ -18,11 +18,15 @@ import (
 	"time"
 )
 
-// Metric is one type the application declares, with its meaning.
+// Metric is one type the application declares, with its meaning. Chart, optional,
+// names the metrics the application computes together from one reading, such as a
+// total and its parts, so discovery groups them rather than proposing their
+// arithmetic.
 type Metric struct {
 	Type  string
 	Unit  string
 	Range [2]float64
+	Chart string
 }
 
 // Client pushes samples for one subject on one node.
@@ -88,7 +92,7 @@ func (c *Client) Push(ctx context.Context, m Metric, value float64, at time.Time
 	body, err := json.Marshal(types.MetricSample{
 		NodeID: c.NodeID, MetricType: types.MetricType(m.Type), Value: value, TimestampUnix: at.Unix(),
 		EventID: EventID(c.Source, c.NodeID, c.Subject, m.Type, at),
-		Subject: c.Subject, Unit: m.Unit, Range: &rng, Source: c.Source, Labels: labels,
+		Subject: c.Subject, Unit: m.Unit, Range: &rng, Source: c.Source, Chart: m.Chart, Labels: labels,
 	})
 	if err != nil {
 		return Ack{}, err

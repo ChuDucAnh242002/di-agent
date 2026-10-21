@@ -30,7 +30,7 @@ func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 		t.Fatalf("seed: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerStateRoutes(mux, sm, nil)
+	registerStateRoutes(mux, sm, nil, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return sm, srv
@@ -488,6 +488,21 @@ func TestState_StatusAndKindFilters(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "is not one of") {
 			t.Errorf("%s: error %q does not name the allowed values", query, b)
+		}
+	}
+}
+
+func TestOnlyTheMapMayClaimIntervened(t *testing.T) {
+	_, srv := stateFixture(t)
+	for _, prov := range []string{"intervened", "learned"} {
+		body := `{"from":"cpu_utilization","to":"memory_utilization","sign":1,"provenance":"` + prov + `"}`
+		resp, err := http.Post(srv.URL+"/state/relationships", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("provenance %q: status %d, want 400", prov, resp.StatusCode)
 		}
 	}
 }

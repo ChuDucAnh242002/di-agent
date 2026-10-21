@@ -27,12 +27,17 @@ KD="${KD:-}"
 PRIORS="${PRIORS:-}"
 ALPHA="${ALPHA:-0.2}"
 CONVERGENCE="${CONVERGENCE:-500}"
+# Where the map is kept. Empty, the default here, keeps it in memory so every
+# dev run and demo starts cold; the agent's own default, /var/lib/di-agent,
+# needs root.
+STATE_FILE="${STATE_FILE:-}"
 
 # AGENT_BIN="/tmp/semantic-map-agent"
 AGENT_BIN="./cmd/agent/tmp/di-agent-poc"
 MAPCTL_BIN="/tmp/semantic-map-mapctl"
 REPLAY_BIN="/tmp/semantic-map-replay"
 LOG_FILE="/tmp/semantic-map-agent.log"
+SPEC_FILE="/tmp/semantic-map-agent.yaml"
 BUILD_GOOS="${BUILD_GOOS:-${GOOS:-}}"
 BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-}}"
 BUILD_TARGET_FILE="/tmp/semantic-map-build-target"
@@ -137,9 +142,20 @@ cmd_start() {
     # An IPv6 literal needs brackets before the port (BIND=::1 → [::1]:8080).
     local host="$BIND"
     [[ "$host" == *:* && "$host" != \[* ]] && host="[$host]"
-    local args=(-profile "$PROFILE" -addr "$host:$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
-    [[ -n "$KD" ]]     && args+=(-kd "$KD")
-    [[ -n "$PRIORS" ]] && args+=(-priors "$PRIORS")
+    # The agent is described by a spec file; write this run's from the environment.
+    cat > "$SPEC_FILE" <<SPEC
+node:
+  addr: "$host:$PORT"
+profile:
+  name: "$PROFILE"
+  kd: "$KD"
+  priors: "$PRIORS"
+  alpha: $ALPHA
+  convergence: $CONVERGENCE
+persist:
+  file: "$STATE_FILE"
+SPEC
+    local args=(-config "$SPEC_FILE")
 
     step "$AGENT_BIN ${args[*]}"
     nohup "$AGENT_BIN" "${args[@]}" > "$LOG_FILE" 2>&1 &

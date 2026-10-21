@@ -11,7 +11,7 @@
 //     happened.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, directionSign, isEditing } from './model.js';
+import { fmt, escapeHTML, effective, directionSign, isEditing, factValue } from './model.js';
 
 const JOURNAL_BUFFER = 400;
 
@@ -20,6 +20,9 @@ export class Drawer {
     this.root = root;
     this.ctx = ctx;                 // { model, toast, selectProperty, refresh, ask }
     this.active = 'journal';
+    this.defaultChosen = false;   // the Actions pane is the default once, not on every poll
+    this.openAction = null;       // the Actions row whose trace is open
+    this.actionTrace = null;      // {id, act, verify, error} for that row
     this.events = [];
     this.journalWindow = null;
     this.sinceRevision = 0;
@@ -35,8 +38,10 @@ export class Drawer {
     this.asking = false;
     this.askError = null;
     this.busy = new Set();  // panes with an operator-started request in flight
+    // The row whose part of the map is highlighted on the canvas: {pane, id}.
+    this.pointed = null;
     this.panes = {};
-    for (const name of ['journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
+    for (const name of ['actions', 'journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
     }
     this.wireTabs();
@@ -49,6 +54,48 @@ export class Drawer {
     document.getElementById('drawer-toggle').addEventListener('click', () => {
       const collapsed = this.root.classList.toggle('collapsed');
       document.getElementById('drawer-toggle').textContent = collapsed ? '▴' : '▾';
+    });
+    this.wireResize();
+  }
+
+  /**
+   * Drag the drawer's top edge to give the record more or less of the page. The
+   * height is remembered per browser; double-click the edge for the default back.
+   * The canvas above is a flex sibling, so it takes whatever is left, and its
+   * ResizeObserver re-frames the graph.
+   */
+  wireResize() {
+    const handle = document.getElementById('drawer-resize');
+    const KEY = 'di-agent.drawer-height';
+    const clamp = (h) => Math.round(Math.min(window.innerHeight - 160, Math.max(80, h)));
+    const set = (h) => { this.root.style.height = `${clamp(h)}px`; };
+    try {
+      const saved = Number(localStorage.getItem(KEY));
+      if (saved > 0) set(saved);
+    } catch (_) { /* storage unavailable: start at the default */ }
+
+    let drag = null;
+    handle.addEventListener('pointerdown', (e) => {
+      drag = { y: e.clientY, h: this.root.getBoundingClientRect().height };
+      handle.classList.add('active');
+      handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (drag) set(drag.h + (drag.y - e.clientY));
+    });
+    const end = (e) => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove('active');
+      try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
+      try { localStorage.setItem(KEY, String(this.root.getBoundingClientRect().height)); } catch (_) { /* not remembered */ }
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    handle.addEventListener('dblclick', () => {
+      this.root.style.height = '';
+      try { localStorage.removeItem(KEY); } catch (_) { /* nothing to forget */ }
     });
   }
 
@@ -78,6 +125,14 @@ export class Drawer {
       this.active === 'cluster' ? this.pollPeers() : null,
       this.active === 'backbone' && (!this.backbone || force) ? this.pollBackbone() : null,
     ]);
+    // The acting data is read by the page with /state (the hulls need it too), so
+    // by now it says whether relief exists. The first poll picks the default pane.
+    // An unanswered /relief decides nothing: the choice waits for the first answer.
+    const state = this.ctx.model()?.actingState;
+    if (!this.defaultChosen && state !== 'unknown') {
+      this.defaultChosen = true;
+      if (state === 'on') this.activate('actions');
+    }
     this.renderActive();
     this.renderCounts();
   }
@@ -95,6 +150,7 @@ export class Drawer {
     if (this.busy.has(this.active) || isEditing(document.activeElement, pane)) return;
     this.askRendered = this.active === 'ask';
     switch (this.active) {
+      case 'actions': return this.renderActions();
       case 'journal': return this.renderJournal();
       case 'decisions': return this.renderDecisions();
       case 'discovery': return this.renderDiscovery();
@@ -107,6 +163,7 @@ export class Drawer {
 
   renderCounts() {
     const model = this.ctx.model();
+    set('c-actions', model?.acting?.actions?.length ?? 0);
     set('c-journal', this.events.length);
     set('c-decisions', this.decisions.length);
     set('c-subjects', model?.counts?.subjects ?? 0);
@@ -117,6 +174,118 @@ export class Drawer {
     // Pending discovery is the one count worth interrupting for: the map has
     // produced structure it was not told about and is waiting on a human.
     cEl.classList.toggle('hot', this.candidates.length > 0);
+  }
+
+  // ── actions ───────────────────────────────────────────────────────────────
+
+  /**
+   * What the agent did, newest first, with the summary the loop keeps. A row opens
+   * the two decisions behind it: the act (notice, attribution, plan, the change)
+   * and the verify (what pressure then did against what was predicted, and
+   * whether that outcome was allowed to teach the map).
+   */
+  renderActions() {
+    const model = this.ctx.model();
+    const { relief, actions } = model.acting;
+    if (!relief) {
+      const off = model.actingState === 'off';
+      this.panes.actions.innerHTML = `<div class="empty">
+        <strong>${off ? 'Relief is not enabled in this agent\'s spec' : 'The agent did not answer'}</strong>
+        <span class="why">${!off
+          ? `GET /relief failed${model.actingError ? `: ${escapeHTML(model.actingError)}` : ''}. This pane fills in when it answers.`
+          : 'With <span class="mono">loops.relief.enabled</span> false the agent models the system and changes nothing, so there is nothing here to show.'}</span>
+      </div>`;
+      return;
+    }
+
+    const frozen = model.acting.workloads.filter((w) => w.policy?.frozen).length;
+    const held = relief.kept + relief.reverted > 0 ? fmt.num(relief.predictions_held * 100, 0) + '%' : '—';
+    const tiles = [
+      ['actions', relief.actions, ''],
+      ['kept', relief.kept, ''],
+      ['reverted', relief.reverted, ''],
+      ['predictions held', held, 'kept of kept + reverted'],
+      ['frozen workloads', frozen, 'policy forbids touching them'],
+      ['refused', relief.refused, ''],
+    ];
+    const state = `${relief.phase}${relief.paused ? ' · paused' : ''}${relief.runtime ? ` · ${relief.runtime}` : ''}`;
+    // An answer that failed after an earlier one landed: what is drawn is the last
+    // known state, and it must say so rather than pass for current.
+    const stale = model.actingError ? `<div class="window-note stale-note">
+      <span><strong>Not current.</strong> The last refresh failed: ${escapeHTML(model.actingError)}. Showing the last answer.</span>
+    </div>` : '';
+    if (relief.stuck) tiles.push(['undo failing', relief.stuck, 'changes in force whose undo the runtime has refused; retried every tick']);
+    const strip = stale + `<div class="action-strip">
+      ${tiles.map(([label, v, tip]) => `<div class="tile"${tip ? ` title="${escapeHTML(tip)}"` : ''}>
+        <span class="label">${escapeHTML(label)}</span><span class="value">${escapeHTML(String(v))}</span></div>`).join('')}
+      <div class="tile"><span class="label">loop</span><span class="value small">${escapeHTML(state)}</span></div>
+    </div>`;
+
+    if (!actions.length) {
+      this.panes.actions.innerHTML = strip + `<div class="empty">
+        <strong>The agent has not acted</strong>
+        <span class="why">Relief caps a workload's CPU limit only after node CPU pressure has held above
+        <span class="mono">enter</span> for <span class="mono">enter_for</span>, and only on a workload policy
+        allows it to touch. It is now <strong>${escapeHTML(state)}</strong>${relief.cooling && Object.keys(relief.cooling).length
+          ? `, with ${Object.keys(relief.cooling).length} workload${Object.keys(relief.cooling).length > 1 ? 's' : ''} cooling down` : ''}.
+        ${relief.refused ? `It has refused ${relief.refused} time${relief.refused > 1 ? 's' : ''}: the Decisions pane says why.` : ''}</span>
+      </div>`;
+      return;
+    }
+
+    this.panes.actions.innerHTML = strip + `<div class="pane-pad">
+      <table class="grid">
+        <thead><tr><th>workload</th><th class="num">cores</th><th class="num">predicted drop</th>
+          <th class="num">observed drop</th><th>outcome</th><th>when</th><th></th></tr></thead>
+        <tbody>${actions.map((a) => {
+          const open = this.openAction === a.id;
+          const name = model.nameOf(a.subject);
+          return `<tr data-action="${escapeHTML(a.id)}"${this.isPointed('actions', a.id) ? ' class="pointed"' : ''}
+              title="open the trace, and highlight on the map what the agent capped and the pressure it was relieving">
+            <td class="mono" title="${escapeHTML(a.subject)}">${escapeHTML(name)}</td>
+            <td class="num nowrap">${fmt.num(a.plan?.from_cores, 2)} → ${fmt.num(a.plan?.to_cores, 2)}</td>
+            <td class="num">${fmt.num(a.plan?.predicted, 4)}</td>
+            <td class="num">${a.observed === undefined || a.observed === null ? '—' : fmt.num(a.observed, 4)}</td>
+            <td><span class="badge outcome-${escapeHTML(a.outcome || 'inflight')}">${escapeHTML(a.outcome || 'in flight')}</span>${a.revert_attempts
+              ? `<div class="undo-failing" title="${escapeHTML(`${a.revert_attempts} failed attempt${a.revert_attempts > 1 ? 's' : ''}; retried every tick`)}">undo failing: ${escapeHTML(a.last_error || '')}</div>` : ''}</td>
+            <td class="muted nowrap">${fmt.ago(a.acted_at)}</td>
+            <td class="muted">${open ? '▴' : '▾'}</td>
+          </tr>
+          ${open ? `<tr><td colspan="7">${actionTrace(a, this.actionTrace?.id === a.id ? this.actionTrace : null)}</td></tr>` : ''}`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+
+    this.panes.actions.querySelectorAll('[data-action]').forEach((row) => {
+      row.addEventListener('click', () => this.toggleAction(row.dataset.action));
+    });
+  }
+
+  async toggleAction(id) {
+    const a = this.ctx.model().acting.actions.find((x) => x.id === id);
+    if (!a) return;
+    const closing = this.openAction === id;
+    // Pointing first: letting go of the canvas (point(), Escape) closes the open
+    // trace through unpoint(), so the row is marked open only afterwards.
+    // Like a Discovery row: the capped workload's usage and the pressure it was
+    // there to relieve. Opening points, closing lets go.
+    if (closing ? this.isPointed('actions', id) : !this.isPointed('actions', id)) {
+      this.point('actions', id, { nodes: [`cpu_utilization@${a.subject}`, 'cpu_contention_ratio'] });
+    }
+    this.actionTrace = null;
+    this.openAction = closing ? null : id;
+    this.renderActions();
+    if (closing) return;
+    const trace = { id, act: null, verify: null, error: '', verifyError: '' };
+    this.actionTrace = trace;
+    const read = async (decisionID) => {
+      try { return [await api.decision(decisionID), '']; } catch (err) {
+        return [null, err.gone ? 'evicted from the journal' : err.message];
+      }
+    };
+    [trace.act, trace.error] = await read(a.decision_id);
+    if (a.verify_id) [trace.verify, trace.verifyError] = await read(a.verify_id);
+    if (this.openAction === id && this.active === 'actions') this.renderActions();
   }
 
   // ── journal ───────────────────────────────────────────────────────────────
@@ -194,6 +363,7 @@ export class Drawer {
       this.openDecisionID = id;
       if (!this.decisions.some((x) => x.id === id)) this.decisions.unshift(d);
       else this.decisions = this.decisions.map((x) => (x.id === id ? d : x));
+      if (!this.isPointed('decisions', id)) this.point('decisions', id, decisionSpan(d));
       this.renderDecisions();
     } catch (err) {
       this.ctx.toast(err.gone
@@ -216,7 +386,8 @@ export class Drawer {
       <table class="grid">
         <thead><tr><th>decision</th><th>question</th><th class="num">revision</th><th>when</th><th></th></tr></thead>
         <tbody>${this.decisions.map((d) => `
-          <tr data-decision="${escapeHTML(d.id)}">
+          <tr data-decision="${escapeHTML(d.id)}"${this.isPointed('decisions', d.id) ? ' class="pointed"' : ''}
+              title="open the trace, and highlight on the map what this decision read">
             <td class="mono">${escapeHTML(d.id)}</td>
             <td>${escapeHTML(d.question || '—')}</td>
             <td class="num">${fmt.int(d.revision)}</td>
@@ -232,8 +403,16 @@ export class Drawer {
       row.addEventListener('click', () => {
         const id = row.dataset.decision;
         this.openDecisionID = this.openDecisionID === id ? null : id;
+        const d = this.decisions.find((x) => x.id === id);
+        // Opening a trace points at what it read; closing it lets go.
+        if (this.openDecisionID ? !this.isPointed('decisions', id) : this.isPointed('decisions', id)) {
+          this.point('decisions', id, decisionSpan(d));
+        }
         this.renderDecisions();
       });
+    });
+    this.panes.decisions.querySelectorAll('[data-cite]').forEach((el) => {
+      el.addEventListener('click', (e) => { e.stopPropagation(); this.ctx.selectProperty(el.dataset.cite); });
     });
   }
 
@@ -242,7 +421,45 @@ export class Drawer {
   async pollCandidates() {
     const res = await api.candidates();
     this.candidates = Array.isArray(res) ? res : (res?.candidates || []);
+    // A candidate settled or withdrawn leaves the queue; what pointed at it lets go.
+    if (this.pointed?.pane === 'discovery' && !this.candidates.some((c) => c.CandidateID === this.pointed.id)) {
+      this.ctx.highlight(null);
+    }
   }
+
+  // ── pointing at the map ───────────────────────────────────────────────────
+
+  /**
+   * Highlight a row's part of the map, or let go of it when the row is already
+   * pointed at. The canvas says what it could not draw — a property filtered out by
+   * the search or no longer in the map — and that is passed on rather than shown as
+   * a highlight with a piece missing.
+   */
+  point(pane, id, spec) {
+    if (this.pointed?.pane === pane && this.pointed.id === id) {
+      this.ctx.highlight(null);
+      return;
+    }
+    this.ctx.highlight(null);
+    this.pointed = { pane, id };
+    const missing = this.ctx.highlight(spec) || [];
+    if (missing.length) {
+      const model = this.ctx.model();
+      this.ctx.toast(`Not on the canvas: ${missing.map((m) => (model ? model.display(m) : m)).join(', ')}`
+        + ' — cleared by the search, or no longer in the map.', 'err');
+    }
+  }
+
+  /** The canvas let go (Escape, a click on empty canvas, another row). */
+  unpoint() {
+    if (!this.pointed) return;
+    // Escape lets go of the row's part of the map, and of its trace with it.
+    if (this.pointed.pane === 'actions') { this.openAction = null; this.actionTrace = null; }
+    this.pointed = null;
+    this.renderActive();
+  }
+
+  isPointed(pane, id) { return this.pointed?.pane === pane && this.pointed.id === id; }
 
   /** How far discovery was rationed, from /state; empty when the proposer is off. */
   rationingLine() {
@@ -256,10 +473,13 @@ export class Drawer {
         Testing ${fmt.int(d.tested_pairs)} of ${fmt.int(d.eligible_pairs)} pairs among
         ${fmt.int(d.properties)} properties, with ${budget}${d.idle_pairs ? `; ${fmt.int(d.idle_pairs)} more held by properties gone quiet` : ''}${d.displaced ? `; ${fmt.int(d.displaced)} displaced so far` : ''}.
         ${short ? 'The most variable properties get pairs first, so a quiet pair may not have been looked at yet.' : ''}
+        ${d.fdr ? `A candidate's p must be at or under ${Number(d.p_bar).toPrecision(2)}: the bar at a ${fmt.num(d.fdr * 100, 1)}% false-discovery rate over the ${fmt.int(d.p_values_tested)} pairs with enough readings.` : 'The p-value bar is not corrected for how many pairs are tested.'}
+        ${(d.groups || []).length ? `${fmt.int(d.groups.length)} arithmetic group${d.groups.length > 1 ? 's' : ''}, each paired outside through one member: ${d.groups.map((g) => `<span class="mono" title="${escapeHTML(g.members.join(', '))}">${escapeHTML(g.representative)}</span> for ${fmt.int(g.members.length)} of ${escapeHTML(g.chart)}`).join('; ')}.` : ''}
       </p>`;
   }
 
   renderDiscovery() {
+    const model = this.ctx.model();
     if (!this.candidates.length) {
       this.panes.discovery.innerHTML = `<div class="empty">
         <strong>Nothing proposed right now</strong>
@@ -268,7 +488,10 @@ export class Drawer {
         node's, the node's with each other, and subjects' with each other. It
         only emits a candidate once each end has moved enough to matter and the correlation
         clears the configured threshold over the configured minimum number of pairs
-        (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>).
+        (<span class="mono">-proposer-threshold</span>, <span class="mono">-proposer-min-pairs</span>),
+        with a p-value under a bar that tightens as more pairs are tested
+        (<span class="mono">-proposer-fdr</span>). Series of one chart that move as one are
+        grouped rather than proposed.
         An empty queue means no tested pair has cleared both yet — not that the proposer is off.</span>
       </div>`;
       return;
@@ -288,20 +511,24 @@ export class Drawer {
         <tbody>${this.candidates.map((c) => {
           const sign = directionSign(c.Direction);
           const from = escapeHTML(c.FromID), to = escapeHTML(c.ToID), id = escapeHTML(c.CandidateID);
+          // Shown by name; the ids stay in the buttons, which is what the agent takes.
+          const fromN = escapeHTML(model ? model.display(c.FromID) : c.FromID);
+          const toN = escapeHTML(model ? model.display(c.ToID) : c.ToID);
           const confirm = c.Undirected
-            ? `<button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${from}" title="confirm as ${from} → ${to}">Confirm →</button>
-               <button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${to}" title="confirm as ${to} → ${from}">Confirm ←</button>`
+            ? `<button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${from}" title="confirm as ${fromN} → ${toN}">Confirm →</button>
+               <button class="btn small primary" data-cand="${id}" data-verdict="confirm" data-from="${to}" title="confirm as ${toN} → ${fromN}">Confirm ←</button>`
             : `<button class="btn small primary" data-cand="${id}" data-verdict="confirm">Confirm</button>`;
           const notes = [
             c.Kind === 'composition' ? `<span class="muted" title="the source is part of the target by definition, so the correlation is accounting rather than something learned">composition</span>` : '',
             c.Kind === 'same-metric' ? `<span class="muted" title="two subjects' readings of one metric often move together because something drives both, not because either drives the other">same metric: a shared driver is likely</span>` : '',
+            c.Kind === 'same-subject' ? `<span class="muted" title="two metrics of one workload, such as a capped pod's CPU and its throttling, often move together by construction">same subject: may hold by construction</span>` : '',
             ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
           ].filter(Boolean).join('<br>');
-          return `<tr>
-            <td class="mono">${from} ${c.Undirected ? '↔' : '→'} ${to}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
+          return `<tr data-cand-row="${id}"${this.isPointed('discovery', c.CandidateID) ? ' class="pointed"' : ''}>
+            <td class="mono" title="${from} ${c.Undirected ? '↔' : '→'} ${to} — click the row to see the pair on the map">${fromN} ${c.Undirected ? '↔' : '→'} ${toN}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
             <td style="color:${sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)'}">${sign < 0 ? '↓ negative' : '↑ positive'}</td>
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
-            <td class="num">${fmt.num(c.PValue, 4)}</td>
+            <td class="num" title="${c.PBar ? `cleared the bar ${Number(c.PBar).toPrecision(2)}, corrected for the pairs tested` : 'no correction for the pairs tested'}">${fmt.num(c.PValue, 4)}</td>
             <td class="num">${fmt.int(c.NObservations)}</td>
             <td class="muted">${escapeHTML(String(c.Status ?? ''))}</td>
             <td class="nowrap">
@@ -313,6 +540,16 @@ export class Drawer {
         }).join('')}</tbody>
       </table>
     </div>`;
+
+    this.panes.discovery.querySelectorAll('[data-cand-row]').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        const c = this.candidates.find((x) => x.CandidateID === row.dataset.candRow);
+        if (!c) return;
+        this.point('discovery', c.CandidateID, { pairs: [{ from: c.FromID, to: c.ToID, undirected: !!c.Undirected }] });
+        this.renderDiscovery();
+      });
+    });
 
     this.panes.discovery.querySelectorAll('[data-cand]').forEach((b) => {
       b.addEventListener('click', async (e) => {
@@ -359,7 +596,7 @@ export class Drawer {
           <th>status</th><th>properties held</th></tr></thead>
         <tbody>${subjects.map((s) => `
           <tr data-subject="${escapeHTML(s.id)}">
-            <td class="mono">${escapeHTML(s.identity)}</td>
+            <td class="mono" title="${escapeHTML(s.id)}">${escapeHTML(s.name || s.identity)}</td>
             <td class="muted">${escapeHTML(s.kind)}</td>
             <td class="num">${s.properties.length}</td>
             <td><span class="badge status-${s.status}">${s.status}</span></td>
@@ -815,6 +1052,90 @@ function detailLine(e) {
   return Object.entries(d).map(([k, v]) => `${k}=${plain(v)}`).join('  ');
 }
 
+/**
+ * What a decision covers on the map: the properties and relationships it read and,
+ * for a candidate review, the candidate's two ends as a would-be edge.
+ */
+function decisionSpan(d) {
+  if (!d) return { nodes: [] };
+  const c = d.inputs?.candidate;
+  return {
+    nodes: (d.properties_read || []).map((p) => p.id),
+    edges: (d.relationships_read || []).map((r) => r.id),
+    pairs: c?.FromID && c?.ToID ? [{ from: c.FromID, to: c.ToID, undirected: !!c.Undirected }] : [],
+  };
+}
+
+/** One action's story, in the order the loop lived it: notice, attribution, plan, act, verify. */
+function actionTrace(a, t) {
+  const h = (s) => `<h3 style="margin:0 0 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted)">${s}</h3>`;
+  const stage = (n, title, body) => `<div class="stage"><span class="n">${n}</span><div>${h(title)}${body}</div></div>`;
+  if (!t) return `<div class="muted" style="padding:10px 2px">Reading the decisions…</div>`;
+  const act = t.act, ins = act?.inputs || {};
+  const parts = [];
+  if (t.error) parts.push(`<div class="caveats" style="color:var(--status-serious)">The act decision: ${escapeHTML(t.error)}</div>`);
+
+  const notice = ins.notice;
+  parts.push(stage(1, 'Notice', notice
+    ? `<p>Node CPU pressure <strong>${fmt.num(notice.pressure, 3)}</strong> had held past the entry level; the loop entered <strong>${escapeHTML(String(notice.phase))}</strong>${notice.since ? ` ${fmt.ago(notice.since)}` : ''}.</p>`
+    : `<p class="muted">No notice recorded: ${act ? 'the act decision carries none' : 'the act decision could not be read'}. Contention at act was ${fmt.num(a.contention_at_act, 3)}.</p>`));
+
+  const cands = Array.isArray(ins.attribution) ? ins.attribution : [];
+  parts.push(stage(2, 'Attribution', cands.length ? `<table class="grid"><thead><tr><th>workload</th><th class="num">share of node</th><th class="num">predicted drop</th><th>basis</th></tr></thead><tbody>
+    ${cands.map((c, i) => `<tr${c.subject === a.subject ? ' class="chosen"' : ''}>
+      <td class="mono">${escapeHTML(c.subject)}${c.subject === a.subject ? ' ← chosen' : ''}</td>
+      <td class="num">${fmt.num(c.share, 3)}</td><td class="num">${fmt.num(c.drop, 4)}</td>
+      <td class="muted" title="${c.basis === 'usage' ? 'the map said nothing about this workload; ranked by how much it uses' : 'the map\'s own relationship from this workload to node CPU contention'}">${escapeHTML(c.basis)}</td></tr>`).join('')}
+    </tbody></table>` : `<p class="muted">No candidate list recorded.</p>`));
+
+  const p = a.plan || {};
+  parts.push(stage(3, 'Plan and prediction', `<dl class="kv" style="max-width:460px">
+    <dt>cap</dt><dd>${fmt.num(p.from_cores, 2)} → ${fmt.num(p.to_cores, 2)} cores</dd>
+    <dt>predicted drop in pressure</dt><dd>${fmt.num(p.predicted, 4)}</dd>
+    <dt>basis</dt><dd>${escapeHTML(p.basis || '—')}</dd>
+    <dt>learned effect factor</dt><dd>${fmt.num(p.effect, 2)}</dd>
+    <dt>policy rule</dt><dd>${p.rule === -1 ? 'defaults' : escapeHTML(String(p.rule))}</dd></dl>
+    ${(act?.caveats || []).length ? `<ul class="caveats">${act.caveats.map((c) => `<li>${escapeHTML(c)}</li>`).join('')}</ul>` : ''}`));
+
+  parts.push(stage(4, 'Act', `<dl class="kv" style="max-width:460px">
+    <dt>decision</dt><dd class="mono">${escapeHTML(a.decision_id)}</dd>
+    <dt>acted</dt><dd>${fmt.clock(a.acted_at)} (${fmt.ago(a.acted_at)})</dd>
+    <dt>original limit</dt><dd>${a.undo?.original?.limit == null ? 'none' : fmt.num(a.undo.original.limit, 2) + ' cores'}</dd>
+    <dt>expires</dt><dd>${fmt.clock(a.undo?.expires)}</dd>
+    <dt>runtime</dt><dd>${escapeHTML(a.undo?.runtime || '—')}</dd></dl>`));
+
+  const v = t.verify;
+  let verifyBody;
+  if (v) {
+    const vi = v.inputs || {}, ans = v.answer || {};
+    const ev = vi.evidence;
+    const conf = vi.confounded || {};
+    verifyBody = `<dl class="kv" style="max-width:460px">
+      <dt>verdict</dt><dd><strong>${escapeHTML(String(ans.verdict ?? '—'))}</strong></dd>
+      <dt>observed drop</dt><dd>${fmt.num(ans.observed, 4)}</dd>
+      <dt>predicted drop</dt><dd>${fmt.num(ans.predicted, 4)}</dd>
+      <dt>contention at act</dt><dd>${fmt.num(vi.contention_at_act, 4)}</dd>
+      <dt>workload share at act → verify</dt><dd>${vi.subject_share ? `${fmt.num(vi.subject_share.at_act, 3)} → ${fmt.num(vi.subject_share.at_verify, 3)}` : '—'}</dd>
+      <dt>confounded</dt><dd>${conf.confounded ? `yes — moved: ${escapeHTML(plain(conf.moved || []))}${(conf.left || []).length ? `; left: ${escapeHTML(plain(conf.left))}` : ''}` : 'no'}</dd></dl>
+      <p style="margin:8px 0 0"><strong>${ev?.fed ? 'Fed the map.' : 'Taught the map nothing.'}</strong>
+        ${ev?.fed ? (ev.confounded ? 'Recorded as confounded evidence, which does not change what it learned.' : 'An intervention was recorded on the capped workload\'s usage → node CPU contention.') : escapeHTML(ev?.why || 'no reason recorded')}</p>
+      ${(v.caveats || []).length ? `<ul class="caveats">${v.caveats.map((c) => `<li>${escapeHTML(c)}</li>`).join('')}</ul>` : ''}
+      <div class="muted mono" style="margin-top:4px">${escapeHTML(v.id)}</div>`;
+  } else if (a.verify_id) {
+    verifyBody = `<p class="muted">The verify decision <span class="mono">${escapeHTML(a.verify_id)}</span> could not be shown: ${escapeHTML(t.verifyError || 'not read')}.</p>
+      ${a.observed !== undefined && a.observed !== null ? `<p>Observed drop ${fmt.num(a.observed, 4)} against ${fmt.num(p.predicted, 4)} predicted.</p>` : ''}`;
+  } else if (a.outcome === '' || !a.outcome) {
+    verifyBody = `<p class="muted">Not verified yet: the loop waits for the settle time before comparing pressure with the prediction.</p>`;
+  } else if (a.resumed) {
+    verifyBody = `<p class="muted">Resumed after a restart: judged without a verdict of its own, and ended as <strong>${escapeHTML(a.outcome)}</strong>.</p>`;
+  } else {
+    verifyBody = `<p class="muted">This action ended as <strong>${escapeHTML(a.outcome)}</strong> without a verdict (released, expired, gone or reverted by an operator).</p>`;
+  }
+  parts.push(stage(5, 'Verify', verifyBody));
+
+  return `<div class="action-trace">${parts.join('')}</div>`;
+}
+
 /** The full trace: what was read, what was supposed, and the agent's own words. */
 function decisionTrace(d) {
   const props = d.properties_read || [];
@@ -841,7 +1162,8 @@ function decisionTrace(d) {
         <span style="text-transform:none;letter-spacing:0;font-weight:400"> — copied at the time, so this record cannot become a description of a later system</span>
       </h3>
       <div class="chips">
-        ${props.map((p) => `<span class="badge mono" title="confidence ${fmt.num(p.confidence, 3)}">
+        ${props.map((p) => `<span class="badge mono" data-cite="${escapeHTML(p.id)}" style="cursor:pointer"
+          title="confidence ${fmt.num(p.confidence, 3)} · click to inspect">
           ${escapeHTML(p.id)} = ${fmt.num(p.value, 3)}</span>`).join('')}
       </div>
       ${rels.length ? `<div class="chips" style="margin-top:6px">
@@ -852,6 +1174,12 @@ function decisionTrace(d) {
             ${escapeHTML(r.from)} → ${escapeHTML(r.to)} ${eff.known ? fmt.num(eff.value, 3) : 'unknown'}</span>`;
         }).join('')}</div>` : ''}
     </div>
+
+    ${(d.facts_read || []).length ? `<div>
+      <h3 style="margin:0 0 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted)">On the machine</h3>
+      <div class="chips">${d.facts_read.map((f) => `<span class="badge mono" title="read by ${escapeHTML(f.source)}">
+        ${escapeHTML(f.key)} ${escapeHTML(factValue(f))}</span>`).join('')}</div>
+    </div>` : ''}
 
     ${d.rationale ? `<pre class="rationale">${escapeHTML(d.rationale)}</pre>` : ''}
 

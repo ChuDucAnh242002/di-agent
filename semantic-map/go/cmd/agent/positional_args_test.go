@@ -5,11 +5,9 @@ import (
 	"testing"
 )
 
-// TestCheckNoPositionalArgs pins the guard that catches the `-flag false`
-// mistake. Go's flag package stops parsing at the first non-flag argument, so
-// a space-separated boolean value becomes a positional arg and every flag after
-// it is discarded without warning — the daemon starts and serves normally on
-// defaults. See checkNoPositionalArgs for the incident this guards against.
+// TestCheckNoPositionalArgs pins the guard against a stray argument after
+// -config: Go's flag package stops at the first argument that is not a flag, so
+// it and every flag after it would be dropped without warning.
 func TestCheckNoPositionalArgs(t *testing.T) {
 	if err := checkNoPositionalArgs(0, ""); err != nil {
 		t.Errorf("no positional args should be accepted, got %v", err)
@@ -19,9 +17,8 @@ func TestCheckNoPositionalArgs(t *testing.T) {
 	if err == nil {
 		t.Fatal(`positional arg "false" should be rejected`)
 	}
-	// The message has to name the actual mistake, not just complain about an
-	// unexpected argument — the whole point is that the cause is non-obvious.
-	for _, want := range []string{"false", "-flag=false", "silently ignored"} {
+	// The message names the argument and what the agent does take.
+	for _, want := range []string{`"false"`, "-config", "-print-config=false"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error message %q missing %q", err.Error(), want)
 		}

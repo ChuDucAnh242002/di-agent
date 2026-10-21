@@ -20,11 +20,21 @@
 //
 // Properties scoped to a subject are enclosed and labelled with that subject, so
 // the picture answers "which workloads are running" before anything is clicked.
+// The machine's own properties are enclosed too, beside its workloads rather than
+// around them: in a node-local map everything is on this machine, so a box around
+// the whole canvas would say nothing, while a box of its own says which signals are
+// the machine's and which a workload's. It is labelled with the machine's facts.
+//
+// A highlight is what the drawer points at — a candidate's two ends, the properties a
+// decision read — drawn over the rest, which is dimmed.
 
-import { effective, subjectOf, shortLabel, fmt, escapeHTML } from './model.js';
+import { effective, subjectOf, subjectName, shortLabel, fmt, escapeHTML, machineSummary } from './model.js';
 import { Force, footprint, HULL_PAD, HULL_LABEL } from './force.js';
 
 const NS = 'http://www.w3.org/2000/svg';
+
+/** The enclosure of node-level properties. Not a subject id: those are kind:identity. */
+export const MACHINE = '@machine';
 const el = (name, attrs = {}) => {
   const n = document.createElementNS(NS, name);
   for (const [k, v] of Object.entries(attrs)) {
@@ -44,9 +54,11 @@ const GLYPH = 6.6;
 const labelHalfWidth = (p, r) => Math.max(r, (Math.max(shortLabel(p.id).length, 10) * GLYPH) / 2 + 3);
 
 export class GraphView {
-  constructor(svg, { onSelect, tooltip }) {
+  constructor(svg, { onSelect, onHighlightCleared, tooltip }) {
     this.svg = svg;
     this.onSelect = onSelect;
+    this.onHighlightCleared = onHighlightCleared || (() => {});
+    this.highlighted = null;   // {nodes: Set, edges: Set, pairs: [{from, to, undirected}]}
     this.tooltip = tooltip;
     this.force = new Force();
     this.selected = null;
@@ -78,6 +90,7 @@ export class GraphView {
     // One marker per sign, because a marker cannot inherit the path's stroke.
     for (const [name, color] of [
       ['pos', 'var(--sign-pos)'], ['neg', 'var(--sign-neg)'], ['none', 'var(--baseline)'],
+      ['hl', 'var(--prov-discovered)'],
     ]) {
       // userSpaceOnUse, so the head keeps a fixed size. The default scales the
       // marker by the path's stroke width, which made a strong relationship —
@@ -113,8 +126,11 @@ export class GraphView {
       if (nodeEl) return { type: 'property', id: nodeEl.dataset.node };
       const edgeEl = target.closest?.('[data-edge]');
       if (edgeEl) return { type: 'relationship', id: edgeEl.dataset.edge };
+      const hullEl = target.closest?.('[data-hull]');
+      if (hullEl) return { type: 'hull', id: hullEl.dataset.hull };
       return null;
     };
+    const membersOf = (subject) => [...this.force.nodes.values()].filter((n) => n.group === subject);
 
     svg.addEventListener('pointerdown', (e) => {
       const hit = hitAt(e.target);
@@ -126,6 +142,12 @@ export class GraphView {
           dragging = { n, wasPinned: n.pinned };
           n.pinned = true;
         }
+      } else if (hit?.type === 'hull') {
+        // A subject's box moves as one: every member goes with it, and stays where
+        // it is put. The other boxes and properties make way.
+        const members = membersOf(hit.id);
+        dragging = { members, was: members.map((n) => n.pinned), at: this.toWorld(e.clientX, e.clientY) };
+        for (const n of members) n.pinned = true;
       } else {
         panning = { x: e.clientX, y: e.clientY, tx: this.transform.x, ty: this.transform.y };
         svg.classList.add('dragging');
@@ -145,7 +167,13 @@ export class GraphView {
       if (dragging) {
         if (!press?.moved) return;         // a tremor is not a drag
         const pt = this.toWorld(e.clientX, e.clientY);
-        dragging.n.x = pt.x; dragging.n.y = pt.y;
+        if (dragging.members) {
+          const dx = pt.x - dragging.at.x, dy = pt.y - dragging.at.y;
+          for (const n of dragging.members) { n.x += dx; n.y += dy; }
+          dragging.at = pt;
+        } else {
+          dragging.n.x = pt.x; dragging.n.y = pt.y;
+        }
         this.viewTouched = true;
         this.force.reheat(0.25);
         this.start();
@@ -166,10 +194,22 @@ export class GraphView {
       if (dragging) {
         // A node dragged deliberately stays put; one that was merely clicked keeps
         // whatever pinned state it already had.
-        if (!press?.moved) dragging.n.pinned = dragging.wasPinned;
+        if (!press?.moved) {
+          if (dragging.members) dragging.members.forEach((n, i) => { n.pinned = dragging.was[i]; });
+          else dragging.n.pinned = dragging.wasPinned;
+        } else if (dragging.members && this.lastModel) {
+          this.render(this.lastModel);   // draw the box's pin
+        }
         dragging = null;
       }
-      if (press && !press.moved) this.select(press.hit);
+      // A subject's box is not something to inspect: clicking one clears the
+      // selection, as clicking the canvas does. The machine's box is: its facts.
+      if (press && !press.moved) {
+        const hit = press.hit;
+        // A click on empty canvas lets go of what the drawer pointed at, too.
+        if (!hit && this.highlighted) this.highlight(null);
+        this.select(hit?.type === 'hull' ? (hit.id === MACHINE ? { type: 'machine', id: MACHINE } : null) : hit);
+      }
       press = null;
       panning = null;
       svg.classList.remove('dragging');
@@ -181,6 +221,13 @@ export class GraphView {
 
     svg.addEventListener('dblclick', (e) => {
       const hit = hitAt(e.target);
+      if (hit?.type === 'hull') {
+        // Release the box: its members go back to the layout.
+        for (const n of membersOf(hit.id)) n.pinned = false;
+        this.force.reheat(0.4);
+        this.render(this.lastModel);
+        return;
+      }
       if (hit?.type !== 'property') return;
       const n = this.force.at(hit.id);
       if (n) { n.pinned = !n.pinned; this.render(this.lastModel); }
@@ -243,6 +290,50 @@ export class GraphView {
     if (this.lastModel) this.render(this.lastModel);
   }
 
+  /**
+   * Point at part of the map: spec is {nodes, edges, pairs}, property ids,
+   * relationship ids and would-be edges (a candidate's two ends), or null to stop.
+   * The rest is dimmed and the view moves to what is pointed at, zoomed to fit it. Returns the ids that are not on the canvas — filtered out by
+   * the search, or not in the map any longer — so the caller can say so.
+   */
+  highlight(spec) {
+    const was = this.highlighted;
+    this.highlighted = spec ? {
+      nodes: new Set(spec.nodes || []),
+      edges: new Set(spec.edges || []),
+      pairs: spec.pairs || [],
+    } : null;
+    for (const p of this.highlighted?.pairs || []) { this.highlighted.nodes.add(p.from); this.highlighted.nodes.add(p.to); }
+    if (!spec && was) this.onHighlightCleared();
+    if (this.lastModel) this.render(this.lastModel);
+    if (!this.highlighted) return [];
+    const missing = [...this.highlighted.nodes].filter((id) => !this.nodeEls?.has(id));
+    this.focus([...this.highlighted.nodes].filter((id) => this.nodeEls?.has(id)));
+    return missing;
+  }
+
+  /** Centre the view on these properties, as close as lets them all fit. */
+  focus(ids) {
+    const ns = ids.map((id) => this.force.at(id)).filter(Boolean);
+    const rect = this.svg.getBoundingClientRect();
+    if (!ns.length || !rect.width) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of ns) {
+      const f = footprint(n);
+      x0 = Math.min(x0, f.x0); y0 = Math.min(y0, f.y0);
+      x1 = Math.max(x1, f.x1); y1 = Math.max(y1, f.y1);
+    }
+    const topInset = 56, pad = 60;
+    const availW = rect.width - pad * 2, availH = rect.height - topInset - pad;
+    // Close enough to read the labels, and no closer than the whole span allows.
+    const k = Math.max(0.2, Math.min(1.2, availW / Math.max(x1 - x0, 1), availH / Math.max(y1 - y0, 1)));
+    this.transform.k = k;
+    this.transform.x = rect.width / 2 - ((x0 + x1) / 2) * k;
+    this.transform.y = topInset + availH / 2 + pad / 2 - ((y0 + y1) / 2) * k;
+    this.viewTouched = true;     // the operator asked to look here; a re-frame should not undo it
+    this.applyTransform();
+  }
+
   setFilter(patch) {
     Object.assign(this.filter, patch);
     if (this.lastModel) this.render(this.lastModel);
@@ -261,6 +352,7 @@ export class GraphView {
     if (!needle) return model.properties;
     return model.properties.filter((p) => p.id.toLowerCase().includes(needle)
       || (p.subject || '').toLowerCase().includes(needle)
+      || (subjectName(p) || '').toLowerCase().includes(needle)
       || (p.unit || '').toLowerCase().includes(needle));
   }
 
@@ -275,7 +367,7 @@ export class GraphView {
 
     const nodes = props.map((p) => {
       const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
-      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: subjectOf(p) };
+      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: subjectOf(p) || MACHINE };
     });
 
     const rels = model.relationships.filter((r) => ids.has(r.from) && ids.has(r.to));
@@ -337,6 +429,7 @@ export class GraphView {
 
   /** Rebuild the DOM for the current data. Positions are applied separately. */
   draw(model, props, rels, members) {
+    const ids = new Set(props.map((p) => p.id));
     this.gHulls.replaceChildren();
     this.gMembers.replaceChildren();
     this.gEdges.replaceChildren();
@@ -345,30 +438,72 @@ export class GraphView {
     this.edgeEls = [];
     this.hullEls = [];
 
-    // Subject enclosures, drawn under everything.
+    const hl = this.highlighted;
+    const dimmed = (id) => hl && !hl.nodes.has(id);
+    // Once a candidate is confirmed its relationship is drawn already; the
+    // highlight then falls on that edge rather than on a second one beside it.
+    const joins = (r, pr) => (r.from === pr.from && r.to === pr.to) || (r.from === pr.to && r.to === pr.from);
+    const joined = (pr) => rels.some((r) => joins(r, pr));
+    for (const pr of hl?.pairs || []) for (const r of rels) if (joins(r, pr)) hl.edges.add(r.id);
+
+    // Enclosures, drawn under everything: the machine's and each subject's.
     const bySubject = new Map();
     for (const p of props) {
-      const s = subjectOf(p);
-      if (!s) continue;
+      const s = subjectOf(p) || MACHINE;
       if (!bySubject.has(s)) bySubject.set(s, []);
       bySubject.get(s).push(p.id);
     }
     for (const [subject, memberIDs] of bySubject) {
-      const g = el('g', { class: 'hull' });
+      const machine = subject === MACHINE;
+      const g = el('g', { class: 'hull', 'data-hull': subject, style: 'cursor:grab' });
+      if (hl && memberIDs.every(dimmed)) g.setAttribute('opacity', 0.35);
+      const title = el('title');
+      const name = machine ? machineSummary(model) : model.nameOf(subject);
+      title.textContent = machine
+        ? `${name} — this machine's own properties · click for its facts · drag to move · double-click to release`
+        : `${name === subject ? subject : `${name} (${subject})`} — drag to move the box · double-click to release it`;
+      g.append(title);
+      // The machine's box is solid where a workload's is dashed: the machine is what
+      // the map is of, a workload something running on it for now.
       const rect = el('rect', {
-        rx: 16, fill: 'var(--surface-2)', 'fill-opacity': 0.55,
-        stroke: 'var(--border-strong)', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+        rx: 16, fill: machine ? 'var(--surface-1)' : 'var(--surface-2)', 'fill-opacity': machine ? 0.7 : 0.55,
+        stroke: machine ? 'var(--ink-muted)' : 'var(--border-strong)', 'stroke-width': machine ? 1.3 : 1,
+        'stroke-dasharray': machine ? null : '4 3',
       });
+      if (machine && this.selected?.type === 'machine') {
+        rect.setAttribute('stroke', 'var(--sign-pos)');
+        rect.setAttribute('stroke-width', 2.5);
+      }
       const label = el('text', {
-        'font-size': 11, fill: 'var(--ink-muted)',
+        'font-size': 11, fill: machine ? 'var(--ink-secondary)' : 'var(--ink-muted)',
+        'font-weight': machine ? 600 : null,
         'font-family': 'ui-monospace, monospace', 'letter-spacing': '.04em',
         stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke',
         'stroke-linejoin': 'round',
       });
-      label.textContent = subject;
+      label.textContent = name;
+      // What the agent has done to this workload, beside its name: throttled while
+      // a cap is in force, frozen while policy forbids touching it.
+      if (!machine) {
+        for (const [on, text, colour] of [
+          [model.throttled(subject), model.acting.relief?.runtime === 'dry-run' ? 'throttled (dry-run)' : 'throttled', 'var(--status-serious)'],
+          [model.frozen(subject), 'frozen', 'var(--prov-asserted)'],
+        ]) {
+          if (!on) continue;
+          const tag = el('tspan', { fill: colour, 'font-weight': 600, class: `hull-badge ${text.split(' ')[0]}` });
+          tag.textContent = `  [${text}]`;
+          label.append(tag);
+        }
+      }
       g.append(rect, label);
+      // Pinned when the operator put the box somewhere: every member stays.
+      let pin = null;
+      if (memberIDs.every((id) => this.force.at(id)?.pinned)) {
+        pin = el('circle', { r: 3, fill: 'var(--ink-muted)' });
+        g.append(pin);
+      }
       this.gHulls.append(g);
-      this.hullEls.push({ subject, memberIDs, rect, label });
+      this.hullEls.push({ subject, memberIDs, rect, label, pin });
     }
 
     // Membership: a derived property is recomputed from these. Hairline and
@@ -377,6 +512,7 @@ export class GraphView {
       const path = el('path', {
         fill: 'none', stroke: 'var(--grid)', 'stroke-width': 1.5,
         'stroke-dasharray': '1 4', 'stroke-linecap': 'round',
+        opacity: hl && (dimmed(m.from) || dimmed(m.to)) ? 0.25 : null,
       });
       this.gMembers.append(path);
       this.edgeEls.push({ kind: 'member', from: m.from, to: m.to, path, curve: 0 });
@@ -405,6 +541,8 @@ export class GraphView {
       const opacity = eff.known ? 0.35 + Math.min(0.65, r.confidence * 0.65) : 0.4;
 
       const g = el('g', { 'data-edge': r.id, class: 'edge', style: 'cursor:pointer' });
+      // Pointed at by id, or joining two highlighted properties; anything else dims.
+      if (hl && !hl.edges.has(r.id) && (dimmed(r.from) || dimmed(r.to))) g.setAttribute('opacity', 0.15);
       // A transparent fat path under the visible one: a 2px line is not a hit target.
       const hit = el('path', { fill: 'none', stroke: 'transparent', 'stroke-width': 14 });
       const path = el('path', {
@@ -417,7 +555,7 @@ export class GraphView {
         path.setAttribute('class', 'flowing');
         path.setAttribute('stroke-dasharray', '7 7');
       }
-      if (this.selected?.type === 'relationship' && this.selected.id === r.id) {
+      if ((this.selected?.type === 'relationship' && this.selected.id === r.id) || hl?.edges.has(r.id)) {
         path.setAttribute('stroke-width', width + 2.5);
         path.setAttribute('stroke-opacity', 1);
       }
@@ -446,10 +584,25 @@ export class GraphView {
       this.edgeEls.push({ kind: 'rel', rel: r, from: r.from, to: r.to, path, hit, dot, alarm, curve });
     }
 
+    // A would-be edge — a candidate not yet confirmed — in the colour a discovered
+    // relationship would take, dashed because nothing has been admitted.
+    for (const pr of hl?.pairs || []) {
+      if (!ids.has(pr.from) || !ids.has(pr.to)) continue;
+      if (joined(pr)) continue;
+      const path = el('path', {
+        fill: 'none', stroke: 'var(--prov-discovered)', 'stroke-width': 3,
+        'stroke-dasharray': '8 5', 'stroke-linecap': 'round', 'pointer-events': 'none',
+        'marker-end': 'url(#arrow-hl)', 'marker-start': pr.undirected ? 'url(#arrow-hl)' : null,
+      });
+      this.gEdges.append(path);
+      this.edgeEls.push({ kind: 'ghost', from: pr.from, to: pr.to, path, curve: -0.22, both: pr.undirected });
+    }
+
     // Properties.
     for (const p of props) {
       const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
       const g = el('g', { 'data-node': p.id, class: 'node', style: 'cursor:pointer' });
+      if (dimmed(p.id)) g.setAttribute('opacity', 0.22);
 
       const statusStroke = p.status === 'stale' ? 'var(--status-serious)'
         : p.status === 'retired' ? 'var(--ink-muted)' : 'var(--baseline)';
@@ -502,11 +655,18 @@ export class GraphView {
       valueText.textContent = p.n_observations ? fmt.num(p.value, 3) : 'unobserved';
       g.append(valueText);
 
-      if (this.force.at(p.id)?.pinned) {
+      const box = subjectOf(p) || MACHINE;
+      const boxPinned = props.every((q) => (subjectOf(q) || MACHINE) !== box || this.force.at(q.id)?.pinned);
+      if (this.force.at(p.id)?.pinned && !boxPinned) {
         g.append(el('circle', { r: 2.5, cx: r - 3, cy: -(r - 3), fill: 'var(--ink-muted)' }));
       }
 
       this.gNodes.append(g);
+      // A highlighted property wears a ring in the highlight's colour.
+      if (hl?.nodes.has(p.id)) {
+        g.insertBefore(el('circle', { r: r + 5, fill: 'none', stroke: 'var(--prov-discovered)', 'stroke-width': 3 }), disc);
+      }
+
       this.nodeEls.set(p.id, { g, disc, arc, halo, p, r });
     }
 
@@ -555,7 +715,8 @@ export class GraphView {
       const a = this.force.at(e.from);
       const b = this.force.at(e.to);
       if (!a || !b) continue;
-      const geom = curvePath(a, b, e.curve, nodeRadius(this.nodeEls, e.from), nodeRadius(this.nodeEls, e.to));
+      const geom = curvePath(a, b, e.curve, nodeRadius(this.nodeEls, e.from) + (e.kind === 'ghost' ? 6 : 0),
+        nodeRadius(this.nodeEls, e.to) + (e.kind === 'ghost' ? 6 : 0), e.both);
       e.path.setAttribute('d', geom.d);
       if (e.hit) e.hit.setAttribute('d', geom.d);
       if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
@@ -581,6 +742,7 @@ export class GraphView {
       h.rect.setAttribute('height', y1 - y0 + pad * 2 + HULL_LABEL);
       h.label.setAttribute('x', x0 - pad + 10);
       h.label.setAttribute('y', y0 - pad + 4);
+      if (h.pin) { h.pin.setAttribute('cx', x1 + pad - 10); h.pin.setAttribute('cy', y0 - pad - HULL_LABEL + 10); }
     }
   }
 
@@ -662,11 +824,11 @@ const nodeRadius = (map, id) => map.get(id)?.r ?? R_OBSERVED;
  * is the curve's own midpoint, B(½) = ¼·start + ½·control + ¼·end, and is where
  * anything meant to sit ON the edge — the provenance dot, the alarm — belongs.
  */
-function curvePath(a, b, curve, ra, rb) {
+function curvePath(a, b, curve, ra, rb, arrowAtStart = false) {
   const dx = b.x - a.x, dy = b.y - a.y;
   const d = Math.hypot(dx, dy) || 1;
   const ux = dx / d, uy = dy / d;
-  const sx = a.x + ux * (ra + 2), sy = a.y + uy * (ra + 2);
+  const sx = a.x + ux * (ra + (arrowAtStart ? 11 : 2)), sy = a.y + uy * (ra + (arrowAtStart ? 11 : 2));
   const ex = b.x - ux * (rb + 11), ey = b.y - uy * (rb + 11);
   const mx = (sx + ex) / 2 - uy * d * curve;
   const my = (sy + ey) / 2 + ux * d * curve;
@@ -693,11 +855,11 @@ function propertyTip(p, model) {
     ['observations', fmt.int(p.n_observations)],
     ['status', p.status],
   ];
-  if (p.subject) rows.unshift(['subject', p.subject]);
+  if (p.subject) rows.unshift(['subject', subjectName(p) ? `${subjectName(p)} (${p.subject})` : p.subject]);
   if (p.kind === 'derived' && p.members?.length) rows.push(['members', p.members.length]);
   const inbound = model.influencesOn(p.id).length;
   if (inbound) rows.push(['influenced by', inbound]);
-  return { title: p.id, kind: p.kind, rows };
+  return { title: model.display(p.id), kind: p.kind, rows };
 }
 
 function relationshipTip(r) {

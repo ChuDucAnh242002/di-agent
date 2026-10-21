@@ -1188,6 +1188,33 @@ func TestIngestSample_EmptyRangeIs400(t *testing.T) {
 	}
 }
 
+// TestIngestSample_PartOfIsANodeTypeOnAScopedSample: part_of names the node-level type
+// a subject's quantity is summed into, so it must be a metric type and the sample must
+// have a subject; anything else is refused at the wire.
+func TestIngestSample_PartOfIsANodeTypeOnAScopedSample(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, c := range []struct {
+		subject, partOf string
+		want            int
+	}{
+		{"disk:sda", "system.io.out", http.StatusAccepted},
+		{"", "system.io.out", http.StatusBadRequest},
+		{"disk:sda", "system.io.out@disk:sdb", http.StatusBadRequest},
+	} {
+		body := `{"metric_type":"disk.io.writes","value":7,"timestamp_unix":1000,"event_id":"e-` + c.subject + c.partOf +
+			`","subject":"` + c.subject + `","unit":"bytes/s","part_of":"` + c.partOf + `"}`
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("subject %q part_of %q: status %d, want %d", c.subject, c.partOf, resp.StatusCode, c.want)
+		}
+	}
+}
+
 // TestIngestSample_ScopedReadingOfARoutedTypeIs202: a scoped reading of a routed
 // metric type is recorded but never routed, and the 202 note says so — a regression
 // to 204 would tell the producer its reading reached a construct.

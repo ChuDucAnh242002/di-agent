@@ -69,11 +69,13 @@ type Config struct {
 
 	// CgroupSubjects walks pod cgroups (and CgroupUnitGlobs-allowlisted units) as
 	// subjects. CgroupMaxSubjects bounds the walk (0 = 256). CgroupCmdLabel stamps a
-	// cmd= label from /proc (needs hostPID). See minimal.CgroupOptions.
+	// cmd= label from /proc (needs hostPID). CgroupPodLogRoot is the kubelet's pod log
+	// directory pods are named from (empty names none). See minimal.CgroupOptions.
 	CgroupSubjects    bool
 	CgroupUnitGlobs   []string
 	CgroupMaxSubjects int
 	CgroupCmdLabel    bool
+	CgroupPodLogRoot  string
 
 	// ScriptPath runs the synthetic system from a scenario file instead of any real
 	// collector — for driving a live daemon through a known story.
@@ -81,8 +83,12 @@ type Config struct {
 
 	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
 	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
-	// When set together with CgroupRoot, both collectors run as a MultiCollector.
-	NetdataURL string
+	// When set together with CgroupRoot, both collectors run as a MultiCollector, and
+	// the cgroup collector alone supplies the node's own types (cpu_utilization and
+	// the rest): Netdata's system charts measure CPU differently. NetdataInclude is
+	// the chart-context patterns it selects (nil = minimal.DefaultNetdataInclude).
+	NetdataURL     string
+	NetdataInclude []string
 
 	// CollectInterval is how often the collection scheduler ticks. Zero
 	// disables the loop entirely. Callers (main.go) default to 10s.
@@ -119,6 +125,10 @@ type Config struct {
 	// a share of each end's declared range, for a pair to become a candidate. nil
 	// keeps minimal.DefaultMinSpread; 0 disables the gate.
 	ProposerMinSpread *float64
+	// ProposerFDR is the false-discovery rate of the candidate bar: a candidate's
+	// p-value must clear the Benjamini–Hochberg bar at this rate over every pair being
+	// tested. nil keeps minimal.DefaultFDR; 0 disables the correction.
+	ProposerFDR *float64
 
 	// DomainSpec is the loaded domain model: constructs, metric routing,
 	// propositions, adjustment policy and operator vocabulary. Nil runs the agent
@@ -341,6 +351,9 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		if cfg.ProposerMinSpread != nil {
 			mi.SetMinSpread(*cfg.ProposerMinSpread)
 		}
+		if cfg.ProposerFDR != nil {
+			mi.SetFDR(*cfg.ProposerFDR)
+		}
 		mi.SetMaxPairs(cfg.ProposerMaxPairs)
 		proposer = mi
 	} else {
@@ -375,9 +388,16 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	if err := minimal.ValidUnitGlobs(cfg.CgroupUnitGlobs); err != nil {
 		return nil, nil, err
 	}
+	if err := minimal.ValidNetdataInclude(cfg.NetdataInclude); err != nil {
+		return nil, nil, err
+	}
+	ndOpts := func(collapse bool) minimal.NetdataOptions {
+		return minimal.NetdataOptions{Include: cfg.NetdataInclude, Collapse: collapse}
+	}
 	cgOpts := minimal.CgroupOptions{
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
+		PodLogRoot: cfg.CgroupPodLogRoot,
 	}
 
 	if cfg.ScriptPath != "" {
@@ -386,7 +406,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		// print ("collection loop disabled") is the message for a deliberate choice.
 		sc, err := scripted.LoadScenario(cfg.ScriptPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
 		}
 		// The script stamps simulated time one tick per Collect while the map sweeps
 		// on the wall clock. An interval above the tick makes every property go stale
@@ -394,13 +414,13 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		// nothing ever goes stale. Not a drift to warn about: a configuration the
 		// daemon must not start with.
 		if tick := time.Duration(sc.TickSeconds) * time.Second; cfg.CollectInterval > 0 && cfg.CollectInterval != tick {
-			return nil, nil, fmt.Errorf("-script %s ticks every %s but -collect-interval is %s: simulated time would run "+
-				"off the wall clock the map sweeps on, retiring or immortalising every property; set -collect-interval=%s",
+			return nil, nil, fmt.Errorf("sources.script %s ticks every %s but sources.interval is %s: simulated time would run "+
+				"off the wall clock the map sweeps on, retiring or immortalising every property; set sources.interval: %s",
 				sc.Name, tick, cfg.CollectInterval, tick)
 		}
 		script, err := scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
 		if err != nil {
-			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
 		}
 		return sm, script, nil
 	}
@@ -408,10 +428,10 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	switch {
 	case hasCgroup && hasNetdata:
 		cgroupC := minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
-		netdataC := minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+		netdataC := minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(false))
 		collector = minimal.NewMultiCollector(cgroupC, netdataC)
 	case hasNetdata:
-		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+		collector = minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(true))
 	case hasCgroup:
 		collector = minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		// else: collector stays nil — collection loop disabled

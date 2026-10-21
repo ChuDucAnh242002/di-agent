@@ -2,6 +2,8 @@
 # 02-k0s.sh — install and start k0s in single-node mode on each VM
 #
 # Usage: ./02-k0s.sh [vm1 vm2 vm3]
+#
+# The version is pinned so a run can name it: K0S_VERSION overrides it.
 
 set -euo pipefail
 
@@ -14,6 +16,8 @@ RESET=$(tput sgr0 2>/dev/null || echo "")
 info() { echo "${YELLOW}[k0s] $*${RESET}"; }
 ok()   { echo "${GREEN}[k0s] $*${RESET}"; }
 err()  { echo "${RED}[k0s] $*${RESET}" >&2; }
+
+K0S_VERSION="${K0S_VERSION:-v1.36.4+k0s.1}"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 vm_ip() { multipass list | awk -v vm="$1" '$1 == vm {print $3}'; }
@@ -45,9 +49,15 @@ fi
 
 # ── install + start ──────────────────────────────────────────────────────────
 for vm in "${VMS[@]}"; do
-    info "Installing k0s on $vm ..."
-    multipass exec "$vm" -- bash -c "curl -sSLf https://get.k0s.sh | sudo sh"
-    ok "k0s binary installed on $vm"
+    info "Installing k0s $K0S_VERSION on $vm ..."
+    multipass exec "$vm" -- bash -c \
+        "curl -sSLf https://get.k0s.sh | sudo K0S_VERSION='$K0S_VERSION' sh"
+    installed=$(multipass exec "$vm" -- sudo k0s version)
+    if [ "$installed" != "$K0S_VERSION" ]; then
+        err "$vm has k0s $installed, expected $K0S_VERSION"
+        exit 1
+    fi
+    ok "k0s $installed installed on $vm"
 
     info "Installing k0s controller (single-node) on $vm ..."
     # Idempotent: ignore error if already installed

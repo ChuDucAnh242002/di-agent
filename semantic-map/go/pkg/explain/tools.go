@@ -58,11 +58,11 @@ type ToolResult struct {
 var toolSchemas = []ToolSchema{
 	{
 		Name:        "get_cost",
-		Description: "Return the live ActionCost for one node + task-type combination: ResourceCost, Confidence, Rationale, GraphPathUsed. Use this first when the operator asks 'why is my cost X'.",
+		Description: "Return the live ActionCost for one node + task-type combination, from the loaded domain model's cost model (an error when none is loaded): the cost level, Confidence, Rationale, GraphPathUsed. Use this first when the operator asks 'why is my cost X'.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"node_id":   map[string]any{"type": "string", "description": "Node ID (usually 'master')."},
+				"node_id":   map[string]any{"type": "string", "description": "Node ID: this agent's own, unless the question is about a peer."},
 				"task_type": map[string]any{"type": "string", "description": "Task type, e.g. 'pod-scheduling'."},
 			},
 			"required":             []string{"node_id", "task_type"},
@@ -71,12 +71,12 @@ var toolSchemas = []ToolSchema{
 	},
 	{
 		Name:        "get_edges",
-		Description: "Return the current EdgeDescriptors, optionally filtered to a construct pair. Each edge carries prior_weight, ema_weight, confidence, n_observations, deprecated, and direction ('+' or '-').",
+		Description: "Return the map's relationships, optionally filtered by either end or both. Each carries effective (the strength the agent reasons with, absent when nothing has been observed) and basis (asserted, measured, established or recent), the layers themselves, confidence, n_observations, deprecated, and direction ('+' or '-').",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"from": map[string]any{"type": "string", "description": "From-construct ID (RC/PS/CO/SC/MU/RR/CE). Omit to skip filtering."},
-				"to":   map[string]any{"type": "string", "description": "To-construct ID. Omit to skip filtering."},
+				"from": map[string]any{"type": "string", "description": "Property the relationship runs from, e.g. cpu_utilization@pod:<uid>. Omit to skip filtering."},
+				"to":   map[string]any{"type": "string", "description": "Property the relationship runs into, e.g. cpu_contention_ratio. Omit to skip filtering."},
 			},
 			"additionalProperties": false,
 		},
@@ -107,7 +107,7 @@ var toolSchemas = []ToolSchema{
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"node_id":   map[string]any{"type": "string", "description": "Source node ID (usually 'master')."},
+				"node_id":   map[string]any{"type": "string", "description": "Source node ID: this agent's own."},
 				"task_type": map[string]any{"type": "string", "description": "Task type, e.g. 'pod-scheduling'."},
 			},
 			"required":             []string{"node_id", "task_type"},
@@ -145,7 +145,7 @@ var toolSchemas = []ToolSchema{
 	},
 	{
 		Name:        "get_graph",
-		Description: "Return the full graph snapshot (all constructs, propositions, and edges). Prefer get_edges or get_cost when the question is narrow — get_graph is expensive to reason over.",
+		Description: "Return the full graph snapshot: properties, relationships, and the loaded domain model's constructs, if any. Prefer get_edges or get_cost when the question is narrow — get_graph is expensive to reason over.",
 		Parameters: map[string]any{
 			"type":                 "object",
 			"properties":           map[string]any{},
@@ -211,7 +211,7 @@ func dispatchGetCost(r SemanticMapReader, args map[string]any) (*ToolResult, err
 	}
 	return &ToolResult{
 		Payload: payload,
-		Digest:  fmt.Sprintf("cost node=%s task=%s rc=%.4f conf=%.3f", node, task, ac.ResourceCost, ac.Confidence),
+		Digest:  fmt.Sprintf("cost node=%s task=%s cost=%.4f conf=%.3f", node, task, ac.ResourceCost, ac.Confidence),
 	}, nil
 }
 
@@ -247,6 +247,7 @@ func dispatchGetEdges(r SemanticMapReader, args map[string]any) (*ToolResult, er
 		PropositionID string   `json:"proposition_id"`
 		Direction     string   `json:"direction"`
 		Established   *float64 `json:"established,omitempty"`
+		Measured      *float64 `json:"measured,omitempty"`
 		Effective     *float64 `json:"effective,omitempty"`
 		Basis         string   `json:"basis,omitempty"`
 		EMAWeight     float64  `json:"ema_weight"`
@@ -262,7 +263,7 @@ func dispatchGetEdges(r SemanticMapReader, args map[string]any) (*ToolResult, er
 		}
 		out = append(out, edgeOut{
 			From: e.FromID, To: e.ToID, PropositionID: e.PropositionID, Direction: dir,
-			Established: e.Established, Effective: e.Effective, Basis: e.Basis,
+			Established: e.Established, Measured: e.Measured, Effective: e.Effective, Basis: e.Basis,
 			EMAWeight: e.EMAWeight, Confidence: e.Confidence,
 			NObservations: e.NObservations, Deprecated: e.Deprecated,
 		})
