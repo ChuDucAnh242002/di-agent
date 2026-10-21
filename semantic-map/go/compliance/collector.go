@@ -30,25 +30,29 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 
 	// ── AvailableMetrics ──────────────────────────────────────────────────────
 
+	// A pattern-driven collector knows its types only once it has asked its source,
+	// so these are asserted after a Collect.
 	t.Run("AvailableMetricsNonEmpty", func(t *testing.T) {
 		c := factory(t)
+		_, _ = c.Collect()
 		if len(c.AvailableMetrics()) == 0 {
-			t.Error("AvailableMetrics() must list at least one MetricType")
+			t.Error("AvailableMetrics() must list at least one MetricType once Collect has produced samples")
 		}
 	})
 
-	t.Run("AvailableMetricsStable", func(t *testing.T) {
+	t.Run("AvailableMetricsStableWithoutACollect", func(t *testing.T) {
 		c := factory(t)
+		_, _ = c.Collect()
 		first := metricSet(c.AvailableMetrics())
 		second := metricSet(c.AvailableMetrics())
 		for mt := range first {
 			if !second[mt] {
-				t.Errorf("AvailableMetrics() changed: %q present first call but not second", mt)
+				t.Errorf("AvailableMetrics() changed with no Collect between: %q present first call but not second", mt)
 			}
 		}
 		for mt := range second {
 			if !first[mt] {
-				t.Errorf("AvailableMetrics() changed: %q present second call but not first", mt)
+				t.Errorf("AvailableMetrics() changed with no Collect between: %q present second call but not first", mt)
 			}
 		}
 	})
@@ -118,11 +122,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 			if s.Unit == "" {
 				t.Errorf("MetricSample.Unit must be non-empty; got %+v", s)
 			}
-			if s.Range == nil {
-				t.Errorf("MetricSample.Range must be declared; got %+v", s)
-				continue
-			}
-			if s.Range[1] <= s.Range[0] {
+			if s.Range != nil && s.Range[1] <= s.Range[0] {
 				t.Errorf("MetricSample.Range %v is empty; hi must exceed lo", *s.Range)
 			}
 		}
@@ -135,17 +135,18 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 	t.Run("UnitAndRangeStablePerType", func(t *testing.T) {
 		c := factory(t)
 		type decl struct {
-			unit string
-			rng  [2]float64
+			unit     string
+			declared bool
+			rng      [2]float64
 		}
 		seen := map[types.MetricType]decl{}
 		for call := 0; call < 2; call++ {
 			samples, _ := c.Collect()
 			for _, s := range samples {
-				if s.Range == nil {
-					continue // reported by SamplesDeclareUnitAndRange
+				d := decl{unit: s.Unit, declared: s.Range != nil}
+				if s.Range != nil {
+					d.rng = *s.Range
 				}
-				d := decl{s.Unit, *s.Range}
 				if prev, ok := seen[s.MetricType]; ok && prev != d {
 					t.Errorf("%s declared %q %v and then %q %v; unit and range must be stable per type",
 						s.MetricType, prev.unit, prev.rng, d.unit, d.rng)
@@ -157,11 +158,11 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 
 	t.Run("SamplesMetricTypeInAvailable", func(t *testing.T) {
 		c := factory(t)
-		available := metricSet(c.AvailableMetrics())
 		samples, _ := c.Collect()
+		available := metricSet(c.AvailableMetrics())
 		for _, s := range samples {
 			if !available[s.MetricType] {
-				t.Errorf("sample MetricType %q not declared in AvailableMetrics()", s.MetricType)
+				t.Errorf("sample MetricType %q not declared in the AvailableMetrics() read after the Collect that emitted it", s.MetricType)
 			}
 		}
 	})

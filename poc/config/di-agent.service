@@ -5,15 +5,7 @@ After=network.target netdata.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/di-agent/env
-ExecStart=/usr/local/bin/di-agent \
-  -profile edge-minimal \
-  -addr :9090 \
-  -netdata-url http://localhost:19999 \
-  -kd k0s \
-  -node-id ${NODE_ID} \
-  -regime ${REGIME} \
-  -collect-interval 5s \
-  -proposer=false
+ExecStart=/usr/local/bin/di-agent -config /etc/di-agent/agent.yaml
 Restart=always
 RestartSec=5
 StandardOutput=journal

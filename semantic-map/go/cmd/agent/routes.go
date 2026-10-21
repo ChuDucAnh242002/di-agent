@@ -27,7 +27,8 @@ package main
 // /ontology/proposition             POST    AddPropositionRequest          204
 // /agent/reset                      POST    ResetRequest                   204
 // /agent/tune                       POST    TuneRequest                    200 TuneResponse
-// /candidates/{id}/confirm          POST    —                              204
+// /candidates/{id}/confirm          POST    ConfirmRequest (optional)      204
+//                                                                          400 (orientation missing or wrong)
 // /candidates/{id}/reject           POST    —                              204
 // /candidates/{id}/defer            POST    —                              204
 // /peers                            GET     —                              200 []PeerDTO
@@ -48,9 +49,11 @@ package main
 // endpoints excepted).
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime"
@@ -131,7 +134,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.CostOfAction(task, node)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
@@ -146,16 +149,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.RecommendPeer(&ctx)
 		if err != nil {
-			// ErrInsufficientTrust covers "no peer registry", "no peers
-			// registered" and "no peer qualifies" — all ordinary states of a
-			// single-node or freshly-started deployment, not server faults.
-			// 409 says the request was well-formed but current state cannot
-			// satisfy it, which is what an operator needs to distinguish.
-			if errors.Is(err, contracts.ErrInsufficientTrust) {
-				writeError(w, http.StatusConflict, err.Error())
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
@@ -173,24 +167,69 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.SimulateOutcome(&req.Context, req.TargetNodeID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeReasonerError(w, err)
 			return
 		}
 		writeJSON(w, result)
 	})
 
-	// GET /candidates  — pending graph extension proposals
+	// GET /candidates  — pending graph extension proposals. ?status=all returns every
+	// candidate the proposer has emitted, in first-seen order, with its current status
+	// and, when deferred, the reason; ?status=<pending|confirmed|rejected|deferred>
+	// one status of them. Without the history, a candidate an operator rejected and
+	// one never proposed look the same.
 	mux.HandleFunc("GET /candidates", func(w http.ResponseWriter, r *http.Request) {
-		candidates, err := sm.PendingCandidates()
+		status := r.URL.Query().Get("status")
+		if status == "" || status == types.Pending.String() {
+			candidates, err := sm.PendingCandidates()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, candidates)
+			return
+		}
+		valid := status == "all"
+		for _, s := range []types.CandidateStatus{types.Confirmed, types.Rejected, types.Deferred} {
+			valid = valid || status == s.String()
+		}
+		if !valid {
+			http.Error(w, fmt.Sprintf("status %q is not all, pending, confirmed, rejected or deferred", status), http.StatusBadRequest)
+			return
+		}
+		history, err := sm.CandidateHistory()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, candidates)
+		out := make([]*types.CandidateEdge, 0, len(history))
+		for _, c := range history {
+			if status == "all" || c.Status.String() == status {
+				out = append(out, c)
+			}
+		}
+		writeJSON(w, out)
 	})
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// writeReasonerError maps the reasoning operations' errors to a status an operator
+// can act on. ErrInsufficientTrust covers "no peer registry", "no peers registered"
+// and "no peer qualifies": ordinary states of a single-node or freshly started
+// deployment, so 409 (well-formed, but current state cannot satisfy it).
+// ErrNoDomainModel is an agent started without a domain model, for which the
+// operation does not exist, so 501, as /explain answers without an LLM.
+func writeReasonerError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, contracts.ErrNoDomainModel):
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, contracts.ErrInsufficientTrust):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
 
 // writeJSON serializes v as JSON with a 200 OK header. It is shared by both
 // old and new endpoints because the success-path content type is the same.
@@ -505,7 +544,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		applied, err := sm.Tune(req.Intent, req.Operator)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeReasonerError(w, err)
 			return
 		}
 		dtos := make([]TuneAdjustmentDTO, len(applied))
@@ -573,11 +612,33 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Path-only candidate review actions. No body, no requireJSON.
+	// Candidate review actions. Reject and defer are path-only. Confirm takes an
+	// optional body naming the end an undirected candidate runs from; when a body is
+	// sent it must be JSON, which keeps the CSRF guard the other POSTs have.
 	mux.HandleFunc("POST /candidates/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.ConfirmCandidate(id); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req ConfirmRequest
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := requireJSON(r); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if err := sm.ConfirmCandidate(id, req.From, operatorReview()); err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, contracts.ErrBadConfirmation) {
+				code = http.StatusBadRequest
+			}
+			writeError(w, code, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -585,7 +646,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/reject", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.RejectCandidate(id); err != nil {
+		if err := sm.RejectCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -594,12 +655,17 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/defer", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.DeferCandidate(id); err != nil {
+		if err := sm.DeferCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// operatorReview is the review an operator's action through the endpoints records.
+func operatorReview() types.CandidateReview {
+	return types.CandidateReview{By: types.ReviewerOperator, At: time.Now()}
 }
 
 // parseSince accepts an empty string (returns zero time), an RFC3339

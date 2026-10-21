@@ -1,0 +1,365 @@
+// A small force-directed layout.
+//
+// Written out rather than imported because the console must work on a node with
+// no route to a CDN — which is the deployment this agent is built for. The map is
+// tens of properties, not thousands, so the O(n²) repulsion is cheaper than the
+// quadtree that would avoid it, and it is stable without tuning.
+//
+// Integration is explicit Euler with velocity damping and an annealing alpha:
+// positions settle, then stop costing anything, and any topology change reheats.
+
+const REPULSION = 9500;   // Coulomb constant between every pair
+const SPRING = 0.035;     // Hooke constant along a link
+const DAMPING = 0.82;
+const CENTER = 0.012;     // pull toward the middle, so nothing drifts off-screen
+const GROUP = 0.045;      // pull toward a subject's own centroid
+const MIN_ALPHA = 0.004;
+const RESOLVE_ROUNDS = 12; // bound on the separation rounds per tick
+
+export class Force {
+  constructor() {
+    this.nodes = new Map();  // id → {id, x, y, vx, vy, r, group, pinned}
+    this.links = [];         // {source, target, distance}
+    this.alpha = 1;
+    this.width = 800;
+    this.height = 600;
+  }
+
+  size(w, h) { this.width = w; this.height = h; }
+
+  /**
+   * Reconcile the simulation with a new set of nodes and links.
+   *
+   * Surviving nodes keep their position: a poll that admits one property should
+   * nudge the picture, not redraw it somewhere else. New nodes are seeded near
+   * their group's centre of mass — or near the middle — so they arrive where they
+   * belong instead of flying in from a corner.
+   */
+  sync(nodes, links) {
+    const seen = new Set();
+    let topologyChanged = false;
+
+    for (const n of nodes) {
+      seen.add(n.id);
+      const existing = this.nodes.get(n.id);
+      if (existing) {
+        existing.r = n.r;
+        existing.hw = n.hw ?? n.r;
+        existing.below = n.below ?? 0;
+        existing.group = n.group;
+        continue;
+      }
+      topologyChanged = true;
+      const seed = this.seedFor(n.group);
+      this.nodes.set(n.id, {
+        id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
+        x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: false,
+      });
+    }
+    for (const id of [...this.nodes.keys()]) {
+      if (!seen.has(id)) { this.nodes.delete(id); topologyChanged = true; }
+    }
+
+    // Compared as a SET, not a count. One relationship retiring while another is
+    // confirmed in the same poll leaves the count unchanged, and a layout that
+    // never reheats draws the new edge across positions arranged for the old one.
+    const next = links.filter((l) => this.nodes.has(l.source) && this.nodes.has(l.target));
+    const key = (l) => `${l.source}\u0001${l.target}`;
+    const before = new Set(this.links.map(key));
+    if (next.length !== before.size || next.some((l) => !before.has(key(l)))) {
+      topologyChanged = true;
+    }
+    this.links = next;
+
+    if (topologyChanged) this.reheat(0.75);
+    return topologyChanged;
+  }
+
+  seedFor(group) {
+    const peers = [...this.nodes.values()].filter((n) => group && n.group === group);
+    const jitter = () => (Math.random() - 0.5) * 60;
+    if (peers.length) {
+      const cx = peers.reduce((s, n) => s + n.x, 0) / peers.length;
+      const cy = peers.reduce((s, n) => s + n.y, 0) / peers.length;
+      return { x: cx + jitter(), y: cy + jitter() };
+    }
+    return { x: this.width / 2 + jitter() * 3, y: this.height / 2 + jitter() * 3 };
+  }
+
+  reheat(to = 0.6) { this.alpha = Math.max(this.alpha, to); }
+
+  /**
+   * Run the simulation synchronously until it settles, or for `max` steps.
+   *
+   * Animating a layout into place depends on requestAnimationFrame, and a browser
+   * throttles that hard in a background tab — so a graph laid out only by the
+   * animation loop can still be sitting on its seed positions when someone brings
+   * the tab forward, or when a screenshot is taken. Settling here costs a few
+   * milliseconds at this size and makes the first painted frame the right one.
+   */
+  prewarm(max = 300) {
+    for (let i = 0; i < max && !this.settled; i++) this.tick();
+  }
+
+  get settled() { return this.alpha <= MIN_ALPHA; }
+
+  /** One integration step. Returns false once the layout has stopped moving. */
+  tick() {
+    if (this.settled) return false;
+    const nodes = [...this.nodes.values()];
+    const n = nodes.length;
+    if (n === 0) return false;
+
+    const cx = this.width / 2;
+    const cy = this.height / 2;
+    const ratio = Math.min(4, Math.max(0.25, this.width / Math.max(1, this.height)));
+    const aspectX = ratio < 1 ? 1 / ratio : 1;
+    const aspectY = ratio > 1 ? ratio : 1;
+
+    // Group centroids, computed once per tick rather than per node.
+    const groups = new Map();
+    for (const a of nodes) {
+      if (!a.group) continue;
+      const g = groups.get(a.group) || { x: 0, y: 0, n: 0 };
+      g.x += a.x; g.y += a.y; g.n++;
+      groups.set(a.group, g);
+    }
+    for (const g of groups.values()) { g.x /= g.n; g.y /= g.n; }
+
+    for (let i = 0; i < n; i++) {
+      const a = nodes[i];
+      let fx = 0, fy = 0;
+
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) { // coincident: push apart on a deterministic-enough jitter
+          dx = (Math.random() - 0.5) * 2; dy = (Math.random() - 0.5) * 2; d2 = 1;
+        }
+        const d = Math.sqrt(d2);
+        // Same-subject properties repel less, so a workload reads as one cluster.
+        const scale = (a.group && a.group === b.group) ? 0.45 : 1;
+        const f = (REPULSION * scale) / d2;
+        fx += (dx / d) * f;
+        fy += (dy / d) * f;
+      }
+
+      // The pull toward the middle follows the canvas's shape. Equal on both axes,
+      // it settles the graph into a disc, and a disc fitted into a wide, short
+      // canvas is drawn small in the middle third with edges threading through
+      // nodes. Pulling harder along the short axis lays it out the canvas's way.
+      fx += (cx - a.x) * CENTER * aspectX;
+      fy += (cy - a.y) * CENTER * aspectY;
+
+      if (a.group) {
+        const g = groups.get(a.group);
+        fx += (g.x - a.x) * GROUP;
+        fy += (g.y - a.y) * GROUP;
+      }
+
+      a.fx = fx; a.fy = fy;
+    }
+
+    for (const l of this.links) {
+      const a = this.nodes.get(l.source);
+      const b = this.nodes.get(l.target);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - l.distance) * SPRING;
+      const ux = (dx / d) * f, uy = (dy / d) * f;
+      a.fx += ux; a.fy += uy;
+      b.fx -= ux; b.fy -= uy;
+    }
+
+    for (const a of nodes) {
+      if (a.pinned) { a.vx = 0; a.vy = 0; a.fx = a.fy = 0; continue; }
+      a.vx = (a.vx + a.fx * this.alpha) * DAMPING;
+      a.vy = (a.vy + a.fy * this.alpha) * DAMPING;
+      // A speed cap keeps a reheat from throwing a node across the viewport.
+      const sp = Math.hypot(a.vx, a.vy);
+      if (sp > 28) { a.vx = (a.vx / sp) * 28; a.vy = (a.vy / sp) * 28; }
+      a.x += a.vx;
+      a.y += a.vy;
+      a.fx = a.fy = 0;
+    }
+
+    // Separate overlapping footprints so a label always has somewhere to sit.
+    //
+    // A footprint is the disc AND its two label lines, as a box: a label such as
+    // cpu_pressure_ratio is several discs wide, so separating circles left
+    // neighbours whose discs cleared each other printing their names on top of
+    // one another. Each overlapping pair is pushed apart along the axis it
+    // overlaps least, which is the smallest move that clears it.
+    collide(nodes, aspectX, aspectY, () => true);
+
+    // Then the enclosures, and both again until a round moves nothing. Moving one
+    // box out of another's way can push it into a third; clearing one pair can push
+    // a property into its neighbour; widening a box can reach the next one. A fixed
+    // number of passes left the last of those moves unchecked, and the layout
+    // settled with labels printed over each other, some inside a pod's box.
+    for (let round = 0; round < RESOLVE_ROUNDS; round++) {
+      const moved = separateEnclosures(nodes, aspectX, aspectY);
+      // The pairs the box pass leaves alone: two members of one box, and two
+      // node-level properties (both have no group).
+      const pairs = (a, b) => a.group === b.group;
+      if (!collide(nodes, aspectX, aspectY, pairs) && !moved) break;
+    }
+
+    this.alpha *= 0.975;
+    return true;
+  }
+
+  at(id) { return this.nodes.get(id); }
+
+  /** The bounding box of everything laid out, for a fit-to-viewport. */
+  bounds() {
+    const ns = [...this.nodes.values()];
+    if (!ns.length) return null;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of ns) {
+      const f = footprint(n);
+      x0 = Math.min(x0, f.x0); y0 = Math.min(y0, f.y0);
+      x1 = Math.max(x1, f.x1); y1 = Math.max(y1, f.y1);
+    }
+    return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+  }
+}
+
+/**
+ * The box a node occupies on screen: its disc, widened to its label, and
+ * extended below it by the label lines. Fitting, hulls and collision all use it,
+ * so what is framed is what is drawn.
+ */
+export function footprint(n) {
+  const hw = n.hw ?? n.r;
+  return { x0: n.x - hw, x1: n.x + hw, y0: n.y - n.r, y1: n.y + n.r + (n.below ?? 0) };
+}
+
+// Pushes apart every overlapping pair that `applies` selects; true if any moved.
+function collide(nodes, aspectX, aspectY, applies) {
+  const n = nodes.length;
+  let moved = false;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = nodes[i], b = nodes[j];
+      if (!applies(a, b)) continue;
+      const gap = separation(a, b);
+      const dx = b.x - a.x;
+      const dy = (b.y + boxShift(b)) - (a.y + boxShift(a));
+      const ox = a.hw + b.hw + gap - Math.abs(dx);
+      const oy = boxHalfHeight(a) + boxHalfHeight(b) + gap - Math.abs(dy);
+      if (ox <= 0 || oy <= 0) continue;
+      let px = 0, py = 0;
+      // Each overlap is weighted by the canvas's aspect, so collisions resolve
+      // along its long axis — sideways on a wide canvas, downwards on a tall one —
+      // and the graph spreads into the space it is drawn in rather than stacking.
+      if (ox * aspectX < oy * aspectY) px = (dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx)) * ox;
+      else py = (dy === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dy)) * oy;
+      // A pinned node does not move, so the other one takes the whole push.
+      const share = a.pinned || b.pinned ? 1 : 0.5;
+      if (!a.pinned) { a.x -= px * share; a.y -= py * share; moved = true; }
+      if (!b.pinned) { b.x += px * share; b.y += py * share; moved = true; }
+    }
+  }
+  return moved;
+}
+
+const boxHalfHeight = (n) => (2 * n.r + (n.below ?? 0)) / 2;
+// The box's centre sits below the disc's, by half the label block.
+const boxShift = (n) => (n.below ?? 0) / 2;
+
+// Clearance between two footprints. Properties of different subjects are kept
+// further apart than the subject enclosure's padding, so a property does not sit
+// inside the padding around a neighbour of another subject; inside one subject
+// they sit close. This is pairwise only: an enclosure is the box around all its
+// members, so a foreign property can still settle in the gap between two members
+// of a spread-out subject and fall inside that box.
+const HULL_PAD = 26;
+const HULL_LABEL = 10;
+function separation(a, b) {
+  if (a.group && a.group === b.group) return 10;
+  // HULL_LABEL is the strip above an enclosure that carries the subject's name.
+  if (a.group && b.group) return 2 * HULL_PAD + HULL_LABEL + 6;   // two enclosures
+  if (a.group || b.group) return HULL_PAD + HULL_LABEL + 6;
+  return 14;
+}
+
+/**
+ * Keep subject enclosures from overlapping, and node-level properties out of them.
+ *
+ * The pairwise clearance above cannot do this: an enclosure is the box around all
+ * its members, so two spread-out subjects interleave, and a node-level property
+ * settles in the gap between members and is drawn inside a pod's box. Here each
+ * enclosure is one box. Two that overlap are moved apart whole, along the axis they
+ * overlap least (weighted by the canvas's aspect, as above); a node-level property
+ * inside a box it does not belong to is moved out of it. An enclosure with a pinned
+ * member stays where the operator put it and the other side takes the whole move.
+ */
+const HULL_GAP = 16;
+export function enclosures(nodes) {
+  const boxes = new Map();
+  for (const n of nodes) {
+    if (!n.group) continue;
+    let b = boxes.get(n.group);
+    if (!b) {
+      b = { group: n.group, members: [], pinned: false, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      boxes.set(n.group, b);
+    }
+    const f = footprint(n);
+    b.members.push(n);
+    b.pinned ||= n.pinned;
+    b.x0 = Math.min(b.x0, f.x0); b.y0 = Math.min(b.y0, f.y0);
+    b.x1 = Math.max(b.x1, f.x1); b.y1 = Math.max(b.y1, f.y1);
+  }
+  for (const b of boxes.values()) {
+    b.x0 -= HULL_PAD; b.x1 += HULL_PAD; b.y0 -= HULL_PAD + HULL_LABEL; b.y1 += HULL_PAD;
+  }
+  return boxes;
+}
+
+function shiftBox(b, dx, dy) {
+  for (const n of b.members) { n.x += dx; n.y += dy; }
+  b.x0 += dx; b.x1 += dx; b.y0 += dy; b.y1 += dy;
+}
+
+// The move that clears box a from box b: along the axis of least overlap, away from
+// b's centre. Null when they do not overlap.
+function clearance(a, b, gap, aspectX, aspectY) {
+  const ox = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) + gap;
+  const oy = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) + gap;
+  if (ox <= 0 || oy <= 0) return null;
+  const away = (d) => (d === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(d));
+  if (ox * aspectX < oy * aspectY) return { dx: away((a.x0 + a.x1) - (b.x0 + b.x1)) * ox, dy: 0 };
+  return { dx: 0, dy: away((a.y0 + a.y1) - (b.y0 + b.y1)) * oy };
+}
+
+// One round of the above; true if anything moved. A node-level property takes part
+// as a box of its own, its footprint, so that it and the enclosures make room for
+// each other: moved out of a box on its own, a property wedged between two boxes
+// was pushed into the second and back, and settled inside one of them.
+function separateEnclosures(nodes, aspectX, aspectY) {
+  const boxes = [...enclosures(nodes).values()];
+  for (const n of nodes) {
+    if (!n.group) boxes.push({ members: [n], pinned: n.pinned, ...footprint(n) });
+  }
+  let moved = false;
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.pinned && b.pinned) continue;
+      // Two node-level properties are the pairwise pass's to separate.
+      if (!a.group && !b.group) continue;
+      const m = clearance(a, b, a.group && b.group ? HULL_GAP : 10, aspectX, aspectY);
+      if (!m) continue;
+      const share = a.pinned || b.pinned ? 1 : 0.5;
+      if (!a.pinned) shiftBox(a, m.dx * share, m.dy * share);
+      if (!b.pinned) shiftBox(b, -m.dx * share, -m.dy * share);
+      moved = true;
+    }
+  }
+  return moved;
+}
+
+export { HULL_PAD, HULL_LABEL };

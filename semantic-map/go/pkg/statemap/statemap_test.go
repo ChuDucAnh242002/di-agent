@@ -357,10 +357,10 @@ func TestAssertionOutranksObservationAndDoesNotDecay(t *testing.T) {
 	if r.Assertion == nil || *r.Assertion != 0.1 {
 		t.Errorf("assertion field not set to 0.1")
 	}
-	if r.Strength != 0.9 {
+	if r.Recent != 0.9 {
 		t.Errorf("assertion overwrote the observed strength (%.3f); the distinction "+
 			"between what was observed and what was asserted is what an audit needs",
-			r.Strength)
+			r.Recent)
 	}
 	if r.Provenance != Asserted {
 		t.Errorf("provenance %s, want asserted", r.Provenance)
@@ -624,14 +624,14 @@ func TestMapLearnsRelationshipStrengthItself(t *testing.T) {
 		t.Errorf("provenance %s after learning; a strength from this system must not "+
 			"still claim to be seeded", raises.Provenance)
 	}
-	if !(raises.Strength > 0.5) {
+	if !(raises.Recent > 0.5) {
 		t.Errorf("the supported mechanism learned strength %.4f; a stream where pressure "+
-			"tracks resource should support it", raises.Strength)
+			"tracks resource should support it", raises.Recent)
 	}
-	if relieves.Strength != 0 {
+	if relieves.Recent != 0 {
 		t.Errorf("the contradicted mechanism learned strength %.4f; evidence of the "+
 			"opposite sign is evidence against it, not a weaker version of it",
-			relieves.Strength)
+			relieves.Recent)
 	}
 	rEff, rKnown := raises.Effective()
 	vEff, vKnown := relieves.Effective()
@@ -704,9 +704,9 @@ func TestLearningIsIdempotentUnderReplay(t *testing.T) {
 	}
 	// The strength may shift slightly for the same reason; it must not move as though
 	// the whole batch had arrived twice.
-	if diff := r2.Strength - r1.Strength; diff > 0.05 || diff < -0.05 {
+	if diff := r2.Recent - r1.Recent; diff > 0.05 || diff < -0.05 {
 		t.Errorf("replay moved the strength by %.4f (%.4f -> %.4f), more than one "+
-			"boundary pair can explain", diff, r1.Strength, r2.Strength)
+			"boundary pair can explain", diff, r1.Recent, r2.Recent)
 	}
 }
 
@@ -772,10 +772,10 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 	if !ok {
 		t.Fatal("the learned relationship did not survive")
 	}
-	if got.Strength != learned.Strength || got.NObservations != learned.NObservations {
+	if got.Recent != learned.Recent || got.NObservations != learned.NObservations {
 		t.Errorf("restored strength %.6f/%d, had %.6f/%d — an agent that forgets what it "+
 			"learned is back at cold start on a system it has already watched",
-			got.Strength, got.NObservations, learned.Strength, learned.NObservations)
+			got.Recent, got.NObservations, learned.Recent, learned.NObservations)
 	}
 	if got.Provenance != learned.Provenance {
 		t.Errorf("restored provenance %s, had %s", got.Provenance, learned.Provenance)
@@ -951,9 +951,9 @@ func TestSignSuspectSeparatesAWrongDeclarationFromAQuietSystem(t *testing.T) {
 	backwards, _ := m.Relationship(RelationshipID("resource", "pressure", "backwards"))
 	correct, _ := m.Relationship(RelationshipID("resource", "pressure", "correct"))
 
-	if backwards.Strength != 0 {
+	if backwards.Recent != 0 {
 		t.Fatalf("precondition: the contradicted relationship should sit at zero, got %.4f",
-			backwards.Strength)
+			backwards.Recent)
 	}
 	if backwards.SignConflicts == 0 {
 		t.Error("no sign conflict was counted; the gate zeroed the strength and left no " +
@@ -1188,10 +1188,10 @@ func TestEstablishedIsUnbiasedEarly(t *testing.T) {
 	// handful of folds so far — but not identical. Pairing produces same-tick and
 	// one-behind pairs, so fold strengths vary a little, and two time constants over a
 	// varying series do not have to coincide. Closeness is the claim; equality is not.
-	if math.Abs(*r.Established-r.Strength) > 0.05 {
+	if math.Abs(*r.Established-r.Recent) > 0.05 {
 		t.Errorf("established %.6f and recent %.6f differ by more than 0.05 this early; "+
 			"before history accumulates there is nothing for them to disagree about",
-			*r.Established, r.Strength)
+			*r.Established, r.Recent)
 	}
 }
 
@@ -1212,24 +1212,24 @@ func TestTheTwoLayersSeparateOnARegimeChange(t *testing.T) {
 	feedPairs(t, m, c, 120, 0.0, "weak")
 	after, _ := m.Relationship(id)
 
-	recentDrop := afterStrong.Strength - after.Strength
+	recentDrop := afterStrong.Recent - after.Recent
 	establishedDrop := establishedBefore - *after.Established
-	t.Logf("recent      %.4f -> %.4f  (moved %.4f)", afterStrong.Strength, after.Strength, recentDrop)
+	t.Logf("recent      %.4f -> %.4f  (moved %.4f)", afterStrong.Recent, after.Recent, recentDrop)
 	t.Logf("established %.4f -> %.4f  (moved %.4f)", establishedBefore, *after.Established, establishedDrop)
 
 	if recentDrop <= 0 {
 		t.Errorf("the recent layer did not fall when the association went away "+
-			"(%.4f -> %.4f)", afterStrong.Strength, after.Strength)
+			"(%.4f -> %.4f)", afterStrong.Recent, after.Recent)
 	}
 	if establishedDrop >= recentDrop {
 		t.Errorf("the established layer moved as much as the recent one (%.4f vs %.4f); "+
 			"then it is a duplicate rather than a second timescale",
 			establishedDrop, recentDrop)
 	}
-	if math.Abs(after.Strength-*after.Established) < 0.05 {
+	if math.Abs(after.Recent-*after.Established) < 0.05 {
 		t.Errorf("recent %.4f and established %.4f are within 0.05 after a regime "+
 			"change; the gap between them is the signal that the present is unusual",
-			after.Strength, *after.Established)
+			after.Recent, *after.Established)
 	}
 }
 
@@ -1804,7 +1804,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 	_ = m.Record(Observation{ID: "a", Value: 1, At: c.now()})
 	_ = m.Record(Observation{ID: "b", Value: 1, At: c.now()})
 	est, asserted := 0.95, 0.7
-	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Strength: 0.9, Confidence: 1,
+	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Recent: 0.9, Confidence: 1,
 		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
 		Provenance: Discovered})
 	if err != nil {
@@ -1815,7 +1815,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
 	}
 	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
-		r.SignConflicts != 0 || r.Strength != 0 || r.Confidence != 0 {
+		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 {
 		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
 	}
 	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {
@@ -2041,5 +2041,37 @@ func TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived(t *testing.T) {
 	_ = m.DeclareProperty(Property{ID: "cpu@pod:a", Subject: "pod:a"})
 	if err := m.DeclareProperty(Property{ID: "sum@pod:a", Subject: "pod:a", Kind: Derived, Members: []string{"cpu@pod:a"}}); err == nil {
 		t.Error("a derived property scoped to a subject was accepted")
+	}
+}
+
+func TestSubjectsListsTheLiveOnes(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, s := range []string{"pod:b", "pod:a", "pod:gone"} {
+		for _, metric := range []string{"cpu", "mem"} {
+			if err := m.Record(Observation{ID: metric + "@" + s, Value: 1, At: c.now(), Subject: s}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := m.Record(Observation{ID: "node_cpu", Value: 1, At: c.now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, metric := range []string{"cpu", "mem"} {
+		if err := m.RetireProperty(metric+"@pod:gone", "pod deleted", "operator:ada"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := m.Subjects()
+	if len(got) != 2 || got[0] != "pod:a" || got[1] != "pod:b" {
+		t.Errorf("Subjects() = %v, want [pod:a pod:b]: sorted, distinct, no node scope, no retired subject", got)
+	}
+}
+
+func TestStaleAfterIsTheConfiguredSilence(t *testing.T) {
+	if got := New(Config{}, nil).StaleAfter(); got != 2*time.Minute {
+		t.Errorf("default %s; want 2m", got)
+	}
+	if got := New(Config{StaleAfter: 30 * time.Second}, nil).StaleAfter(); got != 30*time.Second {
+		t.Errorf("configured %s; want 30s", got)
 	}
 }

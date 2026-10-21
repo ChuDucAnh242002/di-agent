@@ -5,6 +5,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"time"
@@ -86,9 +87,12 @@ type EdgeDescriptor struct {
 	// measured then entered every decision with weight (1 − confidence).
 	Established *float64
 	Assertion   *float64
+	// Measured is what the agent's own interventions on this pair observed; nil when
+	// none has measured anything. It outranks Established and yields to Assertion.
+	Measured *float64
 
 	// Effective is the value the agent reasons with, nil when there is not one yet,
-	// and Basis names which of the three layers it came from.
+	// and Basis names which layer it came from.
 	Effective *float64
 	Basis     string
 
@@ -237,6 +241,10 @@ type OutcomeSimulation struct {
 //	BlockIOUtil          block I/O bandwidth consumed
 //	CPUPressureRatio     PSI cpu.some stall fraction
 //	IOPressureRatio      PSI io.some stall fraction
+//	MemoryPressureRatio  PSI memory.some stall fraction
+//	CPUStealRatio        share of CPU time the hypervisor gave to others (node-level)
+//	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
+//	                     node's is the worst-off subject's (cgroup collector)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -258,6 +266,9 @@ const (
 	BlockIOUtil         MetricType = "block_io_util"
 	CPUPressureRatio    MetricType = "cpu_pressure_ratio"
 	IOPressureRatio     MetricType = "io_pressure_ratio"
+	MemoryPressureRatio MetricType = "memory_pressure_ratio"
+	CPUStealRatio       MetricType = "cpu_steal_ratio"
+	CPUContentionRatio  MetricType = "cpu_contention_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
@@ -279,6 +290,19 @@ const (
 // a pod, a disk, a systemd unit, an application component. Kind is whatever the
 // producer says; the map never interprets it. Unit and Range are the producer's
 // declaration of what the value means; the map stamps them at admission.
+// Chart names the series a producer computes together from one reading of its
+// source, as parts of one whole (a stacked Netdata chart, one line of /proc/stat);
+// empty when it groups nothing. Series drawn together but measured apart, such as an
+// interface's received and sent, are not one chart.
+// Series of one chart and one subject that stay perfectly correlated are sums,
+// complements or smoothings of each other, and discovery treats them as one
+// arithmetic group rather than as findings.
+// PartOf names the node-level metric type this subject's quantity is a part of, when
+// the producer knows it is summed into one: a physical disk's writes into the node's
+// I/O out, a core's user time into the node's. Discovery marks a candidate from it to
+// that type composition, as it does a subject's metric against the node's metric of
+// the same name, which is the case PartOf need not state. It holds per sample: a
+// sample without it withdraws what an earlier one declared.
 // Labels is informational; nothing branches on it.
 type MetricSample struct {
 	NodeID        string            `json:"node_id"`
@@ -290,6 +314,8 @@ type MetricSample struct {
 	Unit          string            `json:"unit,omitempty"`
 	Range         *[2]float64       `json:"range,omitempty"`
 	Source        string            `json:"source,omitempty"`
+	Chart         string            `json:"chart,omitempty"`
+	PartOf        string            `json:"part_of,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
@@ -335,6 +361,88 @@ type TuneAdjustment struct {
 
 // ── Proposer types ────────────────────────────────────────────────────────────
 
+// PropertyReading is one observed property value as the proposer sees it. Range is
+// the producer's declared range, nil when none was declared: the proposer's variation
+// gate measures movement against it and cannot without it. Chart is the sample's
+// chart: properties of one chart and one subject may form an arithmetic group. PartOf
+// is the node-level property the sample's producer said it is a part of.
+type PropertyReading struct {
+	ID      string
+	Subject string
+	Chart   string
+	PartOf  string
+	Value   float64
+	At      time.Time
+	Range   *[2]float64
+}
+
+// Candidate kinds: what is known about a pair before any correlation is read.
+const (
+	// CandidateKindComposition marks a candidate whose source is part of its target.
+	CandidateKindComposition = "composition"
+	// CandidateKindSameMetric marks two subjects' readings of one metric. They often
+	// move together because something drives both (the same cron, the same client),
+	// not because either drives the other.
+	CandidateKindSameMetric = "same-metric"
+	// CandidateKindSameSubject marks two metrics of one subject, such as a capped
+	// pod's CPU and its throttling: one workload's own quantities often move together
+	// by construction, so the pair is more likely accounting than a finding.
+	CandidateKindSameSubject = "same-subject"
+)
+
+// Pair classes, as DiscoveryCounts reports them.
+const (
+	PairSubjectNode    = "subject->node"
+	PairNodeNode       = "node<->node"
+	PairSubjectSubject = "subject<->subject"
+)
+
+// DiscoveryCounts says how far discovery was rationed: how many pairs could be
+// tested, how many are, and how many were displaced to make room. Without it an
+// empty candidate list cannot be told apart from a budget too small to look.
+type DiscoveryCounts struct {
+	// Budget is how many pairs may be tested at once; 0 means no limit.
+	Budget int `json:"budget"`
+	// Properties is how many properties were observed within the pair window of the
+	// latest reading: the ones a pair can be formed from now.
+	Properties    int `json:"properties"`
+	EligiblePairs int `json:"eligible_pairs"`
+	// TestedPairs is the pairs being tested whose ends were both observed within the
+	// pair window; IdlePairs those with an end gone quiet. Both hold budget: an idle
+	// pair is displaced first when a new pair needs room, and dropped when its
+	// property retires.
+	TestedPairs int `json:"tested_pairs"`
+	IdlePairs   int `json:"idle_pairs"`
+	// TestedByClass splits TestedPairs by pair class.
+	TestedByClass map[string]int `json:"tested_by_class"`
+	// Displaced counts pairs dropped, since the start, to make room for more
+	// variable ones.
+	Displaced uint64 `json:"displaced"`
+	// Groups are the arithmetic groups found: properties of one chart and one
+	// subject whose pairs reached |r| ≥ 0.99 and have not since fallen more than
+	// their sampling error below it. Only each group's representative is paired
+	// outside it.
+	Groups []ArithmeticGroup `json:"groups,omitempty"`
+	// FDR is the false-discovery rate the candidate bar holds to, 0 when
+	// uncorrected; PBar is the bar a p-value must be at or under now, over the
+	// PValuesTested pairs being tested (arithmetic links aside), counting those
+	// without enough readings yet as tests that found nothing.
+	FDR           float64 `json:"fdr"`
+	PBar          float64 `json:"p_bar"`
+	PValuesTested int     `json:"p_values_tested"`
+}
+
+// ArithmeticGroup is properties of one chart and one subject that move as one: each
+// is linked to another member by a tested pair that reached |r| ≥ 0.99 and holds
+// within one standard error of Fisher's z of it. Representative, the
+// most variable member when the group last changed, is the only one paired outside.
+type ArithmeticGroup struct {
+	Chart          string   `json:"chart"`
+	Subject        string   `json:"subject,omitempty"`
+	Representative string   `json:"representative"`
+	Members        []string `json:"members"`
+}
+
 type CandidateEdge struct {
 	CandidateID     string
 	FromID          string
@@ -345,11 +453,99 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+	// Undirected is true when nothing says which end drives the other: both are
+	// node-level or both belong to subjects, and correlation is symmetric. FromID and ToID are then the pair in
+	// lexicographic order, not a claim, and confirming one requires the operator to
+	// name the end the relationship runs from.
+	Undirected bool
+	// Kind is "composition" when the source is a component of the target by
+	// definition (a subject's metric against the node's total of the same metric),
+	// so the correlation is accounting rather than something learned; "same-metric"
+	// for two subjects' readings of one metric, where a shared driver is the likely
+	// explanation; "same-subject" for two metrics of one subject, which often hold
+	// together by construction; empty otherwise.
+	Kind string
+	// PBar is the p-value bar the candidate passed at its last update: corrected for
+	// how many pairs were being tested (Benjamini–Hochberg at the proposer's
+	// false-discovery rate), or 0 when the proposer applies no correction.
+	PBar float64
+	// Caveats states what the proposer could not check for this candidate, such as a
+	// variation gate skipped because an endpoint declared no range.
+	Caveats []string
 	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
-	// pending cap chose it as the weakest, "operator" when Defer was called. A
-	// cap deferral is provisional and re-enters when it outranks a pending one; an
-	// operator's is not overturned.
+	// pending cap chose it as the weakest, "untested" when its pair was displaced
+	// from the pair budget and its numbers stopped being updated, "grouped" when an
+	// end joined an arithmetic group it does not represent, "bar" when its p-value
+	// no longer clears the corrected bar as more pairs came to be tested, "weakened"
+	// when its |r| fell below the candidate threshold by more than its sampling
+	// error, "operator" when an operator deferred it, "agent" when the agent did. The
+	// proposer's own deferrals are provisional and re-enter when the evidence holds
+	// again; an agent's re-enters when the evidence has moved since its review
+	// (CandidateReview.Outdated); an operator's is not overturned. A Rejected
+	// candidate carries "operator" or "agent" the same way: only an operator's
+	// rejection is permanent for the session.
 	Reason string
+	// Review is the latest review of the candidate: who looked at it, what they
+	// decided and on what evidence. Nil until someone has.
+	Review *CandidateReview
+}
+
+// Who reviewed a candidate.
+const (
+	ReviewerOperator       = "operator"        // through the review endpoints
+	ReviewerRules          = "rules"           // tier 0, in the daemon
+	ReviewerDecisionModel  = "decision-model"  // tier 1, one forward pass
+	ReviewerReasoningAgent = "reasoning-agent" // tier 2, a model calling tools
+	ReviewerIntervention   = "intervention"    // the agent's own verified actions showed it
+)
+
+// What a review decided. Escalate means no tier was sure enough to act, and the
+// candidate stays in the operator's queue.
+const (
+	ReviewConfirm  = "confirm"
+	ReviewReject   = "reject"
+	ReviewDefer    = "defer"
+	ReviewEscalate = "escalate"
+)
+
+// CandidateReview records one review of a candidate. Applied is false when the
+// reviewer was only allowed to suggest, under the autonomy level in force: the
+// action is then what it would have done. DecisionID names the decision record
+// (GET /state/decisions/{id}) holding everything the review read; an operator's
+// review has none. The evidence fields are the candidate's numbers when it was
+// reviewed, so Outdated can tell when they have moved.
+type CandidateReview struct {
+	By            string
+	Model         string `json:",omitempty"`
+	Tier          int
+	Action        string
+	Applied       bool
+	DecisionID    string `json:",omitempty"`
+	At            time.Time
+	MIScore       float64
+	NObservations int
+	Direction     Direction
+	Kind          string
+}
+
+// Outdated reports whether c's evidence has moved materially since the review: its
+// sign or kind changed, or its |r| moved by more than two standard errors of
+// Fisher's z at the smaller of the two windows. A review that is outdated no
+// longer speaks for the candidate, so an agent's rejection or deferral reopens and
+// an escalated candidate is reviewed again.
+func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
+	if r == nil {
+		return true
+	}
+	if c.Direction != r.Direction || c.Kind != r.Kind {
+		return true
+	}
+	n := min(c.NObservations, r.NObservations)
+	if n <= 3 {
+		return c.NObservations != r.NObservations
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	return math.Abs(z(c.MIScore)-z(r.MIScore)) > 2/math.Sqrt(float64(n-3))
 }
 
 // ── Ontology event log ────────────────────────────────────────────────────────

@@ -48,3 +48,36 @@ func TestPairWindowDedupsAndBounds(t *testing.T) {
 		t.Fatalf("r=%.6f ok=%v; want 1, true", r, ok)
 	}
 }
+
+func TestPairWindowReplaceLast(t *testing.T) {
+	w := NewPairWindow(3)
+	if !w.ReplaceLast("a", 1, 1) || w.Len() != 1 {
+		t.Fatalf("ReplaceLast on an empty window must fold; len=%d", w.Len())
+	}
+	for i, id := range []string{"b", "c", "d"} { // the ring wraps: d overwrote a
+		w.Fold(id, float64(i+2), float64(i+2))
+	}
+	if !w.ReplaceLast("d2", 9, 8) {
+		t.Fatal("ReplaceLast refused a fresh identity")
+	}
+	if w.Len() != 3 || w.xs[0] != 9 || w.ys[0] != 8 {
+		t.Errorf("after the wrap the last fold sits at slot 0; got xs=%v ys=%v", w.xs, w.ys)
+	}
+	if w.ReplaceLast("b", 0, 0) {
+		t.Error("ReplaceLast must refuse an identity already folded")
+	}
+}
+
+func TestDistinctCountsTheEvidenceInAMostlyFlatWindow(t *testing.T) {
+	w := NewPairWindow(10)
+	for i := 0; i < 10; i++ {
+		x, y := 0.0, float64(i)
+		if i == 3 || i == 7 {
+			x = 5
+		}
+		w.Fold("", x, y)
+	}
+	if x, y := w.Distinct(); x != 3 || y != 10 {
+		t.Errorf("distinct %d, %d; want 3 for two spikes off zero and 10 for ten values", x, y)
+	}
+}

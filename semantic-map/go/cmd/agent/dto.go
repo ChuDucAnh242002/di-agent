@@ -49,6 +49,12 @@ type AddPropositionRequest struct {
 	PriorStrength float64 `json:"prior_strength"`
 }
 
+// ConfirmRequest is the optional body of POST /candidates/{id}/confirm. From names
+// the end an undirected candidate runs from; a directed candidate needs no body.
+type ConfirmRequest struct {
+	From string `json:"from"`
+}
+
 // ResetRequest is the body of POST /agent/reset.
 type ResetRequest struct {
 	From string `json:"from"`
@@ -76,7 +82,7 @@ type TuneResponse struct {
 }
 
 // MetricSampleRequest is the body of POST /ingest-sample — the wire face of the
-// sample boundary. subject, unit, range and source are optional; see
+// sample boundary. subject, unit, range, source, chart and part_of are optional; see
 // types.MetricSample for their meaning. A subject must match <kind>:<identity>.
 type MetricSampleRequest struct {
 	NodeID        string            `json:"node_id"`
@@ -88,6 +94,8 @@ type MetricSampleRequest struct {
 	Unit          string            `json:"unit,omitempty"`
 	Range         *[2]float64       `json:"range,omitempty"`
 	Source        string            `json:"source,omitempty"`
+	Chart         string            `json:"chart,omitempty"`
+	PartOf        string            `json:"part_of,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
@@ -136,6 +144,7 @@ type EdgeDTO struct {
 	Direction        string   `json:"direction"`
 	Established      *float64 `json:"established,omitempty"`
 	Assertion        *float64 `json:"assertion,omitempty"`
+	Measured         *float64 `json:"measured,omitempty"`
 	Effective        *float64 `json:"effective,omitempty"`
 	Basis            string   `json:"basis,omitempty"`
 	EMAWeight        float64  `json:"ema_weight"`
@@ -272,6 +281,7 @@ func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 		PropositionID:    e.PropositionID,
 		Direction:        directionToString(e.Direction),
 		Established:      e.Established,
+		Measured:         e.Measured,
 		Assertion:        e.Assertion,
 		Effective:        e.Effective,
 		Basis:            e.Basis,
@@ -338,6 +348,9 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*typ
 	if !types.ValidSubject(req.Subject) {
 		return nil, fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", req.Subject)
 	}
+	if req.PartOf != "" && (!types.ValidMetricType(req.PartOf) || req.Subject == "") {
+		return nil, fmt.Errorf("part_of %q must be a node-level metric type, on a sample with a subject", req.PartOf)
+	}
 	if req.Range != nil && req.Range[1] <= req.Range[0] {
 		return nil, fmt.Errorf("range %v is empty: hi must exceed lo", *req.Range)
 	}
@@ -352,6 +365,8 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*typ
 		Unit:          req.Unit,
 		Range:         req.Range,
 		Source:        req.Source,
+		Chart:         req.Chart,
+		PartOf:        req.PartOf,
 		Labels:        req.Labels,
 	}, nil
 }

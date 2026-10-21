@@ -2,14 +2,29 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
+
+// stateResponse is GET /state: the view, and how far discovery was rationed. The
+// census counts the whole map; Discovery counts the pairs the proposer could and
+// did test, which no filter narrows.
+type stateResponse struct {
+	statemap.StateView
+	Discovery *types.DiscoveryCounts `json:"discovery,omitempty"`
+	// Autonomy is the level, models and thresholds the agent reviews candidates
+	// under, so a reader of the map can see who shaped it.
+	Autonomy *autonomy.Status `json:"autonomy,omitempty"`
+}
 
 // registerStateRoutes exposes the state model: what the system exhibits, how its
 // properties relate, and why the agent answered as it did.
@@ -17,7 +32,11 @@ import (
 // The surface is deliberately query-shaped rather than dump-shaped. An operator
 // debugging a decision asks "what did it think was going on", and the answer needs
 // to be one request naming a property, not a graph export they then have to read.
-func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
+//
+// discovery, when non-nil, supplies the proposer's rationing counts for GET /state:
+// an empty candidate list means nothing only if the pairs were actually tested.
+func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() (*types.DiscoveryCounts, error),
+	autonomyOf func() *autonomy.Status) {
 	if sm == nil {
 		return
 	}
@@ -25,8 +44,8 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 	// GET /state — the current system. No arguments answers the common question;
 	// filters narrow it.
 	//
-	//   ?kind=observed|derived
-	//   ?status=active|stale|retired   (repeatable)
+	//   ?kind=observed|derived         (repeatable, or comma-separated)
+	//   ?status=active|stale|retired   (repeatable, or comma-separated)
 	//   ?min-confidence=0.5
 	//   ?related-to=<property>         one-hop neighbourhood
 	//   ?id=<property>                 (repeatable)
@@ -37,12 +56,21 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			RelatedTo: r.URL.Query().Get("related-to"),
 			Subject:   r.URL.Query().Get("subject"),
 		}
-		for _, k := range r.URL.Query()["kind"] {
-			q.Kinds = append(q.Kinds, statemap.Kind(k))
+		// An unrecognised value is refused rather than matched against nothing: an
+		// empty selection reads as "there are none", which is the one answer a typo
+		// must not be able to produce.
+		kinds, err := enumParam(r, "kind", statemap.Observed, statemap.Derived)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		for _, s := range r.URL.Query()["status"] {
-			q.Statuses = append(q.Statuses, statemap.Status(s))
+		q.Kinds = kinds
+		statuses, err := enumParam(r, "status", statemap.Active, statemap.Stale, statemap.Retired)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
+		q.Statuses = statuses
 		if v := r.URL.Query().Get("min-confidence"); v != "" {
 			f, err := strconv.ParseFloat(v, 64)
 			if err != nil {
@@ -51,7 +79,19 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			}
 			q.MinConfidence = f
 		}
-		writeJSON(w, sm.State(q))
+		view := stateResponse{StateView: sm.State(q)}
+		if discovery != nil {
+			d, err := discovery()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			view.Discovery = d
+		}
+		if autonomyOf != nil {
+			view.Autonomy = autonomyOf()
+		}
+		writeJSON(w, view)
 	})
 
 	// GET /state/properties/{id} — one property, or its explanation as text when
@@ -332,4 +372,24 @@ func writeErrorWithBody(w http.ResponseWriter, status int, body map[string]any) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// enumParam reads a query parameter that takes values from a closed set, repeated
+// (?status=a&status=b) or comma-separated (?status=a,b), and refuses any value
+// outside the set.
+func enumParam[T ~string](r *http.Request, name string, allowed ...T) ([]T, error) {
+	var out []T
+	for _, raw := range r.URL.Query()[name] {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if !slices.Contains(allowed, T(v)) {
+				return nil, fmt.Errorf("%s=%q is not one of %v", name, v, allowed)
+			}
+			out = append(out, T(v))
+		}
+	}
+	return out, nil
 }

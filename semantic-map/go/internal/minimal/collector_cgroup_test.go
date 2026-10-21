@@ -134,7 +134,7 @@ func TestCollectWalksPodsAsSubjects(t *testing.T) {
 	if a[types.MemoryUtilization] == nil || a[types.MemoryUtilization].Value != float64(268435456)/float64(4<<30) {
 		t.Errorf("pod A memory share %v; want memory.current / MemTotal", a[types.MemoryUtilization])
 	}
-	if s := a[types.CPUUtilization]; s == nil || s.Value <= 0 || s.Value > 1 || s.Unit != "share-of-node-capacity" || s.Range == nil || s.Labels["qos"] != "burstable" {
+	if s := a[types.CPUUtilization]; s == nil || s.Value <= 0 || s.Value > 1 || s.Unit != "fraction" || s.Range == nil || s.Labels["qos"] != "burstable" {
 		t.Errorf("pod A cpu sample %+v; want a share in (0,1] with declared unit/range and labels", s)
 	}
 	if s := a[types.CPUThrottleRatio]; s == nil || s.Value != 0.5 {
@@ -207,8 +207,8 @@ func TestRootMemoryComesFromMeminfoOnCgroupV2(t *testing.T) {
 	if s.Value != fakeMemShare {
 		t.Errorf("root memory share %v; want (MemTotal − MemAvailable) / MemTotal = %v", s.Value, fakeMemShare)
 	}
-	if s.Unit != "share-of-node-capacity" || s.Range == nil {
-		t.Errorf("root memory sample %+v; want the declared unit and range", s)
+	if s.Unit != "fraction" || s.Range == nil {
+		t.Errorf("root memory sample %+v; want the unit the spec declares for the node's memory (fraction) and a range", s)
 	}
 }
 
@@ -555,5 +555,403 @@ func TestSubjectWithUnreadableCPUStatIsAbsentThisTick(t *testing.T) {
 	}
 	if bySubject(samples)["pod:"+testUID] == nil {
 		t.Error("the readable subject beside it went missing too")
+	}
+}
+
+func writePressure(t *testing.T, dir string, someTotalUsec uint64) {
+	t.Helper()
+	writePSI(t, dir, "cpu.pressure", someTotalUsec)
+}
+
+// TestCPUPressureIsTheStallShareOfTheWindow: cpu_pressure_ratio is the delta of
+// PSI's cumulative "some" stall time over the elapsed window, for the node and for
+// each subject, declared as "fraction" on [0,1]. A cgroup without cpu.pressure
+// (a kernel booted with psi=0) yields no sample rather than a zero.
+func TestCPUPressureIsTheStallShareOfTheWindow(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	writePressure(t, root, 5_000_000)
+	writePressure(t, podA, 1_000_000)
+	// podB deliberately has no cpu.pressure.
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, root, 5_000_000+2_500_000) // stalled 2.5 s of 10 s
+	writePressure(t, podA, 1_000_000+500_000)   // stalled 0.5 s of 10 s
+	advance(t, podB, 600_000, 0, 0)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	for subject, want := range map[string]float64{"": 0.25, "pod:" + testUID: 0.05} {
+		s := got[subject][types.CPUPressureRatio]
+		if s == nil {
+			t.Errorf("subject %q: no cpu_pressure_ratio after two collects", subject)
+			continue
+		}
+		if d := s.Value - want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: cpu_pressure_ratio %v, want %v", subject, s.Value, want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: unit %q range %v, want fraction on [0,1]: the spec declares cpu_pressure_ratio so",
+				subject, s.Unit, s.Range)
+		}
+	}
+	if s := got["pod:11111111-2222-3333-4444-555555555555"][types.CPUPressureRatio]; s != nil {
+		t.Errorf("pod without cpu.pressure reported %v; want no sample rather than a zero", s.Value)
+	}
+
+	// A counter that went backwards (the cgroup was recreated) yields no sample.
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, podA, 10)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := bySubject(samples)["pod:"+testUID][types.CPUPressureRatio]; s != nil {
+		t.Errorf("cpu_pressure_ratio %v across a counter reset; want no sample", s.Value)
+	}
+}
+
+// writePSI writes a cgroup v2 PSI file of the given name with a "some" total.
+func writePSI(t *testing.T, dir, file string, someTotalUsec uint64) {
+	t.Helper()
+	body := fmt.Sprintf("some avg10=0.00 avg60=0.00 avg300=0.00 total=%d\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", someTotalUsec)
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeProcStat writes /proc/stat's aggregate cpu line with the given steal and a
+// total that the eight counted columns add up to.
+func writeProcStat(t *testing.T, procRoot string, steal, total uint64) {
+	t.Helper()
+	// user carries the rest; guest (counted inside user) is set to show it is not
+	// added a second time.
+	user := total - steal - 400
+	body := fmt.Sprintf("cpu  %d 0 100 200 50 25 25 %d 77 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n", user, steal)
+	if err := os.WriteFile(filepath.Join(procRoot, "stat"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIOAndMemoryPressureAndSteal: io.pressure and memory.pressure are read like
+// cpu.pressure, for the node and for each subject; steal is the node's share of CPU
+// time the hypervisor spent elsewhere, read from /proc/stat, and no subject gets one.
+func TestIOAndMemoryPressureAndSteal(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	writePSI(t, root, "io.pressure", 1_000_000)
+	writePSI(t, root, "memory.pressure", 0)
+	writePSI(t, podA, "io.pressure", 0)
+	writeProcStat(t, procRoot, 1_000, 100_000)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePSI(t, root, "io.pressure", 1_000_000+4_000_000) // 4 s of 10 s
+	writePSI(t, root, "memory.pressure", 1_000_000)       // 1 s of 10 s
+	writePSI(t, podA, "io.pressure", 2_000_000)           // 2 s of 10 s
+	writeProcStat(t, procRoot, 1_000+150, 100_000+1_000)  // 150 of 1 000 ticks stolen
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	pod := "pod:" + testUID
+	for _, tc := range []struct {
+		subject string
+		metric  types.MetricType
+		want    float64
+	}{
+		{"", types.IOPressureRatio, 0.4},
+		{"", types.MemoryPressureRatio, 0.1},
+		{"", types.CPUStealRatio, 0.15},
+		{pod, types.IOPressureRatio, 0.2},
+	} {
+		s := got[tc.subject][tc.metric]
+		if s == nil {
+			t.Errorf("subject %q: no %s after two collects", tc.subject, tc.metric)
+			continue
+		}
+		if d := s.Value - tc.want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: %s = %v, want %v", tc.subject, tc.metric, s.Value, tc.want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: %s unit %q range %v, want fraction on [0,1]", tc.subject, tc.metric, s.Unit, s.Range)
+		}
+	}
+	if s := got[pod][types.MemoryPressureRatio]; s != nil {
+		t.Errorf("pod without memory.pressure reported %v; want no sample rather than a zero", s.Value)
+	}
+	if s := got[pod][types.CPUStealRatio]; s != nil {
+		t.Errorf("a subject reported cpu_steal_ratio %v; steal is the node's alone", s.Value)
+	}
+}
+
+// TestPodsAreNamedFromTheKubeletsLogDirectory: a pod's subject is its UID, which is
+// stable and unique but says nothing to an operator. The kubelet keeps one directory
+// per pod under /var/log/pods named <namespace>_<name>_<uid>, so the collector labels
+// each pod with its namespace and name from there; a pod created after the first
+// tick is named on its first tick, and one with no directory is left unnamed.
+func TestPodsAreNamedFromTheKubeletsLogDirectory(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	logs := t.TempDir()
+	for _, d := range []string{"default_cycler_" + testUID, "junk", "kube-system_coredns-54f859f7dc-4tjdt_99999999-9999-9999-9999-999999999999"} {
+		if err := os.Mkdir(filepath.Join(logs, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot, PodLogRoot: logs})
+	const uidB = "11111111-2222-3333-4444-555555555555"
+	labels := func() map[string]map[string]string {
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]map[string]string{}
+		for s, ms := range bySubject(samples) {
+			for _, m := range ms {
+				out[s] = m.Labels
+			}
+		}
+		return out
+	}
+	got := labels()
+	if a := got["pod:"+testUID]; a["namespace"] != "default" || a["pod"] != "cycler" {
+		t.Errorf("pod A labels %v; want namespace=default pod=cycler", a)
+	}
+	if b := got["pod:"+uidB]; b["pod"] != "" || b["namespace"] != "" {
+		t.Errorf("pod B labels %v; a pod with no log directory has no name", b)
+	}
+	if err := os.Mkdir(filepath.Join(logs, "web_api-7d4b9_"+uidB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if b := labels()["pod:"+uidB]; b["namespace"] != "web" || b["pod"] != "api-7d4b9" {
+		t.Errorf("pod B labels %v after its directory appeared; want namespace=web pod=api-7d4b9", b)
+	}
+}
+
+// writeThrottledUsec appends cpu.stat's cumulative throttled time to the file the
+// last writeCgroup or advance left.
+func writeThrottledUsec(t *testing.T, dir string, usec uint64) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, "cpu.stat"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "throttled_usec %d\n", usec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCPUContentionIsStallNotExplainedByOwnThrottling: a cgroup's CPU "some" stall
+// counts the time its own quota held it back, so a pod at its limit reports pressure
+// with nothing else on the node waiting. cpu_contention_ratio is the stall share left
+// after the cgroup's own throttled time, per subject, and the node's is the worst-off
+// subject's — not the root's stall, which carries every subject's throttling.
+func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
+	writePressure(t, root, 0)
+	writePressure(t, podA, 0)
+	writePressure(t, podB, 0)
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, podB, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+
+	clock = clock.Add(10 * time.Second)
+	writePressure(t, root, 6_000_000) // the root carries both pods' stall
+	// podA sits at its own limit: stalled 3.0 s, of which its quota held it 2.9 s.
+	advance(t, podA, 2_000_000, 200, 110)
+	writeThrottledUsec(t, podA, 2_900_000)
+	writePressure(t, podA, 3_000_000)
+	// podB waited 4 s for CPU and was throttled for 1 s of it.
+	advance(t, podB, 600_000, 100, 10)
+	writeThrottledUsec(t, podB, 1_000_000)
+	writePressure(t, podB, 4_000_000)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	// podB is BestEffort, so the node takes podA's reading (TestABestEffortPodDoesNotSetNodeContention).
+	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.01} {
+		s := got[subject][types.CPUContentionRatio]
+		if s == nil {
+			t.Errorf("subject %q: no cpu_contention_ratio after two collects", subject)
+			continue
+		}
+		if d := s.Value - want; d > 1e-9 || d < -1e-9 {
+			t.Errorf("subject %q: cpu_contention_ratio %v, want %v", subject, s.Value, want)
+		}
+		if s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+			t.Errorf("subject %q: unit %q range %v, want fraction on [0,1]", subject, s.Unit, s.Range)
+		}
+	}
+
+	// Throttled longer than stalled (the two counters are sampled a moment apart):
+	// contention is clamped at zero, never negative.
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 3_000_000, 300, 220)
+	writeThrottledUsec(t, podA, 2_900_000+3_100_000)
+	writePressure(t, podA, 3_000_000+3_000_000)
+	advance(t, podB, 700_000, 200, 10)
+	writeThrottledUsec(t, podB, 1_000_000)
+	writePressure(t, podB, 4_000_000)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = bySubject(samples)
+	if s := got["pod:"+testUID][types.CPUContentionRatio]; s == nil || s.Value != 0 {
+		t.Errorf("throttled beyond its stall: cpu_contention_ratio %v, want 0", s)
+	}
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0 {
+		t.Errorf("node cpu_contention_ratio %v with no subject contended, want 0", s)
+	}
+
+	// A subject without cpu.pressure gives no contention, and a node with no subject
+	// reading gives none either, rather than a zero that reads as "nobody waiting".
+	clock = clock.Add(10 * time.Second)
+	for _, d := range []string{podA, podB} {
+		if err := os.Remove(filepath.Join(d, "cpu.pressure")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for subject, ms := range bySubject(samples) {
+		if s := ms[types.CPUContentionRatio]; s != nil {
+			t.Errorf("subject %q: cpu_contention_ratio %v without any cpu.pressure; want no sample", subject, s.Value)
+		}
+	}
+}
+
+// TestABestEffortPodDoesNotSetNodeContention: a BestEffort pod has no CPU request, so on
+// a node that is merely busy it waits almost all the time — that is the share it was
+// promised, not contention. The node's signal is the worst-off workload that was
+// promised something; the BestEffort pod's own reading is still emitted.
+func TestABestEffortPodDoesNotSetNodeContention(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t) // podB is under kubepods/besteffort
+	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, podB, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000) // waited 1 s of 10
+	advance(t, podB, 600_000, 100, 0)
+	writeThrottledUsec(t, podB, 0)
+	writePressure(t, podB, 9_500_000) // waited 9.5 s of 10: BestEffort on a busy node
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0.1 {
+		t.Fatalf("node cpu_contention_ratio %v; want the burstable pod's 0.1, not the BestEffort pod's 0.95", s)
+	}
+	if s := got[podBSubject][types.CPUContentionRatio]; s == nil || s.Value != 0.95 {
+		t.Fatalf("BestEffort pod's own cpu_contention_ratio %v; want it still reported, 0.95", s)
+	}
+}
+
+// TestNodeContentionIsAnchoredOnItsWindow: like every other windowed sample, the
+// node's cpu_contention_ratio takes its event identity from the start of the window it
+// measures, so a reading is identified by the window and not by when it was emitted.
+func TestNodeContentionIsAnchoredOnItsWindow(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := start
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bySubject(samples)[""][types.CPUContentionRatio]
+	if s == nil {
+		t.Fatal("no node cpu_contention_ratio")
+	}
+	want := c.sample(types.CPUContentionRatio, unitNodeShare, s.Value, clock, start, "", nil).EventID
+	if s.EventID != want {
+		t.Fatalf("event id %s; want the one anchored on the window start %s", s.EventID, want)
+	}
+}
+
+// TestNodeContentionMovesOnWhenTheRootIsUnreadable: node contention is the worst
+// promised subject's, so it does not need the root's cpu.stat; a root that becomes
+// unreadable after a good read must not pin every later node sample to the same
+// window, which would give them one event id and the map would keep only the first.
+func TestNodeContentionMovesOnWhenTheRootIsUnreadable(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, podB} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "cpu.stat")); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	stall := uint64(0)
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(10 * time.Second)
+		stall += 1_000_000
+		advance(t, podA, 2_000_000, 200, 0)
+		writeThrottledUsec(t, podA, 0)
+		writePressure(t, podA, stall)
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := bySubject(samples)[""][types.CPUContentionRatio]
+		if s == nil {
+			t.Fatalf("collect %d: no node cpu_contention_ratio", i)
+		}
+		ids = append(ids, s.EventID)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both node contention samples have event id %s; want each anchored on its own window", ids[0])
 	}
 }

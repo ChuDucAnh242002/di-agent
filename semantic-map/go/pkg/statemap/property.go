@@ -36,6 +36,7 @@
 package statemap
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/DiyazY/di-agent/pkg/types"
 	"math"
@@ -170,6 +171,10 @@ const (
 	// operator. It stays Discovered as strength is learned: provenance answers why the
 	// edge exists, the strength layers answer what it is worth.
 	Discovered Provenance = "discovered"
+
+	// Intervened: created or confirmed by an action the agent took and verified. Only
+	// RecordIntervention writes it; a declaration cannot claim it.
+	Intervened Provenance = "intervened"
 )
 
 // Relationship is a directed association between two properties.
@@ -186,16 +191,19 @@ type Relationship struct {
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
 	Sign int `json:"sign"`
 
-	// Strength is the *recent* estimate in [0,1] — the fast EMA over the most recent
+	// Recent is the *recent* estimate in [0,1] — the fast EMA over the most recent
 	// pairs — and Confidence reports how much of it rests on observation. It carries no
 	// meaning until NObservations > 0; a relationship nothing has been observed about
 	// has no strength rather than a strength of zero.
-	Strength   float64 `json:"strength"`
+	//
+	// It is not the strength the agent reasons with: Effective is, and it prefers an
+	// assertion or the established layer when there is one.
+	Recent     float64 `json:"recent"`
 	Confidence float64 `json:"confidence"`
 
 	// Established is the long-run estimate: what this machine has shown across
 	// regimes, accumulated from the same pairs on a slower time constant than
-	// Strength. It is nil until it has support.
+	// Recent. It is nil until it has support.
 	//
 	// It is *learned, not given*. Nothing seeds it, and no calibration writes it. The
 	// field this replaced held a cross-distribution constant derived from published
@@ -216,6 +224,17 @@ type Relationship struct {
 	// §7.5 — a tune moved the decision by nothing at all. The better the agent knew
 	// its system, the less an operator could steer it. An assertion does not decay.
 	Assertion *float64 `json:"assertion,omitempty"`
+
+	// Measured is the effect the agent's own interventions on this pair observed: the
+	// mean, over unconfounded outcomes, of the target's change per unit change of the
+	// source, both normalised by their ranges — the same units the estimate projects
+	// in. It outranks both learned layers and yields to an assertion. Co-variation is
+	// the wrong measure once the agent acts on the source: a capped workload stops
+	// moving with the contention it caused, because the cap is what holds it still, so
+	// the learned layers settle near zero exactly when the relationship is strongest.
+	// Each effect is clamped to [0, 1], so a measured 1 is a lower bound on the
+	// sensitivity, and the estimate's caveat says so.
+	Measured *float64 `json:"measured,omitempty"`
 
 	NObservations int        `json:"n_observations"`
 	Provenance    Provenance `json:"provenance"`
@@ -240,6 +259,11 @@ type Relationship struct {
 	LastObserved  time.Time `json:"last_observed,omitzero"`
 	RetiredReason string    `json:"retired_reason,omitempty"`
 	Note          string    `json:"note,omitempty"`
+
+	// Interventions counts what the agent did to From and saw happen to To. It is not
+	// stored on the relationship: the map keeps the counters by pair, because they
+	// exist before any relationship does, and copies them here in every view.
+	Interventions *Interventions `json:"interventions,omitempty"`
 }
 
 // Effective is the strength the agent should reason with, and whether there is one
@@ -256,11 +280,14 @@ func (r *Relationship) Effective() (float64, bool) {
 	if r.Assertion != nil {
 		return clamp01(*r.Assertion), true
 	}
+	if r.Measured != nil {
+		return clamp01(*r.Measured), true
+	}
 	if r.Established != nil {
 		return clamp01(*r.Established), true
 	}
 	if r.NObservations > 0 {
-		return clamp01(r.Strength), true
+		return clamp01(r.Recent), true
 	}
 	return 0, false
 }
@@ -283,6 +310,8 @@ func (r *Relationship) Basis() string {
 	switch {
 	case r.Assertion != nil:
 		return "asserted"
+	case r.Measured != nil:
+		return "measured"
 	case r.Established != nil:
 		return "established"
 	case r.NObservations > 0:
@@ -290,6 +319,26 @@ func (r *Relationship) Basis() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON adds the two things a reader of a relationship most needs and would
+// otherwise have to re-derive: the strength the agent reasons with, and the layer it
+// came from. Without them a consumer is handed three layers and left to apply the
+// precedence rule itself, and the one it reaches for first is the fastest-moving.
+// Effective is absent, not zero, for a relationship nothing has been observed about.
+// Both are derived, so they are not read back: decoding ignores them and they are
+// recomputed from the layers.
+func (r Relationship) MarshalJSON() ([]byte, error) {
+	type plain Relationship // no methods, so no recursion
+	out := struct {
+		plain
+		Effective *float64 `json:"effective,omitempty"`
+		Basis     string   `json:"basis"`
+	}{plain: plain(r), Basis: r.Basis()}
+	if v, ok := r.Effective(); ok {
+		out.Effective = &v
+	}
+	return json.Marshal(out)
 }
 
 // SignSuspectMinPairs is the support a conflict share needs before it means anything.
@@ -356,7 +405,7 @@ type Config struct {
 	ConvergenceObservations int
 
 	// Alpha is the EMA weight on each new observation for the RECENT layer — a
-	// relationship's Strength and a property's Value.
+	// relationship's Recent and a property's Value.
 	Alpha float64
 
 	// AlphaSlow is the EMA weight for the ESTABLISHED layer: the same pairs, read on a
@@ -431,12 +480,23 @@ type Map struct {
 	mu  sync.RWMutex
 	cfg Config
 
+	// saveMu makes saves take turns, from the snapshot to the rename, so the later
+	// snapshot always lands last: a periodic save still writing at shutdown cannot
+	// rename an older state over the shutdown save.
+	saveMu sync.Mutex
+
 	// owner is the system this map models. Fixed at construction: a map that could be
 	// reassigned to another system would carry the first one's history into the second.
 	owner string
 
 	properties    map[string]*Property
 	relationships map[string]*Relationship
+
+	// interventions holds the counters by pair "from->to"; see Interventions.
+	interventions map[string]*Interventions
+
+	// facts are what the machine is, read rather than observed; see Fact.
+	facts map[string]Fact
 
 	// latest holds the most recent observation per property, windows the paired
 	// observations per relationship. Together they are the estimator's memory: the map
@@ -478,6 +538,7 @@ func New(cfg Config, journal *Journal) *Map {
 		owner:         c.Owner,
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
+		interventions: make(map[string]*Interventions),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
@@ -503,6 +564,11 @@ func (m *Map) Revision() uint64 {
 	defer m.mu.RUnlock()
 	return m.revision
 }
+
+// StaleAfter is the silence after which the sweep marks a property stale. A
+// reader that cannot wait for the next sweep uses it to judge a reading's age
+// itself.
+func (m *Map) StaleAfter() time.Duration { return m.cfg.StaleAfter }
 
 // Journal exposes the change and decision record.
 func (m *Map) Journal() *Journal { return m.journal }
@@ -1079,6 +1145,15 @@ func RelationshipID(from, to, label string) string {
 
 // DeclareRelationship creates or updates a relationship's definition.
 func (m *Map) DeclareRelationship(r Relationship) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.declareRelationshipLocked(r, false)
+}
+
+// declareRelationshipLocked is DeclareRelationship under the write lock. The public
+// path refuses Intervened; RecordIntervention passes allowIntervened, because that
+// provenance is a claim only the map's own evidence may make.
+func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) error {
 	if r.From == "" || r.To == "" {
 		return fmt.Errorf("relationship needs both endpoints")
 	}
@@ -1092,6 +1167,11 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	case "":
 		r.Provenance = Seeded
 	case Seeded, Asserted, Discovered:
+	case Intervened:
+		if !allowIntervened {
+			return fmt.Errorf("relationship %s->%s declares provenance %q; only the map's own verified interventions can claim it",
+				r.From, r.To, r.Provenance)
+		}
 	default:
 		// Learned is what the map writes when it folds evidence; a declaration
 		// cannot claim it, or a caller could fabricate a learned edge.
@@ -1101,14 +1181,12 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	// A declaration asserts that a relationship exists and which way it runs. What
 	// it is worth is for the machine to say, so every evidence field the caller may
 	// have filled — including through POST /state/relationships — is dropped here.
-	r.Strength, r.Confidence, r.NObservations = 0, 0, 0
+	r.Recent, r.Confidence, r.NObservations = 0, 0, 0
 	r.Established, r.Assertion = nil, nil
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
+	r.Interventions = nil
 	r.ID = RelationshipID(r.From, r.To, r.Label)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, id := range []string{r.From, r.To} {
 		if _, ok := m.properties[id]; !ok {
@@ -1196,9 +1274,9 @@ func (m *Map) ObserveRelationshipEvent(id string, strength float64, at time.Time
 	s := clamp01(strength)
 	if r.NObservations == 0 {
 		r.FirstObserved = at
-		r.Strength = s
+		r.Recent = s
 	} else {
-		r.Strength = m.cfg.Alpha*s + (1-m.cfg.Alpha)*r.Strength
+		r.Recent = m.cfg.Alpha*s + (1-m.cfg.Alpha)*r.Recent
 	}
 	r.NObservations++
 	r.LastObserved = at
@@ -1297,9 +1375,9 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 		return fmt.Errorf("relationship %q not found", id)
 	}
 	discarded := r.NObservations
-	oldStrength, oldConfidence := r.Strength, r.Confidence
+	oldRecent, oldConfidence := r.Recent, r.Confidence
 
-	r.Strength = 0
+	r.Recent = 0
 	r.Confidence = 0
 	r.NObservations = 0
 	r.FirstObserved = time.Time{}
@@ -1320,7 +1398,7 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	m.bump(EventRelationshipAsserted, id, actor, map[string]any{
 		"reset": true, "reason": reason,
 		"discarded_observations": discarded,
-		"strength_before":        oldStrength,
+		"recent_before":          oldRecent,
 		"confidence_before":      oldConfidence,
 		"basis_after":            r.Basis(),
 		"note": "evidence discarded and the pair window cleared, so nothing from " +
@@ -1341,13 +1419,18 @@ func (m *Map) RetireRelationship(id, reason, actor string) error {
 	if !ok {
 		return fmt.Errorf("relationship %q not found", id)
 	}
+	m.retireRelationshipLocked(r, reason, actor, m.now())
+	return nil
+}
+
+// retireRelationshipLocked withdraws a relationship; a retired one is left alone.
+func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at time.Time) {
 	if r.Status == Retired {
-		return nil
+		return
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	m.bump(EventRelationshipRetired, id, actor, map[string]any{"reason": reason}, m.now())
-	return nil
+	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 
 // admitEventLocked reports whether an event identity is new, recording it if so.

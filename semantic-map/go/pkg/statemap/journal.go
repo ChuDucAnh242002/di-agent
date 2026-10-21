@@ -22,6 +22,10 @@ const (
 	EventRelationshipAsserted EventKind = "relationship.asserted"
 	EventRelationshipRetired  EventKind = "relationship.retired"
 
+	// EventIntervention records what an action the agent took did to a relationship's
+	// evidence, whether or not it changed the structure.
+	EventIntervention EventKind = "relationship.intervention"
+
 	// EventOperatorIntent records one operator action that spanned several
 	// relationships, alongside the individual assertions it produced.
 	//
@@ -77,6 +81,14 @@ type Decision struct {
 	// counterfactual is re-derivable: what was observed AND what was supposed.
 	Assumptions map[string]float64 `json:"assumptions,omitempty"`
 	Excluded    []string           `json:"excluded,omitempty"`
+
+	// Inputs are what the decision read that is not a property or a relationship:
+	// a candidate's evidence, the text a model was given, a model's answer. Copied in
+	// like the rest.
+	Inputs map[string]any `json:"inputs,omitempty"`
+
+	// FactsRead are the machine's facts as they stood, when the decision read them.
+	FactsRead []Fact `json:"facts_read,omitempty"`
 
 	// Rationale is the human-readable form of the same content.
 	Rationale string `json:"rationale"`
@@ -273,6 +285,8 @@ type DecisionBuilder struct {
 	rationale   []string
 	assumptions map[string]float64
 	excluded    []string
+	inputs      map[string]any
+	facts       []Fact
 }
 
 // Decide starts a decision record pinned to the map's current revision.
@@ -341,7 +355,7 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 		if r.To != propertyID || r.Status == Retired {
 			continue
 		}
-		out = append(out, *r)
+		out = append(out, b.m.relationshipViewLocked(r))
 		for _, end := range []string{r.From, r.To} {
 			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
 				staleEnds[r.ID] = append(staleEnds[r.ID], end)
@@ -382,6 +396,15 @@ func (b *DecisionBuilder) Assume(id string, v float64) {
 // Exclude records a subject or property taken to its floor.
 func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
+// Input records something else the decision read, under a name. v must be a value
+// the caller will not change afterwards: a copy, a string, a number.
+func (b *DecisionBuilder) Input(name string, v any) {
+	if b.inputs == nil {
+		b.inputs = map[string]any{}
+	}
+	b.inputs[name] = v
+}
+
 // Commit records the decision in the journal and returns it.
 func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 	parts := make([]string, 0, len(b.rationale)+2)
@@ -414,6 +437,8 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		RelationshipsRead: b.rels,
 		Assumptions:       assumptions,
 		Excluded:          b.excluded,
+		Inputs:            b.inputs,
+		FactsRead:         b.facts,
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
