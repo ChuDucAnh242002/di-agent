@@ -54,7 +54,7 @@ If both commands succeed you have a working checkout. Nothing else on this list 
 | Use `POST /explain` | A local OpenAI-compatible LLM. [Ollama](https://ollama.com) is smallest: `brew install ollama && ollama pull qwen2.5:7b-instruct` |
 | Run the 3-VM PoC | [Multipass](https://multipass.run) |
 
-**The LLM is genuinely optional.** `-explain-provider` defaults to `none`; the daemon boots and serves every other endpoint without it, and `POST /explain` returns `501` with instructions. No published result depends on it — see [ARCHITECTURE §13](semantic-map/ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain).
+**The LLM is genuinely optional.** `explain.provider` defaults to `none`; the daemon boots and serves every other endpoint without it, and `POST /explain` returns `501` with instructions. No published result depends on it — see [ARCHITECTURE §13](semantic-map/ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain).
 
 ---
 
@@ -105,22 +105,15 @@ Not via `dev.sh`. Build the binary and run it on the host.
 cd semantic-map/go
 go build -o /usr/local/bin/di-agent ./cmd/agent
 
-di-agent \
-  -profile edge-minimal \
-  -addr :8080 \
-  -priors /etc/di-agent/prior_weights.json \
-  -kd k0s \
-  -netdata-url http://localhost:19999 \
-  -collect-interval 10s \
-  -regime bursty
+di-agent -config /etc/di-agent/agent.yaml
 ```
 
-The full flag table is in [README §3](semantic-map/README.md#3-running-the-edge-daemon). The four that matter most:
+The agent is described by `agent.yaml`, not by flags; `di-agent -print-config` prints every setting with its default, and `semantic-map/agent.example.yaml` is that output. The reference is [README §3](semantic-map/README.md#3-running-the-edge-daemon). The four that matter most:
 
-- **`-kd`** names this node's distribution and is validated against the artefact's `distributions` list. It selects no magnitude: two agents differing only in `-kd` answer identically until telemetry arrives, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts. What makes an agent "know it is on k0s" is what it has measured on k0s.
-- **`-regime`** (`stable`/`default`/`bursty`/`volatile`) sets `-alpha` and `-convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
-- **`-collect-interval 0`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
-- **`-proposer=false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
+- **`profile.kd`** names this node's distribution and is validated against the artefact's `distributions` list. It selects no magnitude: two agents differing only in `kd` answer identically until telemetry arrives, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts. What makes an agent "know it is on k0s" is what it has measured on k0s.
+- **`profile.regime`** (`stable`/`default`/`bursty`/`volatile`) sets `alpha` and `convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
+- **`sources.interval: 0s`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
+- **`map.proposer.enabled: false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
 
 `poc/` has a Multipass-based 3-VM deployment (`make -C poc all`) if you want a real multi-node mesh; see [ARCHITECTURE §12](semantic-map/ARCHITECTURE.md#12-poc-deployment-poc).
 
@@ -158,8 +151,8 @@ type CollectorContract interface {
 
 **Steps:**
 
-1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source) or `collector_cgroup.go` (filesystem source).
-2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, metricType, timestamp)`.
+1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source, include patterns) or `collector_cgroup.go` (filesystem source).
+2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, subject, metricType, timestamp)`.
 3. Return `(nil, nil)` for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
 4. Wire it in `pkg/profiles/profiles.go`. If more than one collector is active, wrap them in `MultiCollector`.
 5. Add `internal/minimal/collector_<source>_test.go` and run the compliance suite against it:
@@ -176,36 +169,30 @@ Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *
 
 **The rule: your implementation is valid if and only if it passes the compliance suite.** That is the definition, not a check on top of one.
 
-> Watch out for the normalisation trap. Every `MetricSample.Value` must be in `[0,1]`. `NetdataCollector` shipped a bug where network throughput was emitted in raw bytes/s — CO-adjacent edges went to tens of thousands and the reasoner produced nonsense. Normalise against a documented reference (the network metrics use a 1 Gbps ceiling) and clamp.
+**The rules every producer follows**, in-process collector or push producer alike — a push producer has no code in the agent, so these are its obligations:
+
+| Concern | Rule |
+| ------- | ---- |
+| What to collect | An include list of patterns over the source's own names, with a short curated default and `*` for everything. Selection happens in the producer; the map records whatever arrives. |
+| Names | The source's name for the quantity (Netdata: `<context>.<dimension>`), collapsed onto an existing type only where it means the same thing, measured the same way. Two producers that measure a quantity differently keep two names: Netdata's `system.cpu` counts iowait, the root cgroup does not. |
+| Subjects | A per-instance series is a subject: `disk:sda`, `net:eth0`, `pod:<uid>`. |
+| Units | Converted to the map's (a percentage to a fraction, KiB/s to bytes/s). A reading whose unit contradicts the held property is refused. |
+| Range | Declared where the quantity has one (a share, a percentage), not for a rate or a count; the same declaration on every sample of a type. |
+| Computed series | Skipped: a remainder (CPU idle) or a longer average of a series that is kept (PSI 60 s and 300 s). |
+| Chart | The series computed together from one reading carry one `chart`, so discovery can group the arithmetic among them. |
+
+`AvailableMetrics()` is at least every type the last `Collect` emitted; a pattern-driven collector's answer grows as its source offers more.
+
+> Watch out for the normalisation trap. A *routed* type — one `domain_spec.json` summarises into a construct — must be a fraction on `[0,1]`. A replay harness once sent network throughput in raw bytes/s and CO-adjacent edges went to tens of thousands. Unrouted types carry whatever unit and range they declare.
 
 ### 4.2 Add a MetricType
 
-**Three** edits, all required. The enum is currently duplicated across three hand-maintained lists, and skipping any one fails differently:
+A metric type is any name over `[A-Za-z0-9._-]`; the set is open. A producer sends it and the map admits it as a property on first observation, routed or not. Two things are optional:
 
-| # | File | Miss it and… |
-| - | ---- | ------------ |
-| 1 | `pkg/types/types.go` — the `MetricType` constant block | it does not compile |
-| 2 | `pkg/semmap/bridge.go` — `metricTypeToConstruct` | the Bridge silently ignores the sample; no edge ever updates |
-| 3 | `cmd/agent/dto.go` — `knownMetricTypes` | `POST /ingest-sample` rejects it with `400 unknown metric_type`, even though the routing table would have handled it fine |
+- **Route it** in `domain_spec.json` `metric_routing` to have a construct summarise it. A routed type declares its unit and range there, and must be a fraction on `[0,1]`.
+- **Name it in code** as a constant in `pkg/types/types.go` only when Go code refers to it (a collector that emits it, a test).
 
-```go
-// 1. pkg/types/types.go
-FuelConsumption MetricType = "fuel_consumption"
-
-// 2. pkg/semmap/bridge.go
-types.FuelConsumption: "RC",
-
-// 3. cmd/agent/dto.go
-types.FuelConsumption: {},
-```
-
-Miss #3 and the failure is genuinely confusing: an in-process collector works (it calls the Bridge directly), but the HTTP path — which the replay tool and any external collector use — rejects the same metric. Grep for the constant name after you add it; you should get three non-test hits.
-
-Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITECTURE.md#5-telemetry-pipeline) — required by the documentation rule, see [§6](#6-conventions).
-
-> Three copies of one enum is a smell, not a design. The right fix is a single registry that the Bridge and the DTO validator both read, which is the same refactor the deferred `metric_types.json` work would do. Until then, the third edit is load-bearing.
-
-The catalogue is **compile-time closed on purpose**: `POST /ingest-sample` rejects any type not in the enum, so a misconfigured collector fails loudly instead of poisoning the model with silent unknowns. Externalising it to a config file is a known, deliberately deferred design item — see the open gap in `research-docs/SEMANTIC-MAP-STATUS.md` (private repo) for the chosen approach and why it waits for a real driver.
+Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITECTURE.md#5-telemetry-pipeline) if you added a constant — required by the documentation rule, see [§6](#6-conventions).
 
 ### 4.3 Swap a contract implementation
 
@@ -229,7 +216,7 @@ There is also no longer a Python mirror of these interfaces. One existed, descri
 
 ### 4.4 Add a deployment profile
 
-A profile is a named wiring of implementations. The binary is identical across profiles; only the `-profile` flag changes.
+A profile is a named wiring of implementations. The binary is identical across profiles; only `profile.name` changes.
 
 In `pkg/profiles/profiles.go`:
 
@@ -270,7 +257,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 
 **Tools must stay read-only.** The registry is what makes "the LLM cannot mutate the graph" true by construction rather than by policy. Adding a mutating tool breaks the human-judgment anchor described in [ARCHITECTURE §8](semantic-map/ARCHITECTURE.md#8-connection-to-research). If the model should be able to suggest a change, it already can — as a draft `Proposal` the operator POSTs themselves.
 
-**A new prompt version:** copy `cmd/agent/prompts/explain-v1.md` to `-v2.md` and edit the copy. Never edit `v1` in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against v1 must stay reproducible.
+**A new prompt version:** copy the newest `cmd/agent/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
 
 ---
 
@@ -350,11 +337,11 @@ Never commit absolute local paths (`/Users/…`).
 
 ## 7. Troubleshooting
 
-**`POST /explain` returns 501.** Working as intended — `-explain-provider` defaults to `none`. The response body says how to enable it.
+**`POST /explain` returns 501.** Working as intended — `explain.provider` defaults to `none`. The response body says how to enable it.
 
-**Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `-addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
+**Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `node.addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
 
-**Collector emits nothing.** Three usual causes: (1) `-collect-interval 0` disables the loop; (2) `-cgroup-root ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
+**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) `sources.cgroup.root: ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
 
 **Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values. Every `MetricSample.Value` must be in `[0,1]`. See the warning in [§4.1](#41-add-a-collector-most-common).
 

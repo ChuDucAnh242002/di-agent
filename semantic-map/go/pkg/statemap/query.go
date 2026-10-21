@@ -27,6 +27,10 @@ type Query struct {
 	// RelatedTo restricts to properties reachable from this one in one hop, in
 	// either direction, which is the neighbourhood a decision about it consults.
 	RelatedTo string
+
+	// Subject restricts to properties of one subject ("" means no restriction, not
+	// "node scope"; use IDs for that).
+	Subject string
 }
 
 // StateView is the answer to a Query: properties, the relationships among them,
@@ -44,6 +48,11 @@ type StateView struct {
 	Revision      uint64         `json:"revision"`
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
+
+	// Facts are the machine the properties belong to: its OS, CPU, memory, disk. Every
+	// view carries them, whatever the filter, since they are the frame its values are
+	// read in.
+	Facts []Fact `json:"facts,omitempty"`
 
 	// Counts summarises the whole map, not just the selection, so a caller can see
 	// what the filter excluded.
@@ -63,7 +72,13 @@ type StateCounts struct {
 	Seeded             int `json:"seeded"`
 	Learned            int `json:"learned"`
 	Asserted           int `json:"asserted"`
+	Discovered         int `json:"discovered"`
+	Intervened         int `json:"intervened"`
 	Unobserved         int `json:"properties_unobserved"`
+
+	// Subjects is the number of distinct non-empty subjects across non-retired
+	// properties: how many things narrower than the node the map currently models.
+	Subjects int `json:"subjects"`
 
 	// RelationshipsSignSuspect counts relationships that every paired observation has
 	// contradicted (see Relationship.SignSuspect). It belongs in the census and not
@@ -110,7 +125,12 @@ func (m *Map) State(q Query) StateView {
 		}
 	}
 
-	view := StateView{Owner: m.owner, Revision: m.revision, Counts: m.censusLocked()}
+	// Empty, not nil: a filter that matches nothing is an answer, and it should
+	// serialise as [] rather than null, which a client has to special-case.
+	view := StateView{
+		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(), Facts: m.factsLocked(),
+		Properties: []Property{}, Relationships: []Relationship{},
+	}
 	selected := map[string]bool{}
 	for _, p := range m.properties {
 		if !wantStatus[p.Status] {
@@ -125,10 +145,13 @@ func (m *Map) State(q Query) StateView {
 		if q.RelatedTo != "" && !neighbourhood[p.ID] {
 			continue
 		}
+		if q.Subject != "" && p.Subject != q.Subject {
+			continue
+		}
 		if p.Confidence < q.MinConfidence {
 			continue
 		}
-		view.Properties = append(view.Properties, *p)
+		view.Properties = append(view.Properties, p.clone())
 		selected[p.ID] = true
 	}
 
@@ -139,7 +162,7 @@ func (m *Map) State(q Query) StateView {
 		if r.Status == Retired && !wantStatus[Retired] {
 			continue
 		}
-		view.Relationships = append(view.Relationships, *r)
+		view.Relationships = append(view.Relationships, m.relationshipViewLocked(r))
 	}
 
 	sort.Slice(view.Properties, func(i, j int) bool {
@@ -157,7 +180,7 @@ func (m *Map) Property(id string) (Property, bool) {
 	if !ok {
 		return Property{}, false
 	}
-	return *p, true
+	return p.clone(), true
 }
 
 // Relationship returns one relationship.
@@ -168,7 +191,7 @@ func (m *Map) Relationship(id string) (Relationship, bool) {
 	if !ok {
 		return Relationship{}, false
 	}
-	return *r, true
+	return m.relationshipViewLocked(r), true
 }
 
 // Relationships returns every relationship, optionally filtered by endpoint.
@@ -183,10 +206,25 @@ func (m *Map) Relationships(from, to string) []Relationship {
 		if to != "" && r.To != to {
 			continue
 		}
-		out = append(out, *r)
+		out = append(out, m.relationshipViewLocked(r))
 	}
 	sortRelationships(out)
 	return out
+}
+
+// Covered reports whether a non-retired relationship already runs from -> to with
+// this sign. It is the map's answer to the proposer's "is this already known", and
+// a retired relationship is not: a subject that left and returned has to earn its
+// edges again.
+func (m *Map) Covered(from, to string, sign int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.relationships {
+		if r.From == from && r.To == to && r.Sign == sign && r.Status != Retired {
+			return true
+		}
+	}
+	return false
 }
 
 // Census summarises the map.
@@ -198,6 +236,7 @@ func (m *Map) Census() StateCounts {
 
 func (m *Map) censusLocked() StateCounts {
 	var c StateCounts
+	subjects := map[string]struct{}{}
 	for _, p := range m.properties {
 		c.PropertiesTotal++
 		switch p.Status {
@@ -217,7 +256,11 @@ func (m *Map) censusLocked() StateCounts {
 		if p.NObservations == 0 {
 			c.Unobserved++
 		}
+		if p.Subject != "" && p.Status != Retired {
+			subjects[p.Subject] = struct{}{}
+		}
 	}
+	c.Subjects = len(subjects)
 	for _, r := range m.relationships {
 		c.RelationshipsTotal++
 		if r.Status != Retired {
@@ -230,6 +273,10 @@ func (m *Map) censusLocked() StateCounts {
 			c.Learned++
 		case Asserted:
 			c.Asserted++
+		case Discovered:
+			c.Discovered++
+		case Intervened:
+			c.Intervened++
 		}
 		if r.SignSuspect() {
 			c.RelationshipsSignSuspect++
@@ -292,10 +339,10 @@ func (m *Map) Explain(id string) (string, error) {
 	var incoming, outgoing []Relationship
 	for _, r := range m.relationships {
 		if r.To == id {
-			incoming = append(incoming, *r)
+			incoming = append(incoming, m.relationshipViewLocked(r))
 		}
 		if r.From == id {
-			outgoing = append(outgoing, *r)
+			outgoing = append(outgoing, m.relationshipViewLocked(r))
 		}
 	}
 	sortRelationships(incoming)
@@ -322,4 +369,24 @@ func (m *Map) Explain(id string) (string, error) {
 
 func sortRelationships(rs []Relationship) {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID })
+}
+
+// Subjects lists the things narrower than the node that the map currently models:
+// the sorted, distinct subjects of its non-retired properties. A subject whose
+// properties are all retired has left the system and is not listed.
+func (m *Map) Subjects() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := map[string]struct{}{}
+	for _, p := range m.properties {
+		if p.Subject != "" && p.Status != Retired {
+			seen[p.Subject] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }

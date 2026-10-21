@@ -2,7 +2,7 @@
 //
 // It loads the configured profile, seeds the graph from Di-Select priors,
 // and serves the agent queries plus the graph control surface over
-// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest. The graph
+// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest-sample. The graph
 // introspection (/graph, /edges, /history, /constructs, /propositions,
 // /neighbors), ontology mutation (/ontology/*), candidate review
 // (/candidates/{id}/{confirm,reject,defer}), edge reset (/agent/reset),
@@ -11,23 +11,27 @@
 //
 // Usage:
 //
-//	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
-//	      -priors /path/to/prior_weights.json -kd k0s \
-//	      -collect-interval 10s -cgroup-root /sys/fs/cgroup \
-//	      -peers http://node_1:8080,http://node_2:8080
+//	agent -config agent.yaml
+//	agent -print-config                  # the defaults, as a file to copy and edit
+//	agent -config agent.yaml -print-config   # the effective spec
 //
-// The -kd flag selects per-distribution edge weights from prior_weights.json
-// when set. Omit it (or pass an empty string) to use the global Di-Select
-// proposition strengths.
+// The agent is described by one document, agent.yaml (see pkg/spec): the file
+// overlays the defaults, so it names only what it changes, and a key the agent does
+// not know is refused. These are the only flags.
 //
-// The autonomous collection loop ticks at -collect-interval, calls
+// The profile's kd (profile.kd) selects the distribution named in profile.priors
+// when set. Omit it to use the global Di-Select proposition strengths.
+//
+// The autonomous collection loop ticks at sources.interval, calls
 // CollectorContract.Collect on the profile's collector, and runs each sample
-// through the Bridge → Updater pipe. Setting -collect-interval=0 or
-// -cgroup-root="" disables it (the manual POST /ingest path still works).
+// through the facade's IngestSample. The collector is the cgroup one at
+// sources.cgroup.root, the Netdata one at sources.netdata.url, both together, or the
+// synthetic system from sources.script; with none configured, or sources.interval 0,
+// the loop is disabled and only the manual POST /ingest-sample path updates the model.
 //
-// -regime (stable|default|bursty|volatile) sets alpha and convergence to a
+// profile.regime (stable|default|bursty|volatile) sets alpha and convergence to a
 // pre-characterised bundle matching the deployment's dynamics. Overrides any
-// explicit -alpha and -convergence values when set.
+// explicit profile.alpha and profile.convergence values when set.
 package main
 
 import (
@@ -43,12 +47,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/relief"
+	"github.com/DiyazY/di-agent/pkg/runtime"
+	_ "github.com/DiyazY/di-agent/pkg/runtime/kubernetes"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -60,211 +70,140 @@ const Version = "0.1.0"
 // binary is built without `-ldflags "-X main.BuildCommit=…"`.
 var BuildCommit = ""
 
+// defineFlags declares the command line: the agent is described by its file, so
+// the flags only name it and ask to see it.
+func defineFlags(fs *flag.FlagSet) (configPath *string, printConfig *bool) {
+	configPath = fs.String("config", "",
+		"path to the agent's spec, agent.yaml; empty runs the defaults. Every setting the "+
+			"agent takes lives in that file")
+	printConfig = fs.Bool("print-config", false,
+		"print the effective spec as YAML (the file over the defaults) and exit; "+
+			"`agent -print-config` is the full document to copy and edit")
+	return configPath, printConfig
+}
+
 func main() {
-	profileName := flag.String("profile", "edge-minimal", "deployment profile")
-	addr := flag.String("addr", ":8080", "HTTP listen address")
-	alpha := flag.Float64("alpha", 0.2, "EMA decay factor for the RECENT layer (0 < alpha < 1)")
-	alphaSlow := flag.Float64("alpha-slow", 0.001,
-		"EMA decay factor for the ESTABLISHED layer: the same paired observations read on a "+
-			"slower clock, answering what is normal for this machine rather than what is "+
-			"happening now. The default is a design choice on a measured trade-off, not a "+
-			"derived optimum: order-invariance and responsiveness trade off monotonically, "+
-			"so the measurement supports a band (roughly 0.004 to 0.0005) and 0.001 sits "+
-			"mid-band with ~10x the recent layer's order-invariance and about a third of "+
-			"its responsiveness. Pinning one value needs a stated requirement about how "+
-			"fast a baseline should follow a persistent change. An offline fit reported an "+
-			"interior maximum; a 135-stream sweep against this daemon refuted it as an "+
-			"artefact of the offline streams being ~6x shorter than a deployment's.")
-	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
-	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
-	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
-	kd := flag.String("kd", "", "Kubernetes distribution running on this node "+
-		"(k3s|k0s|k8s|kubeEdge|openYurt); selects per-KD edge weights from -priors when set")
-	collectInterval := flag.Duration("collect-interval", 10*time.Second,
-		"how often the collection loop ticks the Collector; 0 disables the loop")
-	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
-		"filesystem root the cgroup collector reads from; empty string disables the loop")
-	nodeID := flag.String("node-id", "",
-		"the machine this agent models. Used both to stamp its own MetricSamples and "+
-			"as its identity: the map is node-local, so samples labelled with another "+
-			"machine's ID are rejected unless -ingest-scope=any. Empty falls back to "+
-			"os.Hostname()")
-	staleAfter := flag.Duration("stale-after", 2*time.Minute,
-		"silence after which a property is marked stale. A model that keeps reporting "+
-			"a departed metric's last value asserts something it cannot support, so the "+
-			"map says 'stale' instead of holding the number quietly.")
-	retireAfter := flag.Duration("retire-after", 0,
-		"silence after which a property is retired automatically. 0 leaves retirement "+
-			"to an operator, which is the safer default for a system whose collectors "+
-			"restart.")
-	noLearn := flag.Bool("no-learn", false,
-		"stop relationships learning their strength from paired observations of both "+
-			"endpoints. They then stay at their seeded priors with confidence 0, which is "+
-			"the honest report when nothing has been learned — but the map never improves "+
-			"on what it was told.")
-	pairWindowS := flag.Int("pair-window-seconds", 15,
-		"how far apart two observations may be and still count as simultaneous for "+
-			"learning. A tolerance, not smoothing: collectors sample on independent grids, "+
-			"so without one no pair ever forms.")
-	noAdmit := flag.Bool("no-admit", false,
-		"reject observations of properties that were never declared. Off by default: a "+
-			"model of a changing system that cannot represent something new is a model "+
-			"of the system as it was when someone wrote it down.")
-	sweepInterval := flag.Duration("sweep-interval", 0,
-		"how often to apply lifecycle transitions. 0 derives it from -stale-after "+
-			"(half, floored at 5s). Without a sweep, staleness and retirement only "+
-			"happen when something asks for them, which makes -stale-after a setting "+
-			"that describes nothing.")
-	stateFile := flag.String("state-file", "",
-		"path to persist the map and its journal. Empty keeps everything in memory, which "+
-			"means a restart returns the agent to cold start on a system it has already "+
-			"watched, and makes the audit trail an artefact of one process lifetime.")
-	saveInterval := flag.Duration("save-interval", time.Minute,
-		"how often to snapshot when -state-file is set. A snapshot is also written on "+
-			"shutdown, so this bounds what an unclean exit loses rather than what a clean "+
-			"one does.")
-	journalSize := flag.Int("journal-size", 0,
-		"entries of change and decision history to hold in memory (0 = default)")
-	ingestScope := flag.String("ingest-scope", "self",
-		"self: ingest only this machine's samples, which is what a node-local map means. "+
-			"any: aggregate every machine's telemetry into one graph — correct for "+
-			"replaying a whole testbed into a single daemon, wrong for a deployment, "+
-			"because the resulting weights average over machines that may be different "+
-			"physical systems")
-	netdataURL := flag.String("netdata-url", "",
-		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
-	peersFlag := flag.String("peers", "",
-		"comma-separated peer agent URLs to register at startup "+
-			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
-			"these by trust-weighted savings. Additional peers can be added at "+
-			"runtime via POST /peers.")
-	peerStatePoll := flag.Duration("peer-state-poll", 30*time.Second,
-		"how often to fetch each peer's semantic map. 0 disables polling, leaving "+
-			"GET /state/cluster to report only what a manual POST /state/peers/refresh "+
-			"collected — an empty cluster view then means nobody asked, not that the "+
-			"peers have no state.")
-	peerStateStale := flag.Duration("peer-state-stale", 90*time.Second,
-		"how old a peer's snapshot may be before the cluster view marks it history. "+
-			"Nothing is deleted at this age: during a partition the last snapshot is "+
-			"the only thing this agent has about that node, and it is labelled rather "+
-			"than withheld.")
-	domainPath := flag.String("domain", "",
-		"path to domain_spec.json: the constructs, metric routing, propositions, "+
-			"adjustment policy and operator vocabulary the agent reasons over. "+
-			"Required — the binary carries no built-in model. When empty the daemon "+
-			"searches upward from the working directory.")
-	regime := flag.String("regime", "",
-		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
-	var useProposer bool
-	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
-	var useTuner bool
-	flag.BoolVar(&useTuner, "tuner", true,
-		"enable the RuleBasedTuner behind POST /agent/tune (disable to wire DisabledTuner, "+
-			"which accepts requests and applies nothing)")
-
-	pairSupport := flag.Int("pair-support", 0,
-		"paired observations a relationship needs before its strength moves at all "+
-			"(0 = default 8). Below it the pair is buffered and confidence keeps "+
-			"reporting that nothing has been learned.")
-	pairHistory := flag.Int("pair-history", 0,
-		"recent pairs the strength estimate is computed over (0 = default 60). Older "+
-			"pairs fall out, which is what lets a relationship follow a system whose "+
-			"behaviour changes rather than averaging its whole history.")
-
-	explainProvider := flag.String("explain-provider", "none",
-		"natural-language explain provider: none (disabled) or openai-compatible "+
-			"(routes to any OpenAI-compat backend — Ollama, llama-server, LM Studio, vLLM)")
-	explainURL := flag.String("explain-url", "http://localhost:11434/v1",
-		"base URL for the OpenAI-compatible backend (used when -explain-provider=openai-compatible)")
-	explainModel := flag.String("explain-model", "qwen2.5:7b-instruct",
-		"model name for the OpenAI-compatible backend")
-	explainPrompt := flag.String("explain-prompt", "",
-		"path to the system-prompt file for /explain (default: cmd/agent/prompts/explain-v1.md alongside the binary)")
-	explainAPIKey := flag.String("explain-api-key", "",
-		"optional bearer token for the OpenAI-compatible backend "+
-			"(env var EXPLAIN_API_KEY takes precedence when both are set)")
-	explainPlannerPrompt := flag.String("explain-planner-prompt", "",
-		"path to the planner system prompt; empty derives planner-v1.md from -explain-prompt's directory")
-	explainCriticPrompt := flag.String("explain-critic-prompt", "",
-		"path to the critic system prompt; empty derives critic-v1.md from -explain-prompt's directory")
-	explainKeepAlive := flag.String("explain-keep-alive", "30m",
-		"how long the backend should keep the model resident between calls "+
-			"(Ollama `keep_alive`); empty disables the hint")
-	explainSessions := flag.Bool("explain-sessions", true,
-		"enable multi-turn session memory and the session-scoped tool cache for /explain")
-
+	configPath, printConfig := defineFlags(flag.CommandLine)
 	flag.Parse()
 
 	if err := checkNoPositionalArgs(flag.NArg(), flag.Arg(0)); err != nil {
 		log.Fatalf("%v", err)
 	}
 
-	if err := applyRegime(*regime, alpha, convergence); err != nil {
-		log.Fatalf("invalid -regime %q: %v", *regime, err)
+	cfg, err := spec.Load(*configPath)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if *printConfig {
+		out, err := shownSpec(cfg)
+		if err != nil {
+			log.Fatalf("print-config: %v", err)
+		}
+		os.Stdout.Write(out)
+		return
 	}
 
-	if *nodeID == "" {
+	if err := applyRegime(cfg.Profile.Regime, &cfg.Profile.Alpha, &cfg.Profile.Convergence); err != nil {
+		log.Fatalf("invalid profile.regime %q: %v", cfg.Profile.Regime, err)
+	}
+
+	if cfg.Node.ID == "" {
 		if h, err := os.Hostname(); err == nil {
-			*nodeID = h
+			cfg.Node.ID = h
 		}
 	}
 
-	// The domain model is data, not code: the binary ships with no constructs,
-	// propositions or routing of its own. An agent without a model has nothing to
-	// reason over, so this fails loud rather than serving an empty graph.
-	var (
-		spec    *domain.Spec
-		specErr error
-	)
-	if *domainPath != "" {
-		spec, specErr = domain.Load(*domainPath)
+	// The domain model is data, not code, and it is optional: the binary ships with
+	// no constructs, propositions or routing of its own, and a node may have none to
+	// give it. Without one the map still records every property the node exhibits
+	// and discovers how they relate; what it cannot do is reason over constructs
+	// nobody declared. A path that was named and does not load is still an error,
+	// because silently running without the model someone asked for is worse.
+	dom, domFrom, err := loadDomain(cfg.Domain.Path, "")
+	if err != nil {
+		log.Fatalf("domain spec: %v", err)
+	}
+	if dom != nil {
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics, from %s",
+			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting), domFrom)
 	} else {
-		spec, specErr = domain.LoadFound()
+		log.Printf("domain model: none (domain.path is none, or no domain_spec.json was found): every " +
+			"observed property is recorded and relationships are discovered; cost, " +
+			"recommendations and tuning return 501")
 	}
-	if specErr != nil {
-		log.Fatalf("domain spec: %v (pass -domain <path>)", specErr)
-	}
-	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
-	switch *ingestScope {
+	switch cfg.Node.IngestScope {
 	case "self":
-		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
+		log.Printf("identity: %s (node-local: foreign samples rejected)", cfg.Node.ID)
 	case "any":
-		log.Printf("identity: %s (ingest-scope=any: this graph will be an aggregate over "+
-			"every machine whose telemetry arrives, which is not a deployment topology)", *nodeID)
+		log.Printf("identity: %s (ingest_scope=any: this graph will be an aggregate over "+
+			"every machine whose telemetry arrives, which is not a deployment topology)", cfg.Node.ID)
 	default:
-		log.Fatalf("invalid -ingest-scope %q (valid: self, any)", *ingestScope)
+		log.Fatalf("invalid node.ingest_scope %q (valid: self, any)", cfg.Node.IngestScope)
 	}
+	pairWindowS := int(cfg.Map.PairWindow / time.Second)
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
-		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
+		pairWindowS, orDefault(cfg.Map.PairSupport, 8), orDefault(cfg.Map.PairHistory, 60))
+	prop := cfg.Map.Proposer
+	maxPairs := prop.MaxPairs
+	if maxPairs <= 0 && prop.Enabled {
+		mem, cores := machineMemory(), machineCores()
+		maxPairs = minimal.DerivePairBudget(mem, cores, cfg.Sources.Interval, profiles.DefaultProposerBufSize)
+		if mem == 0 {
+			log.Printf("proposer: machine memory unreadable; pair budget %d (fallback)", maxPairs)
+		} else {
+			log.Printf("proposer: pair budget %d derived from %.1f GiB and %d cores at a %s tick",
+				maxPairs, float64(mem)/(1<<30), cores, cfg.Sources.Interval)
+		}
+	}
+	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f fdr=%.3f max-pairs=%d",
+		prop.Threshold, prop.MinPairs, prop.MinSpread, prop.FDR, maxPairs)
+	cg := cfg.Sources.Cgroup
+	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v pod-logs=%q",
+		cg.Root, cg.Subjects, cg.Units, cg.MaxSubjects, cg.CmdLabel, cg.PodLogs)
+	if cfg.Sources.Netdata.URL != "" {
+		log.Printf("netdata collector: url=%s include=%q", cfg.Sources.Netdata.URL, cfg.Sources.Netdata.Include)
+	}
 
-	peerURLs := parsePeerURLs(*peersFlag)
+	peerURLs := cfg.Peers.URLs
 
-	cfg := profiles.Config{
-		EMAAlpha:             *alpha,
-		EMAAlphaSlow:         *alphaSlow,
-		ConvergenceThreshold: *convergence,
-		MinTrustScore:        *minTrust,
-		PriorWeightsPath:     *priorsPath,
-		KD:                   *kd,
-		NodeID:               *nodeID,
-		CgroupRoot:           *cgroupRoot,
-		NetdataURL:           *netdataURL,
-		CollectInterval:      *collectInterval,
+	minSpread, fdr := prop.MinSpread, prop.FDR
+	pcfg := profiles.Config{
+		EMAAlpha:             cfg.Profile.Alpha,
+		EMAAlphaSlow:         cfg.Profile.AlphaSlow,
+		ConvergenceThreshold: cfg.Profile.Convergence,
+		MinTrustScore:        cfg.Profile.MinTrust,
+		PriorWeightsPath:     cfg.Profile.Priors,
+		KD:                   cfg.Profile.KD,
+		NodeID:               cfg.Node.ID,
+		CgroupRoot:           cg.Root,
+		CgroupSubjects:       cg.Subjects,
+		CgroupUnitGlobs:      cg.Units,
+		CgroupMaxSubjects:    cg.MaxSubjects,
+		CgroupCmdLabel:       cg.CmdLabel,
+		CgroupPodLogRoot:     cg.PodLogs,
+		ScriptPath:           cfg.Sources.Script,
+		NetdataURL:           cfg.Sources.Netdata.URL,
+		NetdataInclude:       cfg.Sources.Netdata.Include,
+		CollectInterval:      cfg.Sources.Interval,
 		PeerURLs:             peerURLs,
-		UseProposer:          useProposer,
+		UseProposer:          prop.Enabled,
+		ProposerThreshold:    prop.Threshold,
+		ProposerMinPairs:     prop.MinPairs,
+		ProposerMinSpread:    &minSpread,
+		ProposerFDR:          &fdr,
+		ProposerMaxPairs:     maxPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then
 		// returned HTTP 200 with an empty applied[] — accepting the request and
 		// doing nothing — which is indistinguishable from an intent that matched
 		// no keyword group.
-		UseRuleBasedTuner:    useTuner,
-		DomainSpec:           spec,
-		AcceptForeignSamples: *ingestScope == "any",
-		PairWindowSeconds:    *pairWindowS,
-		PairMinSupport:       *pairSupport,
-		PairWindow:           *pairHistory,
+		UseRuleBasedTuner:    cfg.Map.Tuner,
+		DomainSpec:           dom,
+		AcceptForeignSamples: cfg.Node.IngestScope == "any",
+		PairWindowSeconds:    pairWindowS,
+		PairMinSupport:       cfg.Map.PairSupport,
+		PairWindow:           cfg.Map.PairHistory,
 	}
 
 	// The state model: what this system exhibits, updated by every sample. It is
@@ -276,65 +215,69 @@ func main() {
 		// The map is owned by this node, and says so. Everything it reports about
 		// itself is attributable once state starts crossing node boundaries, and a
 		// snapshot from another machine is refused rather than adopted.
-		Owner:                   *nodeID,
-		StaleAfter:              *staleAfter,
-		RetireAfter:             *retireAfter,
-		ConvergenceObservations: int(*convergence),
-		Alpha:                   *alpha,
-		AlphaSlow:               *alphaSlow,
-		AdmitUnknown:            !*noAdmit,
-		Learn:                   !*noLearn,
+		Owner:                   cfg.Node.ID,
+		StaleAfter:              cfg.Map.StaleAfter,
+		RetireAfter:             cfg.Map.RetireAfter,
+		ConvergenceObservations: int(cfg.Profile.Convergence),
+		Alpha:                   cfg.Profile.Alpha,
+		AlphaSlow:               cfg.Profile.AlphaSlow,
+		AdmitUnknown:            cfg.Map.Admit,
+		Learn:                   cfg.Map.Learn,
 		LearnConfig: statemap.LearnConfig{
-			PairWindowSeconds: *pairWindowS,
-			MinSupport:        orDefault(*pairSupport, 8),
-			Window:            orDefault(*pairHistory, 60),
+			PairWindowSeconds: pairWindowS,
+			MinSupport:        orDefault(cfg.Map.PairSupport, 8),
+			Window:            orDefault(cfg.Map.PairHistory, 60),
 		},
-	}, statemap.NewJournal(*journalSize))
+	}, statemap.NewJournal(cfg.Map.JournalSize))
 	// Load before seeding. A snapshot holds what this agent learned; seeding holds what
 	// the specification declares. Loading second would refuse (the map would be
 	// populated), and merging blindly would silently pick a winner per property — so the
 	// order is: restore, then let seeding re-declare, where the rules are explicit and
 	// journalled.
-	if *stateFile != "" {
-		loaded, err := state.Load(*stateFile)
+	if cfg.Persist.File != "" {
+		if err := statemap.CanSave(cfg.Persist.File); err != nil {
+			log.Fatalf("persist.file %s cannot be written: %v. Set persist.file to a writable "+
+				"path, or to \"\" to keep the map in memory only", cfg.Persist.File, err)
+		}
+		loaded, err := state.Load(cfg.Persist.File)
 		if err != nil {
-			log.Fatalf("restoring state from %s: %v", *stateFile, err)
+			log.Fatalf("restoring state from %s: %v", cfg.Persist.File, err)
 		}
 		if loaded {
 			c := state.Census()
 			log.Printf("state model: restored %d properties and %d relationships from %s "+
-				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, *stateFile,
+				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, cfg.Persist.File,
 				state.Revision())
 		} else {
-			log.Printf("state model: no snapshot at %s, starting cold", *stateFile)
+			log.Printf("state model: no snapshot at %s, starting cold", cfg.Persist.File)
 		}
+	}
+
+	if err := checkCanRecord(dom != nil, !cfg.Map.Admit, state.Census().PropertiesTotal); err != nil {
+		log.Fatal(err)
+	}
+
+	// What the machine is, read once: the frame every property is read in. After the
+	// snapshot, which restores the revision, so the facts' entries follow it.
+	if err := loadFacts(state, cfg.Facts); err != nil {
+		log.Fatal(err)
 	}
 
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
 	// the specification, so relationships get this cluster's priors rather than a
 	// placeholder.
 
-	cfg.StateMap = state
+	pcfg.StateMap = state
 
-	sm, collector, err := profiles.Build(*profileName, cfg)
+	sm, collector, err := profiles.Build(cfg.Profile.Name, pcfg)
 	if err != nil {
-		log.Fatalf("failed to build profile %q: %v", *profileName, err)
+		log.Fatalf("failed to build profile %q: %v", cfg.Profile.Name, err)
 	}
 	if len(peerURLs) > 0 {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
-	explainer, err := buildExplainer(sm, explainOptions{
-		Provider:      *explainProvider,
-		BaseURL:       *explainURL,
-		Model:         *explainModel,
-		PromptPath:    *explainPrompt,
-		PlannerPath:   *explainPlannerPrompt,
-		CriticPath:    *explainCriticPrompt,
-		FlagAPIKey:    *explainAPIKey,
-		KeepAlive:     *explainKeepAlive,
-		EnableSession: *explainSessions,
-	})
+	explainer, err := buildExplainer(sm, cfg.Explain, dom)
 	if err != nil {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
@@ -343,9 +286,9 @@ func main() {
 	// What this agent has heard from other agents, kept apart from what it observes
 	// itself. This is how a cluster-level question is answered without pretending the
 	// answer came from local observation.
-	peerState := statemap.NewPeerStore(*nodeID, *peerStateStale)
+	peerState := statemap.NewPeerStore(cfg.Node.ID, cfg.Peers.StateStale)
 	peerFetcher := &peerStateFetcher{
-		// The registry, not the -peers list: a peer added at runtime via POST /peers is
+		// The registry, not the peers.urls list: a peer added at runtime via POST /peers is
 		// then polled without a restart.
 		registry: sm.Peers(),
 		client:   peers.NewClient(5 * time.Second),
@@ -354,16 +297,46 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
-	registerStateRoutes(mux, state)
+	registerConfigRoute(mux, cfg)
+	rt, err := runtime.Build(cfg.Runtime.Kind, runtime.Env{NodeID: cfg.Node.ID, Spec: cfg.Runtime, Subjects: workloadSubjects(state)})
+	if err != nil {
+		log.Fatalf("runtime.kind in %s: %v", *configPath, err)
+	}
+	pol, err := policy.New(cfg.Policy)
+	if err != nil {
+		log.Fatalf("policy.rules in %s: %v", *configPath, err)
+	}
+	for _, rule := range policy.MissingDefaultFreezes(cfg.Policy) {
+		log.Printf("policy: policy.rules replaces the default rules and has none to %s; "+
+			"copy it from `agent -print-config` unless leaving it out is meant", rule)
+	}
+	var reliefLoop *relief.Loop
+	if cfg.Loops.Relief.Enabled {
+		// Outcomes are evidence only when the runtime really changes the system: after a
+		// dry run, pressure moves with the workload's own load and nothing else.
+		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, NodeID: cfg.Node.ID,
+			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf,
+			Evidence: rt.Name() != "dry-run", Candidates: sm})
+		if err != nil {
+			log.Fatalf("loops.relief in %s: %v", *configPath, err)
+		}
+	}
+	registerActingRoutes(mux, rt, pol, reliefLoop)
+	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
+	if err != nil {
+		log.Fatalf("autonomy: %v", err)
+	}
+	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
+	registerAutonomyRoutes(mux, reviewer)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		log.Printf("semantic-map agent starting profile=%s addr=%s", *profileName, *addr)
+		log.Printf("semantic-map agent starting profile=%s addr=%s", cfg.Profile.Name, cfg.Node.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -372,15 +345,22 @@ func main() {
 	// Start the autonomous collection loop if the profile produced a
 	// collector AND the interval is positive. Both must hold — a configured
 	// collector with interval=0 is a deliberately disabled loop (useful for
-	// tests and for nodes that only accept manual POST /ingest).
+	// tests and for nodes that only accept manual POST /ingest-sample).
 	// Lifecycle is time-based, so something has to advance it. Without this loop
-	// -stale-after and -retire-after would only take effect when an operator posted
+	// map.stale_after and map.retire_after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
-	startSweepLoop(ctx, state, sweepEvery(*sweepInterval, *staleAfter))
-	startSaveLoop(ctx, state, *stateFile, *saveInterval)
-	startPeerStateLoop(ctx, peerFetcher, *peerStatePoll)
+	if reliefLoop != nil {
+		log.Printf("relief: acting every %s through runtime %s", cfg.Loops.Relief.Interval, rt.Name())
+		go reliefLoop.Start(ctx)
+	}
+	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
+	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
+	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 
-	startCollectionLoop(ctx, sm, collector, *collectInterval)
+	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
+	if reviewer != nil {
+		go reviewer.Run(ctx)
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -392,9 +372,11 @@ func main() {
 	// context and returning let the process exit while the goroutine was still racing to
 	// write, so the shutdown snapshot was usually lost and a clean restart silently
 	// dropped everything since the last periodic save.
-	if *stateFile != "" {
-		if err := state.Save(*stateFile); err != nil {
-			log.Printf("state model: shutdown save failed: %v", err)
+	if cfg.Persist.File != "" {
+		if err := state.Save(cfg.Persist.File); err != nil {
+			// Exits non-zero, so a supervisor sees what the log says: what changed
+			// since the last periodic save may be lost.
+			log.Fatalf("state model: shutdown save failed: %v", err)
 		} else {
 			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 		}
@@ -423,7 +405,7 @@ var regimes = map[string]regimePreset{
 }
 
 // applyRegime overwrites *alpha and *convergence with the preset values for the
-// named regime. It is a no-op when regime is empty (explicit flags win).
+// named regime. It is a no-op when regime is empty (an explicit alpha and convergence lose to it).
 // Returns an error for unrecognised regime names so the caller can log.Fatalf.
 func applyRegime(regime string, alpha, convergence *float64) error {
 	if regime == "" {
@@ -437,29 +419,6 @@ func applyRegime(regime string, alpha, convergence *float64) error {
 	*convergence = p.convergence
 	log.Printf("regime=%s → alpha=%.2f convergence=%.0f", regime, p.alpha, p.convergence)
 	return nil
-}
-
-// parsePeerURLs splits the --peers comma-separated value into a clean slice.
-// Empty entries (e.g. trailing commas, all-whitespace tokens) are dropped so
-// the registry never sees a "" URL. Returns nil when the input is empty so
-// callers can branch on len() instead of inspecting both flag and slice.
-func parsePeerURLs(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // startCollectionLoop launches the autonomous tick goroutine. It is a no-op
@@ -477,7 +436,7 @@ func startCollectionLoop(
 		log.Printf("collection loop disabled: no collector for this profile/configuration")
 		return
 	case interval <= 0:
-		log.Printf("collection loop disabled: -collect-interval=%s", interval)
+		log.Printf("collection loop disabled: sources.interval=%s", interval)
 		return
 	}
 
@@ -522,40 +481,57 @@ func runCollectionLoop(
 	}
 }
 
-// buildExplainer constructs the /explain backend based on the -explain-provider
-// flag. Returns a DisabledExplainer when the operator hasn't opted in, so the
-// route handler can always safely call methods on the returned value.
+// buildExplainer constructs the /explain backend from the spec's explain block.
+// Returns a DisabledExplainer when the operator hasn't opted in, so the route
+// handler can always safely call methods on the returned value.
 //
-// The bearer token comes from EXPLAIN_API_KEY (env) if set, otherwise from the
-// -explain-api-key flag. Env-first matches the standard secret-handling
-// convention: credentials don't live in shell history or systemd unit files
-// unless the operator explicitly opted in via the flag.
-// explainOptions bundles the -explain-* flags. A struct rather than a long
-// positional list so adding a knob doesn't churn every call site.
-type explainOptions struct {
-	Provider      string
-	BaseURL       string
-	Model         string
-	PromptPath    string
-	PlannerPath   string
-	CriticPath    string
-	FlagAPIKey    string
-	KeepAlive     string
-	EnableSession bool
+// The bearer token is explain.api_key; write it as ${EXPLAIN_API_KEY} to keep the
+// credential out of the file.
+// withDomain fills a prompt's {{DOMAIN}} with what the loaded domain model declares, or
+// says that none is loaded. A prompt names no construct itself: the constructs are data
+// this agent loaded, and a model told about others reasons about a map that is not here.
+// loadDomain returns the domain model and the file it came from. "none" runs without
+// one; a named path must load; an empty path searches upward from searchFrom (the
+// working directory when empty) and runs without one when nothing is found. The path is
+// returned so the log says which file supplied the constructs: a search can find a spec
+// nobody meant this agent to have.
+func loadDomain(path, searchFrom string) (*domain.Spec, string, error) {
+	switch path {
+	case "none":
+		return nil, "", nil
+	case "":
+		found, err := domain.FindSpec(searchFrom)
+		if err != nil {
+			return nil, "", nil
+		}
+		path = found
+	}
+	dom, err := domain.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return dom, path, nil
 }
 
-func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explainer, error) {
+func withDomain(prompt string, dom *domain.Spec) string {
+	if prompt == "" {
+		return ""
+	}
+	return strings.ReplaceAll(prompt, "{{DOMAIN}}", dom.PromptSummary())
+}
+
+func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) (explain.Explainer, error) {
 	if opt.Provider == "" || opt.Provider == "none" {
 		log.Printf("explain: provider=none (POST /explain will return 501)")
 		return explain.NewDisabled(), nil
 	}
 	if opt.Provider != "openai-compatible" {
-		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", opt.Provider)
+		return nil, fmt.Errorf("unknown explain.provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
-	if opt.PromptPath == "" {
-		opt.PromptPath = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
+	if opt.Prompt == "" {
+		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v2.md")
 	}
-	prompt, err := explain.LoadPrompt(opt.PromptPath)
+	prompt, err := explain.LoadPrompt(opt.Prompt)
 	if err != nil {
 		return nil, fmt.Errorf("read prompt: %w", err)
 	}
@@ -563,26 +539,22 @@ func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explain
 	// Planner and critic prompts are optional: a missing file disables that
 	// stage rather than failing startup, so an operator can run answer-only
 	// even with a partial prompt directory.
-	promptDir := filepath.Dir(opt.PromptPath)
-	plannerPrompt := loadOptionalPrompt(opt.PlannerPath, promptDir, "planner-v1.md", "planner")
-	criticPrompt := loadOptionalPrompt(opt.CriticPath, promptDir, "critic-v1.md", "critic")
-
-	apiKey := os.Getenv("EXPLAIN_API_KEY")
-	if apiKey == "" {
-		apiKey = opt.FlagAPIKey
-	}
+	promptDir := filepath.Dir(opt.Prompt)
+	prompt = withDomain(prompt, dom)
+	plannerPrompt := withDomain(loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v2.md", "planner"), dom)
+	criticPrompt := withDomain(loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v2.md", "critic"), dom)
 
 	var sessions *explain.SessionStore
-	if opt.EnableSession {
+	if opt.Sessions {
 		sessions = explain.NewSessionStore(explain.SessionConfig{})
 	}
 
 	e, err := explain.NewOpenAICompatible(explainReader{sm}, explain.OpenAICompatibleConfig{
-		BaseURL:       opt.BaseURL,
+		BaseURL:       opt.URL,
 		Model:         opt.Model,
-		APIKey:        apiKey,
+		APIKey:        opt.APIKey,
 		SystemPrompt:  prompt,
-		PromptFile:    opt.PromptPath,
+		PromptFile:    opt.Prompt,
 		PlannerPrompt: plannerPrompt,
 		CriticPrompt:  criticPrompt,
 		KeepAlive:     opt.KeepAlive,
@@ -592,7 +564,7 @@ func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explain
 		return nil, err
 	}
 	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s planner=%t critic=%t sessions=%t keep_alive=%s",
-		opt.BaseURL, opt.Model, opt.PromptPath, plannerPrompt != "", criticPrompt != "", opt.EnableSession, opt.KeepAlive)
+		opt.URL, opt.Model, opt.Prompt, plannerPrompt != "", criticPrompt != "", opt.Sessions, opt.KeepAlive)
 	return e, nil
 }
 
@@ -626,21 +598,32 @@ type explainReader struct{ *semmap.SemanticMap }
 
 func (r explainReader) Peers() *peers.Registry { return r.SemanticMap.Peers() }
 
-// checkNoPositionalArgs rejects stray positional arguments after flag parsing.
-//
-// Go's flag package stops parsing at the first non-flag argument, so
-// `-proposer false` (space instead of `=`) is read as `-proposer` followed by
-// the positional "false" — and every flag after it is silently discarded. That
-// failure mode produced convergence runs whose -alpha, -convergence, -priors
-// and -kd were all ignored while the daemon started and served normally on
-// hardcoded ontology defaults. Failing loud is cheaper than the silent version.
+// checkNoPositionalArgs rejects a stray argument after the flags. The agent
+// takes only -config and -print-config; everything else lives in the spec file.
+// Go's flag package stops at the first argument that is not a flag, so a path
+// given without -config, or `-print-config false` written with a space, would be
+// dropped along with any flag after it, and the agent would start on settings
+// the operator did not give.
 func checkNoPositionalArgs(n int, first string) error {
 	if n == 0 {
 		return nil
 	}
-	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
-		"the form -flag=false (not -flag false), otherwise every flag after it "+
-		"is silently ignored", first)
+	return fmt.Errorf("unexpected argument %q: the agent takes only -config <path> and "+
+		"-print-config (a boolean, written -print-config=false, not -print-config false); "+
+		"every other setting is in the spec file", first)
+}
+
+// checkCanRecord refuses a configuration that can never record anything: without a
+// domain model nothing is declared, and admit: false refuses whatever is not, so unless
+// a restored snapshot supplies properties every sample would be dropped while /state
+// stays empty, which looks the same as telemetry that has not arrived yet.
+func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
+	if hasSpec || !noAdmit || restored > 0 {
+		return nil
+	}
+	return fmt.Errorf("admit: false without a domain model records nothing: no property " +
+		"is declared, so every observation would be refused. Set domain.path, restore a " +
+		"snapshot with persist.file, or set map.admit: true")
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

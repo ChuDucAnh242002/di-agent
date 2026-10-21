@@ -155,8 +155,8 @@ var ErrNoStateModel = errors.New(
 // reintroduce exactly the hardcoding this removes.
 func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err error) {
 	if r.spec == nil {
-		return "", "", fmt.Errorf("reasoner needs a domain specification to know which " +
-			"construct is the resource cost and which is the pressure penalty")
+		return "", "", fmt.Errorf("%w: cost needs one to know which construct is the "+
+			"resource cost and which is the pressure penalty", contracts.ErrNoDomainModel)
 	}
 	cm := r.spec.CostModel
 	if cm.ResourceConstruct == "" || cm.PressureConstruct == "" {

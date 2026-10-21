@@ -136,8 +136,15 @@ func NewWithPeers(
 }
 
 // AttachState gives this map a state model to feed. Samples ingested afterwards
-// create and update its properties.
-func (m *SemanticMap) AttachState(s *statemap.Map) { m.state = s }
+// create and update its properties, and a property that retires — by silence or by
+// an operator — is forgotten by the proposer through the map's retire hook, which
+// neither path can bypass.
+func (m *SemanticMap) AttachState(s *statemap.Map) {
+	m.state = s
+	if s != nil && m.proposer != nil {
+		s.SetRetireHook(func(id string) { _ = m.proposer.Forget(id) })
+	}
+}
 
 // State returns the attached state model, or nil.
 func (m *SemanticMap) State() *statemap.Map { return m.state }
@@ -179,21 +186,22 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 // ── Telemetry ingestion ───────────────────────────────────────────────────────
 
 // IngestSample records one MetricSample in the state model, and notifies the proposer
-// about the construct that summarises it.
+// of the property it observed.
 //
 // The whole path is now: observe the property, let the map recompute whatever derives
 // from it, and let the map's own estimator fold the observation into the relationships
-// incident to it. There used to be a second path alongside — the Bridge, fanning the
-// sample out to every construct edge in a storage graph, with its own idempotency, its
-// own EMA and its own relational variant. It learned the same relations from the same
-// samples into a different structure, which is one structure too many.
+// incident to it. There used to be a second path alongside, fanning the sample out
+// to every construct edge in a storage graph, with its own idempotency, its own EMA
+// and its own relational variant. It learned the same relations from the same
+// samples into a different structure — one structure too many, and it has since
+// been removed.
 //
-// The order that survives from that arrangement, because it was the substantive part:
-// the state model records the observation BEFORE the routing table is consulted. The
-// routing table says what this agent knows how to summarise; it does not say what the
-// system is allowed to exhibit. A metric nobody has mapped is still something the
-// system is doing, so it becomes a property — journalled as an admission — where the
-// construct path would have dropped it.
+// Every property, routed or not, scoped or not, is recorded and reaches the proposer.
+// The routing table decides only the polarity in which an unscoped reading is expressed —
+// before it is stored or learned from. A metric nobody routed is still recorded as an
+// unrouted property; the HTTP layer reports such an admission with a 202 status code.
+// What the routing table decides is which construct summarises an unrouted metric; what
+// it does not decide is what the system is allowed to exhibit.
 //
 // Errors from the proposer are swallowed: it is advisory, and must not block telemetry.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
@@ -208,29 +216,44 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return ErrNoStateModel
 	}
 
-	// Express the reading in its construct's polarity before anything stores or
-	// learns from it. A metric that runs opposite to the construct it informs would
-	// otherwise pull that construct's summary the wrong way, and every relationship
-	// learned from it would be asked to agree with a sign the reading contradicts.
-	// Unrouted and same-polarity metrics pass through untouched.
-	router := m.router()
+	// A scoped sample is a property of something narrower than the node — its id
+	// carries the subject — and it is never routed or normalised: polarity and
+	// construct membership are node-level concerns, so a scoped reading of a routed
+	// metric type still passes through untouched. An unscoped sample is expressed in
+	// its construct's polarity before anything stores or learns from it, because a
+	// metric that runs opposite to the construct it informs would otherwise pull that
+	// construct's summary the wrong way, and every relationship learned from it would
+	// be asked to agree with a sign the reading contradicts; an unrouted or
+	// same-polarity metric passes through untouched either way.
+	id := string(sample.MetricType)
 	value := sample.Value
-	if router != nil {
+	router := m.router()
+	if sample.Subject != "" {
+		id = id + "@" + sample.Subject
+	} else if router != nil {
 		value = router.NormalizeForConstruct(string(sample.MetricType), value)
 	}
 
-	if err := m.state.ObserveEvent(string(sample.MetricType), value,
-		time.Unix(sample.TimestampUnix, 0), sample.EventID); err != nil {
+	if err := m.state.Record(statemap.Observation{
+		ID: id, Value: value, At: time.Unix(sample.TimestampUnix, 0), EventID: sample.EventID,
+		Subject: sample.Subject, Unit: sample.Unit, Range: sample.Range,
+		Source: sample.Source, Labels: sample.Labels,
+	}); err != nil {
 		return err
 	}
 
-	// The proposer looks for relations the backbone does not declare, and it pairs
-	// construct values, so it needs the routed construct rather than the raw metric.
-	// An unrouted metric is simply not something it can propose about yet.
-	if m.proposer != nil && router != nil {
-		if construct, routed := router.ConstructForMetric(string(sample.MetricType)); routed {
-			_ = m.proposer.ObserveConstruct(construct, value)
+	// Every observed property reaches the proposer; it applies the pairing rule
+	// itself. The range it gets is the one the map holds, and only when a producer
+	// declared it: an assumed [0,1] would make the variation gate measure movement
+	// against a scale nobody stated. Advisory: its errors must not block telemetry.
+	if m.proposer != nil {
+		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Chart: sample.Chart, PartOf: sample.PartOf, Value: value,
+			At: time.Unix(sample.TimestampUnix, 0)}
+		if p, ok := m.state.Property(id); ok && p.RangeDeclared {
+			rng := p.Range
+			reading.Range = &rng
 		}
+		_ = m.proposer.ObserveProperty(reading)
 	}
 	return nil
 }
@@ -314,8 +337,9 @@ type SpecCarrier interface {
 
 // router returns the metric routing table for this map, which is the loaded
 // domain specification. Nil when the ontology carries no specification, in which
-// case the proposer simply hears nothing: a metric routed to a construct the
-// deployment never declared would put evidence under a name nobody asked for.
+// case no sample is routed into a construct: a metric routed to a construct the
+// deployment never declared would put evidence under a name nobody asked for. The
+// proposer is fed the property either way.
 func (m *SemanticMap) router() MetricRouter {
 	if c, ok := m.ontology.(SpecCarrier); ok {
 		if s := c.Spec(); s != nil {
@@ -327,17 +351,68 @@ func (m *SemanticMap) router() MetricRouter {
 
 // ── Graph extension ───────────────────────────────────────────────────────────
 
+// Discovery reports how far the proposer rationed the pairs it tests; nil when it
+// tests none.
+func (m *SemanticMap) Discovery() (*types.DiscoveryCounts, error) {
+	return m.proposer.Discovery()
+}
+
 func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetCandidates()
 }
 
-func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
-	prop, err := m.proposer.Confirm(candidateID)
+// CandidateHistory returns every candidate the proposer has ever emitted with its
+// current status — the audit surface for discovery, including deferred ones.
+func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
+	return m.proposer.GetHistory()
+}
+
+// ConfirmCandidate applies an operator's confirmation. from orients an undirected
+// candidate (either end) and is "" or the candidate's own source for a directed one. A
+// candidate between two properties of the state model becomes a state-map
+// relationship with Discovered provenance — never a Di-Select proposition, whose
+// vocabulary is constructs — unless a live relationship already covers the pair with
+// that sign, when the candidate is settled and nothing more is declared. A
+// candidate between constructs (the explicit construct path) goes through the
+// ontology.
+//
+// rv is the review that decided it: an operator's, or the agent's own.
+func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.CandidateReview) error {
+	prop, err := m.proposer.Confirm(candidateID, from, rv)
 	if err != nil {
 		return err
 	}
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
+	}
+	if m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
+		sign := 1
+		if prop.Direction == types.Negative {
+			sign = -1
+		}
+		if m.state.Covered(prop.FromConstruct, prop.ToConstruct, sign) {
+			// The pair already has a relationship — the agent's own interventions, say,
+			// created one while the candidate waited. The candidate is settled; a second
+			// relationship on the pair would count one dependency twice.
+			return nil
+		}
+		err := m.state.DeclareRelationship(statemap.Relationship{
+			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
+			Provenance: statemap.Discovered,
+			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
+		})
+		if err != nil {
+			// The proposer marked the candidate Confirmed on the way out; with no
+			// relationship behind it that would be a phantom nobody can retry or
+			// reject. Put it back.
+			if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
+				if rerr := r.Reopen(candidateID); rerr != nil {
+					return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
+				}
+			}
+			return fmt.Errorf("%w; candidate %s is pending again", err, candidateID)
+		}
+		return nil
 	}
 	// The facade applies it, because this is the only path that reaches both the
 	// declaration and the state model. A confirmed candidate that landed only in the
@@ -345,12 +420,65 @@ func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
 	return m.AddValidatedProposition(prop)
 }
 
-func (m *SemanticMap) RejectCandidate(candidateID string) error {
-	return m.proposer.Reject(candidateID)
+// isPropertyPair reports whether a confirmed candidate relates two properties of the
+// state model rather than two constructs. Scope cannot decide it: two node-level
+// properties are both unscoped and still not constructs. The explicit construct path
+// may name a construct with no property behind it yet, and that one belongs to the
+// ontology, which declares the missing endpoint itself.
+func (m *SemanticMap) isPropertyPair(from, to string) bool {
+	if m.state == nil {
+		return false
+	}
+	for _, id := range []string{from, to} {
+		if _, ok := m.state.Property(id); !ok {
+			return false
+		}
+	}
+	return !(m.isConstruct(from) && m.isConstruct(to))
 }
 
-func (m *SemanticMap) DeferCandidate(candidateID string) error {
-	return m.proposer.Defer(candidateID)
+// isConstruct reports whether id is a construct of the loaded ontology.
+func (m *SemanticMap) isConstruct(id string) bool {
+	cs, err := m.ontology.Constructs()
+	if err != nil {
+		return false
+	}
+	for _, c := range cs {
+		if c.ConstructID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *SemanticMap) RejectCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Reject(candidateID, rv)
+}
+
+func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Defer(candidateID, rv)
+}
+
+// AnnotateCandidate records a review of a pending candidate that did not act on it:
+// an escalation, or a suggestion under an autonomy level that reserves the action.
+func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Annotate(candidateID, rv)
+}
+
+// confirmedBy names the reviewer in a discovered relationship's note, with the
+// decision that holds its reasoning when there is one.
+func confirmedBy(rv types.CandidateReview) string {
+	who := rv.By
+	if who == "" {
+		who = types.ReviewerOperator
+	}
+	if rv.Model != "" {
+		who += " " + rv.Model
+	}
+	if rv.DecisionID != "" {
+		who += ", decision " + rv.DecisionID
+	}
+	return who
 }
 
 // ── Read-side facade (introspection) ──────────────────────────────────────────
@@ -444,16 +572,14 @@ func (m *SemanticMap) History(since time.Time) ([]*types.OntologyEvent, error) {
 // The value is absolute: a new scan yields a new magnitude, not a delta. Callers that
 // think in deltas (see Tune) resolve the current value first and pass the result.
 //
-// What it writes is the PRIOR, and what was learned from this system is left untouched.
-// Those are separate fields precisely so that recalibrating an assumption cannot rewrite
-// observation history, and the effective strength blends the two by confidence — so on a
-// well-observed relationship an operator's number moves the answer very little. That is
-// the arithmetic behaving as designed rather than the write failing, and §7.3 measures
-// it. Asserting deliberately supersedes the per-cluster calibration that prior_init
-// seeded: an operator asserting a value for *this* deployment outranks a cross-cluster
-// estimate, the provenance field records that it is now an assertion, and cold-start
-// equivalence to Di-Select (paper §4.3) is a property of the state at c = 0 before any
-// operator action rather than an invariant for all time.
+// What it writes is the ASSERTION, and what was learned from this system is left
+// untouched. Those are separate fields precisely so that an operator's number cannot
+// rewrite observation history — and so that it is not diluted by it: an assertion
+// outranks both learned layers in full and does not decay, which is the arrangement
+// that replaced a blend by confidence under which a tune moved a well-observed
+// relationship by nothing at all (§7.3 measured it). The provenance field records
+// that the relationship is now asserted; the learned layers keep accumulating
+// underneath and return the moment the assertion is reset.
 //
 // Returns an error when no relationship carries the proposition — a declared claim the
 // agent does not model cannot be recalibrated, and reporting success would tell an
@@ -706,10 +832,9 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 	// Apply and collect results.
 	//
 	// This goes through the facade's SetPropositionStrength, not the ontology's, so
-	// the new magnitude reaches both the storage EdgeDescriptor and the state model's
-	// relationship — the latter being what the Reasoner reads. Calling the ontology
-	// method directly would leave the tune visible in Propositions() and in the audit
-	// log while changing no agent decision.
+	// the new magnitude reaches the state model's relationship — which is what the
+	// Reasoner reads — and the audit log. Calling the ontology method directly would
+	// leave the tune visible in Propositions() while changing no agent decision.
 	var applied []*types.TuneAdjustment
 	var appliedIDs []string
 	for _, a := range adjustments {

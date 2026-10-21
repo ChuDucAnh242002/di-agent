@@ -32,9 +32,14 @@ type SpecOntology struct {
 	propositions []*types.Proposition
 }
 
-// NewOntologyFromSpec builds an ontology from a loaded domain specification.
+// NewOntologyFromSpec builds an ontology from a loaded domain specification. A nil
+// spec is an agent without a domain model: no constructs, no propositions, and no
+// metric routing, while the state model still records everything it observes.
 func NewOntologyFromSpec(spec *domain.Spec) *SpecOntology {
 	o := &SpecOntology{spec: spec}
+	if spec == nil {
+		return o
+	}
 	for _, c := range spec.Constructs {
 		o.constructs = append(o.constructs, &types.Construct{
 			ConstructID: c.ConstructID,
@@ -64,9 +69,9 @@ func NewOntologyFromSpec(spec *domain.Spec) *SpecOntology {
 	return o
 }
 
-// Spec exposes the loaded model so the Bridge can resolve metric routing and the
-// facade can read the adjustment policy. Both are part of the domain model, and
-// keeping them in one place is what lets a runtime-added construct be reachable.
+// Spec exposes the loaded model so the facade can resolve metric routing and read
+// the adjustment policy. Both are part of the domain model, and keeping them in
+// one place is what lets a runtime-added construct be reachable.
 func (o *SpecOntology) Spec() *domain.Spec { return o.spec }
 
 // Constructs returns a defensive copy of the construct list. Callers may mutate the

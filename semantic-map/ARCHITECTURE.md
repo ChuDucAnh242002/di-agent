@@ -11,7 +11,7 @@ Design rationale and decision record. Update this file when a contract, profile,
   - [Component reference](#component-reference)
   - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
-  - [The five contracts](#the-five-contracts)
+  - [The six contracts](#the-six-contracts)
   - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
@@ -32,6 +32,8 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [12. PoC Deployment (`poc/`)](#12-poc-deployment-poc)
 - [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
 - [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
+- [15. Autonomous Candidate Review (`pkg/autonomy`)](#15-autonomous-candidate-review-pkgautonomy)
+- [16. Acting (`pkg/relief`, `pkg/policy`, `pkg/runtime`)](#16-acting-pkgrelief-pkgpolicy-pkgruntime)
 
 ---
 
@@ -132,7 +134,12 @@ than a convenience.
 proposition identifier. `domain_spec.json` declares the constructs, the
 propositions over them with their directions, the metric-to-construct routing,
 the adjustment floor and ceiling, and the tuner's intent vocabulary; the daemon
-loads it via `-domain` and refuses to start without one. Two consequences: the
+loads it via `domain.path`. It is optional: a node may have no specification to give
+it, and the state model needs none — it admits whatever a node exhibits and
+discovers how those properties relate. Without one, only the operations defined
+over declared constructs are unavailable (cost and its recommendations, tuning),
+and they return `contracts.ErrNoDomainModel` (`501`) rather than a cost computed
+over constructs nobody declared. Two consequences of keeping it data: the
 graph a given deployment ran can be reconstructed from an artefact rather than
 from a binary, and a property that appears while the cluster is running is
 admitted by adding a construct and a route rather than by rebuilding. The
@@ -157,13 +164,13 @@ When the pair tracker briefly keyed on construct alone and mixed nodes, the conf
 pair on RC→PS separated the opposite way under load; per-node pairing reversed the
 conclusion.
 
-Two mechanisms enforce this. `-node-id` is the agent's identity, not merely the label
-it stamps on its own samples, and `-ingest-scope=self` (the default) rejects samples
+Two mechanisms enforce this. `node.id` is the agent's identity, not merely the label
+it stamps on its own samples, and `node.ingest_scope: self` (the default) rejects samples
 belonging to another machine with a distinguishable error. `GET /cost?node=X` answers
 409 when X is not this agent, naming that machine's own URL if it is a known peer,
 because returning local numbers under a peer's name is a fabrication — and ignoring
 the parameter, which is what the route did before, was exactly that. Replaying a
-whole testbed into one daemon is legitimate and available via `-ingest-scope=any`,
+whole testbed into one daemon is legitimate and available via `node.ingest_scope: any`,
 which logs at startup that the resulting graph is an aggregate and not a deployment
 topology.
 
@@ -265,16 +272,16 @@ What each piece is for, when it runs, and whether it is required.
 
 | Component | Package | Purpose | Runs when | Required? |
 |---|---|---|---|---|
-| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest-sample` works without one |
+| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
 | **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
 | **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
 | **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
-| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`-proposer`) | Optional |
+| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
 | **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
-| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`-explain-provider=none` default) |
+| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup | Once, at boot | Yes |
 
 ### The four request lifecycles
@@ -312,7 +319,7 @@ GET /cost?task=pod-scheduling&node=master
         ├─▶ LEVEL      = b.Property(construct).Value        ← the estimate itself
         └─▶ SENSITIVITY, reported beside the level, never added into it:
               for each relationship INTO the construct, source property present:
-                eff, known := rel.Effective()   ← assertion | established | recent
+                eff, known := rel.Effective()   ← assertion | measured | established | recent
                 if !known { continue }          ← absent from the sum, not a zero
                 sum += eff · sign(direction)
         └─▶ ActionCost {ResourceCost=level, ResourceSensitivity=sum,
@@ -381,31 +388,35 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
  registry       planner·critic       HTTP · mapctl · /ui
  + client       + validator          (§9)
    (§10)          (§13–14)
+
+  [policy] ──may touch?──▶ [Runtime] ──▶ orchestrator
+  (pkg/policy)             dry-run · kubernetes
 ```
 
 The Collector lives outside the SemanticMap facade — it feeds it. The three components below the facade are *consumers*: they read model state and expose it, but only the facade's own mutation methods can change it.
 
 ### What is deliberately not a contract
 
-The contract set has stayed at six since the first release. Three substantial components sit outside it on purpose:
+The contract set is the five in `pkg/contracts` plus Runtime (`pkg/runtime`, the sixth). Three substantial components sit outside it on purpose:
 
 | Component | Why it is concrete, not a contract |
 |---|---|
 | **State model** (`pkg/statemap`) | One implementation, and it is the agent's model rather than a pluggable store. A contract here would invite a second implementation, which is the arrangement §2 just finished removing. |
 | **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
-| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `-explain-provider=none`. |
+| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `explain.provider: none`. |
 
-The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
+The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before. Runtime meets the rule: it is a contract because it has `dry-run` (in memory, what the loops are tested against) and `kubernetes` (`pkg/runtime/kubernetes`, §16) as two implementations the loops must not tell apart.
 
-### The five contracts
+### The six contracts
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Collector** | Read raw metrics from a source; emit normalized samples     | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
+| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit, and range where the quantity has one, per type | Pure read; deterministic `event_id`; every type a `collect()` emits is in the `available_metrics()` that follows it; never raises on empty data |
 | **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
-| **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; `Reject` permanently suppresses within session          |
+| **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; an operator's `Reject` permanently suppresses within session |
 | **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
+| **Runtime**   | The orchestrator-neutral way the agent changes the system it models: list the node's workloads, cap one's CPU, give the cap back | Every change returns an `Undo` carrying the resource as it was (including "no limit"), so a revert is exact; a second change to a workload this node already changed keeps the first change's original, so one revert gives back what it had before the agent touched it; `Changed(nodeID)` lists only this node's unreverted changes, never another's; a workload that has gone is `ErrGone`. Implementations: `dry-run` (in memory) and `kubernetes` (`pkg/runtime/kubernetes`, this node's pods through the resize subresource; §16). Policy (`pkg/policy`) decides what the agent may touch; a Runtime only does what it is told |
 
 **Storage and Updater used to be here**, and their removal is the largest structural change
 the design has been through. Storage held a graph of construct edges; Updater incorporated
@@ -419,7 +430,7 @@ opening the viewer read weights and confidences that entered no decision, on a p
 looked exactly like the one that used to. So the contracts went, their implementations
 (`InMemoryStorage`, `EMAUpdater`, `RelationalEMAUpdater`) went, their compliance suites went,
 and the graph surfaces now project the state model — see §5, "The graph surfaces are a
-projection". `POST /ingest`, which named a construct pair and a magnitude directly, went
+projection". The endpoint that ingested a construct pair and a magnitude directly went
 with them: an observation is of a property, and a single number about a pair is an
 assertion rather than a measurement.
 
@@ -427,7 +438,15 @@ assertion rather than a measurement.
 
 Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `go/compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
 
-Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
+Subjects and discovery added guarantees to two of the five `pkg/contracts` contracts:
+
+- **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
+- **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
+- **Proposer** — the pairing rule: `ObserveProperty` pairs any two properties inside a time tolerance — a scoped property (non-empty subject) with an unscoped one directed scoped → unscoped, two unscoped or two scoped properties as an undirected candidate — except that series of one chart and one subject that stay perfectly correlated are an arithmetic group, represented outside it by one member. A candidate with a non-zero `PBar` had a p-value at or under it. How many pairs are tested at once is the implementation's budget; `Discovery()` reports the budget, the pairs eligible, tested and displaced, so a short candidate list cannot be mistaken for nothing to find.
+- **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate pending.
+- **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
+
+Compliance suites exist for the five `pkg/contracts` contracts; Runtime, the sixth, is tested through its registry and the `dry-run` implementation (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
 
 ### End-to-end validation: integration scenarios
 
@@ -437,7 +456,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `ColdStart`                                    | every declared relationship present with confidence=0 and **no effective value at all** — `Effective()` reports not-known, so the agent says it does not know rather than reporting a constant |
 | `ConvergenceOnOneEdge`                         | observations at a fixed value: the recent layer converges, the established layer follows more slowly, confidence climbs 0→1 |
-| `PerKDAgentsAreIdenticalUntilTheyObserve`      | two agents built with different `-kd` produce **identical** cost answers until telemetry arrives — the inversion of the old expectation, and the point: nothing distinguishes them but what they measure |
+| `PerKDAgentsAreIdenticalUntilTheyObserve`      | two agents built with different `profile.kd` produce **identical** cost answers until telemetry arrives — the inversion of the old expectation, and the point: nothing distinguishes them but what they measure |
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
@@ -451,8 +470,8 @@ to 1e-6; the inversion is deliberate, and the failure it now guards against is a
 appearing where nothing has been measured. It still runs through `Build` with the same
 Config literal the daemon constructs, which a library-level test of the seeder could not
 do — and that distinction caught a real failure once, when the convergence harness
-passed `-proposer false` and Go's flag package silently dropped every flag after it,
-including `-priors` and `-kd`.
+passed `map.proposer.enabled: false` and Go's flag package silently dropped every flag after it,
+including `profile.priors` and `profile.kd`.
 
 `TestBuildKeepsOntologyAndStorageInAgreement` pins a second invariant: the strength a
 caller reads from `GET /propositions` is the one every answer is computed from. This
@@ -527,7 +546,7 @@ What is stable, what is not:
 - **Proposition removal** is impossible. `Deprecate` is the only retirement path. Deprecated propositions remain in `Propositions()` so the audit trail / replay are intact, and the relationship stays in the model marked retired — soft-delete preserves both the structural and the evidence record, so a decision taken before the retirement remains reconstructible.
 - **Proposition direction reversal** is impossible. `ValidateProposition` rejects a new edge that contradicts an existing direction. The three Di-Select conflict pairs (P2/P3, P5/P6, P7/P9) are exempt because both halves are present from the bootstrap; the Proposer cannot introduce *new* conflict pairs without explicit operator action (a future extension).
 
-The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart when a state file is configured (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
+The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart unless `persist.file` is set to `""` (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
 
 Implementations that intentionally do not support a mutation (e.g. a read-only ontology cache layered in front of the canonical store) return `contracts.ErrNotImplemented` rather than silently succeeding. The compliance suite tolerates this — every live-ontology subtest skips on `ErrNotImplemented`.
 
@@ -642,25 +661,31 @@ Each `MetricSample` carries:
 | ---------------- | ------------ | -------------------------------------------------------- |
 | `node_id`        | `str`        | Cluster node (`"master"`, `"node_1"`, …)                |
 | `metric_type`    | `MetricType` | Semantic type — see catalogue below                      |
-| `value`          | `float`      | Normalized value in the fixed unit for the metric type   |
+| `value`          | `float`      | The reading, in the declared `unit`; routed types are fractions on [0,1] |
 | `timestamp_unix` | `int`        | Unix timestamp of the observation                        |
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
-| `container_id`   | `str`        | Empty for node-level aggregates; set for per-container   |
+| `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
+| `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
+| `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Declared where the quantity has one (a share, a percentage), absent for a rate or a count; the same on every sample of a type. Without one the map assumes [0,1] and says so |
+| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
+| `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
-**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + container_id + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
+**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
-**`available_metrics()` is static** — declared once at construction, never changes within a deployment session. It says what this collector can report without calling `collect()` first.
+**`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
 
 ### MetricType catalogue
 
-Routing is declared in `domain_spec.json`, not in code, and every route fixes its
-unit as a fraction on [0,1]. Collectors must normalize before emitting: edge
-weights are Bernoulli parameters and the divergence measure is defined on that
-interval, so an out-of-range observation is clipped and the affected edge stops
+Routing is declared in `domain_spec.json`, not in code, and every *routed* type is a
+fraction on [0,1]: construct polarity and the divergence measure are defined on that
+interval, so an out-of-range observation there is clipped and the affected edge stops
 responding to evidence while aggregates keep tracing a smooth curve. A replay
 harness that passed network throughput in raw bytes per second produced exactly
-that failure, silently.
+that failure, silently. The set of types is open by union (below): an unrouted type —
+any name a producer sends, most often scoped to a subject — carries whatever `unit` and
+`range` it declares, and the map normalises by the declared range wherever it needs a
+fraction.
 
 | `MetricType`            | Construct | Polarity | Note                                                       |
 | ----------------------- | --------- | -------- | ---------------------------------------------------------- |
@@ -675,8 +700,15 @@ that failure, silently.
 | `network_latency_ms`    | CO        | worse    | **inverted at ingestion** — RTT to a peer, against a budget |
 | `pod_startup_ms`        | PS        | worse    | creation timestamp → Running, normalized against a budget  |
 | `scheduling_latency_ms` | PS        | worse    | Pending → Scheduled, likewise                              |
-| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall fraction                              |
-| `io_pressure_ratio`     | PS        | worse    | PSI `io.some` stall fraction                               |
+| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall share of the window (cgroup `cpu.pressure`) |
+| `io_pressure_ratio`     | —         | worse    | PSI `io.some` stall share of the window (cgroup `io.pressure`); route removed (§2) |
+| `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
+| `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
+| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst-off non-BestEffort subject's; unrouted; relief's signal (§16) |
+
+The catalogue names the types a collector or a test can reference; it is not the
+limit of what the map accepts. The set of `MetricType`s the map actually admits is
+open by union — it is whatever its producers declare, routed or not.
 
 An unrouted `MetricType` is ignored rather than rejected: forward compatibility is
 deliberate, so a collector upgraded ahead of the specification does not break
@@ -728,8 +760,24 @@ evaluation constructs live here as derived properties over the metrics that evid
 them, which keeps prior knowledge without the graph being about the framework.
 
 **Edges are relationships**, each carrying its provenance: `seeded` when only its structure came from prior
-knowledge, `learned` from observing this system, `asserted` by an operator. An agent
-that cannot say why it believes an edge cannot be audited, so provenance is data.
+knowledge, `learned` from observing this system, `asserted` by an operator, `intervened` when an action
+the agent took and verified created or confirmed it. `intervened` ranks above `discovered`: a
+discovered edge rests on correlation, which a shared cause can produce, while the agent moved
+the cause end itself and saw the effect end respond. Only the map's intervention record can
+write it, and the state census counts it as `intervened` beside the other provenances. An agent that cannot say why it believes an edge cannot be audited, so provenance is data.
+
+**Facts are the frame.** Beside its properties the map holds what the machine *is* — OS,
+kernel, CPU model and cores, memory, disk, boot time — read once at startup by a
+`facts.Source` (`host` reads `/proc`, `/sys` and `/etc/os-release`; another is a
+registration away). A fact is read, not learned: it has no confidence and no history,
+only its source and when it was read. It exists because a value means nothing without
+its frame — 0.3 of a core is most of a Raspberry Pi and a rounding error on a server —
+and an agent reasoning about one machine should not have to be told which machine it is.
+Every view carries the facts whatever its filter, and a decision that reads them keeps
+its own copy (`facts_read`). Reading the same value again changes nothing; a different
+value (memory hot-added, a disk grown) is journalled as `fact.changed`. They are not
+snapshotted: a restart reads the machine afresh, since a snapshot's facts would describe
+the machine as it was when it was written.
 
 **Lifecycle is the substance.** An observation of an unknown property admits it and
 journals the admission, so the map follows a system that changes rather than a schema
@@ -792,9 +840,17 @@ produce.
 `GET /state/estimate?target=` does the same for any property, not only the cost
 constructs.
 
-**The map survives the process.** `-state-file` persists properties, relationships and
-the journal; the write is to a temporary file and renamed, because a half-written
-snapshot read back on the next start would look like knowledge. Two things follow from
+**The map survives the process.** `persist.file` persists properties, relationships and
+the journal, and is on by default (`/var/lib/di-agent/state.json`): an agent that keeps
+nothing is the exception an operator asks for with `""`, not the default they forget to
+change. The write is to a temporary file, flushed to disk, renamed, and the directory
+flushed after it (a filesystem that cannot flush a directory is let be), because a half-written snapshot read back on the next start would look
+like knowledge, and a rename that reached the disk before its bytes leaves an empty one
+after a power cut, which an edge node on an SD card will see. The agent checks at start
+that it can write there and refuses to start if not, rather than failing every minute
+in a log while the operator believes the map is kept. Saves take turns, from snapshot to
+rename, so a periodic save still writing at shutdown cannot land an older state over
+the shutdown save; and a shutdown save that fails exits non-zero. Two things follow from
 persisting at all. A restarted agent is not back at cold start on a system it has
 already watched for a week, and "why did you do that yesterday" stays answerable —
 without this the audit trail is an artefact of one process lifetime rather than of the
@@ -809,7 +865,21 @@ so the estimator resumes from what it concluded rather than from what it was mid
 through concluding. The snapshot carries a format version and an owner, and a mismatch
 in either is refused rather than guessed at — a version 1 file half-loads under version
 2's field names, and a snapshot copied from another host would install that machine's
-observations as this one's history at full confidence.
+observations as this one's history at full confidence. A relationship serialises its
+recent layer as `recent` and adds the derived `effective` and `basis`, so a reader is
+handed the answer rather than three layers and a precedence rule.
+
+#### The three paces
+
+The map changes at three rates, and each is a setting rather than an accident.
+
+| Pace | Appears | Disappears |
+|---|---|---|
+| **Property** | one observation, at confidence 0 | stale after `map.stale_after` (2 m) → retired after `map.retire_after` (10 m), cascading to incident relationships |
+| **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
+| **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
@@ -842,7 +912,7 @@ cluster view. A peer that answered before and cannot be reached now keeps its la
 snapshot and is listed as unreachable — during a partition that snapshot is all this
 agent has. An address that has never identified itself is reported as silent and does
 not become a node, because inventing one from a URL would put a machine that may not
-exist into the cluster view. And a snapshot older than `-peer-state-stale` is labelled
+exist into the cluster view. And a snapshot older than `peers.state_stale` is labelled
 history rather than withheld, so the caller decides whether to act on it.
 
 ### How a relationship's strength is learned
@@ -960,13 +1030,16 @@ the agent has seen enough to say so.
 Which construct plays which role comes from `domain_spec.json`'s `cost_model` block.
 The cost function was the last place in the daemon that knew a construct by name.
 
+**Counterfactuals.** `assume=<property>=<value>` substitutes a source's value in the contribution sum; `without=<subject>` takes every property of that subject to its range floor. Contributions are normalised by each source's declared range (`(v − lo)/(hi − lo)`), so a kW reading and a ratio can share a sum, and the projection is `level + Δ·(hi_t − lo_t)`, clamped to the target's range. Strength is a correlation magnitude used as a unit sensitivity, not a fitted slope, and every counterfactual says so. The decision records the assumptions and exclusions beside the properties and relationships read, so the answer is re-derivable after the system has moved on.
+
 ### What ingestion does
 
 `IngestSample` records the sample against the metric's own property, and everything else
 follows from the model: derived properties recompute from their members, and the estimator
-folds the observation into the relationships incident to whatever moved. The routed
-construct is passed to the Proposer, which needs construct-level values to look for
-relations the backbone does not declare.
+folds the observation into the relationships incident to whatever moved. Every observed
+property, routed or not, is then fed to the Proposer through `ObserveProperty`, which
+looks for relations that nothing declared, between a subject and the node and between
+two node-level properties (§6).
 
 The order matters and is the substantive part: the state model records the observation
 **before** the routing table is consulted. The routing table says what this agent knows how
@@ -983,11 +1056,66 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go` | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `sources.cgroup.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `sources.cgroup.max_subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `sources.cgroup.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
+| `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
-| `NetdataCollector`  | Netdata HTTP streaming API       | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go` | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps |
+| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick), `/api/v1/charts` for chart types (when a chart appears that it has not described, at most once a minute) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`sources.netdata.include`; a curated default of CPU, memory, I/O, network and disk — not pressure, which beside the cgroup collector is the same quantity read twice and discovery proposes the two readings as a near-perfect pair; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped. A sample's chart is the Netdata chart id only when Netdata calls the chart `stacked` — a whole split into parts (`system.cpu`, `system.ram`, `disk.space`) — and `<chart id>/<dimension>` otherwise: an area or line chart's dimensions share an axis, not a reading, and received and sent, or reads and writes, track each other when the traffic is request and response, which is a finding. A device chart Netdata counts into a node chart (by its `interface_type: real` or `device_type: physical` label, or any core) declares `part_of` the node type each dimension adds to. A chart not yet described counts as not stacked; a collapsed type carries its source dimension's chart, so `network_rx_bps` groups with `system.net.InOctets` and not with `OutOctets`. When it is the only collector it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); beside the cgroup collector it does not, because the two measure CPU differently. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
+
+The `CgroupCollector` reports memory from two different places, because a cgroup v2
+root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
+as `(MemTotal − MemAvailable) / MemTotal`; when meminfo is unreadable the node simply
+has no memory property, which is the honest answer. A **subject's** share is its own
+`memory.current` over `MemTotal`; when `MemTotal` is unknown the subject has no memory
+property at all, because `memory.current` over the subject's own `memory.max` is a
+share of its limit, a different quantity, and the estimator normalises by what a sample
+declares. A root that *does* carry memory files — the daemon
+itself running inside a container, whose cgroup is its root — keeps the subject rule
+and is measured against `MemTotal`, so the ratio is still against the machine and not
+the container's limit. Every CPU and memory share, node or subject, is declared as
+`fraction` of the node — never a fraction of any per-process or per-container ceiling.
+The label is the domain spec's: the node's readings land on routed properties the spec
+declares as `fraction`, the map holds a declared unit fixed and refuses a reading that
+contradicts it, and the Collector contract keeps a type's unit stable across subjects.
+(An earlier `share-of-node-capacity` label named the same quantity and had every
+node-level reading refused as a conflict.) The one reading
+that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
+elapsed periods), is declared as `share-of-periods` instead. `cpu_pressure_ratio` is
+the share of the collection window in which at least one runnable task in the cgroup
+waited for a CPU: the delta of PSI's cumulative `some` stall time over the elapsed
+time, rather than the kernel's `avg10`, so it covers exactly the window whatever the
+interval. It is declared as `fraction` on `[0,1]`, matching the spec's route into PS.
+Before it was collected, no live producer observed PS at all, so on a real node both
+propositions stayed unknown however long the agent ran; only replay supplied it. A
+kernel without PSI (`psi=0`) yields no pressure sample rather than a zero.
+`io_pressure_ratio` and `memory_pressure_ratio` are the same measurement over
+`io.pressure` and `memory.pressure`, unrouted: they are properties the proposer can
+pair, not members of a construct. `cpu_steal_ratio` is the node's share of CPU time the
+hypervisor gave to someone else, the steal column of `/proc/stat` over the total of its
+first eight columns, in the kernel's own ticks on both sides so no `USER_HZ` or CPU
+count enters. It is zero on bare metal, and on a VM it separates "this machine is busy"
+from "the host is busy" when pressure rises with nothing local to explain it.
+`cpu_contention_ratio` exists because a cgroup's `cpu.some` stall counts the time its
+own quota held it back, and the root's sums every cgroup's: on the k0s VM (kernel 6.8)
+one pod alone at a 1.5-core limit put node pressure at 27% with nothing else waiting,
+its own throttled share 29%, and lowering its limit to 1 core raised node pressure to
+42%. Per subject, contention is the stall share left after the cgroup's own throttled
+time, clamped at zero; a cgroup without `throttled_usec` has no quota, so all its stall
+counts. It is an approximation that errs toward zero: `throttled_usec` sums the time each
+of the cgroup's per-CPU runqueues spent throttled, while the PSI total is wall-clock, so a
+cgroup throttled on several CPUs at once has more subtracted than its throttling explains
+and reads low, never high. The node's is the highest of its subjects' this tick — the share of the window
+in which some workload waited for a CPU another was using — over the subjects that were
+promised CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
+nearly all the time, and letting it set the signal would have relief cap a workload that
+was promised CPU to serve one promised none. Its own reading is still emitted. The node's
+is absent when no such subject has a reading, rather than a zero that would read as
+"nobody waiting". The two sources
+account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
+cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
+subjects' figures are not the same quantity and are not expected to add up.
 
 Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The map ingests all their outputs — event identities make overlapping reports of the same physical observation harmless.
 
@@ -1050,7 +1178,7 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and passes the routed construct to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
 
 ---
 
@@ -1061,27 +1189,87 @@ The Proposer contract supports discovering relationships the loaded specificatio
 ```
 Telemetry accumulates in the evidence layer
         ↓
-Proposer computes mutual information between construct time series
+Proposer pairs any two properties that co-occur — subject → node, node ↔ node,
+subject ↔ subject — one pair per reading, as many pairs at once as the pair budget
+allows (the pairing rule below)
         ↓
-If MI > threshold AND p < 0.05 AND n_observations > min_support:
+If |r| ≥ map.proposer.threshold AND n ≥ map.proposer.min_pairs AND each end holds
+map.proposer.min_pairs distinct readings AND each end moved by
+map.proposer.min_spread of its declared range AND the map does not already hold the
+pair (either way round, for an undirected one):
     → Emit CandidateEdge (visible via GET /candidates)
         ↓
 Operator reviews: confirm / reject / defer
         ↓
-Confirm → OntologyContract.AddValidatedProposition()
-          (structural validation runs first — contradictions are rejected)
-Reject  → Suppressed for this deployment session
+Confirm → a Discovered relationship in the state map (a pair of properties),
+          declared by the facade; an undirected candidate runs from the end the
+          operator names. A sign that contradicts an existing edge is refused and
+          the candidate reopened. A construct pair goes through
+          OntologyContract.AddValidatedProposition() instead.
+Reject  → an operator's is suppressed for this deployment session; an agent's
+          returns to pending once the evidence moves past what it was decided on
+Defer   → out of the pending list; an operator's deferral stands, an agent's
+          returns like its rejection, the cap's re-enters when it outranks a
+          pending candidate
 ```
 
-The Proposer **never modifies the backbone directly**. `Confirm` delegates to `OntologyContract.AddValidatedProposition`, which validates the new edge against existing propositions before accepting. A proposed edge that contradicts a validated proposition (e.g., a positive direction where a negative is already established) is rejected.
+Every review is recorded on the candidate as its `Review`: who decided (operator, rules,
+or which model tier), the action, whether it was applied or only suggested, the decision
+record holding its inputs, and the candidate's evidence at the time. The evidence is what
+lets an agent's decision be provisional without being forgotten: the pair is still tested,
+and the decision stands until the sign or kind changes or `|r|` moves by more than two
+standard errors of Fisher's z at the smaller window — the band in which a second look
+would see the same candidate. An operator's rejection or deferral is final for the session,
+because a person who has looked at the pair is the last tier there is.
 
-The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It ring-buffers construct-level observations fed by `IngestSample` via `ObserveConstruct`, pairs values across constructs lexicographically, and emits `CandidateEdge`s when `|Pearson r|` exceeds the threshold (default 0.85). P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). `Confirm` delegates to `OntologyContract.AddValidatedProposition` with evidence source tag `proposer-mi`. The coverage check is direction-aware so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a pair of state-map properties becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
+
+The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (`map.proposer.enabled: true` in `agent.yaml`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `map.proposer.min_pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, or rejected or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `map.proposer.enabled: false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+
+### The pairing rule and Discovered provenance
+
+The proposer is fed every observed property, and pairs them inside the pair window:
+
+| Pair | Candidate | Why |
+| --- | --- | --- |
+| subject → node | directed, subject → node | a subject is a component of the node, so the stated assumption is component influences whole |
+| node ↔ node | **undirected**, the pair in lexicographic order, id `a<->b` | correlation is symmetric and nothing says which node-level quantity drives the other; the operator names the end it runs from on confirm (`{"from": ...}`), and a relationship declared either way round covers it |
+| subject ↔ subject | **undirected**, as node ↔ node | two workloads can drive each other or share a driver. Two subjects' readings of one metric (`cpu_utilization@pod:a <-> cpu_utilization@pod:b`) carry `Kind: "same-metric"`: they are proposed like any other pair, and the kind says a shared driver (the same cron, the same client) is the likelier explanation. Two metrics of *one* subject (`cpu_utilization@pod:a <-> cpu_throttle_ratio@pod:a`) carry `Kind: "same-subject"`: a workload's own quantities often hold together by construction — a capped pod that is busy is throttled and under pressure — and on a k0s VM with seven workloads they were 10 of 25 pending candidates |
+
+Readings further apart than the pair window do not form a pair, and a reading no newer than its property's last one is a repeat and is not paired; a pending candidate carries its pair's latest numbers, and one whose `|r|` falls below the threshold by more than one standard error of Fisher's z, `1/√(n−3)`, is deferred with `Reason: "weakened"` (it re-enters at the threshold itself, if the pair holds again) — without that, a candidate emitted on one coincident spike stood in the queue at the `|r|` it had then, and without the margin a pair whose `|r|` sat on the threshold flapped between pending and weakened every minute or two, each flip a change for an operator to read; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+
+### The pair budget
+
+The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `map.proposer.max_pairs`, is shared by all three classes.
+
+- **Default from the machine.** `0` (the default) derives it at start from 1% of the agent's memory (`MemTotal`, or its own cgroup's `memory.max` when lower) at ~2.6 KB per tested pair, and 1% of each collection tick across its CPUs (`cpu.max` when lower) at 5 µs per pair per tick — ten times what an Apple M-series core measured, so a Raspberry Pi-class core is not overcommitted — whichever allows fewer. A 2 GiB VM gets about 8 000 pairs; an 8 GiB, 4-core Raspberry Pi about 32 000. Fixed at start rather than adapting while the agent runs, so a run's budget is one number in its log and in `/state`. When the memory cannot be read (not Linux), 4 096. An explicit value always wins.
+- **While there is room** every pair a reading can form is tested, so a node within its budget behaves as if there were none.
+- **When it is full**, a rationing pass runs at most once per pair window of reading time:
+  - pairs whose candidate was confirmed, rejected or deferred by an operator, or that became a relationship, stop being tested;
+  - only properties observed within the pair window that moved by at least `map.proposer.min_spread` of their declared range (of their largest magnitude when they declare none) compete;
+  - the most variable properties get pairs first, whatever the class — a pair ranks by its less variable end, because the variation gate needs both;
+  - an arithmetic group competes through its representative only;
+  - a new pair takes a free slot or displaces a tested pair that ranks below it: first one with an end gone quiet (not observed within the pair window), then one that has held 30 pairs and stays below the candidate threshold, weakest `|r|·n` first. A live pair at or above the threshold is never displaced, and a pair is never displaced by one that ranks no higher, so the budget settles instead of rotating;
+  - a pending candidate whose pair is displaced is deferred with `Reason: "untested"`: nothing updates its numbers, so it should not ask for confirmation or hold a place under the pending cap. It re-enters if the pair is tested again and still clears the threshold.
+- **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `idle_pairs` (tested, with an end gone quiet), `tested_by_class`, `displaced`, the arithmetic `groups`, and the corrected bar (`fdr`, `p_bar`, `p_values_tested`) — and the console's Discovery pane says how many of the eligible pairs are being tested.
+
+The per-pair cost is what made the budget affordable: each pair window used to keep a set of up to four windows' worth of pair identities against replays, ~23 KB of a pair's ~26 KB. The property path now refuses a reading no newer than its property's last instead, one timestamp per property, and its windows keep no identities.
+
+Four gates shape what is proposed:
+
+- **Variation.** Correlation is scale-free: a pod whose memory stepped between 572 KB and 1 MB correlated with node memory at r = 0.995 while moving 0.01% of the node. A candidate is emitted only when each end moved, over the window, by at least `map.proposer.min_spread` (default 0.01) of its declared range. An end whose producer declared no range cannot be checked; the candidate is still emitted and its `Caveats` say so.
+- **Evidence, not length.** A rate that sits at zero and spikes a few times correlates, over a window, as if it had only those readings: idle pods' interfaces, at zero but for occasional bursts at the same moments (plausibly the bridge's broadcasts; not verified), paired at r = 1.0, 21 candidates in one 25-minute run. Each end must hold `map.proposer.min_pairs` readings' worth of evidence — its readings off its commonest value, plus that value once, which is the window's length when no value repeats — or its r is undefined, as a constant series' is: no candidate, no group link, a pending candidate deferred as weakened. Past that, spikes count like any other movement, so a bursty workload active a quarter of the time is still tested. Unlike the spread gate this needs no declared range, so it covers the rates the spread gate cannot check.
+- **Composition.** A subject's metric against the node total of the same metric (`cpu_utilization@pod:a → cpu_utilization`) is part against whole, so its correlation is accounting rather than something learned. It is still proposed, because how much of the node one workload accounts for is what `without=` answers from, and carries `Kind: "composition"` so it is not read as a discovery. A part need not share the whole's name: a producer that knows a subject's quantity is summed into a node type declares it with `part_of`, and the Netdata collector does so for the devices Netdata counts into its node charts — real interfaces into `system.net`, physical disks into `system.io`, cores into `system.cpu`. On a node with one disk and one interface those pairs reached r = 1.000 and were offered as findings; they are the device being the node's total.
+- **Arithmetic groups.** A producer that computes several series from one reading (a Netdata chart's dimensions, a counter and its 10 s and 60 s averages) names them with one `chart`. Series of one chart and one subject whose tested pair reaches |r| ≥ 0.99 are sums, complements or smoothings of each other: the pair links them into a group instead of becoming a candidate, and the members a chain of links connects are one group. Its representative — the most variable member when the group formed, kept while it stays a member so one link elsewhere does not move every group's pairs — is the only member paired outside the chart; the others' outside pairs stop being tested and their pending candidates are deferred with `Reason: "grouped"`. Pairs inside a chart keep being tested, so a group breaks when its members part ways and they are paired again. A link forms at 0.99 and holds until |r| falls more than one standard error of Fisher's z below it (0.988 at 120 pairs), the band a pending candidate gets under its threshold: a pair whose |r| hovers at the cut-off otherwise forms and breaks its group at every crossing, and each break sends the pair into the pending queue as an ordinary candidate (the group count went 0 → 5 → 3 → 1 → 3 in a 25-minute run with Netdata before the band). The band is a Schmitt trigger set by sampling error, the same device ODAC (Rodrigues, Gama and Pedroso, IEEE TKDE 2008) uses when it splits a cluster of correlated streams only once the difference in question exceeds its Hoeffding bound; a link displaced from the budget breaks it too, since an untested link can neither hold nor break a group. Without this, a wide include list fills the pending queue with arithmetic. Series with no chart are never grouped: two quantities that merely correlate perfectly are a finding, not an identity. The chart is therefore the producer's claim that its series are parts of one reading, not that they are drawn together: the Netdata collector gives a non-stacked chart's dimensions a chart each, because received and sent on one interface reached |r| ≥ 0.99 on a request/response workload and were grouped as if one were arithmetic of the other.
+- **A bar corrected for the pairs tested.** With thousands of pairs, |r| ≥ 0.85 over few readings passes by chance often enough to matter. Each pair's Fisher p-value is kept at its last fold; a candidate must also have a p-value at or under the Benjamini–Hochberg bar at `map.proposer.fdr` (default 0.05) over the `m` pairs being tested — `k·q/m` for the largest `k` whose sorted p-value is under it, `q/m` when none is — and carries that bar as `PBar`. A pair without enough readings yet counts in `m` as a test that found nothing: without that, the first pairs to reach `map.proposer.min_pairs` were judged as if they were the only tests, and in a run of 30 noise properties about one noise pair per run got through. Arithmetic links are left out, since their p ≈ 0 would count as discoveries and loosen the bar for every real pair. A pending candidate the bar tightens past is deferred with `Reason: "bar"` and re-enters if it clears the bar again. The bar is recomputed once per round of folds, or sooner when `m` moves by a tenth: about one sort per tick. It controls the false-discovery rate under independence; readings that drift slowly together are autocorrelated, so the bar is a floor on the evidence asked for, not a guarantee.
+
+Confirming a candidate between properties declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Whether a confirmation goes to the state map or the ontology is decided by its ends, not their scope: two node-level properties are unscoped and still not constructs. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
 
 ---
 
 ## 7. Adding a New Profile
 
-1. Create `go/internal/<profile-name>/` and implement all five contracts, or reuse existing implementations.
+1. Create `go/internal/<profile-name>/` and implement all five `pkg/contracts` contracts, or reuse existing implementations.
 2. Every implementation must pass its contract's compliance suite before being wired into a profile.
 3. Add a case to `go/pkg/profiles/profiles.go`:
 
@@ -1151,13 +1339,15 @@ This design also satisfies Ng's reliable-agentic-system invariant — *every imp
 
 ## 9. Control Surface
 
+**The agent is described by a spec, not by flags.** `pkg/spec` holds one document, `agent.yaml`: every setting the daemon takes, each defaulted to what the flag it replaced defaulted to. The file overlays the defaults, `${VAR}` is expanded from the environment so a secret stays out of it, and an unknown key is refused. The daemon's only flags are `-config` and `-print-config`; `GET /config` serves the running spec with secrets redacted. `main` builds every part from one `spec.Spec` value, so a later stage adds a block to the spec rather than a flag to the command line.
+
 The Semantic Map facade is a Go API. The agent daemon wraps it in three layers so that operators, scripts, and demos can drive the same surface without sharing process memory:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer C — Web UI         cmd/agent/static/{index,app,style} │
-│  Vanilla JS + Cytoscape.js, embedded via go:embed all:static │
-│  Click-to-mutate viewer at /ui/                              │
+│  Layer C — Web console    cmd/agent/static/{index,style,js/} │
+│  Vanilla ES modules, no CDN, embedded via go:embed all:static │
+│  Live state-model console at /ui/                            │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer B — CLI            cmd/mapctl/                        │
 │  cobra + tablewriter; one binary, sixteen subcommands        │
@@ -1180,6 +1370,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
 | ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
 | GET  | `/healthz`                        | —                                                                      | `{"ok":true}`                 | Liveness probe; never touches the facade                                                                |
+| GET  | `/config`                      | —                                                                      | the spec as JSON             | The spec the agent runs on (`agent.yaml` over the defaults); secrets shown as `[redacted]` |
 | GET  | `/version`                        | —                                                                      | `VersionResponse`             | Agent version, Go runtime, build commit, construct/proposition counts                                  |
 | GET  | `/graph`                          | —                                                                      | `GraphSnapshot`               | Full snapshot: every construct, every proposition (incl. deprecated), every edge                       |
 | GET  | `/edges`                          | `?from=&to=` (either or both, optional)                                | `[]EdgeDTO`                   | Filtered edge list; when both `from` and `to` are set, returns the conflict-pair multigraph fan-out    |
@@ -1192,10 +1383,12 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/ontology/construct`             | `AddConstructRequest`                                                  | `204 No Content`              | Append a new construct (append-only; constructs are domain-stable)                                     |
 | POST | `/ontology/proposition`           | `AddPropositionRequest` (`direction` is `"+"` or `"-"`)                | `204 No Content`              | Add a validated proposition; `ValidateProposition` rejects direction contradictions                    |
 | POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Discard what a `(from, to)` pair learned: both layers cleared, confidence to zero, pair window emptied, discard count journalled. Keeps the claim and any assertion; does not delete the relationship |
-| POST | `/candidates/{id}/confirm`        | path only                                                              | `204 No Content`              | Promote a proposer candidate to a validated proposition                                                |
-| POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session                                                    |
-| POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
-| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/JS/CSS for the viewer; served by `http.FileServer` over an `embed.FS` sub-tree            |
+| POST | `/candidates/{id}/confirm`        | optional `ConfirmRequest{from}`; required for an undirected candidate  | `204 No Content`; `400` when the orientation is missing or wrong | Promote a proposer candidate: a Discovered relationship between properties, or a validated proposition between constructs |
+| POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
+| POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
+| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
+| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree   |
 
 Errors on the new endpoints follow a single shape:
 
@@ -1240,6 +1433,7 @@ There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` 
 | `proposition add <id> <f> <t> ±<s>` | `POST /ontology/proposition`                |                                                             |
 | `reset <from> <to>`                 | `POST /agent/reset`                         | Discard the evidence, keep the claim                        |
 | `candidates [list|confirm|reject|defer]` | `GET/POST /candidates*`                 |                                                             |
+| `estimate <target> [--assume p=v]... [--without x]...` | `GET /state/estimate` | Answer from the map, optionally under hypotheses; prints the decision id |
 | `recommend` / `simulate`            | the corresponding POST                      | Existing endpoints                                          |
 | `watch graph|edges`                 | polled GET                                  | 2s ticker; clear-screen unless `--no-color`                 |
 | `dot`                               | `GET /graph` → Graphviz                     | Direct paste into `dot -Tpdf`                               |
@@ -1249,25 +1443,125 @@ DTOs are duplicated in `cmd/mapctl/client/types.go` rather than imported from `c
 
 Dependencies: `github.com/spf13/cobra v1.8.1`, `github.com/olekukonko/tablewriter v0.0.5`. `tablewriter` is pinned below 1.x because the 1.x API revamp is breaking.
 
-### The web viewer
+### The operator console
 
-`/ui/` serves a single-page application:
+`/ui/` serves a single-page console over the state model. It is a tree of ES
+modules under `static/js/`, embedded in the binary alongside `index.html` and
+`style.css`.
 
-- `index.html` — markup: header (title + healthz dot + refresh), Cytoscape mount, side panel, one `<dialog>` modal, toast container
-- `app.js` — controller: fetches `/graph`, builds the Cytoscape model, renders the side panel from selection events, POSTs mutations back through the same API
-- `style.css` — visual rules: edge color by direction (green `+`, red `−`), opacity proportional to confidence, dashed when deprecated
+| Module | Holds |
+| --- | --- |
+| `app.js` | the poll loop (it reads `/relief`, `/relief/actions` and `/workloads` with `/state`), the census strip, theme, toasts, the prompt dialog |
+| `api.js` | every route the console calls, and how this agent reports failure |
+| `model.js` | effective-strength precedence, per-property value history, subject grouping, workload names and the throttled/frozen facts |
+| `force.js` | the force-directed layout |
+| `graph.js` | the SVG canvas |
+| `charts.js` | sparkline, strength layers, diverging contributions, census bar |
+| `inspector.js` | property and relationship detail, and the counterfactual studio |
+| `drawer.js` | actions, journal, decisions, discovery, subjects, cluster, backbone, ask |
 
-Cytoscape.js 3.28.1 is loaded from `unpkg.com` (single CDN pin, no build chain). The built-in `cose` layout is sufficient for seven nodes — no extension packages needed.
+**No external dependency.** The previous viewer pulled Cytoscape.js from
+`unpkg.com`. A CDN pin makes the operator surface of an offline, air-gapped or
+metered node a blank page — which is the deployment this agent exists for — so the
+layout and every chart are drawn here instead. `TestStaticUI_HasNoExternalDependency`
+pins that: a reviewer adding a remote `<script src>` fails in CI rather than on a
+disconnected device.
 
-Mutation flow (single edge):
+**What the canvas encodes.** Each visual channel carries exactly one meaning, and
+the two that would otherwise compete are separated deliberately:
 
-1. User clicks edge → side panel populates from cached graph state and a filtered `/history` fetch
-2. User clicks Deprecate / Set strength / Reset → the same `<dialog>` opens with class swaps providing the appropriate input
-3. Submit → `fetch(..., {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(req)})`
-4. `204` → success toast → re-fetch `/graph` → Cytoscape redraws (dashed edge for Deprecate, opacity/weight change for Strength, EMA fields reset for Reset)
-5. non-2xx → toast with the server's `{"error":"..."}` message
+| Channel | Meaning |
+| --- | --- |
+| edge colour | the relationship's sign (diverging blue/red) |
+| edge width | effective strength — the number the agent reasons with |
+| edge opacity | confidence (never a hue; hue is reserved for sign) |
+| edge dash | nothing observed yet — distinct from a measured zero |
+| midpoint dot | provenance: seeded / learned / discovered / asserted |
+| node shape | observed (filled) vs derived (ring and core) |
+| node ring | lifecycle: active / stale / retired |
+| node arc | the value within its declared range, when one was declared |
 
-There is no auto-poll by default; an opt-in checkbox enables a 5-second refresh tick. Same-origin only — no CORS configuration.
+Properties scoped to a subject are enclosed and labelled with that subject, so the
+picture answers *which workloads are running* before anything is clicked. The machine's
+own properties are enclosed too — beside the workloads, not around them. In a node-local
+map everything is on this machine, so a box around the whole canvas would say nothing;
+a box of its own says which signals are the machine's and which a workload's. It is
+drawn solid where a workload's is dashed, labelled with the machine's facts
+(`di-node · 4 cores · 7.7 GiB · 18.3 GiB disk · Ubuntu 24.04.5 LTS`), and clicking it
+shows every fact with its source.
+
+**The drawer points at the canvas.** A Discovery row, clicked, highlights the
+candidate's two ends and draws the would-be edge between them, dashed in the colour a
+discovered relationship takes; opening a decision's trace highlights the properties and
+relationships it read and, for a candidate review, the candidate. Everything else is
+dimmed and the view zooms to what is pointed at.
+An end the canvas cannot draw — cleared by the search, or no longer in the map — is
+named in a toast rather than silently left out. Escape or a click on empty canvas lets go.
+
+**The console shows what the agent did.** `GET /relief`, `/relief/actions` and
+`/workloads` are read with every `/state` poll. The **Actions** pane is the drawer's
+default when `/relief` answers, and the pane it lands on is chosen once, not on each poll.
+Its strip is the loop's own counts (`predictions_held` is shown as a percentage and as
+"—" until something has been kept or reverted) plus the frozen workloads counted from
+`/workloads`. A row is one action, newest first: workload, cores before → after, predicted
+against observed drop, outcome. Opening it highlights `cpu_utilization@<subject>` and
+`cpu_contention_ratio` and reads two decisions: the act (notice, attribution, plan, the
+change) and the verify, named on the action as `verify_id` (the latest step's; after a
+further step is reverted it is the failed step's verify, the one that caused the revert). The verify stage states the
+observed and predicted drop, whether another workload moved (confounded), and whether the
+outcome fed the map or why it did not. When the journal has evicted a decision the
+stage says "evicted from the journal" instead of inventing one. The page polls `/relief` and
+`/relief/actions` each tick and `/workloads` every fourth (or when the set of subjects changes),
+never holds the map's redraw back for them, and stops asking once `/relief` has said 404; a
+`/relief` that fails otherwise reads "The agent did not answer", not "not enabled". A
+`throttled` badge on a `dry-run` runtime (`runtime` on `GET /relief`) reads "throttled (dry-run)". With relief off the `/relief*` routes are 404 and the
+pane says "Relief is not enabled in this agent's spec". A pod's box is labelled with the
+runtime's workload name when `/workloads` lists it (otherwise the collector's labels, then the
+subject), and carries `[throttled]` while an action is in flight or kept, and `[frozen]`
+while policy forbids touching it.
+
+**Honesty rules the console enforces.** These exist because the state model draws
+distinctions a naive renderer would flatten:
+
+- a relationship nothing has been observed about has **no** strength, and is drawn
+  dashed rather than as a measured `0.00`;
+- the three strength layers are shown together with the one that *answers* marked,
+  because precedence is by authority — assertion over measured over established over recent — and
+  not arithmetic;
+- the journal states its window (`held`, `dropped`, `oldest_revision`) so an empty
+  list is not readable as "nothing happened";
+- an undeclared range is never normalised, so no value arc is drawn for it;
+- `sign_suspect` is surfaced as an alarm, because such a relationship reports a
+  strength near zero and would otherwise read as a quiet system;
+- an empty list says *why* it is empty — "the proposer needs N pairs" rather than
+  "no candidates".
+
+**Two panes answer questions wider than one property.**
+
+*Cluster* lists the peers and, through `GET /state/where`, locates one property
+across every node that holds it. The answers are kept apart and no aggregate is
+offered, because the reason to ask several nodes is to be able to pick one. On a
+four-machine replay of the testbed this reads `cpu_utilization` as 0.005 on the
+master and 0.29–0.30 on the three workers: a mean of 0.22 would be the load on no
+machine in the cluster.
+
+*Ask* is the natural-language surface over `POST /explain`. The citation list is
+rendered as the primary result rather than a footnote, because the agent runs a
+deterministic validator over those citations before releasing the answer — one
+naming a number the map does not hold is refused rather than shown. Each cited
+property selects itself on the canvas, so a claim and the state that justifies it
+are one click apart. With no provider configured the endpoint answers 501 and the
+pane says which flag turns it on.
+
+**Value history is the console's own.** The map holds a current value per property,
+not a series, so the sparkline is accumulated from successive polls and labelled as
+console history. It is never presented as the agent's record.
+
+**Liveness** is a 2s poll of `/state`, adjustable or steppable, paused when the tab
+is hidden. The revision counter, the journal, the value arcs and the edge-flow
+animation all move from the same snapshot. Mutation flow is unchanged: POST with
+`Content-Type: application/json`, `204` → toast → re-poll; non-2xx → toast carrying
+the server's own `{"error":"…"}` text. Same-origin only — no CORS configuration.
 
 ### Why three layers, not one
 
@@ -1292,7 +1586,7 @@ This section covers the registry and the trust mechanics that decide *where work
 In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
 - SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
-- gossip-based discovery (mDNS / dat-style) so peers find each other without a static `--peers` flag.
+- gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
 
@@ -1443,23 +1737,23 @@ Each VM: 2 vCPU, 2 GB RAM, 10 GB disk. Provisioned via [Multipass](https://multi
 Each node runs:
 - **k0s** in `--single` (controller+worker) mode — provides the k8s surface that Netdata's `k8s.cgroup` collector observes.
 - **Netdata** — system metrics at `localhost:19999`.
-- **di-agent** — `edge-minimal` profile, `-netdata-url http://localhost:19999`, `-kd k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
+- **di-agent** — `edge-minimal` profile, `sources.netdata.url: http://localhost:19999`, `profile.kd: k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
 
 Peer mesh: each agent registers the other two via `POST /peers`. The server derives the peer ID as `sha256(url)[:12]` and initialises trust at 0.5; `05-peers.sh` follows each add with `POST /peers/{id}/trust {"value":0.8}` to set the operational trust. diag-1 uses this mesh for `/recommend`.
 
 ### What the binary sees on each node
 
-The `NetdataCollector` polls one chart at a time via:
+The `NetdataCollector` reads every chart in one request:
 
 ```
-GET /api/v1/data?chart=CHART&points=1&after=-30&format=json
+GET /api/v1/allmetrics?format=json
 ```
 
-and maps:
-- `system.cpu idle %` → `CPUUtilization = 1 - idle/100` → RC-adjacent edges
+reads the chart types from `GET /api/v1/charts` when a chart appears that it has not described, and keeps the charts its include list selects (§5). With Netdata as the only collector it also maps:
+- `system.cpu`, every dimension but idle and iowait → `CPUUtilization` → RC-adjacent edges
 - `system.ram used/(used+free+cached+buffers)` → `MemoryUtilization` → RC-adjacent edges
-- `system.net InOctets` (kb/s) → `NetworkRxBps` normalized to [0,1] vs 1 Gbps reference
-- `system.net OutOctets` (sign-flipped) → `NetworkTxBps` normalized similarly
+- `system.cpu_some_pressure_stall_time` (ms stalled per second) → `CPUPressureRatio`, and the I/O and memory equivalents
+- `system.net InOctets` / `OutOctets` (kb/s, outbound drawn negative) → `NetworkRxBps` / `NetworkTxBps` against a 1 Gbps reference
 
 At idle k0s, CPU utilization is ≈ 0.05, so the reported resource level is low and the pressure series is close to flat — which means the paired estimator forms few pairs and declines to move on what it does form, and confidence stays near zero. That is the estimator working rather than the demo failing; §"What determines the saturation point" is the general form. The bursty regime (α=0.30, N=200) reaches saturation sooner, so diag-1 accumulates confidence faster than the stable VMs (α=0.05, N=1000).
 
@@ -1508,7 +1802,7 @@ make -C poc teardown                   # delete VMs and purge
 - **linux/arm64 binary**: `04-agent.sh` cross-compiles with `GOOS=linux GOARCH=arm64`. On an Apple Silicon host this is a same-arch cross (darwin → linux, same ISA); no emulation layer.
 - **Independent single-node clusters**: each VM runs k0s `--single`, not a joined multi-node cluster. The PoC tests agent-level routing decisions, not k8s scheduling. Three separate clusters keep provisioning simple and failure-isolated.
 - **No auth**: same v1 stance as the coordination layer — lab network only.
-- **`-proposer=false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
+- **`map.proposer.enabled: false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
 
 ---
 
@@ -1526,7 +1820,7 @@ Operator → POST /explain (question)
              ▼
         pkg/explain (OpenAICompatibleExplainer)
              │
-             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (system prompt: cmd/agent/prompts/explain-v2.md)
              │  (tool schemas: get_cost, get_edges, get_history,
              │                 get_peers, get_recommend, get_graph)
              │
@@ -1568,21 +1862,21 @@ v1 speaks the OpenAI `/v1/chat/completions` surface with function-tool semantics
 | vLLM            | `http://localhost:8000/v1`        |
 | Hosted (OpenAI) | `https://api.openai.com/v1`       |
 
-Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `-explain-provider=none` (the default).
+Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `explain.provider: none` (the default).
 
-### Configuration flags
+### Configuration
 
 ```
--explain-provider     none | openai-compatible          (default: none)
--explain-url          http://localhost:11434/v1         (default)
--explain-model        qwen2.5:7b-instruct               (default)
--explain-prompt       cmd/agent/prompts/explain-v1.md   (default)
--explain-api-key      ""                                (env EXPLAIN_API_KEY overrides)
+explain.provider      none | openai-compatible          (default: none)
+explain.url           http://localhost:11434/v1         (default)
+explain.model         qwen2.5:7b-instruct               (default)
+explain.prompt        cmd/agent/prompts/explain-v2.md   (default)
+explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 
@@ -1603,7 +1897,7 @@ The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prom
 
 ### Reproducibility stance
 
-`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `-explain-provider=none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
+`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `explain.provider: none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
 
 ### Tests
 
@@ -1765,28 +2059,28 @@ Every response carries `usage`:
 ### Configuration
 
 ```
--explain-provider         none | openai-compatible          (default: none)
--explain-url              http://localhost:11434/v1
--explain-model            qwen2.5:7b-instruct
--explain-prompt           cmd/agent/prompts/explain-v1.md
--explain-planner-prompt   (derived: <prompt-dir>/planner-v1.md)
--explain-critic-prompt    (derived: <prompt-dir>/critic-v1.md)
--explain-keep-alive       30m
--explain-sessions         true
--explain-api-key          ""   (env EXPLAIN_API_KEY wins)
+explain.provider         none | openai-compatible          (default: none)
+explain.url              http://localhost:11434/v1
+explain.model            qwen2.5:7b-instruct
+explain.prompt           cmd/agent/prompts/explain-v2.md
+explain.planner_prompt   (derived: <prompt dir>/planner-v2.md)
+explain.critic_prompt    (derived: <prompt dir>/critic-v2.md)
+explain.keep_alive       30m
+explain.sessions         true
+explain.api_key          ""   (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 A missing *derived* planner/critic prompt disables that stage with a log line; an explicitly-specified path that fails to load logs a warning and disables the stage. Either way the daemon boots — a partial prompt directory degrades features, it does not block startup.
 
 ### Prompt versioning
 
-Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+Three prompts, each versioned by filename (v1 is kept unedited; v2 removed the hard-coded constructs): `explain-v2.md`, `planner-v2.md`, `critic-v2.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
 
 ### What v2 does not change
 
 - **The reasoner, the state model, and the prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
 - **The tool registry is still read-only.** Planner, answering agent, and critic all get the same six read tools. None can mutate.
-- **`-explain-provider=none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
+- **`explain.provider: none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
 
 ### Tests
 
@@ -1800,3 +2094,168 @@ Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `cr
 | `cmd/agent/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
 
 All run against a scripted mock LLM. No test requires Ollama.
+
+---
+
+## 15. Autonomous Candidate Review (`pkg/autonomy`)
+
+Candidate review is the one place the map waits on a person, and the first decision the
+agent takes on its own authority. How much authority is an operator setting
+(`loops.review.level`); what the agent does with it is always a decision record.
+
+**Tiers, cheapest first.** A candidate goes up only as far as it has to.
+
+| Tier | Decider | Why it is the right tool |
+| ---- | ------- | ------------------------ |
+| 0 | rules in the daemon | Some candidates are settled by what they are. A `composition` candidate is a part against its whole, true by definition and the relationship `without=` answers from, so it is confirmed. There is one rule: the other kinds (`same-metric`, `same-subject`) make a shared driver or accounting *likelier*, which is a judgement about this system, so they are evidence for the models rather than verdicts. |
+| 1 | decision model | Escalation needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
+| 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
+| — | operator | What no tier was sure of keeps its place in the queue, with the review that escalated it. |
+
+**Levels.** `suggest` (0) records every tier's verdict as a suggestion and applies none —
+today's behaviour with the reasoning written down. `rules` (1) lets tier 0 act. `bounded`
+(2) lets the model tiers confirm and defer; a model's rejection is escalated, because a
+rejection hides a pair. `full` (3) lets every tier act above its threshold. Thresholds
+differ by action for the same reason: confirmation is undone by retirement with history
+kept, deferral costs only time, rejection the most. The defaults (0.85 / 0.95 / 0.7) are
+not calibrated — there is no labelled set of candidates yet, and building one from an
+operator's past reviews is a measurement round.
+
+**An agent's decision is provisional; an operator's is not.** An agent's rejection or
+deferral carries `Reason: "agent"`: the pair is still tested and the candidate returns to
+pending when its evidence moves past what the review saw (sign, kind, or `|r|` by more than
+two standard errors of Fisher's z). The same test decides when an escalated candidate is
+reviewed again, which is what keeps the models from being asked the same question every
+cycle. A candidate with a stale end waits: its window is not moving, so a decision now
+would be on frozen evidence.
+
+**An outage is not a review.** A model that cannot answer — the server still loading, the
+network down, a request it refuses — leaves the candidate untouched: no decision, no
+`Review`, so it is due again next cycle. Recording it as an escalation would shelve the
+candidate until its evidence moved, which on a steady machine may be never. The cycle
+stops at the first failure, since the next candidate would fail the same way, and the
+error is counted in the status. Tier 2's tool loop has a hard end: calls past the budget
+are answered with an error, and a model told to answer that calls tools again fails the
+review rather than looping.
+
+**Orientation.** An undirected candidate cannot be confirmed with an arbitrary end. The
+decision model is asked which end drives the other, with "unclear" as an option; the
+confirmation needs the confirm threshold on both questions, or it escalates.
+
+**Traceability.** A review is `Map.Decide` like an estimate: both properties are read
+through the `DecisionBuilder`, and `Inputs` holds the candidate, its neighbours, the level
+and thresholds, the exact state text each model was given, each model's probabilities, and
+the reasoning model's analysis and tool trace. The candidate's `Review` names the decision,
+the confirmed relationship's note names the reviewer and the decision, and `GET
+/state/decisions/{id}` reproduces it after the map has moved on. Model names and prompt
+versions (`review-decide-v1`, `review-reason-v1`) are in every record because the model
+choice is a snapshot.
+
+**What it does not do.** `/explain` stays read-only: autonomy is a separate surface whose
+only writes are the four review actions. No hosted model is contacted; the URL is the
+operator's. Escalation ends at the operator: a tier 3 on a peer or a bigger model is not
+built, because where it should live is open.
+
+**Every part is substitutable.** The reviewer depends on interfaces — `Map` for the
+semantic map, `Rule` (tier 0), `Decider` (tier 1), `Reasoner` (tier 2), `Tool` (what tier 2
+may read) and `Renderer` (how evidence becomes text) — and the daemon builds each from a
+registry by the name a flag gives. Each tier has its own URL and model, so the decision
+model can sit on the node while the reasoning model sits on a peer with memory to spare.
+Two tier 1 backends exist because the calibrated signal can come from two places: a
+decision model's typed-question endpoint (`systemone`, Ollama only), or any
+OpenAI-compatible server returning token log-probabilities (`openai-logprobs`), where the
+question is asked as lettered options with a one-token answer and the distribution is the
+letters' probabilities, normalised. The second carries `OptionMass` — how much of the
+model's probability fell on any letter — and below one half the verdict escalates: a model
+that wanted to say something else has not answered the question. The verdict records the
+backend, model, question-set version and renderer, so substituting any of them leaves the
+records comparable. The `text` renderer (`text-v2`) opens with the machine's facts —
+`Machine: QEMU Virtual Machine, 4 CPU cores (Apple CPU (part 0x000)), 7.7 GiB memory,
+18.3 GiB disk, Ubuntu 24.04.5 LTS` — so a model reads a correlation between two
+utilisations against how much machine there is.
+
+**Models.** On a 24 GB Apple-silicon machine, `nimble-v3:9b-nvfp4` (6.9 GB, MLX) as tier 1
+and `qwen3.8:27b-nvfp4` (18 GB) as tier 2; the two do not stay resident together, so a
+tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 with no tier
+2. Nothing is known yet about either decision model's accuracy on candidates like these.
+
+| Test | Covers |
+| ---- | ------ |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
+| `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
+| `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
+| `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
+
+All run against fake models. No test requires Ollama.
+
+---
+
+## 16. Acting (`pkg/relief`, `pkg/policy`, `pkg/runtime`)
+
+The map answers what a system is doing; acting is the agent changing that system, and every change is a decision record that can be reproduced from the map state that justified it. The first act is CPU relief: when the node is hot, cap the workload the map says is responsible, check that it helped, undo it if it did not, and give every cap back when the node cools.
+
+**Three parts, one direction of authority.** The *spec* (`loops.relief`) says how the loop behaves. The *policy* (`pkg/policy`) says what the agent may touch and how far: allow and deny lists, a floor, an hourly limit, a cooldown, and freezing a workload outright. The first matching rule overlays the defaults field by field, a floor bound by bound, and the floor that results is what is validated. The spec refuses an allow or deny entry that is not an action (`cpu.limit`, or the reserved `evict`, which no runtime performs and the defaults deny) and a `match.kind` that is not a workload kind (`pod`, `container`, `unit`, `app`): a misspelt deny would deny nothing and a misspelt kind would match nothing. The lists live in `pkg/spec`, which the runtime imports, and a runtime test holds them to the runtime's own action names. It refuses `expiry` no longer than `settle` too, since such a change would be given back before it was judged. The *runtime* (`pkg/runtime`) only does what it is told, orchestrator-neutrally, and returns an `Undo` that restores the resource exactly as it was, including "no limit". The loop decides; the policy bounds; the runtime executes. A runtime never decides and a policy never acts.
+
+**Trigger.** The signal is the node's CPU contention, `cpu_contention_ratio` (§5): the share of time some workload waited for a CPU another was using. It is not utilisation; a node can be fully used without anything waiting, and that is not what relief is for. Nor is it `cpu_pressure_ratio`, which the loop used first: a cgroup's PSI stall counts its own throttling, so a pod at its limit raised node pressure with nobody else waiting, and capping it raised pressure further. On the VM every real action was then reverted by its own verification — the lever moved the signal the wrong way. Contention removes each workload's own throttling, so capping the workload that crowds the others lowers what the others wait. Relief begins only when it stays above `enter` for `enter_for`, and ends only when it stays below `exit` for `exit_for`, with `exit` under `enter`, so a node hovering at the line does not flap. A reading counts only while it is fresh: a stale reading, or one that has stopped changing, never counts toward either run, and the loop makes no new change and releases nothing on data that may describe a system that no longer exists. What needs no reading still happens: expiry, a pending revert retried, and the dropping of a change whose workload the runtime no longer lists.
+
+**One action in flight.** The loop changes one workload at a time and waits `settle` before judging, so an outcome belongs to one action. It predicts before acting, from the map's relationship between the workload's share and node contention, or, where the map has none, from the workload's share of node usage times the fraction of its usage the step actually cuts (a floor can hold the cut short of `step`), and journals that prediction with the attribution and the policy that allowed it. `min_effect` is a planning floor: a step predicted to cut contention by less is not taken. After `settle` the step is judged against its own prediction: kept when the observed drop is at least half the predicted one, reverted otherwise. A change taken up after a restart is always kept, because its baseline was read with the cap already in force and the drop it caused is in neither reading; release and expiry give it back as usual. An action that did not help is reverted and its workload cooled down; a reverted action cools its workload down four times longer than a refused one. Predict before, verify after, revert what did not help: the verification is a recorded comparison, not a hope.
+
+**Stepping again, and giving back.** A workload that was helped but not enough may be stepped again from its current cap. It keeps one action, whose id is the first step's, and the runtime keeps the first original, so a revert always restores the limit the workload had before the agent first touched it, never an intermediate cap. When contention is gone, caps are released newest first, one per `settle`; the cooldown after a release doubles for a workload that keeps cycling between throttle and release within an hour, up to 4h. A cap the runtime will not give back does not hold up the rest: the next newest is released in the same pass and the refused one is tried again on the next.
+
+**An undo that keeps failing.** A revert, release, expiry or the letting go of a vanished workload's change that the runtime refuses leaves the change in force and is retried every pass. It is not only logged: the action carries `revert_attempts` (refusals since its latest step) and `last_error`, `GET /relief` counts such changes as `stuck`, the console shows `undo failing: <error>` on the action's row, and the first refusal is journalled once per action as a `relief-stuck-*` decision rather than once per pass. Release also happens from Calm, so a loop restarted after pressure ended gives back what it finds.
+
+**A failed change.** An `Apply` that returns an error may still have taken effect, as a resize whose call timed out after the API server accepted it. After any `Apply` error the loop reconciles again on its next pass, so a change the runtime recorded is taken up as a resumed action and given back by release or expiry rather than left until a restart.
+
+**Timeouts.** Every pass (`Tick`), the start-up reconcile and a manual revert run under one context deadline of `interval`, at least 10s, and the Kubernetes client bounds each request at 30s. An orchestrator that stops answering costs one pass, not the pass lock: a manual revert it does not answer is an error and the action stays in force.
+
+**Restarts.** A graceful shutdown keeps its changes, because reverting on every restart would bring the pressure straight back. On start the loop asks the runtime what this node changed (never another node's) and takes them up: the newest unexpired one is in flight until `settle` passes and is then kept without being judged (above), the rest are kept for release, expired ones are reverted. Nothing is applied until that has succeeded once, since a change made on top of caps the loop does not know of would record one of them as the original. Where the journal still holds the act that made a change, its prediction and first step are recovered. A change whose pre-agent limit cannot be established after a restart is never deepened: the floor measured as a share of the original would otherwise be a share of the agent's own cap and slide down with every restart. It stays for release and expiry, and the refusal is journalled once. Each unexpired change taken up counts toward `max_actions_per_hour` from its journalled act time, or from the restart when the journal no longer holds it, so a restart does not hand the loop a fresh hourly budget. Cooldowns and the release backoff are per process lifetime: a restarted loop has forgotten them.
+
+**Kill switch.** `POST /relief/pause` stops the loop making and releasing changes. It does not abandon what is in flight: a paused loop still verifies, reverts a failed action, and gives back what expires, because pausing should never leave a harmful change stranded. An operator can revert one action by hand (outcome `manual`). With relief disabled in the spec the routes answer `404`; the loop does not exist.
+
+**The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below `floor.cpu_cores` or `floor.of_original` of its original limit, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
+
+### Learning from outcomes
+
+A verified action is the one kind of evidence correlation cannot give: the agent moved the cause end itself and watched the effect end. The loop feeds it back three ways, and every verify decision records what it fed and why not — inputs `confounded` (whether, and which workloads moved or left), `subject_share` (the throttled workload's own share at act and at verify), `evidence` (fed or not, with the reason) and `intervention` (the relationship and what `RecordIntervention` changed).
+
+**What counts as evidence.** Only a verify verdict is an outcome: `keep` (observed at least half the predicted drop) is *agreed*, `revert` is *null*. Expiry, a workload that left, a manual revert and a refused change are not outcomes and teach nothing. Neither does an action with no prediction to judge against, nor any action resumed after a restart: its baseline was taken with the change already in force, so what it observes is noise. A further step on a resumed workload takes a fresh baseline and is evidence again. Nor does an outcome where the cap did not bind: if the workload's usage at verify (share × `cpu_cores`) is under 0.9 of its new limit, it asked for less on its own and the drop is its demand falling, not the cap. The keep/revert verdict is the same in every case but a resumed action, which is always kept; only what it teaches changes.
+
+**Dry runs teach nothing.** Outcomes feed the map only when the runtime really changes the system (`Config.Evidence`, which the daemon sets for every runtime but `dry-run`). Under a dry run nothing was capped, so a drop in pressure after a recorded "action" is the workload's own load cycle; a demonstration run showed every dry-run `keep` to be exactly that coincidence. Recording it would build relationships on actions that never happened.
+
+**Confounding.** At act time — and, for a resumed action, at the tick that gives it a baseline — the loop snapshots every workload's share of node CPU (`Action.shares_at_act`). An outcome is *confounded* when another workload, live at verify time, has since moved by more than `step` relative to its share then *and* by more than 0.02 of the node absolute; a workload that arrived since moved from nothing, and one that was using more than 0.02 at act and is no longer live has left, taking its load with it. The absolute bar keeps a small pod's relative jitter (0.01 → 0.02) from discrediting every outcome. Rises are the exception: capping a workload frees CPU and the contended workloads beside it take it up, which is the relief working rather than something else moving, so workloads present at act whose rises together stay within what the capped workload gave up (plus 0.02) are *absorbed* rather than moved. What it gave up is known only while the map holds its share; without one nothing counts as freed. An absorbed rise is excused only when the outcome agreed: when contention did not drop as predicted, the same rise may be a workload that grew on its own and hid the cap's effect, and excusing it would turn a confound into a null outcome that teaches, so a revert beside an absorbed rise is confounded. A larger rise, a fall, an arrival and a departure always count. The verify decision lists `moved`, `left` and `absorbed`. A confounded outcome is recorded on the relationship's `interventions` counts and changes nothing else.
+
+**Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
+
+**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node, clamped to [0, 1] (`measuredEffect`; none when the share fell by no more than 0.02). The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. The verify decision records the outcome's `effect`.
+
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
+
+**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how the escalation queue drains without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
+
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. The escalation queue therefore drains slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
+
+### The Kubernetes runtime (`pkg/runtime/kubernetes`)
+
+The runtime lists the pods scheduled on this node (`spec.nodeName`, the spec's `runtime.node` or else the node ID) and changes one pod's CPU limit in place through the pod `resize` subresource, so the container does not restart. It is built on the in-cluster service account, or the kubeconfig in `runtime.kubeconfig`; the factory error names that spec path.
+
+**Workloads.** Every pod on the node is listed, including those that are not running, each with its reason in `Can`, so a pod missing from the list is one that is really gone and the relief loop's "gone" path fires only then. The subject is `pod:<metadata.uid>`, so a pod recreated under a new UID is a different subject and the old one is gone. `Name` is the bare pod name; the namespace is the label `k8s/namespace`. The other labels are the pod's own, plus `k8s/priority-class` (`spec.priorityClassName`), `k8s/qos` (`status.qosClass`) and `k8s/owner-kind` (the first owner reference's kind). `cpu.request` and `cpu.limit` sum the containers; the limit is nil if any container has none. `Self` is the pod whose UID is in the `POD_UID` environment variable. In-cluster (empty `runtime.kubeconfig`) the factory refuses to build without it, naming the downward API's `metadata.uid`, because nothing else would stop the agent capping itself; with a kubeconfig it logs that its own pod cannot be recognised.
+
+**The annotation.** Each change is recorded on the pod as `di-agent/change`, the JSON of the `runtime.Undo`. The record lives and dies with the pod, a restarted agent recovers its changes with `Changed(nodeID)`, and a pod with another node's annotation is never reported or reverted by this one, nor is a record whose subject is not the pod it is on (one copied by a template or by hand). A second `Apply` on a pod this node already changed keeps the first change's `Original`, read from the annotation. The annotation is written first and the resize second: a record without a cap reverts as a no-op, while a cap without a record would never be given back. If the resize fails the record stays, since a resize that timed out may still have been applied. A pod whose annotation is another node's, or cannot be read, is not actionable and is never overwritten; `Revert` clears the annotation only when it still decodes to this node. A pod already at its original limit, as after a resize that never took, is not resized on `Revert`: only the record is cleared, so a resize the API keeps refusing cannot hold in force a change that is not there. RBAC grants `patch` on pods cluster-wide because Kubernetes cannot scope it to a node; the agent only ever patches pods on its own node.
+
+**What can be resized, and why.** These rules come from a spike on k0s v1.36.4 (cgroup v2), not from the documentation. Lowering and raising an existing limit is accepted and takes effect within seconds with no restart. A limit set below the request is refused, so the plan never goes below the request. The refusals, in the order they are reported (the Burstable, BestEffort and Guaranteed rows come from the spike):
+
+| `Can["cpu.limit"]` | Why |
+| --- | --- |
+| `not running` | Only a running pod has a cgroup to resize; a Succeeded or Failed pod is also `ErrGone` on `Revert`. |
+| `being deleted` | A pod with a deletion timestamp is on its way out. |
+| `pod-level resources or sidecars: the agent cannot account for them` | Pod-level `spec.resources` and native sidecars (init containers with `restartPolicy: Always`) take CPU the single-container accounting does not see. |
+| `more than one container: the limit cannot be split by the agent` | One pod-level cap cannot be divided between containers without a rule for the division. |
+| `unreadable di-agent/change annotation` / `changed by another node: <id>` | An unreadable or another node's record is never overwritten. |
+| `BestEffort: a limit would change the pod's QoS class` | Adding a limit to a BestEffort pod is refused by the API (`Pod QOS Class may not change as a result of resizing`). |
+| `no CPU limit: a limit the agent added could never be removed` | Adding a limit to a Burstable pod is accepted, but removing it again is refused (`resource limits cannot be removed`), so `Revert` could not restore "no limit". |
+| `Guaranteed: changing the limit alone would change the pod's QoS class` | A Guaranteed pod's limit equals its request; moving only the limit would change the class. |
+| `resizePolicy restarts the container for a CPU change` | A container whose CPU `resizePolicy` is `RestartContainer` would restart on every cap and every revert. |
+
+A limit is also refused at `Apply` when it would make the pod Guaranteed: a CPU limit equal to the CPU request, on a container whose memory request equals its memory limit. The plan never goes below the request, so it can land on it; the runtime refuses rather than change the QoS class.
+
+Because pods without a limit are refused, a revert never restores "no limit": an `Undo` whose `Original.Limit` is nil is an error on this runtime, not `ErrGone`. A pod deleted or recreated between `Apply` and `Revert` is `ErrGone`.

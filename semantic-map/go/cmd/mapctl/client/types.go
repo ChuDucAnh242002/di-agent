@@ -53,6 +53,7 @@ type EdgeDTO struct {
 	Direction     string   `json:"direction"`
 	Established   *float64 `json:"established"`
 	Assertion     *float64 `json:"assertion"`
+	Measured      *float64 `json:"measured"`
 	Effective     *float64 `json:"effective"`
 	Basis         string   `json:"basis"`
 	EMAWeight     float64  `json:"ema_weight"`
@@ -120,6 +121,11 @@ type AddPropositionRequest struct {
 	PriorStrength float64 `json:"prior_strength"`
 }
 
+// ConfirmRequest is the optional body of POST /candidates/{id}/confirm.
+type ConfirmRequest struct {
+	From string `json:"from"`
+}
+
 // ResetRequest is the body of POST /agent/reset.
 type ResetRequest struct {
 	From string `json:"from"`
@@ -167,15 +173,20 @@ type OutcomeSimulation struct {
 
 // CandidateEdge mirrors types.CandidateEdge for the GET /candidates response.
 type CandidateEdge struct {
-	CandidateID     string  `json:"CandidateID"`
-	FromID          string  `json:"FromID"`
-	ToID            string  `json:"ToID"`
-	Direction       int     `json:"Direction"`
-	MIScore         float64 `json:"MIScore"`
-	PValue          float64 `json:"PValue"`
-	NObservations   int     `json:"NObservations"`
-	DeploymentsSeen int     `json:"DeploymentsSeen"`
-	Status          int     `json:"Status"`
+	CandidateID     string   `json:"CandidateID"`
+	FromID          string   `json:"FromID"`
+	ToID            string   `json:"ToID"`
+	Direction       int      `json:"Direction"`
+	MIScore         float64  `json:"MIScore"`
+	PValue          float64  `json:"PValue"`
+	PBar            float64  `json:"PBar"`
+	NObservations   int      `json:"NObservations"`
+	DeploymentsSeen int      `json:"DeploymentsSeen"`
+	Status          string   `json:"Status"`
+	Undirected      bool     `json:"Undirected"`
+	Kind            string   `json:"Kind"`
+	Caveats         []string `json:"Caveats"`
+	Reason          string   `json:"Reason,omitempty"`
 }
 
 // ── Peer coordination DTOs ────────────────────────────────────────────────────
@@ -221,4 +232,51 @@ type TuneAdjustmentDTO struct {
 type TuneResponse struct {
 	Applied []TuneAdjustmentDTO `json:"applied"`
 	Intent  string              `json:"intent"`
+}
+
+// ── Estimate DTOs ─────────────────────────────────────────────────────────────
+
+// EstimateInfluence mirrors statemap.Influence on the wire.
+type EstimateInfluence struct {
+	Relationship             string   `json:"relationship"`
+	Source                   string   `json:"source"`
+	SourceValue              float64  `json:"source_value"`
+	Strength                 float64  `json:"effective_strength"`
+	Sign                     int      `json:"sign"`
+	Contribution             float64  `json:"contribution"`
+	Provenance               string   `json:"provenance"`
+	Basis                    string   `json:"basis"`
+	Known                    bool     `json:"known"`
+	HypotheticalSourceValue  *float64 `json:"hypothetical_source_value,omitempty"`
+	HypotheticalContribution *float64 `json:"hypothetical_contribution,omitempty"`
+}
+
+// EstimateAnswer mirrors statemap.EstimateAnswer.
+type EstimateAnswer struct {
+	Target        string  `json:"target"`
+	Level         float64 `json:"level"`
+	Confidence    float64 `json:"confidence"`
+	Status        string  `json:"status"`
+	Sensitivity   float64 `json:"sensitivity"`
+	Contributions float64 `json:"contributions"`
+}
+
+// EstimateHypothetical mirrors statemap.Hypothetical.
+type EstimateHypothetical struct {
+	Contributions  float64 `json:"contributions"`
+	Delta          float64 `json:"delta"`
+	ProjectedLevel float64 `json:"projected_level"`
+}
+
+// EstimateResponse is GET /state/estimate.
+type EstimateResponse struct {
+	DecisionID   string                `json:"decision_id"`
+	Revision     uint64                `json:"revision"`
+	Answer       EstimateAnswer        `json:"answer"`
+	Influences   []EstimateInfluence   `json:"influences"`
+	Assumptions  map[string]float64    `json:"assumptions,omitempty"`
+	Excluded     []string              `json:"excluded,omitempty"`
+	Hypothetical *EstimateHypothetical `json:"hypothetical,omitempty"`
+	Rationale    string                `json:"rationale"`
+	Caveats      []string              `json:"caveats,omitempty"`
 }

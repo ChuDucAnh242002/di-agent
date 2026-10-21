@@ -30,25 +30,29 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 
 	// ── AvailableMetrics ──────────────────────────────────────────────────────
 
+	// A pattern-driven collector knows its types only once it has asked its source,
+	// so these are asserted after a Collect.
 	t.Run("AvailableMetricsNonEmpty", func(t *testing.T) {
 		c := factory(t)
+		_, _ = c.Collect()
 		if len(c.AvailableMetrics()) == 0 {
-			t.Error("AvailableMetrics() must list at least one MetricType")
+			t.Error("AvailableMetrics() must list at least one MetricType once Collect has produced samples")
 		}
 	})
 
-	t.Run("AvailableMetricsStable", func(t *testing.T) {
+	t.Run("AvailableMetricsStableWithoutACollect", func(t *testing.T) {
 		c := factory(t)
+		_, _ = c.Collect()
 		first := metricSet(c.AvailableMetrics())
 		second := metricSet(c.AvailableMetrics())
 		for mt := range first {
 			if !second[mt] {
-				t.Errorf("AvailableMetrics() changed: %q present first call but not second", mt)
+				t.Errorf("AvailableMetrics() changed with no Collect between: %q present first call but not second", mt)
 			}
 		}
 		for mt := range second {
 			if !first[mt] {
-				t.Errorf("AvailableMetrics() changed: %q present second call but not first", mt)
+				t.Errorf("AvailableMetrics() changed with no Collect between: %q present second call but not first", mt)
 			}
 		}
 	})
@@ -93,13 +97,72 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("SamplesMetricTypeInAvailable", func(t *testing.T) {
+	// A sample whose unit and range are not declared cannot be reasoned about: the
+	// map normalises a contribution by the property's range, so an undeclared range
+	// means the map assumes [0,1] and every answer that reads the property carries a
+	// caveat saying so. The contract makes declaring them a MUST; this asserts it.
+	// Every sample-level subtest in this suite ranges over one Collect() batch and
+	// passes on an empty one. A factory whose collector emits nothing therefore
+	// certifies nothing; this makes that visible instead of vacuous.
+	t.Run("CollectProducesSamples", func(t *testing.T) {
 		c := factory(t)
-		available := metricSet(c.AvailableMetrics())
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		if len(samples) == 0 {
+			t.Fatal("Collect returned no samples: the sample-level guarantees are asserted over this batch, so the factory must build a collector with data behind it")
+		}
+	})
+
+	t.Run("SamplesDeclareUnitAndRange", func(t *testing.T) {
+		c := factory(t)
 		samples, _ := c.Collect()
 		for _, s := range samples {
+			if s.Unit == "" {
+				t.Errorf("MetricSample.Unit must be non-empty; got %+v", s)
+			}
+			if s.Range != nil && s.Range[1] <= s.Range[0] {
+				t.Errorf("MetricSample.Range %v is empty; hi must exceed lo", *s.Range)
+			}
+		}
+	})
+
+	// "keep them stable per type": the map stamps unit and range on the property at
+	// admission and treats a later disagreement as a conflict, so a collector whose
+	// declaration moves between calls, or between subjects of one type, poisons its
+	// own properties.
+	t.Run("UnitAndRangeStablePerType", func(t *testing.T) {
+		c := factory(t)
+		type decl struct {
+			unit     string
+			declared bool
+			rng      [2]float64
+		}
+		seen := map[types.MetricType]decl{}
+		for call := 0; call < 2; call++ {
+			samples, _ := c.Collect()
+			for _, s := range samples {
+				d := decl{unit: s.Unit, declared: s.Range != nil}
+				if s.Range != nil {
+					d.rng = *s.Range
+				}
+				if prev, ok := seen[s.MetricType]; ok && prev != d {
+					t.Errorf("%s declared %q %v and then %q %v; unit and range must be stable per type",
+						s.MetricType, prev.unit, prev.rng, d.unit, d.rng)
+				}
+				seen[s.MetricType] = d
+			}
+		}
+	})
+
+	t.Run("SamplesMetricTypeInAvailable", func(t *testing.T) {
+		c := factory(t)
+		samples, _ := c.Collect()
+		available := metricSet(c.AvailableMetrics())
+		for _, s := range samples {
 			if !available[s.MetricType] {
-				t.Errorf("sample MetricType %q not declared in AvailableMetrics()", s.MetricType)
+				t.Errorf("sample MetricType %q not declared in the AvailableMetrics() read after the Collect that emitted it", s.MetricType)
 			}
 		}
 	})

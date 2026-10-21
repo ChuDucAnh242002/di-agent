@@ -36,7 +36,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: semantic-map/go/go.mod
           cache: true
           cache-dependency-path: semantic-map/go/go.sum
 
@@ -74,7 +74,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: semantic-map/go/go.mod
           cache: true
           cache-dependency-path: semantic-map/go/go.sum
 

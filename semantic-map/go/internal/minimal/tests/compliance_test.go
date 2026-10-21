@@ -1,7 +1,6 @@
 package minimal_test
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +28,23 @@ func TestCgroupCollectorCompliance(t *testing.T) {
 	})
 }
 
+func TestCgroupCollectorSubjectsCompliance(t *testing.T) {
+	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
+		root := newFakeCgroupRoot(t)
+		pod := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+		if err := os.MkdirAll(pod, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(pod, "cpu.stat"), "usage_usec 500000\nnr_periods 10\nnr_throttled 1\n")
+		mustWrite(t, filepath.Join(pod, "memory.current"), "268435456\n")
+		mustWrite(t, filepath.Join(pod, "memory.max"), "max\n")
+		c := minimal.NewCgroupCollectorWithOptions("test-node", root, minimal.CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 8 << 30})
+		c.Collect() //nolint:errcheck
+		time.Sleep(2 * time.Millisecond)
+		return c
+	})
+}
+
 func TestNetdataCollectorCompliance(t *testing.T) {
 	// Fake Netdata server responding to all three charts.
 	srv := httptest.NewServer(netdataFakeHandler(t))
@@ -39,23 +55,26 @@ func TestNetdataCollectorCompliance(t *testing.T) {
 	})
 }
 
-// netdataFakeHandler returns an http.Handler that responds with canned Netdata JSON.
+// netdataFakeHandler serves the minimal package's Netdata fixtures as the two
+// endpoints the collector reads: /api/v1/allmetrics, 23 charts as a Netdata 1.43 agent
+// reported them, and /api/v1/charts, their types. The suite certifies the collector on
+// samples it really emits.
 func netdataFakeHandler(t *testing.T) http.Handler {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/data", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Query().Get("chart") {
-		case "system.cpu":
-			fmt.Fprint(w, `{"result":{"labels":["time","user","system","idle"],"data":[[1703123456,2.5,0.5,96.9]]}}`)
-		case "system.ram":
-			fmt.Fprint(w, `{"result":{"labels":["time","free","used","cached","buffers"],"data":[[1703123456,4096.0,2048.0,1024.0,512.0]]}}`)
-		case "system.net":
-			fmt.Fprint(w, `{"result":{"labels":["time","InOctets","OutOctets"],"data":[[1703123456,8.0,-6.0]]}}`)
-		default:
-			http.NotFound(w, r)
+	for path, file := range map[string]string{
+		"/api/v1/allmetrics": "../testdata/netdata_allmetrics.json",
+		"/api/v1/charts":     "../testdata/netdata_charts.json",
+	} {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		})
+	}
 	return mux
 }
 
@@ -84,7 +103,7 @@ func TestDisabledProposerCompliance(t *testing.T) {
 func TestMICorrelationProposerCompliance(t *testing.T) {
 	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
 		o := minimal.NewOntologyFromSpec(mustSpec())
-		return minimal.NewMICorrelationProposer(o, 0.8, 10, 50)
+		return minimal.NewMICorrelationProposer(minimal.LookupOntology(o), 0.8, 10, 50, 0)
 	})
 }
 

@@ -94,7 +94,7 @@ func snapEdgeByPropID(t *testing.T, state *statemap.Map, propID string) edgeSnap
 			ToID:          r.To,
 			PropID:        r.Label,
 			PriorWeight:   establishedOf(r),
-			EMAWeight:     r.Strength,
+			EMAWeight:     r.Recent,
 			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,
@@ -854,8 +854,8 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 //  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
 func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	o := minimal.NewOntologyFromSpec(mustSpec())
-	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
 	state := stateFor(t)
+	proposer := minimal.NewMICorrelationProposer(state, 0.7, 20, 80, 0)
 	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(state)
 
@@ -895,7 +895,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	// returns the proposition and the facade applies it to both the declaration and the
 	// state model; confirming against the proposer alone would leave the claim declared
 	// and unmodelled, taking part in no answer.
-	if err := sm.ConfirmCandidate(cand.CandidateID); err != nil {
+	if err := sm.ConfirmCandidate(cand.CandidateID, "", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 

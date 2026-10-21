@@ -1,0 +1,15 @@
+# The PoC agent's spec. Installed at /etc/di-agent/agent.yaml; ${VAR} is read from
+# /etc/di-agent/env, so each VM names itself and picks its regime there.
+node:
+  addr: ":9090"
+  id: ${NODE_ID}
+profile:
+  kd: k0s
+  regime: ${REGIME}
+sources:
+  interval: 5s
+  netdata:
+    url: http://localhost:19999
+map:
+  proposer:
+    enabled: false

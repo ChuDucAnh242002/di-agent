@@ -1,0 +1,160 @@
+// Package stats holds the one Pearson estimator, the one Fisher p-value and the one
+// paired-observation window the map and the proposer share. Two copies of an
+// estimator are two chances for the same pair of readings to be scored differently.
+package stats
+
+import "math"
+
+// PairWindow is a fixed-capacity ring of paired observations with a dedup set keyed
+// by pair identity, so a replayed batch cannot fold the same physical pair twice.
+type PairWindow struct {
+	xs, ys   []float64
+	next     int
+	capacity int
+	seen     map[string]struct{}
+}
+
+// NewPairWindow builds a ring of the given capacity; 0 or less is unbounded. The
+// capacity belongs to the window, not to each Fold call: the ring's invariants
+// (len ≤ capacity, next < capacity) hold only if every fold agrees on it.
+func NewPairWindow(capacity int) *PairWindow {
+	return &PairWindow{capacity: capacity, seen: make(map[string]struct{})}
+}
+
+// Fold adds (x, y) under identity unless that identity was already folded. The
+// dedup set is trimmed when it exceeds 4*capacity, because an identity that can no
+// longer be in the window cannot be a duplicate of anything in it. Returns false
+// when the pair was a duplicate. An empty identity skips the check, for a caller
+// that refuses repeats itself: the set is most of a window's memory.
+func (w *PairWindow) Fold(identity string, x, y float64) bool {
+	if !w.remember(identity) {
+		return false
+	}
+	if w.capacity <= 0 || len(w.xs) < w.capacity {
+		w.xs = append(w.xs, x)
+		w.ys = append(w.ys, y)
+		return true
+	}
+	w.xs[w.next] = x
+	w.ys[w.next] = y
+	w.next = (w.next + 1) % w.capacity
+	return true
+}
+
+// ReplaceLast overwrites the most recently folded pair with (x, y) under identity,
+// for a caller that has found a better partner for one of its readings. It folds
+// instead when the window is empty, and returns false when identity was already
+// folded.
+func (w *PairWindow) ReplaceLast(identity string, x, y float64) bool {
+	if len(w.xs) == 0 {
+		return w.Fold(identity, x, y)
+	}
+	if !w.remember(identity) {
+		return false
+	}
+	last := len(w.xs) - 1
+	if w.capacity > 0 && len(w.xs) == w.capacity {
+		last = (w.next - 1 + w.capacity) % w.capacity
+	}
+	w.xs[last], w.ys[last] = x, y
+	return true
+}
+
+// remember records identity, and reports false when it was already folded.
+func (w *PairWindow) remember(identity string) bool {
+	if identity == "" {
+		return true
+	}
+	if _, dup := w.seen[identity]; dup {
+		return false
+	}
+	w.seen[identity] = struct{}{}
+	if w.capacity > 0 && len(w.seen) > 4*w.capacity {
+		w.seen = map[string]struct{}{identity: {}}
+	}
+	return true
+}
+
+func (w *PairWindow) Len() int { return len(w.xs) }
+
+// Spread returns max − min of each side over the window: how far each series moved.
+// Correlation is scale-free, so a series that barely moves can still correlate
+// perfectly; the spread is what says whether the movement is worth anything.
+func (w *PairWindow) Spread() (x, y float64) { return spread(w.xs), spread(w.ys) }
+
+func spread(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	lo, hi := v[0], v[0]
+	for _, x := range v[1:] {
+		lo, hi = math.Min(lo, x), math.Max(hi, x)
+	}
+	return hi - lo
+}
+
+// Distinct returns, for each side, the readings that are not its commonest value plus
+// one for that value: the window's length when no value repeats, k+1 for a rate that
+// sits at zero and spikes k times. Pearson over a window that is mostly one value
+// carries the evidence of those readings, not of its length.
+func (w *PairWindow) Distinct() (x, y int) { return distinct(w.xs), distinct(w.ys) }
+
+func distinct(v []float64) int {
+	if len(v) == 0 {
+		return 0
+	}
+	counts := make(map[float64]int, len(v))
+	most := 0
+	for _, x := range v {
+		counts[x]++
+		most = max(most, counts[x])
+	}
+	return len(v) - most + 1
+}
+
+// Pearson returns the correlation over the window, and false when it is undefined.
+func (w *PairWindow) Pearson() (float64, bool) { return Pearson(w.xs, w.ys) }
+
+// Pearson returns the correlation coefficient, and false when it is undefined: fewer
+// than three points, mismatched lengths, or a constant series on either side. A
+// constant series is the common case on a quiet system; reporting r = 0 there would
+// be a claim, and "undefined" is the honest answer.
+func Pearson(xs, ys []float64) (float64, bool) {
+	n := len(xs)
+	if n < 3 || n != len(ys) {
+		return 0, false
+	}
+	var sx, sy float64
+	for i := 0; i < n; i++ {
+		sx += xs[i]
+		sy += ys[i]
+	}
+	mx, my := sx/float64(n), sy/float64(n)
+	var sxy, sxx, syy float64
+	for i := 0; i < n; i++ {
+		dx, dy := xs[i]-mx, ys[i]-my
+		sxy += dx * dy
+		sxx += dx * dx
+		syy += dy * dy
+	}
+	if sxx <= 1e-12 || syy <= 1e-12 {
+		return 0, false
+	}
+	return sxy / math.Sqrt(sxx*syy), true
+}
+
+// FisherPValue is the two-tailed p-value for Pearson r using the Fisher z-transform:
+// z = atanh(r)·sqrt(n−3), P = erfc(|z|/sqrt 2). Returns 1.0 when n < 4.
+func FisherPValue(r float64, n int) float64 {
+	if n < 4 {
+		return 1.0
+	}
+	if r >= 1 {
+		r = 1 - 1e-12
+	}
+	if r <= -1 {
+		r = -1 + 1e-12
+	}
+	z := math.Atanh(r) * math.Sqrt(float64(n-3))
+	return math.Erfc(math.Abs(z) / math.Sqrt2)
+}

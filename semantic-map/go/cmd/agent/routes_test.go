@@ -531,26 +531,71 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
-func TestStaticUI_ServesAppJS(t *testing.T) {
-	// Phase 2B replaced the placeholder with the real index.html / app.js /
-	// style.css triple. We assert the embed.FS → /ui/ chain end-to-end by
-	// fetching app.js, which (unlike index.html) is not subject to Go's
-	// FileServer canonicalization redirect (/index.html → ./), so it is the
+func TestStaticUI_ServesTheModuleTree(t *testing.T) {
+	// The console is an ES module tree under /ui/js/, so the embed.FS → /ui/
+	// chain has to carry a subdirectory, not just three sibling files. Each
+	// module is fetched directly: unlike index.html they are not subject to Go's
+	// FileServer canonicalization redirect (/index.html → ./), so they are the
 	// simplest probe for "file is embedded and served verbatim".
+	//
+	// The content type is asserted too. A module served as anything other than
+	// JavaScript is rejected by the browser's module loader, which fails as a
+	// blank page rather than as a 404 — worth catching here instead of there.
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	resp, err := http.Get(base + "/ui/app.js")
+
+	for _, mod := range []string{
+		"app.js", "api.js", "model.js", "force.js", "graph.js",
+		"charts.js", "inspector.js", "drawer.js",
+	} {
+		resp, err := http.Get(base + "/ui/js/" + mod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("%s: status %d", mod, resp.StatusCode)
+			continue
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "javascript") {
+			t.Errorf("%s: content type %q, want a javascript type", mod, ct)
+		}
+		if len(b) == 0 {
+			t.Errorf("%s: served empty", mod)
+		}
+	}
+
+	resp, err := http.Get(base + "/ui/style.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("app.js: status %d", resp.StatusCode)
+		t.Fatalf("style.css: status %d", resp.StatusCode)
 	}
+}
+
+// TestStaticUI_HasNoExternalDependency pins the property that makes the console
+// usable on the node it was written for.
+//
+// The previous console pulled its graph library from a CDN, which silently turns
+// the operator surface of an offline or air-gapped agent into a blank page. The
+// page is whatever the binary embeds; a reviewer adding a <script src="http…">
+// should fail here rather than discover it on a disconnected device.
+func TestStaticUI_HasNoExternalDependency(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp, err := http.Get(base + "/ui/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	body := string(b)
-	if !strings.Contains(body, "Semantic-Map embedded UI controller") {
-		t.Errorf("app.js should contain the module banner; got %q", body[:min(len(body), 200)])
+	for _, forbidden := range []string{"http://", "https://", "//unpkg.com", "//cdn."} {
+		if strings.Contains(string(b), forbidden) {
+			t.Errorf("index.html references %q; the console must load only embedded assets", forbidden)
+		}
 	}
 }
 
@@ -1069,4 +1114,127 @@ func newTestState(t *testing.T) *statemap.Map {
 		ConvergenceObservations: 100,
 		AdmitUnknown:            true,
 	}, statemap.NewJournal(0))
+}
+
+func TestIngestSample_RejectsMalformedSubject(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.1,"timestamp_unix":1,"event_id":"e","subject":"pod/x"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 for a subject containing '/'", resp.StatusCode)
+	}
+}
+
+func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	body := `{"node_id":"","metric_type":"queue_depth","value":7,"timestamp_unix":1000,
+	          "event_id":"e1","subject":"pod:abc","unit":"items","range":[0,100],"source":"app:ingest"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (scoped samples are never routed)", resp.StatusCode)
+	}
+	p, ok := sm.State().Property("queue_depth@pod:abc")
+	if !ok {
+		t.Fatal("scoped property was not admitted under metric_type@subject")
+	}
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != [2]float64{0, 100} || p.Source != "app:ingest" {
+		t.Errorf("admitted property %+v; want subject/unit/range/source stamped from the sample", p)
+	}
+}
+
+// TestIngestSample_RejectsAMetricTypeThatIsNotASegment: a property id is
+// metric_type@subject, so an unscoped sample named "cpu_utilization@pod:a" would land
+// on the scoped property's id with no conflict recorded.
+func TestIngestSample_RejectsAMetricTypeThatIsNotASegment(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, mt := range []string{"cpu_utilization@pod:a", "a/b", "a b"} {
+		body := `{"metric_type":"` + mt + `","value":0.5,"timestamp_unix":1000,"event_id":"e1","unit":"fraction","range":[0,1]}`
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("metric_type %q: status %d, want 400", mt, resp.StatusCode)
+		}
+	}
+}
+
+// TestIngestSample_EmptyRangeIs400: a range that cannot normalise anything is
+// refused at the wire, as the map refuses it.
+func TestIngestSample_EmptyRangeIs400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"queue_depth","value":7,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"items","range":[5,5]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty range: status %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestIngestSample_PartOfIsANodeTypeOnAScopedSample: part_of names the node-level type
+// a subject's quantity is summed into, so it must be a metric type and the sample must
+// have a subject; anything else is refused at the wire.
+func TestIngestSample_PartOfIsANodeTypeOnAScopedSample(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, c := range []struct {
+		subject, partOf string
+		want            int
+	}{
+		{"disk:sda", "system.io.out", http.StatusAccepted},
+		{"", "system.io.out", http.StatusBadRequest},
+		{"disk:sda", "system.io.out@disk:sdb", http.StatusBadRequest},
+	} {
+		body := `{"metric_type":"disk.io.writes","value":7,"timestamp_unix":1000,"event_id":"e-` + c.subject + c.partOf +
+			`","subject":"` + c.subject + `","unit":"bytes/s","part_of":"` + c.partOf + `"}`
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("subject %q part_of %q: status %d, want %d", c.subject, c.partOf, resp.StatusCode, c.want)
+		}
+	}
+}
+
+// TestIngestSample_ScopedReadingOfARoutedTypeIs202: a scoped reading of a routed
+// metric type is recorded but never routed, and the 202 note says so — a regression
+// to 204 would tell the producer its reading reached a construct.
+func TestIngestSample_ScopedReadingOfARoutedTypeIs202(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.4,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"fraction","range":[0,1]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("scoped routed type: status %d, want 202", resp.StatusCode)
+	}
+	var ack map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack["routed"] != false || !strings.Contains(ack["note"].(string), "scoped") {
+		t.Errorf("202 body %v; want routed:false with a note about scoped readings", ack)
+	}
 }

@@ -49,6 +49,12 @@ type AddPropositionRequest struct {
 	PriorStrength float64 `json:"prior_strength"`
 }
 
+// ConfirmRequest is the optional body of POST /candidates/{id}/confirm. From names
+// the end an undirected candidate runs from; a directed candidate needs no body.
+type ConfirmRequest struct {
+	From string `json:"from"`
+}
+
 // ResetRequest is the body of POST /agent/reset.
 type ResetRequest struct {
 	From string `json:"from"`
@@ -75,22 +81,21 @@ type TuneResponse struct {
 	Intent  string              `json:"intent"`
 }
 
-// MetricSampleRequest is the body of POST /ingest-sample.
-//
-// Distinct from POST /ingest: where /ingest takes a pre-routed (from_id,
-// to_id, observation, event_id) tuple and bypasses the Bridge, /ingest-sample
-// carries a MetricSample that the daemon routes through Bridge server-side.
-// This is the public-API entry point for external collectors (e.g. the
-// parquet replay tool) that don't speak Go and can't call IngestSample
-// directly. ContainerID and Labels are optional and informational only —
-// the Bridge does not branch on them in v1.
+// MetricSampleRequest is the body of POST /ingest-sample — the wire face of the
+// sample boundary. subject, unit, range, source, chart and part_of are optional; see
+// types.MetricSample for their meaning. A subject must match <kind>:<identity>.
 type MetricSampleRequest struct {
 	NodeID        string            `json:"node_id"`
 	MetricType    string            `json:"metric_type"`
 	Value         float64           `json:"value"`
 	TimestampUnix int64             `json:"timestamp_unix"`
 	EventID       string            `json:"event_id"`
-	ContainerID   string            `json:"container_id,omitempty"`
+	Subject       string            `json:"subject,omitempty"`
+	Unit          string            `json:"unit,omitempty"`
+	Range         *[2]float64       `json:"range,omitempty"`
+	Source        string            `json:"source,omitempty"`
+	Chart         string            `json:"chart,omitempty"`
+	PartOf        string            `json:"part_of,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
@@ -139,6 +144,7 @@ type EdgeDTO struct {
 	Direction        string   `json:"direction"`
 	Established      *float64 `json:"established,omitempty"`
 	Assertion        *float64 `json:"assertion,omitempty"`
+	Measured         *float64 `json:"measured,omitempty"`
 	Effective        *float64 `json:"effective,omitempty"`
 	Basis            string   `json:"basis,omitempty"`
 	EMAWeight        float64  `json:"ema_weight"`
@@ -275,6 +281,7 @@ func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 		PropositionID:    e.PropositionID,
 		Direction:        directionToString(e.Direction),
 		Established:      e.Established,
+		Measured:         e.Measured,
 		Assertion:        e.Assertion,
 		Effective:        e.Effective,
 		Basis:            e.Basis,
@@ -298,12 +305,16 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 	}
 }
 
-// metricTypeValidator answers whether the loaded domain specification routes a
-// metric type. The /ingest-sample boundary rejects unrouted types with 400 so
-// operators and the replay tool get a clear error instead of a silent no-op —
-// ingestion itself ignores them for forward compatibility, which is the right
-// behaviour inside the pipeline but the wrong behaviour at an API boundary a
-// human is typing against.
+// metricTypeValidator is the routing question a sample boundary may put to the
+// semantic map: which construct, if any, the loaded domain specification routes a
+// metric type to. *semmap.SemanticMap satisfies it with RoutedConstruct.
+//
+// It does not gate conversion. sampleRequestToTypes accepts it but never consults
+// it, because an unrouted metric type is not an error at /ingest-sample: the state
+// map admits the reading as a property, and the handler in routes.go asks the map
+// directly, after ingestion, whether to answer 202 (recorded, summarised by no
+// construct) instead of 204. What the routing table says is what the agent can
+// summarise, not what the system may exhibit.
 //
 // This asks the specification rather than carrying a list. A hardcoded copy here
 // was a third place routing knowledge lived, and it silently rejected the two PSI
@@ -321,28 +332,41 @@ func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
 	}
 }
 
-// sampleRequestToTypes converts the wire DTO into a *types.MetricSample,
-// validating the metric_type string against the closed catalogue declared in
-// pkg/types. Returns an error suitable for writeError(400, ...) when the
-// metric type is unknown.
+// sampleRequestToTypes converts the wire DTO into a *types.MetricSample. An unrouted
+// metric type is NOT rejected: the state model records it as a property, and the
+// handler answers 202 so the caller learns nothing summarises it. A malformed subject
+// is rejected, because it would produce a property id the HTTP surface cannot address.
 func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*types.MetricSample, error) {
-	mt := types.MetricType(req.MetricType)
 	if req.MetricType == "" {
 		return nil, fmt.Errorf("metric_type is required")
 	}
-	// An unrouted metric type is NOT rejected. It is something the system reported,
-	// and the state model records it as a property — a model that can only represent
-	// what someone declared in advance is a model of the system as it was when they
-	// wrote it down. The handler answers 202 rather than 204 so the caller still
-	// learns that nothing summarises it, which is the part a typo needs to surface.
+	if !types.ValidMetricType(req.MetricType) {
+		// A property id is metric_type@subject: an unscoped sample named
+		// "cpu_utilization@pod:a" would land on the scoped property's id.
+		return nil, fmt.Errorf("metric_type %q is not a single segment over [A-Za-z0-9._-]", req.MetricType)
+	}
+	if !types.ValidSubject(req.Subject) {
+		return nil, fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", req.Subject)
+	}
+	if req.PartOf != "" && (!types.ValidMetricType(req.PartOf) || req.Subject == "") {
+		return nil, fmt.Errorf("part_of %q must be a node-level metric type, on a sample with a subject", req.PartOf)
+	}
+	if req.Range != nil && req.Range[1] <= req.Range[0] {
+		return nil, fmt.Errorf("range %v is empty: hi must exceed lo", *req.Range)
+	}
 	_ = v
 	return &types.MetricSample{
 		NodeID:        req.NodeID,
-		MetricType:    mt,
+		MetricType:    types.MetricType(req.MetricType),
 		Value:         req.Value,
 		TimestampUnix: req.TimestampUnix,
 		EventID:       req.EventID,
-		ContainerID:   req.ContainerID,
+		Subject:       req.Subject,
+		Unit:          req.Unit,
+		Range:         req.Range,
+		Source:        req.Source,
+		Chart:         req.Chart,
+		PartOf:        req.PartOf,
 		Labels:        req.Labels,
 	}, nil
 }
