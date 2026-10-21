@@ -40,6 +40,8 @@ sources:
   interval: ${COLLECT_INTERVAL}
   netdata:
     url: "${NETDATA_URL}"
+  cgroup:
+    root: "${CGROUP_ROOT}"
 map:
   proposer:
     enabled: ${PROPOSER}
