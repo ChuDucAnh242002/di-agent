@@ -99,6 +99,30 @@ curl -X PUT http://localhost:8000/config \
   -d '{"interval_ms":500,"points_per_interval":25}'
 ```
 
+#### Streamer control API (runtime changes)
+
+The streamer exposes `replay-streamer:8000` inside the cluster (use `kubectl port-forward svc/replay-streamer 8000:8000` from your machine).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness (503 only if the worker thread died) |
+| `GET /status` | Active config, `state` (`running`/`error`), `published` count, `last_error` |
+| `PUT /config` | Partial update; send only the fields you want to change |
+
+`PUT /config` fields (all optional): `mode` (`real`\|`synthetic`), `run_id`, `source`, `interval_ms` (10–3,600,000), `points_per_interval` (1–10,000), `loop` (bool), `random_seed` (int, synthetic only). Throughput is `points_per_interval / interval_ms`. Changes apply within ~0.25 s without a restart.
+
+```bash
+# Switch to another run and source, in real mode
+curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
+  -d '{"mode":"real","run_id":"1000rpm_150kW_0001_2","source":"short"}'
+# Pause-like slow replay: 1 point every 10 s
+curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
+  -d '{"interval_ms":10000,"points_per_interval":1}'
+curl localhost:8000/status
+```
+
+API changes are in memory only: a pod restart or a new `make helm-install` returns to the Helm/`STREAMER_*` values. Use those for permanent settings.
+
 `streamer.runId` and `streamer.source` select the dataset (defaults: `1000rpm_150kW_0001` and `short`). To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
 
 ### Optional: cloud eventual-consistency sync
