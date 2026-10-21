@@ -1,3 +1,4 @@
+{{- if .Values.playground.enabled }}
 # React/Vite frontend, served via nginx which proxies /api/* to each
 # genset/propulsion/battery/auxload/switchboard Service by in-cluster DNS
 # name (see poc2/playground/nginx.conf.template — the nginx entrypoint
@@ -83,3 +84,4 @@ spec:
     - port: 80
       targetPort: 80
       nodePort: {{ .Values.playground.nodePort }}
+{{- end }}

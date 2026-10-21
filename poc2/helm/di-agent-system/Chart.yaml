@@ -1,9 +1,9 @@
 apiVersion: v2
 name: di-agent-system
 description: >
-  Helm chart for the di-agent PoC power-system simulation stack (Kafka,
-  genset, switchboard, propulsion, battery, auxload, InfluxDB,
-  telemetry-writer, Grafana, Prometheus, playground). Does not include the
+  Helm chart for the di-agent PoC telemetry stack (Kafka, PostgreSQL,
+  replay-streamer, InfluxDB, telemetry-writer, Grafana, and opt-in
+  power-system simulators/playground). Does not include the
   di-agent component itself, which is deployed one instance per cluster node
   via poc2/scripts/04-agent.sh.
 type: application

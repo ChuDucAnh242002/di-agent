@@ -98,3 +98,28 @@ def test_to_points_invalid(writer_modules):
     # Missing timestamp
     with pytest.raises(KeyError, match="timestamp"):
         to_points({"genset_id": "genset-1", "power_kw": 100})
+
+
+def test_dataset_topic_writes_generic_signal_point(writer_modules):
+    to_points = writer_modules["writer"]._to_points
+    message = {
+        "run_id": "test-run",
+        "source": "short",
+        "signal": "Injection",
+        "value": -11.5,
+        "t_source": 7200.0,
+        "origin": "real",
+        "timestamp": 123.0,
+        "timestamp_ns": 123_000_000_001,
+    }
+
+    points = to_points(message, "dataset.telemetry")
+
+    assert len(points) == 1
+    line = points[0].to_line_protocol()
+    assert line.startswith(
+        "dataset_timeseries,origin=real,run_id=test-run,signal=Injection,source=short "
+    )
+    assert "t_source=7200" in line
+    assert "value=-11.5" in line
+    assert line.endswith("123000000001")

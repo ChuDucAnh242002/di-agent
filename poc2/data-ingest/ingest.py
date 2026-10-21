@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS timeseries (
 CREATE TABLE IF NOT EXISTS ingested_files (
     name text PRIMARY KEY, size bigint NOT NULL, loaded_at timestamptz NOT NULL DEFAULT now());
 """
-INDEX = "CREATE INDEX IF NOT EXISTS timeseries_idx ON timeseries (run_id, signal, t)"
+INDEXES = (
+    "CREATE INDEX IF NOT EXISTS timeseries_idx ON timeseries (run_id, signal, t)",
+    "CREATE INDEX IF NOT EXISTS timeseries_replay_idx "
+    "ON timeseries (run_id, source, t, signal)",
+)
 
 
 def download(url):
@@ -123,7 +127,8 @@ def main():
                     "INSERT INTO ingested_files (name, size) VALUES (%s, %s) "
                     "ON CONFLICT (name) DO UPDATE SET size = EXCLUDED.size, loaded_at = now()",
                     (path.name, size))
-        conn.execute(INDEX)
+        for index in INDEXES:
+            conn.execute(index)
         conn.execute("ANALYZE timeseries")
     print("done", flush=True)
 

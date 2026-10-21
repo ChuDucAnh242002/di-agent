@@ -1,6 +1,6 @@
 {{/*
-Fully-qualified image reference for a chart-built image (genset, switchboard,
-propulsion, battery, auxload, telemetry-writer, playground): prefixes
+Fully-qualified image reference for a chart-built image (simulators,
+telemetry-writer, replay-streamer, playground): prefixes
 global.imageRegistry, falls back to global.imageTag when a service doesn't
 pin its own tag. Called as:
 {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.genset.image) }}
@@ -80,4 +80,3 @@ switchboard's Modbus polling client. Called as:
 {{- end }}
 {{- join "," $names -}}
 {{- end -}}
-

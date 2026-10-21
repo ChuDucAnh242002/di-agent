@@ -15,6 +15,7 @@ AUXLOAD_KAFKA_TOPIC = os.environ.get("AUXLOAD_KAFKA_TOPIC", "auxload.telemetry")
 SHORE_POWER_KAFKA_TOPIC = os.environ.get("SHORE_POWER_KAFKA_TOPIC", "shore_power.telemetry")
 SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
 NAVIGATION_KAFKA_TOPIC = os.environ.get("NAVIGATION_KAFKA_TOPIC", "navigation.telemetry")
+DATASET_KAFKA_TOPIC = os.environ.get("DATASET_KAFKA_TOPIC", "dataset.telemetry")
 KAFKA_TOPICS = [
     GENSET_KAFKA_TOPIC,
     PROPULSION_KAFKA_TOPIC,
@@ -23,6 +24,7 @@ KAFKA_TOPICS = [
     SHORE_POWER_KAFKA_TOPIC,
     SWITCHBOARD_KAFKA_TOPIC,
     NAVIGATION_KAFKA_TOPIC,
+    DATASET_KAFKA_TOPIC,
 ]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
 
@@ -199,7 +201,28 @@ def _normalize_message(message: dict) -> dict:
     return message
 
 
-def _to_points(message: dict) -> list[Point]:
+def _dataset_to_point(message: dict) -> Point:
+    required = ("run_id", "source", "signal", "value", "timestamp")
+    missing = [key for key in required if key not in message]
+    if missing:
+        raise KeyError("dataset message is missing: " + ", ".join(missing))
+    point = (
+        Point("dataset_timeseries")
+        .tag("run_id", str(message["run_id"]))
+        .tag("source", str(message["source"]))
+        .tag("signal", str(message["signal"]))
+        .tag("origin", str(message.get("origin", "unknown")))
+        .field("value", float(message["value"]))
+    )
+    if "t_source" in message:
+        point = point.field("t_source", float(message["t_source"]))
+    timestamp = int(message.get("timestamp_ns", float(message["timestamp"]) * 1e9))
+    return point.time(timestamp, WritePrecision.NS)
+
+
+def _to_points(message: dict, topic: str | None = None) -> list[Point]:
+    if topic == DATASET_KAFKA_TOPIC:
+        return [_dataset_to_point(message)]
     normalized = _normalize_message(message)
     tag_key = next((key for key in MESSAGE_SCHEMAS if key in normalized), None)
     if tag_key is None:
@@ -247,7 +270,7 @@ def main() -> None:
             stats["seen"] += 1
             MESSAGES_SEEN.inc()
             try:
-                points = _to_points(message)
+                points = _to_points(message, record.topic)
                 write_api.write(bucket=INFLUXDB_BUCKET, record=points)
                 stats["written"] += 1
                 MESSAGES_WRITTEN.inc()

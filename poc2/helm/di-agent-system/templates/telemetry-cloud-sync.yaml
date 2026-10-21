@@ -33,7 +33,7 @@ spec:
             - name: KAFKA_BROKERS
               value: "kafka:{{ .Values.kafka.port }}"
             - name: SYNC_KAFKA_TOPICS
-              value: {{ printf "%s,%s,%s,%s,%s,%s" .Values.genset.kafkaTopic .Values.propulsion.kafkaTopic .Values.battery.kafkaTopic .Values.auxload.kafkaTopic .Values.shorePower.kafkaTopic .Values.propulsion.allocationKafkaTopic | quote }}
+              value: {{ printf "%s,%s,%s,%s,%s,%s,%s" .Values.genset.kafkaTopic .Values.propulsion.kafkaTopic .Values.battery.kafkaTopic .Values.auxload.kafkaTopic .Values.shorePower.kafkaTopic .Values.propulsion.allocationKafkaTopic .Values.streamer.kafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryCloudSync.kafkaGroupId | quote }}
             - name: LOG_EVERY_N_MESSAGES
@@ -51,6 +51,7 @@ spec:
                   (printf "%q:%q" .Values.auxload.kafkaTopic "IOTHUB_CONN_AUXLOAD")
                   (printf "%q:%q" .Values.shorePower.kafkaTopic "IOTHUB_CONN_SHOREPOWER")
                   (printf "%q:%q" .Values.switchboard.kafkaTopic "IOTHUB_CONN_SWITCHBOARD")
+                  (printf "%q:%q" .Values.streamer.kafkaTopic "IOTHUB_CONN_DATASET")
                 )) | quote }}
             - name: IOTHUB_CONN_GENSET
               valueFrom:
@@ -82,6 +83,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
                   key: {{ .Values.telemetryCloudSync.iotHub.devices.switchboard }}
+            - name: IOTHUB_CONN_DATASET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.dataset }}
             {{- else }}
             - name: EVENTHUB_NAMESPACE_FQDN
               value: {{ .Values.telemetryCloudSync.eventHub.namespaceFqdn | quote }}

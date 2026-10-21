@@ -1,3 +1,4 @@
+{{- if .Values.shorePower.enabled }}
 # Single shore power instance: when connected, charges the battery via its
 # /charge endpoint (see poc2/system/shore-power).
 apiVersion: apps/v1
@@ -52,3 +53,4 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
+{{- end }}

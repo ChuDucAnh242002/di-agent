@@ -1,3 +1,4 @@
+{{- if .Values.battery.enabled }}
 # One Deployment + Service per battery instance (battery-1..N); publishes
 # power supply like a genset, summed by the switchboard into bus supply.
 # Each instance simulates the model picked round-robin from .Values.battery.models.
@@ -69,4 +70,5 @@ spec:
       port: {{ $.Values.battery.modbusPort }}
       targetPort: {{ $.Values.battery.modbusPort }}
 ---
+{{- end }}
 {{- end }}

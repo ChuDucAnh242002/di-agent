@@ -1,3 +1,4 @@
+{{- if .Values.auxload.enabled }}
 # One Deployment + Service per auxiliary (hotel) load instance
 # (auxload-1..N); requests power from, and is allocated power by, the
 # switchboard, same as propulsion.
@@ -64,4 +65,5 @@ spec:
     - port: 8000
       targetPort: 8000
 ---
+{{- end }}
 {{- end }}

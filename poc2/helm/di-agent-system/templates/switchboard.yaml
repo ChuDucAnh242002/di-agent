@@ -1,3 +1,4 @@
+{{- if .Values.switchboard.enabled }}
 # Single switchboard instance: aggregates genset/battery supply and
 # consumer (propulsion/auxload) requests, and publishes each consumer's
 # power allocation.
@@ -57,3 +58,4 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
+{{- end }}

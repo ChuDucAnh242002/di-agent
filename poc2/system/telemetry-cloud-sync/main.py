@@ -10,7 +10,7 @@ KAFKA_TOPICS = [
     for topic in os.environ.get(
         "SYNC_KAFKA_TOPICS",
         "genset.telemetry,propulsion.telemetry,battery.telemetry,"
-        "auxload.telemetry,shore_power.telemetry,switchboard.telemetry",
+        "auxload.telemetry,shore_power.telemetry,switchboard.telemetry,dataset.telemetry",
     ).split(",")
     if topic.strip()
 ]

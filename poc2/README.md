@@ -39,7 +39,7 @@ The deployment consists of two separate layers:
    - one cluster for the VM fleet
 
 2. Application and demo layer
-   - Helm chart in `helm/di-agent-system` deploys Kafka, InfluxDB, Grafana, genset, battery, propulsion, auxload, switchboard, telemetry-writer, and playground
+   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, and telemetry-writer; legacy simulators and the playground are disabled by default
    - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
    - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
@@ -79,6 +79,28 @@ helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeou
 
 Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
 
+### PostgreSQL replay and simulation modes
+
+The streamer defaults to `synthetic` mode, generating bounded, correlated samples from the selected run's measured signal profiles and carrying its `run_metadata` in each message. Set `streamer.mode=real` to replay the actual stored samples. Both modes publish generic engine signals to `dataset.telemetry`; telemetry-writer writes them to InfluxDB's `dataset_timeseries` measurement with `run_id`, `source`, `signal`, and `origin` tags. If PostgreSQL data is unavailable, the streamer reports the error through `/status` and retries; it never silently substitutes synthetic values for a requested real stream.
+
+```bash
+make images IMAGES="replay-streamer telemetry-writer data-ingest"
+make helm-install
+# Select real samples instead:
+make helm-install STREAMER_MODE=real
+# Real samples, 25 points every 500 ms:
+make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=25
+# Any other chart value, e.g. enable the legacy genset simulator:
+make helm-install HELM_ARGS="--set genset.enabled=true"
+# Change emission rate while running:
+kubectl port-forward svc/replay-streamer 8000:8000
+curl -X PUT http://localhost:8000/config \
+  -H 'Content-Type: application/json' \
+  -d '{"interval_ms":500,"points_per_interval":25}'
+```
+
+`streamer.runId` and `streamer.source` select the dataset (defaults: `1000rpm_150kW_0001` and `short`). To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
+
 ### Optional: cloud eventual-consistency sync
 
 `telemetryCloudSync` mirrors telemetry Kafka topics to Azure (Event Hubs or IoT Hub), and `telemetryWriterCloud` is a second telemetry-writer that reads them back out of Event Hubs into a cloud-hosted InfluxDB, so the cloud store eventually converges with the edge one. Both are disabled by default. To enable them:
@@ -90,7 +112,7 @@ kubectl -n default create secret generic influxdb-cloud-credentials \
   --from-literal=admin-token="$INFLUXDB_CLOUD_ADMIN_TOKEN"
 ```
 
-then set `telemetryCloudSync.enabled=true`, `telemetryCloudSync.target=eventhub`, `telemetryWriterCloud.enabled=true`, and `telemetryWriterCloud.influxdb.url` to your cloud InfluxDB endpoint.
+then set `telemetryCloudSync.enabled=true`, `telemetryCloudSync.target=eventhub`, `telemetryWriterCloud.enabled=true`, and `telemetryWriterCloud.influxdb.url` to your cloud InfluxDB endpoint. The optional IoT Hub configuration also needs a `dataset-connection-string` key for the replay topic.
 
 You should also set the registry and tag before installing the chart if you are not using the defaults:
 
@@ -99,7 +121,7 @@ make images REGISTRY=ghcr.io/your-org TAG=v1
 make helm-install REGISTRY=ghcr.io/your-org TAG=v1
 ```
 
-The chart also expects the build context directories under `system/` and `playground/` to exist and to be buildable with Docker.
+The chart also expects the enabled service build contexts under `system/` and `playground/` to exist and to be buildable with Docker.
 
 ## End-to-end workflow
 
@@ -120,7 +142,7 @@ That sequence does the following:
 1. `make provision` creates the libvirt VMs.
 2. `make k8s` bootstraps the cluster on the VMs.
 3. `make images` builds and pushes the workload images used by the Helm chart.
-4. `make helm-install` deploys Kafka, InfluxDB, Grafana, switchboard, genset, battery, propulsion, auxload, and the playground.
+4. `make helm-install` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, and telemetry-writer. Legacy simulations and playground remain off by default.
 5. `make agent` builds the Go agent binary and imports the image into each worker node; it then deploys one `di-agent` pod per VM.
 6. `make peers` registers each agent as a peer on the others and assigns trust values.
 7. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting.
@@ -133,20 +155,6 @@ make list-vms
 make demo
 make teardown
 ```
-
-The trust-routing acceptance scenarios are in `bdd/features`. They exercise
-the external agent HTTP contract with deterministic in-process peers, so they
-do not require VMs, Kubernetes, or a running semantic-map agent:
-
-```bash
-make bdd
-```
-
-The scenarios cover the PoC's central behavior: selecting a trusted,
-lower-cost peer, excluding a peer below the trust floor, and rejecting a
-recommendation when no peer has sufficient trust. Cypress remains the test
-surface for the playground UI, while these Gherkin scenarios cover the
-cross-agent workflow.
 
 The demo is the proof-of-value. It does the following:
 
@@ -171,7 +179,8 @@ The files that matter for understanding or running the PoC are:
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images
 - `helm/di-agent-system/values.yaml`: all chart defaults and required secrets
 - `helm/di-agent-system/templates/`: the actual Kubernetes manifests for Kafka, InfluxDB, Grafana, and simulation services
-- `system/*`: workload generators and telemetry services
+- `system/replay-streamer`: configurable PostgreSQL-to-Kafka real/synthetic data source
+- `system/*`: legacy workload generators and telemetry services
 
 ## What the system is proving
 

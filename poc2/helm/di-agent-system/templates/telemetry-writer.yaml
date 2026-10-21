@@ -1,3 +1,4 @@
+{{- if .Values.telemetryWriter.enabled }}
 # Kafka consumer that writes system telemetry into InfluxDB. No externally-
 # exposed Service; port 8000 only serves Prometheus /metrics for in-cluster
 # scraping (see the prometheus.io/* pod annotations below).
@@ -46,6 +47,8 @@ spec:
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: NAVIGATION_KAFKA_TOPIC
               value: {{ .Values.navigation.kafkaTopic | quote }}
+            - name: DATASET_KAFKA_TOPIC
+              value: {{ .Values.streamer.kafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryWriter.kafkaGroupId | quote }}
             - name: LOG_EVERY_N_MESSAGES
@@ -65,3 +68,4 @@ spec:
                   key: admin-token
           resources:
             {{- toYaml .Values.telemetryWriter.resources | nindent 12 }}
+{{- end }}

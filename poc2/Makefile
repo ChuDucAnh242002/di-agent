@@ -22,15 +22,34 @@ $(eval $(VM_DEFS))
 
 SCRIPTS := ./scripts
 
-# Helm chart covering every service except di-agent (kafka, genset,
-# switchboard, propulsion, battery, auxload, influxdb, telemetry-writer,
-# grafana, playground) — see helm/di-agent-system. Any of its pods can be
+# Helm chart covering every service except di-agent (kafka, postgres,
+# replay-streamer, influxdb, telemetry-writer, grafana, and opt-in legacy
+# simulations/playground) — see helm/di-agent-system. Any pod can be
 # scheduled on any cluster node; there is no per-service VM pinning.
 HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
 REGISTRY ?= ghcr.io/chuducanh242002
 TAG ?= latest
+
+# Optional replay-streamer overrides for helm-install/helm-template. Unset
+# variables fall back to the chart defaults in values.yaml.
+#   make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=25
+STREAMER_MODE ?=
+STREAMER_RUN_ID ?=
+STREAMER_SOURCE ?=
+STREAMER_INTERVAL_MS ?=
+STREAMER_POINTS ?=
+STREAMER_LOOP ?=
+# Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
+HELM_ARGS ?=
+HELM_STREAMER_SETS = \
+	$(if $(STREAMER_MODE),--set streamer.mode=$(STREAMER_MODE)) \
+	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
+	$(if $(STREAMER_SOURCE),--set streamer.source=$(STREAMER_SOURCE)) \
+	$(if $(STREAMER_INTERVAL_MS),--set streamer.intervalMs=$(STREAMER_INTERVAL_MS)) \
+	$(if $(STREAMER_POINTS),--set streamer.pointsPerInterval=$(STREAMER_POINTS)) \
+	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP))
 
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
@@ -54,12 +73,15 @@ helm-lint:
 	@helm lint $(HELM_CHART)
 
 helm-template:
-	@helm template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE)
+	@helm template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE) \
+		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
+		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
 helm-install:
 	@helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) --create-namespace \
-		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG)
+		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
+		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
 helm-upgrade: helm-install
 
@@ -93,9 +115,6 @@ stop-vms:
 
 deploy: 
 	@bash $(SCRIPTS)/deploy.sh
-
-bdd:
-	@cd bdd && go test ./...
 
 demo:
 	@bash $(SCRIPTS)/coordinator.sh $(VMS)
@@ -152,19 +171,21 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
-	workload-heavy workload-light workload-stop teardown status list-vms get-ip-% bdd
+	workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target
 help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
 	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
-	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest images to REGISTRY (default $(REGISTRY))"
+	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest/replay-streamer images to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
 	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
+	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID STREAMER_SOURCE"
+	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
@@ -172,7 +193,6 @@ help:
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
 	@echo "  agent        - Deploy di-agent (one pod per worker VM; not part of the Helm chart)"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
-	@echo "  bdd          - Run poc2 Gherkin trust-routing scenarios"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"
 	@echo "  get-ip-<vm>  - Get IP address of a specific VM (e.g., make get-ip-ubuntu-vm1)"

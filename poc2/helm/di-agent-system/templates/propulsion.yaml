@@ -1,3 +1,4 @@
+{{- if .Values.propulsion.enabled }}
 # One Deployment + Service per propulsion instance (propulsion-1..N); each
 # requests power from, and is allocated power by, the switchboard.
 {{- range $i := until (.Values.propulsion.count | int) }}
@@ -72,4 +73,5 @@ spec:
       port: {{ $.Values.propulsion.modbusPort }}
       targetPort: {{ $.Values.propulsion.modbusPort }}
 ---
+{{- end }}
 {{- end }}

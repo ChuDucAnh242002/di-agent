@@ -8,7 +8,7 @@ This architecture is deliberately layered so each part of the system remains obs
 
 - VM infrastructure creates the cluster nodes,
 - Kubernetes schedules the service stack,
-- the telemetry pipeline moves workload data into InfluxDB,
+- the telemetry pipeline replays real or profile-matched synthetic PostgreSQL data into InfluxDB,
 - the `di-agent` process runs on each VM as a peer node,
 - the demo coordinator exercises trust-aware routing behavior.
 
@@ -28,7 +28,7 @@ The system has five layers:
    - Kafka for event transport
    - InfluxDB for time-series storage
    - Grafana for dashboards
-   - switchboard, genset, battery, propulsion, auxload, navigation, and telemetry-writer services
+   - replay-streamer, PostgreSQL, Kafka, and telemetry-writer; the legacy physics simulators are opt-in
 
 4. Agent layer
    - one `di-agent` pod per worker VM
@@ -49,16 +49,15 @@ PoC2 uses a two-part deployment strategy:
 The chart under `helm/di-agent-system` manages the shared runtime services:
 
 - Kafka
+- PostgreSQL engine-test dataset
 - InfluxDB
 - Grafana
-- genset
-- battery
-- propulsion
-- auxload
-- navigation
-- switchboard
+- replay-streamer (real or synthetic data mode)
 - telemetry-writer
-- playground
+
+Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and playground deployments are disabled by default and can be enabled individually through Helm values.
+
+The replay-streamer reads the selected `run_id` and `source` from PostgreSQL. In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` control the emission rate.
 
 The chart wraps all of these in one release but does not include the `di-agent` itself.
 

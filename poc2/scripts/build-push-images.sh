@@ -43,7 +43,7 @@ SYSTEM_DIR="$POC_DIR/system"
 REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
 TAG="${TAG:-latest}"
 
-ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync playground data-ingest)
+ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer)
 
 usage() {
     sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -62,6 +62,7 @@ service_dir() {
         telemetry-cloud-sync) printf '%s\n' "$SYSTEM_DIR/telemetry-cloud-sync" ;;
         playground) printf '%s\n' "$POC_DIR/playground" ;;
         data-ingest) printf '%s\n' "$POC_DIR/data-ingest" ;;
+        replay-streamer) printf '%s\n' "$SYSTEM_DIR/replay-streamer" ;;
         *) return 1 ;;
     esac
 }
