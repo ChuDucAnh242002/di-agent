@@ -1,0 +1,16 @@
+# Known workloads for checking discovery: each moves one resource on its own period,
+# on cycles that never line up (cycler 90 s, io 97, twins 113, memory 131, squeeze 173),
+# so pods should not correlate with each other — except the twins, which share a
+# wall-clock schedule.
+apiVersion: v1
+kind: Pod
+metadata: { name: mem-wave, labels: { check: casestudy, di-agent/group: memory } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    # 65 s holding 400 MB in a memory-backed volume, 66 s with it freed: a 131 s cycle.
+    command: ["sh", "-c", "while true; do dd if=/dev/zero of=/shm/f bs=1M count=400 2>/dev/null; sleep 65; rm -f /shm/f; sleep 66; done"]
+    resources: { requests: { cpu: 50m, memory: 32Mi }, limits: { cpu: 500m, memory: 600Mi } }
+    volumeMounts: [{ name: shm, mountPath: /shm }]
+  volumes: [{ name: shm, emptyDir: { medium: Memory, sizeLimit: 450Mi } }]

@@ -1,0 +1,25 @@
+# The demo's agent: the case study's, on a compressed timetable.
+node: { addr: "0.0.0.0:9090" }
+sources:
+  interval: 5s
+  netdata: { url: http://localhost:19999 }
+  # The node's other consumers, beside its pods: the agent itself, its decision model, k0s
+  # (with its own containerd), the system containerd and Netdata. Every other unit is in
+  # the node total and in no subject.
+  cgroup: { units: [di-agent.service, ollama.service, k0scontroller.service, containerd.service, netdata.service] }
+runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
+loops:
+  # The agent reviews discovery's candidates on its own, on this node: rules, then the decision
+  # model (tier1.sh: Ollama on CPUs 6-11, which no pod can use, 6-9 GB). Nothing waits for a person.
+  review:
+    level: full
+    # Kept loaded: a model unloading and reloading swings node memory by gigabytes, which the
+    # map would read as the node's behaviour.
+    decision: { backend: systemone, url: "http://localhost:11434", model: "tev1:4b-node", keep_alive: "24h" }
+    # No reasoning tier on this node (tier1.sh says why): what rules and the decision model are
+    # not sure of stays undecided until its evidence moves, and is reviewed again then.
+    reasoning: { backend: none }
+  relief: { enabled: true }
+persist:
+  file: /var/lib/di-agent/state.json
+domain: { path: none }
