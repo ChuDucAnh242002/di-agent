@@ -47,12 +47,10 @@ func TestBuildSeedsStructureAndNoMagnitude(t *testing.T) {
 				PriorWeightsPath:     pwPath,
 				KD:                   kd,
 				NodeID:               "testnode",
-				CgroupRoot:           "/sys/fs/cgroup",
-				CollectInterval:      0,
 				UseProposer:          false,
 			}
 
-			sm, _, err := Build("edge-minimal", cfg)
+			sm, err := Build("edge-minimal", cfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -162,7 +160,7 @@ func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
 			cfg.PriorWeightsPath = pwPath
 			cfg.KD = kd
 
-			sm, _, err := Build("edge-minimal", cfg)
+			sm, err := Build("edge-minimal", cfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -214,7 +212,7 @@ func TestBuildMakesCostAnswersTraceable(t *testing.T) {
 	cfg.DomainSpec = mustSpec()
 	cfg.StateMap = state
 
-	sm, _, err := Build("edge-minimal", cfg)
+	sm, err := Build("edge-minimal", cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

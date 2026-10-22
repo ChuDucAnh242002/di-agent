@@ -53,7 +53,7 @@ Measured on the reference build (`linux/arm64`, single static binary, no runtime
 | RSS after 500 observations (warm graph) | ~15 MB |
 | OS threads | 8 |
 
-A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. Memory grows with what the map holds, not with uptime: the domain model is small, the cgroup walk admits at most `sources.cgroup.max_subjects` subjects (default 256), silent properties are retired, and the observation ring buffers (the ~3 MB delta above) are bounded.
+A Raspberry Pi 4 (4 GB) runs this with room to spare — it was the reference target. Memory grows with what the map holds, not with uptime: the domain model is small, the cgroup walk admits at most the cgroup entry's `config.max_subjects` subjects (default 256), silent properties are retired, and the observation ring buffers (the ~3 MB delta above) are bounded.
 
 Set `map.proposer.enabled: false` on nodes where you want to reclaim the ring-buffer overhead entirely.
 
@@ -61,8 +61,8 @@ Set `map.proposer.enabled: false` on nodes where you want to reclaim the ring-bu
 
 | Requirement | Notes |
 | ----------- | ----- |
-| Linux with cgroups v2 | Only if you want the cgroup collector. `sources.cgroup.root: ""` disables it. |
-| Netdata (optional) | For richer host metrics. an empty `sources.netdata.url` disables it. Tested against v1.42 and v1.33. |
+| Linux with cgroups v2 | Only if you want the cgroup collector, which `sources.collectors` lists by default. Leave it out of the list to run without it. |
+| Netdata (optional) | For richer host metrics: a `type: netdata` entry in `sources.collectors` with `config.url`. Tested against v1.42 and v1.33. |
 | Nothing else | Static Go binary. No interpreter, no shared libraries, no package manager. |
 
 The agent does **not** require Kubernetes to run. `profile.kd` only names the distribution for the record and is validated against the artefact's `distributions` list; it selects no magnitude and does not talk to an API server.
@@ -206,8 +206,12 @@ profile:
   priors: /etc/di-agent/prior_weights.json
   regime: ${REGIME}
 sources:
-  netdata:
-    url: http://localhost:19999
+  collectors:
+    - name: cgroup
+      type: cgroup
+    - name: netdata
+      type: netdata
+      config: {url: http://localhost:19999, collapse: false}
 ```
 
 ```bash
@@ -367,10 +371,11 @@ Full inventory, so you can reason about it before deploying.
 
 | Path / endpoint | When | Why |
 | --------------- | ---- | --- |
-| `/sys/fs/cgroup/**` | Every `sources.interval` | CPU, memory, throttling and CPU, I/O and memory pressure (`cpu.stat`, `memory.current`, `cpu.pressure`, `io.pressure`, `memory.pressure`). Read-only. Disable with `sources.cgroup.root: ""`. |
+| `/sys/fs/cgroup/**` | Every `sources.interval` | CPU, memory, throttling and CPU, I/O and memory pressure (`cpu.stat`, `memory.current`, `cpu.pressure`, `io.pressure`, `memory.pressure`). Read-only. With a `type: cgroup` entry in `sources.collectors` (the default); its `config.root` names the tree. |
 | `/proc/meminfo`, `/proc/stat` | Every `sources.interval`, with the cgroup collector | The node's memory in use (a cgroup v2 root has no memory files) and CPU steal time. Read-only. |
 | `/proc/meminfo`, the agent's own `/sys/fs/cgroup/memory.max` and `cpu.max` | Once at start, with the proposer on and `map.proposer.max_pairs: 0` | The memory and CPUs the agent may use, from which the pair budget is derived. A container limit lower than the host counts. Read-only. |
-| `$NETDATA_URL/api/v1/data` | Every `sources.interval` | Host metrics. Disable with `sources.netdata.url: ""`. |
+| Netdata's `config.url` `/api/v1/allmetrics` | Every `sources.interval` | Host metrics. Only with a `type: netdata` entry in `sources.collectors`. |
+| An `exec` plugin's program, an `http` plugin's URL | Started once (`exec`, restarted if it exits); every `sources.interval` | Whatever the plugin reads. Only for the plugins `sources.collectors` lists; an `exec` plugin runs as the agent's user with a minimal environment. |
 | `profile.priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
 | `explain.prompt` files | Once, at startup | Only when the explain layer is enabled. |
 
@@ -383,7 +388,7 @@ Full inventory, so you can reason about it before deploying.
 | Direction | Target | When |
 | --------- | ------ | ---- |
 | Inbound | `node.addr` (default `:8080`, **all interfaces**) | Always. **Unauthenticated.** |
-| Outbound | Netdata at `sources.netdata.url` | Every collect interval |
+| Outbound | Netdata, and any `http` plugin, at the URL its `sources.collectors` entry names | Every collect interval |
 | Outbound | Peer agents' `/cost`, `/healthz`, `/offload` | On `/recommend` and offload |
 | Outbound | LLM at `explain.url` | Only if `explain.provider` is set; default is `none`, so **no LLM traffic by default** |
 
@@ -401,12 +406,13 @@ None. It needs no root, no capabilities, and no write access. `DynamicUser=yes` 
 
 ```bash
 journalctl -u di-agent | grep "collection loop"
-# "collection loop disabled: -collect-interval=0s"  → you disabled it
-# "collection loop disabled: no collector"          → both sources are off
-# "collection loop started: source=… interval=…"    → loop is up; source is unreachable
+# "collection loop disabled: sources.interval=0s"     → you disabled it
+# "collection loop disabled: no collector"           → sources.collectors is empty
+# "collection loop started: source=… interval=…"     → loop is up; check each collector:
+curl -s localhost:8080/collectors   # state backoff + last_error names the one failing
 ```
 
-If the loop is up, test the source directly: `curl -s localhost:19999/api/v1/data?chart=system.cpu | head`. On macOS or a container without cgroups v2, `sources.cgroup.root: ""` is correct and expected — you need Netdata instead.
+If the loop is up, test the source directly: `curl -s localhost:19999/api/v1/data?chart=system.cpu | head`. On macOS or a container without cgroups v2 the cgroup collector reads nothing — list a Netdata entry instead (`collapse: true`, its default, so it supplies the node's own types) and drop the cgroup one.
 
 **Port already in use.** Under k0s, kube-router owns `:8080`. Use `:9090`. Check with `ss -tlnp | grep :8080`.
 

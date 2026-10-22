@@ -21,7 +21,7 @@ import (
 // declares a Discovered relationship in the state model running that way.
 func TestNodePairDiscoveredAndConfirmedWithADirection(t *testing.T) {
 	state := newTestState(t)
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		StateMap: state, EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		UseRuleBasedTuner: true, UseProposer: true, ProposerThreshold: 0.8, ProposerMinPairs: 10,
 	})
@@ -148,7 +148,7 @@ func TestStateReportsHowFarDiscoveryWasRationed(t *testing.T) {
 	}{{"budget of one", true}, {"no proposer", false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := newTestState(t)
-			sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+			sm, err := profiles.Build("edge-minimal", profiles.Config{
 				StateMap: state, EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 				UseRuleBasedTuner: true, UseProposer: tc.proposer, ProposerMaxPairs: 1,
 			})

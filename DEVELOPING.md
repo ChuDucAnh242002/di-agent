@@ -154,7 +154,7 @@ type CollectorContract interface {
 1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source, include patterns) or `collector_cgroup.go` (filesystem source).
 2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, subject, metricType, timestamp)`.
 3. Return `(nil, nil)` for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
-4. Wire it in `pkg/profiles/profiles.go`. If more than one collector is active, wrap them in `MultiCollector`.
+4. Register it as a type in `pkg/collectors/builtin.go` (`Register("<source>", factory)`), with a factory that decodes its own `config` strictly, and list it in `sources.collectors`. The Supervisor runs it beside the others; no profile changes.
 5. Add `internal/minimal/collector_<source>_test.go` and run the compliance suite against it:
 
 ```go
@@ -341,7 +341,7 @@ Never commit absolute local paths (`/Users/…`).
 
 **Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `node.addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
 
-**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) `sources.cgroup.root: ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
+**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) the cgroup collector reads nothing on macOS, which has no cgroups v2 — leave it out of `sources.collectors` there; (3) the metric source is unreachable. `./dev.sh logs` shows each configured collector at startup (`collector <name>: …`), and `curl localhost:8080/collectors` shows whether each is `ok` or in `backoff`, with its last error.
 
 **Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values. Every `MetricSample.Value` must be in `[0,1]`. See the warning in [§4.1](#41-add-a-collector-most-common).
 

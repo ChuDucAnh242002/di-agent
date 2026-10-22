@@ -81,7 +81,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units `sources.cgroup.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -146,6 +146,14 @@ semantic-map/
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
     │   │   └── client_test.go  Push wire-format + EventID determinism coverage
+    │   ├── collectors/         Telemetry sources from sources.collectors (concrete, NOT a contract)
+    │   │   ├── registry.go     Register(type, Factory) + Build(env, entries) → Supervisor
+    │   │   ├── builtin.go      The built-in types: cgroup, netdata, script, each decoding its own config
+    │   │   ├── supervisor.go   Supervisor — every member each tick: timeout, fault isolation, backoff,
+    │   │   │                   contract enforcement, one owner per node-level type, Status()
+    │   │   ├── wire.go         Wire protocol v1 (hello, collect, shutdown) shared by both transports
+    │   │   ├── exec.go         ExecCollector — a plugin process speaking the protocol on stdin/stdout
+    │   │   └── http.go         HTTPCollector — a plugin reached over HTTP
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
@@ -194,7 +202,7 @@ semantic-map/
     │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
     │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
-    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up (no collectors)
     │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties; structure only
     │
     ├── internal/               Implementation packages — not importable externally
@@ -214,7 +222,6 @@ semantic-map/
     │       │                         drivers) and allowlisted system.slice units
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, include patterns
     │       │                         over chart contexts)
-    │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
     │       │                                           propositions from domain_spec.json. No
     │       │                                           strengths, no history — both live on the
@@ -247,6 +254,7 @@ semantic-map/
     ├── cmd/agent/              Daemon binary
     │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
+    │   ├── collectors_route.go GET /collectors: each configured collector's status
     │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
@@ -450,6 +458,29 @@ def push(base, node, subject, source, metric, unit, rng, value):
     urllib.request.urlopen(req, timeout=5).read()
 ```
 
+### `GET /collectors`
+
+Each collector in `sources.collectors`, in list order, with what it has done so far.
+Read-only: collectors are configured in the spec, not over HTTP.
+
+```json
+{"interval_s":10,
+ "collectors":[
+  {"name":"cgroup","kind":"type","type":"cgroup","state":"ok",
+   "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
+   "samples":51234,"violations":0,"ownership_drops":0,"restarts":0,
+   "backoff_until_unix":0,"available":["cpu_utilization","..."]}]}
+```
+
+`kind` is `type` (a built-in), `exec` or `http`; `type` is the built-in's name and empty
+otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
+`backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
+5 min, reset by a success). `violations` counts samples dropped for breaking the collector
+contract (an invalid metric type or subject, no unit, a foreign `node_id`, a unit or range
+that changed); `ownership_drops` counts node-level samples dropped because an earlier
+collector in the list owns that type; `restarts` counts an exec plugin's process restarts.
+With no collectors configured the list is `[]`.
+
 ### `GET /candidates`
 
 Lists Proposer candidate edges pending review. `?status=all` lists every candidate the
@@ -561,6 +592,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
+| GET  | `/collectors`                       | —                                                        | collectors | `{interval_s, collectors:[…]}`: each configured collector's state, counters and declared types, in list order; see [`GET /collectors`](#get-collectors) |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the runtime has refused; absent when none), `cooling` | relief   |
@@ -651,14 +683,18 @@ profile:
   kd: k0s
   priors: /etc/semantic-map/prior_weights.json
 sources:
-  netdata:
-    url: http://localhost:19999
+  collectors:
+    - name: cgroup
+      type: cgroup
+    - name: netdata
+      type: netdata
+      config: {url: http://localhost:19999, collapse: false}
 loops:
   review:
     level: full
 ```
 
-Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
+Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Three lists replace rather than extend their defaults: `sources.collectors` written in the file is the whole set of collectors (naming Netdata alone drops the default cgroup entry); `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
 
 Values that cannot be what was meant are refused at startup, every one named. In the policy: an `allow` or `deny` entry that is not an action (`cpu.limit`, or `evict`, which no runtime performs and the defaults deny), in the defaults or any rule, since a misspelt deny would deny nothing; and a `match.kind` that is not a workload kind (`pod`, `container`, `unit`, `app`), since a misspelt kind would match nothing. In relief: `loops.relief.cpu.expiry` must be longer than `settle`, or a change would be given back before it is judged. `min_effect` is a planning floor: a step whose predicted drop in pressure is below it is not taken. A step is then judged against its own prediction: kept when the observed drop is at least half the predicted one, reverted otherwise; a change taken up after a restart is always kept, as its baseline was read with the cap in force.
 
@@ -1008,17 +1044,25 @@ the shape of the real thing.
 | `profile.min_trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
-| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `sources.cgroup.root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
-| `sources.cgroup.subjects`  | `true`           | Walk pod cgroups (and `sources.cgroup.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
-| `sources.cgroup.units`     | `[]`             | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
-| `sources.cgroup.max_subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
-| `sources.cgroup.cmd_label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
-| `sources.cgroup.pod_logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. The kubelet's per-container links beside it (`/var/log/containers`) break a pod with more than one container into `container:<uid>.<name>` subjects, each labelled with its pod as `parent`. |
+| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
+| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello — is refused at startup, naming the entry. |
+| `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
+| `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
+| `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |
+| `sources.collectors[].http` | — | `{url}`: a plugin reached over HTTP, speaking the same protocol. |
+| `sources.collectors[].timeout` | `min(interval/2, 5s)` | The longest one collect may take. At most `sources.interval`. |
+| `sources.collectors[].config` | — | The collector's own settings. A built-in decodes them strictly (an unknown key is refused); an `exec` or `http` plugin receives them in its hello. |
+| `type: cgroup` `config.root` | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. On macOS or a node without cgroups v2, leave the cgroup entry out of the list. The agent's `GET /groups` reads cgroups from the first cgroup entry's root. |
+| `type: cgroup` `config.subjects` | `true` | Walk pod cgroups (and `config.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
+| `type: cgroup` `config.units` | `[]` | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
+| `type: cgroup` `config.max_subjects` | `256` | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
+| `type: cgroup` `config.cmd_label` | `false` | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
+| `type: cgroup` `config.pod_logs` | `/var/log/pods` | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. The kubelet's per-container links beside it (`/var/log/containers`) break a pod with more than one container into `container:<uid>.<name>` subjects, each labelled with its pod as `parent`. |
+| `type: netdata` `config.url` | required | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). |
+| `type: netdata` `config.include` | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
+| `type: netdata` `config.collapse` | `true` | Also emit the node's own types (`cpu_utilization` and the rest) from Netdata's system charts. Set `false` when a cgroup entry is listed before it: the cgroup collector supplies those types, and Netdata measures CPU differently. |
+| `type: script` `config.path` | required | Run the synthetic system from this scenario file. Exclusive: a list holding a `script` entry and any other is refused. `sources.interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `node.id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
-| `sources.netdata.url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `sources.cgroup.root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
-| `sources.netdata.include`  | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
-| `sources.script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `sources.interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `map.proposer.enabled`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `map.proposer.threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
@@ -1041,7 +1085,7 @@ A scenario is JSON with a name, `seed`, `tick_seconds`, `duration_seconds`, opti
 
 Property names are metric types (`[A-Za-z0-9._-]`); the runner addresses a subject's property as `<property>@<subject>`. The loader validates all of this and refuses a file it cannot run: every `of` must name an existing subject property (or, for `logistic`, a non-logistic node property), a `linear` counterfactual needs `tolerance > 0` and a `saturated` one `min_error > 0`, its target must be a node property and its `assume` keys must name existing subject properties. Past `duration_seconds` the script emits nothing and logs once that the scenario finished.
 
-See `scenarios/` for five seed scenario files to drive `sources.script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
+See `scenarios/` for five seed scenario files to drive a `script` collector with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 
@@ -1083,7 +1127,7 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
 | `groups.label_keys`                  | `[di-agent/group, app.kubernetes.io/part-of]` | Pod labels naming a pod's group, first set wins; a `kube-system` pod with none is in `kube-system`. Label your storage pods `di-agent/group: storage` and the map holds what the storage group uses. |
-| `groups.units`                       | `{system: ["*"]}`     | Group name → globs of the units `sources.cgroup.units` models. CPU cores, disks and physical NICs are `hardware`, other virtual interfaces `network`, a `veth` is its pod's. |
+| `groups.units`                       | `{system: ["*"]}`     | Group name → globs of the units a cgroup collector's `config.units` models. CPU cores, disks and physical NICs are `hardware`, other virtual interfaces `network`, a `veth` is its pod's. |
 | `groups.interval`                    | `30s`                 | How often the topology is recomputed; `0` turns grouping off. |
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |

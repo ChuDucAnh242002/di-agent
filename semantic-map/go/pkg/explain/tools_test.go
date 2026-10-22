@@ -25,7 +25,7 @@ func newTestMap(t *testing.T) (explain.SemanticMapReader, *semmap.SemanticMap) {
 	t.Helper()
 	// A state model, as a daemon always attaches: cost is answered from the map, so an
 	// agent without one cannot answer get_cost at all.
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec: mustSpec(t),
 		StateMap:   statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
 	})

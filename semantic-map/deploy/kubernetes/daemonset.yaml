@@ -21,9 +21,12 @@ data:
     node:
       id: ${NODE_NAME}
     sources:
-      cgroup:
-        root: /host/sys/fs/cgroup
-        pod_logs: /host/var/log/pods
+      collectors:
+        - name: cgroup
+          type: cgroup
+          config:
+            root: /host/sys/fs/cgroup
+            pod_logs: /host/var/log/pods
     facts:
       - kind: host
         root: /host

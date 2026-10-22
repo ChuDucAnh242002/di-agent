@@ -23,7 +23,7 @@ import (
 // avoid duplicating the agent boot sequence.
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		StateMap:             newTestState(t),
 		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.2,
@@ -1005,7 +1005,7 @@ func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
 
 func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		StateMap:             newTestState(t),
 		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.5,

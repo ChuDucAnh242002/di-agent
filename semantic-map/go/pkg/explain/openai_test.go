@@ -232,7 +232,7 @@ func TestExplain_DisabledReturnsErrNotEnabled(t *testing.T) {
 // session store, driven by a scripted LLM.
 func newV2Explainer(t *testing.T, script []string, sessions *explain.SessionStore) (*explain.OpenAICompatibleExplainer, *semmap.SemanticMap, *scriptedLLM) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestExplain_CriticCatchesStructurallyValidButWrongAnswer(t *testing.T) {
 
 // A critic that errors must not block a structurally valid answer.
 func TestExplain_CriticFailureShipsValidAnswerWithNote(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestExplain_SessionIDWithoutStoreIsRejected(t *testing.T) {
 // burned all 10 tool calls on "how many propositions are in the graph?" and
 // the daemon returned a bare "exceeded MaxToolCalls" with no answer.
 func TestExplain_ToolLoopIsForcedToAnswerRatherThanFailing(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestExplain_ToolLoopIsForcedToAnswerRatherThanFailing(t *testing.T) {
 }
 
 func TestExplain_UsageAccountsTokensAndWallClock(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +687,7 @@ func TestExplain_ProseAnswerIsRetriedWithoutTools(t *testing.T) {
 	// different from the first. Observed against qwen2.5:7b-instruct on Ollama,
 	// the documented default backend: offered tools it answered in prose every
 	// time; the same evidence with no tools produced the response object.
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

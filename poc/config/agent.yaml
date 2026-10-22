@@ -8,8 +8,14 @@ profile:
   regime: ${REGIME}
 sources:
   interval: 5s
-  netdata:
-    url: http://localhost:19999
+  # cgroup first: it supplies the node's own types, and Netdata (collapse: false) adds
+  # its charts beside them without feeding cpu_utilization a second time.
+  collectors:
+    - name: cgroup
+      type: cgroup
+    - name: netdata
+      type: netdata
+      config: { url: http://localhost:19999, collapse: false }
 map:
   proposer:
     enabled: false

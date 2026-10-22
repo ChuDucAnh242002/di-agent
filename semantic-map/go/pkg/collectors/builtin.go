@@ -9,6 +9,7 @@ import (
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/internal/scripted"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -27,8 +28,33 @@ type cgroupConfig struct {
 	PodLogs     string   `yaml:"pod_logs"`
 }
 
+// defaultCgroupConfig is what a cgroup entry runs with when its config names
+// nothing: the host's unified hierarchy, pods and allowlisted units as subjects.
+func defaultCgroupConfig() cgroupConfig {
+	return cgroupConfig{Root: "/sys/fs/cgroup", Subjects: true, Units: []string{}, MaxSubjects: 256, PodLogs: minimal.DefaultPodLogRoot}
+}
+
+// CgroupRoot is the cgroup hierarchy the agent reads its own cgroups from: the
+// root of the first cgroup entry, so the agent's groups walk the same tree its
+// collector reports on, or the default hierarchy when no entry is a cgroup one.
+// An entry whose config does not decode yields the default too; Build has already
+// refused that list.
+func CgroupRoot(entries []spec.CollectorEntry) string {
+	cfg := defaultCgroupConfig()
+	for _, e := range entries {
+		if e.Type != "cgroup" {
+			continue
+		}
+		if err := decodeStrict(&e.Config, &cfg); err != nil {
+			return defaultCgroupConfig().Root
+		}
+		break
+	}
+	return cfg.Root
+}
+
 func newCgroup(env Env, n *yaml.Node) (contracts.CollectorContract, error) {
-	cfg := cgroupConfig{Root: "/sys/fs/cgroup", Subjects: true, Units: []string{}, MaxSubjects: 256, PodLogs: minimal.DefaultPodLogRoot}
+	cfg := defaultCgroupConfig()
 	if err := decodeStrict(n, &cfg); err != nil {
 		return nil, err
 	}

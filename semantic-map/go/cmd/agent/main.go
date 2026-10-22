@@ -22,11 +22,11 @@
 // The profile's kd (profile.kd) selects the distribution named in profile.priors
 // when set. Omit it to use the global Di-Select proposition strengths.
 //
-// The autonomous collection loop ticks at sources.interval, calls
-// CollectorContract.Collect on the profile's collector, and runs each sample
-// through the facade's IngestSample. The collector is the cgroup one at
-// sources.cgroup.root, the Netdata one at sources.netdata.url, both together, or the
-// synthetic system from sources.script; with none configured, or sources.interval 0,
+// The autonomous collection loop ticks at sources.interval, calls Collect on the
+// supervisor built from sources.collectors (pkg/collectors), and runs each sample
+// through the facade's IngestSample. The supervisor runs every listed collector —
+// built-in types, exec plugins, http plugins — isolating each one's faults, and
+// GET /collectors reports their status. With an empty list, or sources.interval 0,
 // the loop is disabled and only the manual POST /ingest-sample path updates the model.
 //
 // profile.regime (stable|default|bursty|volatile) sets alpha and convergence to a
@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/collectors"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
@@ -158,12 +159,6 @@ func main() {
 	}
 	log.Printf("proposer: threshold=%.2f min-pairs=%d min-spread=%.3f fdr=%.3f max-pairs=%d",
 		prop.Threshold, prop.MinPairs, prop.MinSpread, prop.FDR, maxPairs)
-	cg := cfg.Sources.Cgroup
-	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v pod-logs=%q",
-		cg.Root, cg.Subjects, cg.Units, cg.MaxSubjects, cg.CmdLabel, cg.PodLogs)
-	if cfg.Sources.Netdata.URL != "" {
-		log.Printf("netdata collector: url=%s include=%q", cfg.Sources.Netdata.URL, cfg.Sources.Netdata.Include)
-	}
 
 	peerURLs := cfg.Peers.URLs
 
@@ -176,16 +171,6 @@ func main() {
 		PriorWeightsPath:     cfg.Profile.Priors,
 		KD:                   cfg.Profile.KD,
 		NodeID:               cfg.Node.ID,
-		CgroupRoot:           cg.Root,
-		CgroupSubjects:       cg.Subjects,
-		CgroupUnitGlobs:      cg.Units,
-		CgroupMaxSubjects:    cg.MaxSubjects,
-		CgroupCmdLabel:       cg.CmdLabel,
-		CgroupPodLogRoot:     cg.PodLogs,
-		ScriptPath:           cfg.Sources.Script,
-		NetdataURL:           cfg.Sources.Netdata.URL,
-		NetdataInclude:       cfg.Sources.Netdata.Include,
-		CollectInterval:      cfg.Sources.Interval,
 		PeerURLs:             peerURLs,
 		UseProposer:          prop.Enabled,
 		ProposerThreshold:    prop.Threshold,
@@ -270,9 +255,27 @@ func main() {
 
 	pcfg.StateMap = state
 
-	sm, collector, err := profiles.Build(cfg.Profile.Name, pcfg)
+	sm, err := profiles.Build(cfg.Profile.Name, pcfg)
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", cfg.Profile.Name, err)
+	}
+	// Collectors are built after the map so a refused entry stops the daemon before it
+	// serves anything; a broken collector found later is isolated by the supervisor
+	// and reported at GET /collectors instead.
+	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf},
+		cfg.Sources.Collectors)
+	if err != nil {
+		log.Fatalf("collectors: %v", err)
+	}
+	if sup != nil {
+		defer sup.Close()
+		for _, e := range cfg.Sources.Collectors {
+			timeout := e.Timeout
+			if timeout <= 0 {
+				timeout = collectors.DefaultTimeout(cfg.Sources.Interval)
+			}
+			log.Printf("collector %s: %s %s timeout=%s", e.Name, e.Kind(), collectorSource(e), timeout)
+		}
 	}
 	if len(peerURLs) > 0 {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
@@ -299,6 +302,7 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
 	registerConfigRoute(mux, cfg)
+	registerCollectorsRoute(mux, sup, cfg.Sources.Interval)
 	rt, err := runtime.Build(cfg.Runtime.Kind, runtime.Env{NodeID: cfg.Node.ID, Spec: cfg.Runtime, Subjects: workloadSubjects(state)})
 	if err != nil {
 		log.Fatalf("runtime.kind in %s: %v", *configPath, err)
@@ -330,7 +334,7 @@ func main() {
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
 	registerAutonomyRoutes(mux, reviewer)
 	grp := &grouper{state: state, cfg: groups.Config{LabelKeys: cfg.Groups.LabelKeys, Units: cfg.Groups.Units},
-		linux:     groups.Linux{SysRoot: "/sys", ProcRoot: "/proc", CgroupRoot: cfg.Sources.Cgroup.Root},
+		linux:     groups.Linux{SysRoot: "/sys", ProcRoot: "/proc", CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors)},
 		workloads: rt.Workloads, logf: log.Printf}
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
@@ -347,8 +351,8 @@ func main() {
 		}
 	}()
 
-	// Start the autonomous collection loop if the profile produced a
-	// collector AND the interval is positive. Both must hold — a configured
+	// Start the autonomous collection loop if sources.collectors built a
+	// supervisor AND the interval is positive. Both must hold — a configured
 	// collector with interval=0 is a deliberately disabled loop (useful for
 	// tests and for nodes that only accept manual POST /ingest-sample).
 	// Lifecycle is time-based, so something has to advance it. Without this loop
@@ -362,6 +366,12 @@ func main() {
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 
+	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
+	// would call it; no collectors is a nil collector.
+	var collector contracts.CollectorContract
+	if sup != nil {
+		collector = sup
+	}
 	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
@@ -441,7 +451,7 @@ func startCollectionLoop(
 ) {
 	switch {
 	case collector == nil:
-		log.Printf("collection loop disabled: no collector for this profile/configuration")
+		log.Printf("collection loop disabled: no collector (sources.collectors is empty)")
 		return
 	case interval <= 0:
 		log.Printf("collection loop disabled: sources.interval=%s", interval)
@@ -632,6 +642,18 @@ func checkCanRecord(hasSpec, noAdmit bool, restored int) error {
 	return fmt.Errorf("admit: false without a domain model records nothing: no property " +
 		"is declared, so every observation would be refused. Set domain.path, restore a " +
 		"snapshot with persist.file, or set map.admit: true")
+}
+
+// collectorSource names what a collector entry runs, for the startup log: the
+// registered type, the plugin's command, or the plugin's URL.
+func collectorSource(e spec.CollectorEntry) string {
+	switch {
+	case e.Exec != nil:
+		return e.Exec.Command
+	case e.HTTP != nil:
+		return e.HTTP.URL
+	}
+	return e.Type
 }
 
 // orDefault reports the value actually in force, so the startup log is a record of

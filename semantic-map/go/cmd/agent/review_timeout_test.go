@@ -38,7 +38,7 @@ func TestAReviewModelsTimeoutIsConfigured(t *testing.T) {
 		reasoning = s.Timeout
 		return timeoutReasoner{}, nil
 	})
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{StateMap: newTestState(t)})
+	sm, err := profiles.Build("edge-minimal", profiles.Config{StateMap: newTestState(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

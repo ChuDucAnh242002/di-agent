@@ -77,9 +77,6 @@ type Profile struct {
 // Sources is where telemetry comes from. Interval 0 disables the collection loop.
 type Sources struct {
 	Interval time.Duration `yaml:"interval"`
-	Cgroup   Cgroup        `yaml:"cgroup"`
-	Netdata  Netdata       `yaml:"netdata"`
-	Script   string        `yaml:"script"`
 	// Collectors is the ordered list of telemetry collectors; the order is the
 	// ownership priority for node-level types. An empty list disables the loop.
 	Collectors []CollectorEntry `yaml:"collectors"`
@@ -131,22 +128,6 @@ func (e CollectorEntry) kinds() []string {
 		k = append(k, "http")
 	}
 	return k
-}
-
-// Cgroup configures the cgroup collector; an empty Root disables it.
-type Cgroup struct {
-	Root        string   `yaml:"root"`
-	Subjects    bool     `yaml:"subjects"`
-	Units       []string `yaml:"units"`
-	MaxSubjects int      `yaml:"max_subjects"`
-	CmdLabel    bool     `yaml:"cmd_label"`
-	PodLogs     string   `yaml:"pod_logs"`
-}
-
-// Netdata configures the Netdata collector; an empty URL disables it.
-type Netdata struct {
-	URL     string   `yaml:"url"`
-	Include []string `yaml:"include"`
 }
 
 // FactSource names one source of the machine's facts and where its filesystem
@@ -449,11 +430,6 @@ func Default() Spec {
 		},
 		Sources: Sources{
 			Interval: 10 * time.Second,
-			Cgroup: Cgroup{
-				Root: "/sys/fs/cgroup", Subjects: true, Units: []string{},
-				MaxSubjects: 256, PodLogs: minimal.DefaultPodLogRoot,
-			},
-			Netdata: Netdata{Include: slices.Clone(minimal.DefaultNetdataInclude)},
 			// The file's list replaces this one: decoding into a non-empty slice
 			// restarts it, so naming collectors never adds to the default.
 			Collectors: []CollectorEntry{{Name: "cgroup", Type: "cgroup"}},

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -96,5 +97,60 @@ func TestCollectorsUnknownKeyRefused(t *testing.T) {
 	}
 	if _, err := Parse([]byte("sources:\n  collectors:\n    - {name: x, type: cgroup, config: {anything: 1}}\n")); err != nil {
 		t.Fatalf("config keys are the collector's to check: %v", err)
+	}
+}
+
+// TestExampleConfigsParse pins that the shipped example loads under the current
+// schema: it is the file operators copy, so a key it still uses after a rename is
+// a refusal on their first start.
+func TestExampleConfigsParse(t *testing.T) {
+	s, err := Load("../../../agent.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Sources.Collectors) < 1 {
+		t.Fatal("agent.example.yaml names no collector")
+	}
+}
+
+// TestCollectorsYAMLRoundTrip pins that the spec as -print-config and GET /config
+// render it reads back to the same collectors: an entry's config is opaque to the
+// schema, so it must survive the round trip as the collector will decode it.
+func TestCollectorsYAMLRoundTrip(t *testing.T) {
+	s, err := Parse([]byte(collectorsYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry built in code, with no config, is how the default list is written.
+	s.Sources.Collectors = append(s.Sources.Collectors, CollectorEntry{Name: "bare", Type: "cgroup"})
+	out, err := s.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Parse(out)
+	if err != nil {
+		t.Fatalf("printed spec does not parse: %v\n%s", err, out)
+	}
+	want, got := s.Sources.Collectors, back.Sources.Collectors
+	if len(got) != len(want) {
+		t.Fatalf("got %d collectors back, want %d", len(got), len(want))
+	}
+	for i := range want {
+		w, g := want[i], got[i]
+		if g.Name != w.Name || g.Kind() != w.Kind() || g.Type != w.Type || g.Timeout != w.Timeout {
+			t.Errorf("[%d] = %+v, want %+v", i, g, w)
+		}
+		var wc, gc map[string]any
+		if err := w.Config.Decode(&wc); err != nil && w.Config.Kind != 0 {
+			t.Fatal(err)
+		}
+		if g.Config.Kind != 0 {
+			if err := g.Config.Decode(&gc); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !reflect.DeepEqual(wc, gc) {
+			t.Errorf("[%d] config = %v, want %v", i, gc, wc)
+		}
 	}
 }

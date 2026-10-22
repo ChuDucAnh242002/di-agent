@@ -25,7 +25,7 @@ import (
 // answer 501 and say why, rather than 500 or a cost of zero.
 func TestAgentRunsWithoutADomainModel(t *testing.T) {
 	state := newTestState(t)
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		StateMap:             state,
 		DomainSpec:           nil,
 		EMAAlpha:             0.2,

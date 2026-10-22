@@ -245,7 +245,7 @@ func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, val
 func TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
 	build := func(kd string) *semmap.SemanticMap {
-		sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		sm, err := profiles.Build("edge-minimal", profiles.Config{
 			DomainSpec: mustSpec(),
 			StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
 			EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
@@ -518,7 +518,7 @@ type coordinationAgent struct {
 // the default trust of 0.5.
 func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordinationAgent {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec:           mustSpec(),
 		StateMap:             statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
 		EMAAlpha:             0.5,

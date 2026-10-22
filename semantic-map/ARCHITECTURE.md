@@ -272,7 +272,7 @@ What each piece is for, when it runs, and whether it is required.
 
 | Component | Package | Purpose | Runs when | Required? |
 |---|---|---|---|---|
-| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
+| **Collector** | `pkg/collectors` (built-ins in `internal/minimal`, `internal/scripted`) | Read raw metrics from cgroup / Netdata / a plugin; emit typed `MetricSample`s. The configured list (`sources.collectors`) runs under one Supervisor | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
 | **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
 | **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
 | **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
@@ -282,7 +282,7 @@ What each piece is for, when it runs, and whether it is required.
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
 | **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
 | **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
-| **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup | Once, at boot | Yes |
+| **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup (not collectors: those are `sources.collectors`) | Once, at boot | Yes |
 
 ### The four request lifecycles
 
@@ -367,10 +367,10 @@ POST /explain {"question":"why is my cost high?","use_planner":true,"use_critic"
 The Semantic Map is not a monolith. It is a **set of responsibilities, each behind a contract (interface)**. Concrete implementations are fully swappable — agent code never imports an implementation directly.
 
 ```
-  Metric source          Semantic Map
-  (cgroup / Netdata)
+  Metric sources         Semantic Map
+  (cgroup / Netdata / plugins, in-process or exec/http)
         │
-   [Collector] ──samples──▶ [state model: properties, relationships]
+   [Supervisor of Collectors] ──samples──▶ [state model: properties, relationships]
                                                               │
                     ┌─────────────────────────────────────────┘
                     ▼
@@ -395,6 +395,12 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
 
 The Collector lives outside the SemanticMap facade — it feeds it. The three components below the facade are *consumers*: they read model state and expose it, but only the facade's own mutation methods can change it.
 
+**Collectors are plugged in, not wired.** Which collectors run is configuration (`sources.collectors`, an ordered list), not a profile's code: `pkg/collectors` keeps a registry of types (`cgroup`, `netdata` and `script` are built in; an out-of-tree Go package adds one with `Register` in its `init`) and builds the list into a **Supervisor**, which is itself a `CollectorContract`, so the collection loop still sees one source. The Supervisor replaces `MultiCollector`, which fanned out to its members and halted the tick at the first member's error, so one broken source silenced the rest. Under the Supervisor each member runs concurrently under its own timeout; an error, panic or timeout costs that member its samples for the tick and puts it in exponential backoff, and the others deliver. A Go member cannot be cancelled, so a call that outlives its timeout is abandoned and the member is not called again until it returns. The Supervisor also enforces the contract on every member, built-ins included: a sample with an invalid type or subject, no unit, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type is dropped and counted, and the rest of the batch is kept. What each member is doing is `GET /collectors`.
+
+**One owner per node-level type.** Two collectors can both measure a node-level quantity — cgroup and Netdata both report `cpu_utilization`, measured differently — and two producers alternating on one property would mix in its EMA. A node-level type is owned by the earliest-listed member that has emitted it; another member's samples of it are dropped and counted. Ownership is sticky across the owner's backoff and moves only to an earlier-listed member. This replaces a hidden coupling the old wiring had (Netdata stopped emitting node types whenever cgroup was configured too) with a rule the list order states, plus Netdata's explicit `collapse` flag. Subject-scoped samples are keyed `type@subject` and have no owner.
+
+**The contract has a wire form.** A collector need not be Go or in the agent's process: an `exec` entry starts a program that speaks wire protocol v1 (JSON messages: a hello once per start, then one collect per tick) as newline-delimited lines on its stdin and stdout, and an `http` entry POSTs the same messages to a URL. The protocol is a transport for `CollectorContract`, not a second contract: the adapters (`ExecCollector`, `HTTPCollector`) implement the contract, the same guarantees apply, and the same compliance suite certifies a plugin. A plugin that cannot complete its hello refuses the agent's start rather than running as a silent gap.
+
 ### What is deliberately not a contract
 
 The contract set is the five in `pkg/contracts` plus Runtime (`pkg/runtime`, the sixth). Three substantial components sit outside it on purpose:
@@ -411,7 +417,7 @@ The rule we hold to: **no new contract without a second implementation that need
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit, and range where the quantity has one, per type | Pure read; deterministic `event_id`; every type a `collect()` emits is in the `available_metrics()` that follows it; never raises on empty data |
+| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit, and range where the quantity has one, per type. In process, or out of process over wire protocol v1 (`exec`, `http`) | Pure read; deterministic `event_id`; every type a `collect()` emits is in the `available_metrics()` that follows it; never raises on empty data |
 | **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; an operator's `Reject` permanently suppresses within session |
@@ -580,6 +586,8 @@ A profile is a named configuration that wires specific implementations to each c
 | `edge-minimal`  | cgroup (direct `/sys/fs`)   | in-memory + snapshots  | Static Di-Select         | Rule engine      | MI correlation    | RPi4, IoT nodes       |
 | `edge-standard` | cgroup + kubelet `/metrics` | + variance per property | Static + extension table | Rule engine      | Threshold-based   | Standard edge servers |
 | `cloud-full`    | Netdata HTTP API            | + durable store         | RDF/OWL + SPARQL         | SLM (Phi-3 Mini) | Correlation miner | Cloud VMs             |
+
+The Collector column is what the profile is meant to run on; it is not wired by the profile. Collectors are configured in `sources.collectors` for every profile alike (§2).
 
 **EMA** — Exponential Moving Average: `new = α × observation + (1-α) × old`. Controls how fast a property's value follows what it observes. `α = 0.2` is the default.
 
@@ -1056,13 +1064,13 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under `sources.cgroup.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `sources.cgroup.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `sources.cgroup.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
-| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick), `/api/v1/charts` for chart types (when a chart appears that it has not described, at most once a minute) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`sources.netdata.include`; a curated default of CPU, memory, I/O, network and disk — not pressure, which beside the cgroup collector is the same quantity read twice and discovery proposes the two readings as a near-perfect pair; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped. A sample's chart is the Netdata chart id only when Netdata calls the chart `stacked` — a whole split into parts (`system.cpu`, `system.ram`, `disk.space`) — and `<chart id>/<dimension>` otherwise: an area or line chart's dimensions share an axis, not a reading, and received and sent, or reads and writes, track each other when the traffic is request and response, which is a finding. A device chart Netdata counts into a node chart (by its `interface_type: real` or `device_type: physical` label, or any core) declares `part_of` the node type each dimension adds to. A chart not yet described counts as not stacked; a collapsed type carries its source dimension's chart, so `network_rx_bps` groups with `system.net.InOctets` and not with `OutOctets`. When it is the only collector it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); beside the cgroup collector it does not, because the two measure CPU differently. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
+| `NetdataCollector`  | Netdata HTTP API v1, `/api/v1/allmetrics` (one request a tick), `/api/v1/charts` for chart types (when a chart appears that it has not described, at most once a minute) | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go`. Include patterns over chart contexts (`config.include`; a curated default of CPU, memory, I/O, network and disk — not pressure, which beside the cgroup collector is the same quantity read twice and discovery proposes the two readings as a near-perfect pair; `*` for every chart). Each dimension becomes `<context>.<dimension>`; a chart that is one instance of its context becomes a subject (`disk:sda`, `net:enp0s1`, `cpu:cpu0`, `app:<name>`; a kubelet container's cgroup `container:<id>` labelled with its pod UID); percentages become fractions on [0,1], KiB/s and kilobits/s bytes/s with no range, PSI stall time a fraction of the second; outgoing rates are magnitudes; CPU idle and the 60 s / 300 s averages are skipped. A sample's chart is the Netdata chart id only when Netdata calls the chart `stacked` — a whole split into parts (`system.cpu`, `system.ram`, `disk.space`) — and `<chart id>/<dimension>` otherwise: an area or line chart's dimensions share an axis, not a reading, and received and sent, or reads and writes, track each other when the traffic is request and response, which is a finding. A device chart Netdata counts into a node chart (by its `interface_type: real` or `device_type: physical` label, or any core) declares `part_of` the node type each dimension adds to. A chart not yet described counts as not stacked; a collapsed type carries its source dimension's chart, so `network_rx_bps` groups with `system.net.InOctets` and not with `OutOctets`. With `config.collapse: true` (the default) it also feeds the node's own types (`cpu_utilization` = busy without idle and iowait, memory, the three pressures, steal, network against 1 Gbps); listed after a cgroup entry it is configured `collapse: false`, because the two measure CPU differently and the cgroup collector owns those types. | any `<context>.<dimension>` Netdata offers under the include list, plus the node types when alone |
 
 The `CgroupCollector` reports memory from two different places, because a cgroup v2
 root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
@@ -1178,7 +1186,7 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. The loop ticks the Supervisor that `pkg/collectors` built from `sources.collectors`. Both pieces are profile-agnostic — adding a new collector means registering a type or listing an `exec`/`http` plugin, no changes to the loop, to ingestion or to any profile.
 
 ---
 
@@ -1275,7 +1283,9 @@ Confirming a candidate between properties declares a state-map relationship with
 
 ```go
 case "my-profile":
-    collector := myprofile.NewMyCollector(...)
+    // No collector here: collectors are configured in sources.collectors and built by
+    // pkg/collectors. A new source is a registered type (collectors.Register in an
+    // init) or an exec/http plugin, not a profile.
     ontology  := minimal.NewOntologyFromSpec(spec) // reuse if sufficient
     reasoner  := myprofile.NewMyReasoner(spec, ...)
     proposer  := myprofile.NewMyProposer(...)
@@ -1289,7 +1299,7 @@ case "my-profile":
     sm := semmap.New(ontology, reasoner, proposer, tuner)
     sm.AttachState(cfg.StateMap)
     reasoner.AttachState(cfg.StateMap)
-    return sm, collector, nil
+    return sm, nil
 ```
 
 4. Update the profiles table in this file (§3) and the project structure in README.md.
@@ -1737,7 +1747,7 @@ Each VM: 2 vCPU, 2 GB RAM, 10 GB disk. Provisioned via [Multipass](https://multi
 Each node runs:
 - **k0s** in `--single` (controller+worker) mode — provides the k8s surface that Netdata's `k8s.cgroup` collector observes.
 - **Netdata** — system metrics at `localhost:19999`.
-- **di-agent** — `edge-minimal` profile, `sources.netdata.url: http://localhost:19999`, `profile.kd: k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
+- **di-agent** — `edge-minimal` profile, `sources.collectors` a cgroup entry then a Netdata one at `http://localhost:19999` (`collapse: false`), `profile.kd: k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
 
 Peer mesh: each agent registers the other two via `POST /peers`. The server derives the peer ID as `sha256(url)[:12]` and initialises trust at 0.5; `05-peers.sh` follows each add with `POST /peers/{id}/trust {"value":0.8}` to set the operational trust. diag-1 uses this mesh for `/recommend`.
 
