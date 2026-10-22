@@ -7,24 +7,40 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
+// CollectorFactory builds a fresh collector for one check, given that check's
+// *testing.T for t.TempDir, t.Cleanup and t.Fatalf.
 type CollectorFactory func(t *testing.T) contracts.CollectorContract
 
+// CheckFactory is CollectorFactory for a caller with no *testing.T.
+type CheckFactory func(r Reporter) contracts.CollectorContract
+
+// RunCollectorCompliance certifies the collector factory builds, as subtests of t.
+// Each subtest's factory call receives that subtest's own *testing.T.
 func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
+	t.Helper()
+	RunCollectorChecks(TReporter(t), func(r Reporter) contracts.CollectorContract {
+		return factory(testingT(r))
+	})
+}
+
+// RunCollectorChecks is the assertion set behind RunCollectorCompliance, written
+// against Reporter so a command line can run it over any collector.
+func RunCollectorChecks(t Reporter, factory CheckFactory) {
 	t.Helper()
 
 	// ── SourceID ──────────────────────────────────────────────────────────────
 
-	t.Run("SourceIDNonEmpty", func(t *testing.T) {
+	t.Run("SourceIDNonEmpty", func(t Reporter) {
 		c := factory(t)
 		if c.SourceID() == "" {
-			t.Error("SourceID() must return a non-empty string")
+			t.Errorf("SourceID() must return a non-empty string")
 		}
 	})
 
-	t.Run("SourceIDStable", func(t *testing.T) {
+	t.Run("SourceIDStable", func(t Reporter) {
 		c := factory(t)
 		if c.SourceID() != c.SourceID() {
-			t.Error("SourceID() must return the same value on every call")
+			t.Errorf("SourceID() must return the same value on every call")
 		}
 	})
 
@@ -32,15 +48,15 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 
 	// A pattern-driven collector knows its types only once it has asked its source,
 	// so these are asserted after a Collect.
-	t.Run("AvailableMetricsNonEmpty", func(t *testing.T) {
+	t.Run("AvailableMetricsNonEmpty", func(t Reporter) {
 		c := factory(t)
 		_, _ = c.Collect()
 		if len(c.AvailableMetrics()) == 0 {
-			t.Error("AvailableMetrics() must list at least one MetricType once Collect has produced samples")
+			t.Errorf("AvailableMetrics() must list at least one MetricType once Collect has produced samples")
 		}
 	})
 
-	t.Run("AvailableMetricsStableWithoutACollect", func(t *testing.T) {
+	t.Run("AvailableMetricsStableWithoutACollect", func(t Reporter) {
 		c := factory(t)
 		_, _ = c.Collect()
 		first := metricSet(c.AvailableMetrics())
@@ -59,7 +75,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 
 	// ── Collect ───────────────────────────────────────────────────────────────
 
-	t.Run("CollectDoesNotError", func(t *testing.T) {
+	t.Run("CollectDoesNotError", func(t Reporter) {
 		c := factory(t)
 		_, err := c.Collect()
 		if err != nil {
@@ -67,7 +83,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("CollectTwiceNoError", func(t *testing.T) {
+	t.Run("CollectTwiceNoError", func(t Reporter) {
 		c := factory(t)
 		if _, err := c.Collect(); err != nil {
 			t.Fatalf("first Collect() error: %v", err)
@@ -77,7 +93,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("SamplesHaveNonEmptyNodeID", func(t *testing.T) {
+	t.Run("SamplesHaveNonEmptyNodeID", func(t Reporter) {
 		c := factory(t)
 		samples, _ := c.Collect()
 		for _, s := range samples {
@@ -87,7 +103,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("SamplesHaveNonEmptyEventID", func(t *testing.T) {
+	t.Run("SamplesHaveNonEmptyEventID", func(t Reporter) {
 		c := factory(t)
 		samples, _ := c.Collect()
 		for _, s := range samples {
@@ -104,18 +120,18 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 	// Every sample-level subtest in this suite ranges over one Collect() batch and
 	// passes on an empty one. A factory whose collector emits nothing therefore
 	// certifies nothing; this makes that visible instead of vacuous.
-	t.Run("CollectProducesSamples", func(t *testing.T) {
+	t.Run("CollectProducesSamples", func(t Reporter) {
 		c := factory(t)
 		samples, err := c.Collect()
 		if err != nil {
 			t.Fatalf("Collect: %v", err)
 		}
 		if len(samples) == 0 {
-			t.Fatal("Collect returned no samples: the sample-level guarantees are asserted over this batch, so the factory must build a collector with data behind it")
+			t.Fatalf("Collect returned no samples: the sample-level guarantees are asserted over this batch, so the factory must build a collector with data behind it")
 		}
 	})
 
-	t.Run("SamplesDeclareUnitAndRange", func(t *testing.T) {
+	t.Run("SamplesDeclareUnitAndRange", func(t Reporter) {
 		c := factory(t)
 		samples, _ := c.Collect()
 		for _, s := range samples {
@@ -132,7 +148,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 	// admission and treats a later disagreement as a conflict, so a collector whose
 	// declaration moves between calls, or between subjects of one type, poisons its
 	// own properties.
-	t.Run("UnitAndRangeStablePerType", func(t *testing.T) {
+	t.Run("UnitAndRangeStablePerType", func(t Reporter) {
 		c := factory(t)
 		type decl struct {
 			unit     string
@@ -156,7 +172,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("SamplesMetricTypeInAvailable", func(t *testing.T) {
+	t.Run("SamplesMetricTypeInAvailable", func(t Reporter) {
 		c := factory(t)
 		samples, _ := c.Collect()
 		available := metricSet(c.AvailableMetrics())
@@ -167,7 +183,7 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
-	t.Run("EventIDDeterministic", func(t *testing.T) {
+	t.Run("EventIDDeterministic", func(t Reporter) {
 		// Collect twice; any overlapping EventIDs must refer to identical samples.
 		// Implementations with advancing windows produce disjoint batches —
 		// in that case the test trivially passes.
@@ -197,7 +213,7 @@ func metricSet(ms []types.MetricType) map[types.MetricType]bool {
 	return out
 }
 
-func mustCollect(t *testing.T, c contracts.CollectorContract) []*types.MetricSample {
+func mustCollect(t Reporter, c contracts.CollectorContract) []*types.MetricSample {
 	t.Helper()
 	samples, err := c.Collect()
 	if err != nil {

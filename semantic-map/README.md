@@ -241,7 +241,8 @@ semantic-map/
     │                                    ProposerNaturalDiscovery, OperatorTuneAndAuditTrail)
     │
     ├── compliance/             Go compliance test suites — one per contract
-    │   ├── collector.go        RunCollectorCompliance(t, factory)
+    │   ├── collector.go        RunCollectorCompliance(t, factory); RunCollectorChecks(reporter, factory)
+    │   ├── reporter.go         Reporter interface, *testing.T adapter, Recorder for non-test callers
     │   ├── ontology.go         RunOntologyCompliance(t, factory)  — vocabulary + validation
     │   ├── reasoner.go         RunReasonerCompliance(t, factory)
     │   ├── proposer.go         RunProposerCompliance(t, factory)

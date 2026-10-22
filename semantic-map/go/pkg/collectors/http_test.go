@@ -250,3 +250,17 @@ func TestHTTPHelloFailureOnRetryIsThatTicksFault(t *testing.T) {
 		t.Fatalf("recovers: %v", err)
 	}
 }
+
+// complianceReply is a well-behaved plugin: it declares a unit on every sample and
+// a range on one, and stamps the time the agent sent so a repeat is identical.
+func complianceReply(op string, req map[string]any, w http.ResponseWriter) {
+	if op == "hello" {
+		w.Write([]byte(`{"protocol":1}`))
+		return
+	}
+	now, _ := req["now_unix"].(float64)
+	json.NewEncoder(w).Encode(CollectReply{Seq: uint64(req["seq"].(float64)), Samples: []*types.MetricSample{
+		{MetricType: "gpu_util", Value: 0.5, TimestampUnix: int64(now), Unit: "share", Range: &[2]float64{0, 1}},
+		{MetricType: "gpu_temp", Value: 55, TimestampUnix: int64(now), Unit: "celsius"},
+	}})
+}
