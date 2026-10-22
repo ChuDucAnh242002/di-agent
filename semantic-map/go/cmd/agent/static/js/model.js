@@ -2,9 +2,10 @@
 //
 // Two things live here that are easy to get wrong elsewhere.
 //
-// First, EFFECTIVE STRENGTH. A relationship's JSON carries three layers, and the
+// First, EFFECTIVE STRENGTH. A relationship's JSON carries up to four layers, and the
 // agent decides which one answers by authority rather than arithmetic: an operator's
-// assertion outranks the long-run estimate, which outranks the most recent few pairs,
+// assertion outranks what the agent's own interventions measured, which outranks the
+// long-run estimate, which outranks the most recent few pairs,
 // and a relationship nothing has been observed about has no strength to offer at all.
 // The agent reports its own answer as `effective` and `basis`, and the page uses that
 // rather than re-deriving it. `effective` is absent for an unknown relationship, which

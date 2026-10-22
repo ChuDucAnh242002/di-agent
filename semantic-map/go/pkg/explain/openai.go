@@ -24,7 +24,7 @@ type OpenAICompatibleConfig struct {
 	BaseURL      string        // e.g. "http://localhost:11434/v1"
 	Model        string        // e.g. "qwen2.5:7b-instruct"
 	APIKey       string        // usually empty for local models; passed via Authorization if set
-	SystemPrompt string        // full text of explain-v1.md (or newer)
+	SystemPrompt string        // full text of explain-v2.md (or newer)
 	PromptFile   string        // path used, kept for provenance in the response
 	HTTPTimeout  time.Duration // per-request timeout; default 2m (see NewOpenAICompatible)
 
@@ -796,7 +796,7 @@ func (e *OpenAICompatibleExplainer) chat(ctx context.Context, messages []chatMes
 	return &out, nil
 }
 
-// parseExplainResponse extracts the JSON object described by explain-v1.md
+// parseExplainResponse extracts the JSON object described by explain-v2.md
 // from the model's assistant message. Tolerant of ```json fences and leading
 // prose, both of which some local models emit despite the prompt asking for
 // pure JSON.

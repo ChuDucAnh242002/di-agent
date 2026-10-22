@@ -63,6 +63,7 @@ func edgeFromRelationship(r statemap.Relationship) *types.EdgeDescriptor {
 		Direction:     direction,
 		Established:   r.Established,
 		Assertion:     r.Assertion,
+		Measured:      r.Measured,
 		Effective:     effectivePtr(r),
 		Basis:         r.Basis(),
 		EMAWeight:     r.Recent,

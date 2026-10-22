@@ -319,7 +319,7 @@ GET /cost?task=pod-scheduling&node=master
         ├─▶ LEVEL      = b.Property(construct).Value        ← the estimate itself
         └─▶ SENSITIVITY, reported beside the level, never added into it:
               for each relationship INTO the construct, source property present:
-                eff, known := rel.Effective()   ← assertion | established | recent
+                eff, known := rel.Effective()   ← assertion | measured | established | recent
                 if !known { continue }          ← absent from the sum, not a zero
                 sum += eff · sign(direction)
         └─▶ ActionCost {ResourceCost=level, ResourceSensitivity=sum,
@@ -704,7 +704,7 @@ fraction.
 | `io_pressure_ratio`     | —         | worse    | PSI `io.some` stall share of the window (cgroup `io.pressure`); route removed (§2) |
 | `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
 | `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
-| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst-off non-BestEffort subject's; unrouted; relief's signal (§16) |
+| `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst waiting of a pod owed CPU it does not get — its weighted fair share of the pods' CPUs (`cpu.weight`, capped by its `cpu.max`), by water-filling (`owedContention`) — not a BestEffort pod's or a unit's, whose waiting is not the runtime's to relieve, and not a pod's past its share, which waits on its own threads; unrouted; relief's signal (§16) |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is
@@ -1103,7 +1103,10 @@ one pod alone at a 1.5-core limit put node pressure at 27% with nothing else wai
 its own throttled share 29%, and lowering its limit to 1 core raised node pressure to
 42%. Per subject, contention is the stall share left after the cgroup's own throttled
 time, clamped at zero; a cgroup without `throttled_usec` has no quota, so all its stall
-counts. The node's is the highest of its subjects' this tick — the share of the window
+counts. It is an approximation that errs toward zero: `throttled_usec` sums the time each
+of the cgroup's per-CPU runqueues spent throttled, while the PSI total is wall-clock, so a
+cgroup throttled on several CPUs at once has more subtracted than its throttling explains
+and reads low, never high. The node's is the highest of its subjects' this tick — the share of the window
 in which some workload waited for a CPU another was using — over the subjects that were
 promised CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
 nearly all the time, and letting it set the signal would have relief cap a workload that
@@ -1523,7 +1526,7 @@ distinctions a naive renderer would flatten:
 - a relationship nothing has been observed about has **no** strength, and is drawn
   dashed rather than as a measured `0.00`;
 - the three strength layers are shown together with the one that *answers* marked,
-  because precedence is by authority — assertion over established over recent — and
+  because precedence is by authority — assertion over measured over established over recent — and
   not arithmetic;
 - the journal states its window (`held`, `dropped`, `oldest_revision`) so an empty
   list is not readable as "nothing happened";
@@ -1817,7 +1820,7 @@ Operator → POST /explain (question)
              ▼
         pkg/explain (OpenAICompatibleExplainer)
              │
-             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (system prompt: cmd/agent/prompts/explain-v2.md)
              │  (tool schemas: get_cost, get_edges, get_history,
              │                 get_peers, get_recommend, get_graph)
              │
@@ -1867,13 +1870,13 @@ Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary 
 explain.provider      none | openai-compatible          (default: none)
 explain.url           http://localhost:11434/v1         (default)
 explain.model         qwen2.5:7b-instruct               (default)
-explain.prompt        cmd/agent/prompts/explain-v1.md   (default)
+explain.prompt        cmd/agent/prompts/explain-v2.md   (default)
 explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 
@@ -2059,9 +2062,9 @@ Every response carries `usage`:
 explain.provider         none | openai-compatible          (default: none)
 explain.url              http://localhost:11434/v1
 explain.model            qwen2.5:7b-instruct
-explain.prompt           cmd/agent/prompts/explain-v1.md
-explain.planner_prompt   (derived: <prompt dir>/planner-v1.md)
-explain.critic_prompt    (derived: <prompt dir>/critic-v1.md)
+explain.prompt           cmd/agent/prompts/explain-v2.md
+explain.planner_prompt   (derived: <prompt dir>/planner-v2.md)
+explain.critic_prompt    (derived: <prompt dir>/critic-v2.md)
 explain.keep_alive       30m
 explain.sessions         true
 explain.api_key          ""   (write ${EXPLAIN_API_KEY} to read it from the environment)
@@ -2071,7 +2074,7 @@ A missing *derived* planner/critic prompt disables that stage with a log line; a
 
 ### Prompt versioning
 
-Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+Three prompts, each versioned by filename (v1 is kept unedited; v2 removed the hard-coded constructs): `explain-v2.md`, `planner-v2.md`, `critic-v2.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. No prompt names a construct: each carries `{{DOMAIN}}`, which startup fills with the loaded domain model's constructs, routes and propositions (`domain.Spec.PromptSummary`), or with the statement that none is loaded. The hash is taken after that substitution, so it identifies what the model was actually told. Earlier prompts listed Di-Select's seven constructs and the seeded-prior blend, describing a map this agent does not hold; `prompts_test.go` now fails on either. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
 
 ### What v2 does not change
 
@@ -2105,14 +2108,14 @@ agent takes on its own authority. How much authority is an operator setting
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
 | 0 | rules in the daemon | Some candidates are settled by what they are. A `composition` candidate is a part against its whole, true by definition and the relationship `without=` answers from, so it is confirmed. There is one rule: the other kinds (`same-metric`, `same-subject`) make a shared driver or accounting *likelier*, which is a judgement about this system, so they are evidence for the models rather than verdicts. |
-| 1 | decision model | Escalation needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
+| 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
-| — | operator | What no tier was sure of keeps its place in the queue, with the review that escalated it. |
+| — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
 
 **Levels.** `suggest` (0) records every tier's verdict as a suggestion and applies none —
 today's behaviour with the reasoning written down. `rules` (1) lets tier 0 act. `bounded`
-(2) lets the model tiers confirm and defer; a model's rejection is escalated, because a
-rejection hides a pair. `full` (3) lets every tier act above its threshold. Thresholds
+(2) lets the model tiers confirm and defer; a model's rejection is left undecided, because a
+rejection hides a pair. `full` (3), the default, lets every tier act above its threshold; the lower levels are the manual modes an operator opts into. Thresholds
 differ by action for the same reason: confirmation is undone by retirement with history
 kept, deferral costs only time, rejection the most. The defaults (0.85 / 0.95 / 0.7) are
 not calibrated — there is no labelled set of candidates yet, and building one from an
@@ -2121,23 +2124,30 @@ operator's past reviews is a measurement round.
 **An agent's decision is provisional; an operator's is not.** An agent's rejection or
 deferral carries `Reason: "agent"`: the pair is still tested and the candidate returns to
 pending when its evidence moves past what the review saw (sign, kind, or `|r|` by more than
-two standard errors of Fisher's z). The same test decides when an escalated candidate is
+two standard errors of Fisher's z). The same test decides when an undecided candidate is
 reviewed again, which is what keeps the models from being asked the same question every
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
+**Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
+costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits
+behind the models' queue (on the case-study node a composition candidate waited an hour behind
+reasoning-tier reviews), and it does not count against `per_cycle`, which caps the models' work.
+
 **An outage is not a review.** A model that cannot answer — the server still loading, the
 network down, a request it refuses — leaves the candidate untouched: no decision, no
-`Review`, so it is due again next cycle. Recording it as an escalation would shelve the
-candidate until its evidence moved, which on a steady machine may be never. The cycle
-stops at the first failure, since the next candidate would fail the same way, and the
-error is counted in the status. Tier 2's tool loop has a hard end: calls past the budget
+`Review`, so it is due again next cycle. Recording it as undecided would shelve the
+candidate until its evidence moved, which on a steady machine may be never. A model that
+failed is not asked again that cycle, since the next candidate would fail the same way;
+what needs it waits, what does not — a rule, or tier 1 when only the reasoning model is
+down — is still reviewed, and the outage is counted once in the status. A default that
+names a reasoning model therefore cannot stall review on a node that has none. Tier 2's tool loop has a hard end: calls past the budget
 are answered with an error, and a model told to answer that calls tools again fails the
 review rather than looping.
 
 **Orientation.** An undirected candidate cannot be confirmed with an arbitrary end. The
 decision model is asked which end drives the other, with "unclear" as an option; the
-confirmation needs the confirm threshold on both questions, or it escalates.
+confirmation needs the confirm threshold on both questions, or it is undecided.
 
 **Traceability.** A review is `Map.Decide` like an estimate: both properties are read
 through the `DecisionBuilder`, and `Inputs` holds the candidate, its neighbours, the level
@@ -2150,8 +2160,8 @@ choice is a snapshot.
 
 **What it does not do.** `/explain` stays read-only: autonomy is a separate surface whose
 only writes are the four review actions. No hosted model is contacted; the URL is the
-operator's. Escalation ends at the operator: a tier 3 on a peer or a bigger model is not
-built, because where it should live is open.
+operator's. What no tier settles waits for its evidence to move: a tier 3 on a peer or a
+bigger model is not built, because where it should live is open.
 
 **Every part is substitutable.** The reviewer depends on interfaces — `Map` for the
 semantic map, `Rule` (tier 0), `Decider` (tier 1), `Reasoner` (tier 2), `Tool` (what tier 2
@@ -2163,7 +2173,7 @@ decision model's typed-question endpoint (`systemone`, Ollama only), or any
 OpenAI-compatible server returning token log-probabilities (`openai-logprobs`), where the
 question is asked as lettered options with a one-token answer and the distribution is the
 letters' probabilities, normalised. The second carries `OptionMass` — how much of the
-model's probability fell on any letter — and below one half the verdict escalates: a model
+model's probability fell on any letter — and below one half the verdict is undecided: a model
 that wanted to say something else has not answered the question. The verdict records the
 backend, model, question-set version and renderer, so substituting any of them leaves the
 records comparable. The `text` renderer (`text-v2`) opens with the machine's facts —
@@ -2178,7 +2188,7 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 
 | Test | Covers |
 | ---- | ------ |
-| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass is undecided; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
 | `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
 | `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
@@ -2223,11 +2233,13 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
 
-**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1.
+**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node, clamped to [0, 1] (`measuredEffect`; none when the share fell by no more than 0.02). The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. The verify decision records the outcome's `effect`.
 
-**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how the escalation queue drains without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
 
-**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. The escalation queue therefore drains slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
+**Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how undecided candidates settle without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
+
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
 
 ### The Kubernetes runtime (`pkg/runtime/kubernetes`)
 

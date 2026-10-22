@@ -135,7 +135,7 @@ type RelationshipLookup interface {
 //     candidate Pending.
 //   - Reviews: Confirm, Reject, Defer and Annotate take the review that decided
 //     them, and the candidate carries the latest one, stamped with its evidence at
-//     the time. Annotate records a review without acting on it (an escalation, or a
+//     the time. Annotate records a review without acting on it (an undecided review, or a
 //     suggestion the autonomy level did not let the reviewer apply).
 //   - Settled candidates: a candidate is keyed on (from, to). After Confirm, or an
 //     operator's Reject or Defer, that pair is not re-emitted under either sign within

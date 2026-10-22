@@ -582,3 +582,80 @@ func TestNothingIsFreedByAWorkloadTheMapNoLongerHolds(t *testing.T) {
 		t.Fatalf("moved %v absorbed %v; nothing is known to have been freed", moved, absorbed)
 	}
 }
+
+// TestAnInterventionsEffectIsWhatItMeasured: an unconfounded outcome hands the map the
+// drop in contention per unit drop in the workload's share — the units the estimate
+// projects in — and the relationship the interventions create reasons with it, not
+// with the co-variation of a workload the cap holds still.
+func TestAnInterventionsEffectIsWhatItMeasured(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.act("pod:a")
+	// The cap takes 0.1 of the node off pod:a's usage.
+	record(t, h.m, usage("pod:a"), "pod:a", h.action("pod:a").SharesAtAct["pod:a"]-0.1, h.now)
+	h.run(2*time.Minute, 0.44)
+	d := h.lastVerify()
+	ss, _ := d.Inputs["subject_share"].(map[string]any)
+	iv, _ := d.Inputs["intervention"].(map[string]any)
+	atAct, _ := ss["at_act"].(float64)
+	atVerify, _ := ss["at_verify"].(float64)
+	observed, _ := d.Inputs["observed"].(float64)
+	want := math.Min(1, observed/(atAct-atVerify))
+	if got, ok := iv["effect"].(float64); !ok || math.Abs(got-want) > 1e-9 {
+		t.Fatalf("intervention input %v; want effect %v = observed %v / share drop %v", iv, want, observed, atAct-atVerify)
+	}
+}
+
+// TestTheCreatedRelationshipReasonsFromTheMeasuredEffect: the relationship two agreeing
+// outcomes create carries what they measured, and the map answers from it.
+func TestTheCreatedRelationshipReasonsFromTheMeasuredEffect(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.judged("pod:a", 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	// The second cap binds: pod:a runs at its new limit, 0.9 of 4 cores.
+	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
+	h.run(2*time.Minute, 0.40)
+	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, ""))
+	if !ok || r.Provenance != statemap.Intervened || r.Measured == nil || r.Basis() != "measured" {
+		t.Fatalf("relationship %+v; want it created and reasoning from the measured effect", r)
+	}
+	if eff, _ := r.Effective(); eff < 0.03 {
+		t.Fatalf("effective %v; the measured effect of a cap that worked is not negligible", eff)
+	}
+}
+
+// TestNoEffectIsMeasuredWhenTheShareDidNotMove: an outcome whose workload's share barely
+// moved has nothing to divide by, so it counts toward structure but measures no effect.
+func TestNoEffectIsMeasuredWhenTheShareDidNotMove(t *testing.T) {
+	if _, ok := measuredEffect(0.3, 0.5, 0.49); ok {
+		t.Fatal("a share drop of 0.01 measured an effect; want none")
+	}
+	if e, ok := measuredEffect(0.3, 0.5, 0.4); !ok || math.Abs(e-1) > 1e-9 {
+		t.Fatalf("effect %v ok=%v; want 0.3/0.1 clamped to 1", e, ok)
+	}
+	if e, ok := measuredEffect(0.05, 0.5, 0.25); !ok || math.Abs(e-0.2) > 1e-9 {
+		t.Fatalf("effect %v ok=%v; want 0.05/0.25", e, ok)
+	}
+	if e, ok := measuredEffect(-0.1, 0.5, 0.25); !ok || e != 0 {
+		t.Fatalf("effect %v ok=%v; a rise in contention is an effect of zero", e, ok)
+	}
+}
+
+// TestAMeasuredEffectReplacesTheMapPredictionsCorrection: the map-basis factor
+// corrects a map prediction for what acting has done against it. Once an outcome
+// writes a measured strength, the map's prediction already carries what the
+// interventions saw, and a factor learned against the old strength would correct it
+// a second time.
+func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.l.effects.Observe("pod:a", BasisMap, 2)
+	h.judged("pod:a", 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
+	h.run(2*time.Minute, 0.40)
+	if r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok || r.Measured == nil {
+		t.Fatalf("relationship %+v; want a measured strength", r)
+	}
+	if f := h.l.effects.Of("pod:a", BasisMap); f != 1 {
+		t.Fatalf("map-basis factor %v after a measured effect; want 1, nothing left to correct", f)
+	}
+}

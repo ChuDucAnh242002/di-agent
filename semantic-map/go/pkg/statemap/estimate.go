@@ -231,6 +231,11 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	// each edge, but those caveats and the assumption line describe the source,
 	// not the edge, so they must fire only once.
 	seenSource := map[string]bool{}
+	// learnedKnown says some known strength is a correlation magnitude or an
+	// assertion; measuredRels name those the agent's interventions measured, which
+	// are slopes and need their own caveat.
+	var learnedKnown bool
+	var measuredRels []Relationship
 	for _, rel := range b.RelationshipsInto(target) {
 		src, ok := b.Property(rel.From)
 		if !ok {
@@ -254,6 +259,11 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			}
 			influences = append(influences, inf)
 			continue
+		}
+		if rel.Basis() == "measured" {
+			measuredRels = append(measuredRels, rel)
+		} else {
+			learnedKnown = true
 		}
 		firstForSource := !seenSource[rel.From]
 		seenSource[rel.From] = true
@@ -314,16 +324,25 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 
 	var hypothetical *Hypothetical
 	if len(assume) > 0 {
-		b.Caveat("%s", slopeCaveat)
+		if learnedKnown || len(measuredRels) == 0 {
+			b.Caveat("%s", slopeCaveat)
+		}
+		for _, rel := range measuredRels {
+			eff, _ := rel.Effective()
+			if eff >= 1 {
+				b.Caveat("strength of %s was measured by the agent's interventions, a slope in normalised units clamped to [0, 1]; "+
+					"it is at the clamp of 1, a lower bound on the sensitivity", rel.ID)
+			} else {
+				b.Caveat("strength of %s was measured by the agent's interventions, a slope in normalised units clamped to [0, 1]", rel.ID)
+			}
+		}
 		lo, hi := p.Range[0], p.Range[1]
 		projected := p.Value + delta
 		if hi > lo {
 			projected = p.Value + delta*(hi-lo)
-			if projected < lo {
-				projected = lo
-			}
-			if projected > hi {
-				projected = hi
+			if linear := projected; linear < lo || linear > hi {
+				projected = math.Min(math.Max(linear, lo), hi)
+				b.Caveat("the linear projection %.4f lies outside %s's range [%g, %g] and is clipped to the range", linear, target, lo, hi)
 			}
 		}
 		hypothetical = &Hypothetical{Contributions: hypContributions, Delta: delta, ProjectedLevel: projected}
