@@ -69,7 +69,7 @@ import (
 const Version = "0.1.0"
 
 // BuildCommit is the short git SHA the binary was built from. Empty when the
-// binary is built without `-ldflags "-X main.BuildCommit=…"`.
+// binary is built without `-ldflags "-X github.com/DiyazY/di-agent/pkg/agentmain.BuildCommit=…"`.
 var BuildCommit = ""
 
 // defineFlags declares the command line: the agent is described by its file, so
