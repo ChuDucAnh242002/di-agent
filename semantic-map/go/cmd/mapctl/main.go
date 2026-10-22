@@ -17,9 +17,11 @@
 //	mapctl reset RC PS
 //	mapctl watch graph --interval 2s
 //	mapctl dot > graph.dot && dot -Tpdf graph.dot -o graph.pdf
+//	mapctl collector check --exec ./loadavg.py
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -28,7 +30,10 @@ import (
 
 func main() {
 	if err := mapctlcmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// A failed certification has already printed every check and its verdict.
+		if !errors.Is(err, mapctlcmd.ErrNotCertified) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }

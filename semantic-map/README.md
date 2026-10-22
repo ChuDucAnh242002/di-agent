@@ -109,6 +109,15 @@ semantic-map/
 │   ├── constants.py            Publication constants (J/pod, mJ/op, CIS scores, …)
 │   └── loaders.py              CSV / result file loaders
 │
+│  ── Collector plugins (out-of-process, any language) ───────────
+│
+├── sdk/python/di_collector.py  Python plugin SDK, stdlib only, one file: serve(setup) speaks wire
+│                               protocol v1 on stdin/stdout so a plugin only says what to measure
+├── examples/collectors/
+│   └── loadavg/                Example exec plugin on the Python SDK: load1/5/15 per CPU and
+│       ├── loadavg.py          PSI some avg10 for cpu, memory, io; certified in CI by
+│       └── README.md           `mapctl collector check` (see §3)
+│
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
 ├── deploy/kubernetes/rbac.yaml ServiceAccount, ClusterRole and ClusterRoleBinding the `kubernetes` runtime needs (see §3)
@@ -153,7 +162,8 @@ semantic-map/
     │   │   │                   contract enforcement, one owner per node-level type, Status()
     │   │   ├── wire.go         Wire protocol v1 (hello, collect, shutdown) shared by both transports
     │   │   ├── exec.go         ExecCollector — a plugin process speaking the protocol on stdin/stdout
-    │   │   └── http.go         HTTPCollector — a plugin reached over HTTP
+    │   │   ├── http.go         HTTPCollector — a plugin reached over HTTP
+    │   │   └── plugin/         plugin.Serve — the exec loop for a plugin written in Go (stdlib + pkg/types only)
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
@@ -288,7 +298,7 @@ semantic-map/
     │   ├── cmd/                One file per subcommand (graph, edges, history, strength,
     │   │                       deprecate, construct, proposition, reset, candidates,
     │   │                       recommend, simulate, watch, dot, health, peers,
-    │   │                       version, completion)
+    │   │                       version, tune, completion, collector)
     │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
     │   │   ├── client.go
     │   │   ├── types.go
@@ -1150,6 +1160,44 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.thresholds.confirm`         | `0.85`                | Probability a model tier needs to confirm, and to orient an undirected candidate. |
 | `loops.review.thresholds.reject`          | `0.95`                | Probability a model tier needs to reject. |
 | `loops.review.thresholds.defer`           | `0.7`                 | Probability a model tier needs to defer. |
+
+### Collector plugins and `mapctl collector check`
+
+A collector in any language is an `exec` plugin (the agent starts it and speaks wire
+protocol v1 on its stdin and stdout) or an `http` one (each request is a `POST` of the
+same JSON). Two helpers write the loop for you:
+
+| Language | Helper | Shape |
+| -------- | ------ | ----- |
+| Python | [`sdk/python/di_collector.py`](sdk/python/di_collector.py), stdlib only | `di_collector.serve(setup)`; `setup(hello)` returns `collect(seq, now)`, which returns a list of samples or `(samples, available)` |
+| Go | `pkg/collectors/plugin` | `plugin.Serve(func(plugin.Hello) (plugin.CollectFunc, error))` |
+
+[`examples/collectors/loadavg/`](examples/collectors/loadavg/) is a complete Python plugin.
+
+A plugin is valid when it passes the collector compliance suite. `mapctl collector check`
+runs that suite over it through the agent's own exec or http adapter, with no agent
+running, plus the protocol checks `HelloRoundTrip`, `SeqEcho`, `ReplyWithinTimeout`,
+`UnitRangeStableOverTicks`, `NoForeignNodeID` and `AvailableCoversEmitted`:
+
+```bash
+cd semantic-map/go
+go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadavg.py
+go run ./cmd/mapctl collector check --exec ./gpu --config gpu.yaml -- --device 0   # plugin arguments after --
+go run ./cmd/mapctl collector check --http http://localhost:9100/collect
+```
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
+| `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
+| `--ticks N` | `5` | Collects per protocol check. |
+| `--interval D` | `10s` | The interval announced in hello. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
+| `--node-id ID` | `check` | The node id the agent side announces and stamps. |
+
+It prints `PASS <check>` or `FAIL <check>: <why>` per check, then `certified` (exit 0) or
+`not certified (k failed)` (exit 1). Every check starts the plugin afresh; its stderr
+is shown. A plugin that does not complete its hello stops the run at `HelloRoundTrip`.
+CI certifies the loadavg example this way on Linux.
 
 ---
 

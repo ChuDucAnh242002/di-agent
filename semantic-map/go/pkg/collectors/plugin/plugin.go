@@ -1,0 +1,178 @@
+// Package plugin runs an out-of-process collector written in Go: it speaks wire
+// protocol v1 on stdin and stdout so the plugin's author writes only what to
+// measure.
+//
+// It imports the standard library and pkg/types and nothing of the agent, so a
+// plugin binary stays small and does not move when the agent's internals do. The
+// message shapes are therefore copies of pkg/collectors' wire types; a test keeps
+// them encoding identically.
+package plugin
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
+
+// ProtocolVersion is the wire protocol this package speaks.
+const ProtocolVersion = 1
+
+// maxLine bounds one request line, the same 4 MiB the agent allows a reply.
+const maxLine = 4 << 20
+
+// Hello is the agent's first message to a started plugin: who it is, which node it
+// runs on, how often it will be asked, and its entry's config block.
+type Hello struct {
+	Op        string         `json:"op"`
+	Protocol  int            `json:"protocol"`
+	Name      string         `json:"name"`
+	NodeID    string         `json:"node_id"`
+	IntervalS int            `json:"interval_s"`
+	Config    map[string]any `json:"config"`
+}
+
+// CollectFunc answers one collect request. seq is the request's sequence number
+// and now the agent's clock for it, which is the timestamp a sample should carry.
+//
+// No samples is "no data right now", not an error. available, when non-nil, is
+// every type the plugin can produce now; when nil the agent takes the types in
+// samples. An error is a fault: the agent restarts the plugin with backoff.
+type CollectFunc func(seq uint64, now time.Time) (samples []*types.MetricSample, available []types.MetricType, err error)
+
+// Serve answers the agent on stdin and stdout until stdin closes, which is how the
+// agent stops a plugin. setup is called on every hello; an error from it is sent as
+// the hello's refusal and Serve returns it, since the agent will not use a plugin
+// that refused. A line that is not a request ends Serve with an error.
+func Serve(setup func(Hello) (CollectFunc, error)) error {
+	return serve(os.Stdin, os.Stdout, setup)
+}
+
+type request struct {
+	Hello
+	Seq     uint64 `json:"seq"`
+	NowUnix int64  `json:"now_unix"`
+}
+
+type helloReply struct {
+	Protocol int    `json:"protocol,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// collectReply always carries samples, so "no data" is an empty list on the wire.
+type collectReply struct {
+	Seq       uint64                `json:"seq"`
+	Available []types.MetricType    `json:"available,omitempty"`
+	Samples   []*types.MetricSample `json:"samples"`
+}
+
+type errorReply struct {
+	Seq   uint64 `json:"seq"`
+	Error string `json:"error"`
+}
+
+func serve(in io.Reader, out io.Writer, setup func(Hello) (CollectFunc, error)) error {
+	br := bufio.NewReaderSize(in, 64<<10)
+	bw := bufio.NewWriter(out)
+	// Each reply is flushed at once: the agent waits for it before anything else.
+	reply := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		if _, err := bw.Write(append(b, '\n')); err != nil {
+			return err
+		}
+		return bw.Flush()
+	}
+	var collect CollectFunc
+	for {
+		line, err := readLine(br)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var req request
+		if err := json.Unmarshal(line, &req); err != nil {
+			return fmt.Errorf("request is not JSON: %w", err)
+		}
+		switch req.Op {
+		case "hello":
+			c, err := setup(req.Hello)
+			if err == nil && c == nil {
+				err = errors.New("setup returned no collect function")
+			}
+			if err != nil {
+				if rerr := reply(helloReply{Error: err.Error()}); rerr != nil {
+					return rerr
+				}
+				return fmt.Errorf("setup: %w", err)
+			}
+			collect = c
+			if err := reply(helloReply{Protocol: ProtocolVersion}); err != nil {
+				return err
+			}
+		case "collect":
+			if err := reply(answer(collect, req)); err != nil {
+				return err
+			}
+		default:
+			// One reply per request keeps the agent's reads in step even for an
+			// operation this version does not know.
+			if err := reply(errorReply{Seq: req.Seq, Error: fmt.Sprintf("unknown op %q", req.Op)}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// answer runs one collect, turning an error or a panic into an error reply so a
+// bad tick costs that tick and not the process.
+func answer(collect CollectFunc, req request) (r any) {
+	if collect == nil {
+		return errorReply{Seq: req.Seq, Error: "collect before hello"}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			r = errorReply{Seq: req.Seq, Error: fmt.Sprintf("collect panicked: %v", p)}
+		}
+	}()
+	samples, available, err := collect(req.Seq, time.Unix(req.NowUnix, 0))
+	if err != nil {
+		return errorReply{Seq: req.Seq, Error: err.Error()}
+	}
+	if samples == nil {
+		samples = []*types.MetricSample{}
+	}
+	return collectReply{Seq: req.Seq, Available: available, Samples: samples}
+}
+
+// readLine returns one line without its newline. A final line without a newline
+// still counts; a line over maxLine is an error.
+func readLine(br *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > maxLine+1 {
+			return nil, fmt.Errorf("request line exceeds %d MiB", maxLine>>20)
+		}
+		line = append(line, chunk...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) && len(line) > 0 {
+			return line, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return line[:len(line)-1], nil
+	}
+}
