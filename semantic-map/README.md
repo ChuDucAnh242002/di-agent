@@ -1065,7 +1065,7 @@ the shape of the real thing.
 | `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
 | `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |
 | `sources.collectors[].http` | — | `{url}`: a plugin reached over HTTP, speaking the same protocol. |
-| `sources.collectors[].timeout` | `min(interval/2, 5s)` | The longest one collect may take. At most `sources.interval`. |
+| `sources.collectors[].timeout` | `min(interval/2, 5s)` | The longest one collect may take. Less than `sources.interval`: the supervisor waits it plus 500 ms for an exec or http member, so a timeout at the interval would let one hung plugin stretch every tick past it. |
 | `sources.collectors[].config` | — | The collector's own settings. A built-in decodes them strictly (an unknown key is refused); an `exec` or `http` plugin receives them in its hello. |
 | `type: cgroup` `config.root` | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. On macOS or a node without cgroups v2, leave the cgroup entry out of the list. The agent's `GET /groups` reads cgroups from the first cgroup entry's root. |
 | `type: cgroup` `config.subjects` | `true` | Walk pod cgroups (and `config.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |

@@ -376,6 +376,8 @@ func (s *Supervisor) violation(ms *memberState, smp *types.MetricSample) string 
 		return "invalid metric_type"
 	case !types.ValidSubject(smp.Subject):
 		return "invalid subject"
+	case !types.ValidPartOf(smp.PartOf, smp.Subject):
+		return "invalid part_of"
 	case smp.Unit == "":
 		return "missing unit"
 	case smp.Range != nil && !(smp.Range[0] < smp.Range[1]):

@@ -33,7 +33,9 @@ type HTTPCollector struct {
 	timeout time.Duration
 	config  map[string]any
 	// client has no client-level timeout; each request is bounded by the context
-	// deadline of the Collect or Start that makes it.
+	// deadline of the Collect or Start that makes it. It follows no redirect: a 3xx
+	// is a non-2xx answer and so a fault, rather than a way for the configured URL
+	// to send the agent's requests somewhere it was not told about.
 	client *http.Client
 
 	// mu serialises Start, Collect and Close, which own seq and needHello.
@@ -53,7 +55,8 @@ func NewHTTPCollector(env Env, name string, sp spec.HTTPSpec, timeout time.Durat
 		config = map[string]any{}
 	}
 	return &HTTPCollector{env: env, name: name, sp: sp, timeout: resolveTimeout(env, timeout),
-		config: config, client: &http.Client{}, needHello: true}
+		config: config, needHello: true,
+		client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 // Start sends hello. An error means the sidecar was unreachable or refused it; the
@@ -88,7 +91,8 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	h.seq++
 	seq := h.seq
-	body, err := h.post(ctx, CollectRequest{Op: "collect", Seq: seq, NowUnix: time.Now().Unix()})
+	now := time.Now().Unix()
+	body, err := h.post(ctx, CollectRequest{Op: "collect", Seq: seq, NowUnix: now})
 	if err != nil {
 		return nil, h.fault(err)
 	}
@@ -99,7 +103,7 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	if err := checkCollect(&r, seq); err != nil {
 		return nil, h.fault(err)
 	}
-	samples, avail := stampReply(h.name, h.env.NodeID, &r)
+	samples, avail := stampReply(h.name, h.env.NodeID, now, &r)
 	h.availMu.Lock()
 	h.available = avail
 	h.availMu.Unlock()

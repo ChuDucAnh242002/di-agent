@@ -279,7 +279,7 @@ func TestExecCloseShutsDown(t *testing.T) {
 
 func TestExecEmptySamplesIsNotAFault(t *testing.T) {
 	r := &CollectReply{Seq: 1, Samples: []*types.MetricSample{}}
-	got, avail := stampReply("fx", "n1", r)
+	got, avail := stampReply("fx", "n1", 1_700_000_000, r)
 	if got == nil || len(got) != 0 || len(avail) != 0 {
 		t.Fatalf("stampReply = %v, %v", got, avail)
 	}

@@ -834,8 +834,11 @@ func (s Sources) validateCollectors() []error {
 		if c.Timeout < 0 {
 			bad("timeout = %v, want zero or more", c.Timeout)
 		}
-		if s.Interval > 0 && c.Timeout > s.Interval {
-			bad("timeout = %v exceeds sources.interval = %v", c.Timeout, s.Interval)
+		// Strictly less: the supervisor waits timeout plus a short grace for an exec
+		// or http member, so a timeout at the interval would let one hung plugin
+		// stretch every tick past it.
+		if s.Interval > 0 && c.Timeout >= s.Interval {
+			bad("timeout = %v must be less than sources.interval = %v", c.Timeout, s.Interval)
 		}
 		hasScript = hasScript || c.Type == "script"
 	}

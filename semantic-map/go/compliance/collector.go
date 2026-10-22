@@ -113,6 +113,22 @@ func RunCollectorChecks(t Reporter, factory CheckFactory) {
 		}
 	})
 
+	// The map keys a property by metric_type@subject and serves its id as one path
+	// segment, so the agent drops a sample with a malformed type or subject. A
+	// collector that would lose samples that way at runtime is not certified.
+	t.Run("SamplesHaveValidTypeAndSubject", func(t Reporter) {
+		c := factory(t)
+		samples, _ := c.Collect()
+		for _, s := range samples {
+			if !types.ValidMetricType(string(s.MetricType)) {
+				t.Errorf("MetricSample.MetricType %q must be a single segment over [A-Za-z0-9._-]; got %+v", s.MetricType, s)
+			}
+			if !types.ValidSubject(s.Subject) {
+				t.Errorf("MetricSample.Subject %q must be empty or <kind>:<identity> over [A-Za-z0-9._:-]; got %+v", s.Subject, s)
+			}
+		}
+	})
+
 	// A sample whose unit and range are not declared cannot be reasoned about: the
 	// map normalises a contribution by the property's range, so an undeclared range
 	// means the map assumes [0,1] and every answer that reads the property carries a

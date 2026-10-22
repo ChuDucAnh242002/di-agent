@@ -348,7 +348,7 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*typ
 	if !types.ValidSubject(req.Subject) {
 		return nil, fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", req.Subject)
 	}
-	if req.PartOf != "" && (!types.ValidMetricType(req.PartOf) || req.Subject == "") {
+	if !types.ValidPartOf(req.PartOf, req.Subject) {
 		return nil, fmt.Errorf("part_of %q must be a node-level metric type, on a sample with a subject", req.PartOf)
 	}
 	if req.Range != nil && req.Range[1] <= req.Range[0] {

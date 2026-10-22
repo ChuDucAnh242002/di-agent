@@ -264,3 +264,47 @@ func complianceReply(op string, req map[string]any, w http.ResponseWriter) {
 		{MetricType: "gpu_temp", Value: 55, TimestampUnix: int64(now), Unit: "celsius"},
 	}})
 }
+
+// A sample without a timestamp is stamped with the now_unix of the request it
+// answered, so the agent and the plugin agree on when it was observed.
+func TestHTTPZeroTimestampIsRequestNow(t *testing.T) {
+	var sent int64
+	p := &httpPlugin{}
+	p.reply = func(op string, req map[string]any, w http.ResponseWriter) {
+		if op == "hello" {
+			w.Write([]byte(`{"protocol":1}`))
+			return
+		}
+		sent = int64(req["now_unix"].(float64))
+		json.NewEncoder(w).Encode(CollectReply{Seq: uint64(req["seq"].(float64)),
+			Samples: []*types.MetricSample{{MetricType: "gpu_util", Value: 0.5, Unit: "share"}}})
+	}
+	c := newHTTP(t, p, time.Second)
+	got, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent == 0 || got[0].TimestampUnix != sent {
+		t.Fatalf("timestamp %d, want the request's now_unix %d", got[0].TimestampUnix, sent)
+	}
+}
+
+// A redirect is not followed: a 3xx is a non-2xx answer like any other, so a
+// sidecar URL cannot quietly send the agent's requests somewhere else.
+func TestHTTPRedirectIsFault(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/collect", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	})
+	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"protocol":1}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := NewHTTPCollector(Env{NodeID: "n1", Interval: 10 * time.Second}, "gpu", spec.HTTPSpec{URL: srv.URL + "/collect"}, time.Second, nil)
+	t.Cleanup(func() { c.Close() })
+	err := c.Start()
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("err = %v, want a fault naming the 302", err)
+	}
+}

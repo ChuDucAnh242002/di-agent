@@ -256,6 +256,28 @@ func TestSupervisorInvalidSubjectIsViolation(t *testing.T) {
 	}
 }
 
+// part_of is held to the rule POST /ingest-sample applies: a node-level metric
+// type, on a sample with a subject.
+func TestSupervisorBadPartOfIsViolation(t *testing.T) {
+	unscoped := sample("x", "share")
+	unscoped.PartOf = "cpu"
+	badName := sample("y", "share")
+	badName.Subject = "pod:a"
+	badName.PartOf = "cpu util"
+	good := sample("z", "share")
+	good.Subject = "pod:a"
+	good.PartOf = "cpu"
+	f := &fakeCollector{id: "f", samples: []*types.MetricSample{unscoped, badName, good}}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	if len(out) != 1 || out[0].MetricType != "z" {
+		t.Fatalf("got %d samples, want only the valid part_of", len(out))
+	}
+	if v := statusOf(t, s, "f").Violations; v != 2 {
+		t.Fatalf("violations=%d, want 2", v)
+	}
+}
+
 func TestSupervisorUnitDriftIsViolation(t *testing.T) {
 	f := &fakeCollector{id: "f", samples: []*types.MetricSample{sample("x", "share")}}
 	s, _ := newTestSupervisor(t, member("f", f))

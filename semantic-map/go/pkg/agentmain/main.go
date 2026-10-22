@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -655,7 +656,12 @@ func collectorSource(e spec.CollectorEntry) string {
 	case e.Exec != nil:
 		return e.Exec.Command
 	case e.HTTP != nil:
-		return e.HTTP.URL
+		// A URL may carry a password; the log gets it redacted.
+		u, err := url.Parse(e.HTTP.URL)
+		if err != nil {
+			return "<invalid url>"
+		}
+		return u.Redacted()
 	}
 	return e.Type
 }

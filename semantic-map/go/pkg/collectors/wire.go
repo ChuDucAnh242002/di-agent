@@ -86,11 +86,19 @@ func stamp(name, nodeID string, s *types.MetricSample) {
 // stampReply stamps a successful reply's samples and works out the types the
 // plugin declares available. Null entries are dropped. The returned slice is
 // never nil, so "no data" stays distinguishable from a fault.
-func stampReply(name, nodeID string, r *CollectReply) ([]*types.MetricSample, []types.MetricType) {
+//
+// A sample with no timestamp takes nowUnix, the now_unix of the request it
+// answers, before its event id is computed: hashed at time zero it would carry
+// the same event id every tick, and the map would drop every sample after the
+// first as a duplicate.
+func stampReply(name, nodeID string, nowUnix int64, r *CollectReply) ([]*types.MetricSample, []types.MetricType) {
 	out := make([]*types.MetricSample, 0, len(r.Samples))
 	for _, s := range r.Samples {
 		if s == nil {
 			continue
+		}
+		if s.TimestampUnix == 0 {
+			s.TimestampUnix = nowUnix
 		}
 		stamp(name, nodeID, s)
 		out = append(out, s)

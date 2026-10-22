@@ -157,7 +157,8 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	e.seq++
 	seq := e.seq
-	line, err := e.roundTrip(CollectRequest{Op: "collect", Seq: seq, NowUnix: time.Now().Unix()}, deadline)
+	now := time.Now().Unix()
+	line, err := e.roundTrip(CollectRequest{Op: "collect", Seq: seq, NowUnix: now}, deadline)
 	if err != nil {
 		return nil, e.fault(err)
 	}
@@ -168,7 +169,7 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	if err := checkCollect(&r, seq); err != nil {
 		return nil, e.fault(err)
 	}
-	samples, avail := stampReply(e.name, e.env.NodeID, &r)
+	samples, avail := stampReply(e.name, e.env.NodeID, now, &r)
 	e.availMu.Lock()
 	e.available = avail
 	e.availMu.Unlock()

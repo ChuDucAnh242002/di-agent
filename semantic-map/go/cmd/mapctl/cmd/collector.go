@@ -56,9 +56,10 @@ func newCollectorCheckCmd() *cobra.Command {
 		Long: "Runs the plugin behind the agent's real exec or http adapter and puts it through\n" +
 			"the same compliance suite every Go collector passes, plus the wire-protocol\n" +
 			"checks: hello round trip, seq echo, reply within the timeout, unit and range\n" +
-			"stable over --ticks collects, no foreign node_id, and available covering every\n" +
-			"emitted type. Prints PASS or FAIL per check, then the verdict; exits 0 only\n" +
-			"when certified. Each check starts the plugin afresh.",
+			"stable over --ticks collects, no foreign node_id, timestamps in Unix seconds\n" +
+			"within 2 x --interval of now, and available covering every emitted type.\n" +
+			"Prints PASS or FAIL per check, then the verdict; exits 0 only when certified.\n" +
+			"Each check starts the plugin afresh.",
 		Example: "  mapctl collector check --exec ./loadavg.py\n" +
 			"  mapctl collector check --exec ./gpu --config gpu.yaml -- --device 0\n" +
 			"  mapctl collector check --http http://localhost:9100/collect",
@@ -218,6 +219,27 @@ func runPluginChecks(o *checkOpts, args []string, config map[string]any, errOut 
 				}
 			}
 		})
+	})
+
+	// timestamp_unix is seconds. Either side of each collect bounds the request's
+	// now_unix, and a sample observed within two intervals of it passes; one in
+	// milliseconds lands decades out and fails.
+	root.Run("TimestampNearNow", func(r compliance.Reporter) {
+		p := start(r)
+		slack := int64(2 * o.interval / time.Second)
+		for i := 0; i < o.ticks; i++ {
+			before := time.Now().Unix()
+			samples, err := p.Collect()
+			if err != nil {
+				r.Fatalf("collect %d: %v", i+1, err)
+			}
+			after := time.Now().Unix()
+			for _, s := range samples {
+				if s.TimestampUnix < before-slack || s.TimestampUnix > after+slack {
+					r.Errorf("collect %d: %s timestamp_unix %d is more than 2 x --interval from now_unix %d; it must be Unix seconds", i+1, s.MetricType, s.TimestampUnix, before)
+				}
+			}
+		}
 	})
 
 	root.Run("AvailableCoversEmitted", func(r compliance.Reporter) {

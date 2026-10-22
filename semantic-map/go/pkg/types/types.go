@@ -339,6 +339,13 @@ func ValidSubject(s string) bool {
 	return subjectRe.MatchString(s)
 }
 
+// ValidPartOf reports whether partOf may stand on a sample of subject: empty, or a
+// valid node-level metric type on a sample that has a subject, since only a
+// subject's quantity is a part of a node total.
+func ValidPartOf(partOf, subject string) bool {
+	return partOf == "" || (ValidMetricType(partOf) && subject != "")
+}
+
 // ── Tuner types ───────────────────────────────────────────────────────────────
 
 // TuneIntent is the raw output of TunerContract.ParseIntent — a signed delta

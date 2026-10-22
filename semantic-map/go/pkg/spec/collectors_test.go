@@ -62,14 +62,15 @@ func TestCollectorsParse(t *testing.T) {
 
 func TestCollectorsValidate(t *testing.T) {
 	cases := map[string]struct{ yaml, name string }{
-		"duplicate name": {"collectors: [{name: a, type: cgroup}, {name: a, type: netdata}]", "a"},
-		"bad name":       {`collectors: [{name: "a b", type: cgroup}]`, "a b"},
-		"no kind":        {"collectors: [{name: none}]", "none"},
-		"two kinds":      {"collectors: [{name: both, type: cgroup, exec: {command: x}}]", "both"},
-		"empty command":  {`collectors: [{name: e, exec: {command: ""}}]`, "e"},
-		"empty url":      {`collectors: [{name: h, http: {url: ""}}]`, "h"},
-		"timeout":        {"interval: 10s\n  collectors: [{name: slow, type: cgroup, timeout: 20s}]", "slow"},
-		"script alone":   {"collectors: [{name: script, type: script}, {name: other, type: cgroup}]", "script"},
+		"duplicate name":      {"collectors: [{name: a, type: cgroup}, {name: a, type: netdata}]", "a"},
+		"bad name":            {`collectors: [{name: "a b", type: cgroup}]`, "a b"},
+		"no kind":             {"collectors: [{name: none}]", "none"},
+		"two kinds":           {"collectors: [{name: both, type: cgroup, exec: {command: x}}]", "both"},
+		"empty command":       {`collectors: [{name: e, exec: {command: ""}}]`, "e"},
+		"empty url":           {`collectors: [{name: h, http: {url: ""}}]`, "h"},
+		"timeout":             {"interval: 10s\n  collectors: [{name: slow, type: cgroup, timeout: 20s}]", "slow"},
+		"timeout at interval": {"interval: 10s\n  collectors: [{name: even, type: cgroup, timeout: 10s}]", "even"},
+		"script alone":        {"collectors: [{name: script, type: script}, {name: other, type: cgroup}]", "script"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
