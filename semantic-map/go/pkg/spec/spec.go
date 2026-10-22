@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -79,6 +80,57 @@ type Sources struct {
 	Cgroup   Cgroup        `yaml:"cgroup"`
 	Netdata  Netdata       `yaml:"netdata"`
 	Script   string        `yaml:"script"`
+	// Collectors is the ordered list of telemetry collectors; the order is the
+	// ownership priority for node-level types. An empty list disables the loop.
+	Collectors []CollectorEntry `yaml:"collectors"`
+}
+
+// CollectorEntry is one collector instance. Exactly one of Type (a registered
+// built-in), Exec (an out-of-process plugin) or HTTP (a remote plugin) names
+// where it comes from. Config is kept as a node because its keys belong to the
+// collector, which checks them, not to this schema.
+type CollectorEntry struct {
+	Name    string        `yaml:"name"`
+	Type    string        `yaml:"type,omitempty"`
+	Exec    *ExecSpec     `yaml:"exec,omitempty"`
+	HTTP    *HTTPSpec     `yaml:"http,omitempty"`
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	Config  yaml.Node     `yaml:"config,omitempty"`
+}
+
+// ExecSpec is a plugin run as a child process speaking the exec wire protocol.
+type ExecSpec struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
+}
+
+// HTTPSpec is a plugin reached over HTTP.
+type HTTPSpec struct {
+	URL string `yaml:"url"`
+}
+
+// Kind says which source the entry names: "type", "exec" or "http". An entry
+// naming none or several returns "", which Validate refuses.
+func (e CollectorEntry) Kind() string {
+	kinds := e.kinds()
+	if len(kinds) != 1 {
+		return ""
+	}
+	return kinds[0]
+}
+
+func (e CollectorEntry) kinds() []string {
+	var k []string
+	if e.Type != "" {
+		k = append(k, "type")
+	}
+	if e.Exec != nil {
+		k = append(k, "exec")
+	}
+	if e.HTTP != nil {
+		k = append(k, "http")
+	}
+	return k
 }
 
 // Cgroup configures the cgroup collector; an empty Root disables it.
@@ -402,6 +454,9 @@ func Default() Spec {
 				MaxSubjects: 256, PodLogs: minimal.DefaultPodLogRoot,
 			},
 			Netdata: Netdata{Include: slices.Clone(minimal.DefaultNetdataInclude)},
+			// The file's list replaces this one: decoding into a non-empty slice
+			// restarts it, so naming collectors never adds to the default.
+			Collectors: []CollectorEntry{{Name: "cgroup", Type: "cgroup"}},
 		},
 		Facts: []FactSource{{Kind: "host"}},
 		Map: MapSpec{
@@ -676,6 +731,7 @@ func (s Spec) Validate() error {
 	}
 
 	notNegative("sources.interval", s.Sources.Interval)
+	errs = append(errs, s.Sources.validateCollectors()...)
 	notNegative("map.stale_after", s.Map.StaleAfter)
 	notNegative("map.retire_after", s.Map.RetireAfter)
 	notNegative("persist.interval", s.Persist.Interval)
@@ -769,4 +825,50 @@ func redact(v reflect.Value) {
 // YAML renders the spec as a document Parse reads back to the same spec.
 func (s Spec) YAML() ([]byte, error) {
 	return yaml.Marshal(s)
+}
+
+var collectorName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// validateCollectors reports every collector entry that cannot be what the
+// operator meant. Each message names the entry by index and name.
+func (s Sources) validateCollectors() []error {
+	var errs []error
+	seen := map[string]bool{}
+	hasScript := false
+	for i, c := range s.Collectors {
+		bad := func(format string, a ...any) {
+			errs = append(errs, fmt.Errorf("sources.collectors[%d] %s: %s", i, c.Name, fmt.Sprintf(format, a...)))
+		}
+		switch {
+		case !collectorName.MatchString(c.Name):
+			bad("name must match [A-Za-z0-9._-]+")
+		case seen[c.Name]:
+			bad("duplicate name")
+		}
+		seen[c.Name] = true
+		if k := c.kinds(); len(k) != 1 {
+			bad("want exactly one of type, exec or http, got %d", len(k))
+		}
+		if c.Exec != nil && c.Exec.Command == "" {
+			bad("exec.command is empty")
+		}
+		if c.HTTP != nil && c.HTTP.URL == "" {
+			bad("http.url is empty")
+		}
+		if c.Timeout < 0 {
+			bad("timeout = %v, want zero or more", c.Timeout)
+		}
+		if s.Interval > 0 && c.Timeout > s.Interval {
+			bad("timeout = %v exceeds sources.interval = %v", c.Timeout, s.Interval)
+		}
+		hasScript = hasScript || c.Type == "script"
+	}
+	if hasScript && len(s.Collectors) > 1 {
+		for i, c := range s.Collectors {
+			if c.Type == "script" {
+				errs = append(errs, fmt.Errorf("sources.collectors[%d] %s: script is exclusive and cannot share the list with another collector", i, c.Name))
+			}
+		}
+	}
+	return errs
 }
