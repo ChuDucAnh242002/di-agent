@@ -125,29 +125,43 @@ func (e *ExecCollector) Start() error {
 		return nil
 	}
 	e.started = true
-	return e.spawn()
+	return e.spawn(time.Now().Add(e.timeout))
 }
 
 // Collect sends one collect request and returns the stamped samples. A plugin
-// faulted earlier is restarted first.
+// that faulted earlier, or exited since the last tick, is restarted first.
+//
+// The whole call, restart and hello included, shares one deadline of the
+// configured timeout: the supervisor waits only a short grace beyond it, so a
+// restart tick that gave hello and collect a timeout each would be abandoned by
+// the supervisor even when the plugin is merely slow to start.
 func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return nil, errors.New("collector closed")
 	}
+	deadline := time.Now().Add(e.timeout)
+	if e.proc != nil {
+		// A plugin that exited quietly between ticks is not a fault of this tick;
+		// reap it and start a fresh one instead of writing into a dead pipe.
+		select {
+		case <-e.proc.done:
+			e.fault(nil)
+		default:
+		}
+	}
 	if e.proc == nil {
 		if e.started {
 			e.restarts.Add(1)
 		}
 		e.started = true
-		if err := e.spawn(); err != nil {
+		if err := e.spawn(deadline); err != nil {
 			return nil, fmt.Errorf("restart: %w", err)
 		}
 	}
 	e.seq++
 	seq := e.seq
-	deadline := time.Now().Add(e.timeout)
 	line, err := e.roundTrip(CollectRequest{Op: "collect", Seq: seq, NowUnix: time.Now().Unix()}, deadline)
 	if err != nil {
 		return nil, e.fault(err)
@@ -200,21 +214,23 @@ func (e *ExecCollector) Close() error {
 	select {
 	case <-p.done:
 	case <-time.After(shutdownGrace):
-		p.cmd.Process.Signal(syscall.SIGTERM)
+		signalGroup(p.cmd, syscall.SIGTERM)
 		select {
 		case <-p.done:
 		case <-time.After(shutdownGrace):
-			p.cmd.Process.Kill()
+			signalGroup(p.cmd, syscall.SIGKILL)
 			<-p.done
 		}
 	}
+	// Whatever the plugin started and left running goes with it.
+	signalGroup(p.cmd, syscall.SIGKILL)
 	p.release()
 	return nil
 }
 
-// spawn starts the process and sends hello; on any failure the process is reaped
-// and e.proc stays nil. Called with mu held.
-func (e *ExecCollector) spawn() error {
+// spawn starts the process and sends hello, answered before deadline; on any
+// failure the process is reaped and e.proc stays nil. Called with mu held.
+func (e *ExecCollector) spawn(deadline time.Time) error {
 	p, err := e.startProcess()
 	if err != nil {
 		return err
@@ -222,7 +238,7 @@ func (e *ExecCollector) spawn() error {
 	e.proc = p
 	hello := Hello{Op: "hello", Protocol: ProtocolVersion, Name: e.name, NodeID: e.env.NodeID,
 		IntervalS: int(e.env.Interval / time.Second), Config: e.config}
-	line, err := e.roundTrip(hello, time.Now().Add(e.timeout))
+	line, err := e.roundTrip(hello, deadline)
 	if err != nil {
 		return e.fault(fmt.Errorf("hello: %w", err))
 	}
@@ -243,18 +259,19 @@ func (e *ExecCollector) spawn() error {
 // The pipes are made here rather than by os/exec so the agent owns their ends:
 // Wait then never closes a pipe under a reader, and stdin can take a deadline.
 func (e *ExecCollector) startProcess() (*execProc, error) {
-	path := e.sp.Command
-	dir := ""
-	if strings.ContainsRune(path, filepath.Separator) {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return nil, err
-		}
-		path, dir = abs, filepath.Dir(abs)
+	// The working directory is the command's own, also for a bare name found on
+	// PATH, so a plugin can read files shipped beside it by relative path.
+	path, err := exec.LookPath(e.sp.Command)
+	if err != nil {
+		return nil, fmt.Errorf("start %s: %w", e.sp.Command, err)
+	}
+	if path, err = filepath.Abs(path); err != nil {
+		return nil, fmt.Errorf("start %s: %w", e.sp.Command, err)
 	}
 	cmd := exec.Command(path, e.sp.Args...)
-	cmd.Dir = dir
+	cmd.Dir = filepath.Dir(path)
 	cmd.Env = e.childEnv()
+	ownGroup(cmd)
 
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -343,8 +360,9 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 	}
 }
 
-// fault kills the current process, reaps it, and returns err, noting the exit
-// status when the process had already ended on its own. Called with mu held.
+// fault kills the current process group, reaps the process, and returns err,
+// noting the exit status when the process had already ended on its own. A nil err
+// only reaps. Called with mu held.
 func (e *ExecCollector) fault(err error) error {
 	p := e.proc
 	e.proc = nil
@@ -358,10 +376,13 @@ func (e *ExecCollector) fault(err error) error {
 	default:
 	}
 	close(p.quit)
-	p.cmd.Process.Kill()
+	signalGroup(p.cmd, syscall.SIGKILL)
 	p.stdin.Close()
 	<-p.done
 	p.release()
+	if err == nil {
+		return nil
+	}
 	if exitedAlready && p.cmd.ProcessState != nil {
 		return fmt.Errorf("%w (plugin %s)", err, p.cmd.ProcessState)
 	}

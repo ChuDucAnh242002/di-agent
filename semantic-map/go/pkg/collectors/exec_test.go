@@ -306,3 +306,49 @@ func TestConfigJSON(t *testing.T) {
 		t.Fatal("a sequence config was accepted")
 	}
 }
+
+func TestExecExitedBetweenTicksRestartsFirst(t *testing.T) {
+	e, dir := fixture(t, "exit-after-collect", 2*time.Second, nil)
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p := e.proc
+	if _, err := e.Collect(); err != nil {
+		t.Fatalf("first Collect: %v", err)
+	}
+	select {
+	case <-p.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fixture did not exit after its reply")
+	}
+	got, err := e.Collect()
+	if err != nil || len(got) != 2 {
+		t.Fatalf("Collect after a quiet exit = %d samples, err %v; want a restart and a good tick", len(got), err)
+	}
+	if e.Restarts() != 1 {
+		t.Fatalf("Restarts = %d, want 1", e.Restarts())
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "hellos"))
+	if n := strings.Count(string(b), "hello\n"); n != 2 {
+		t.Fatalf("fixture saw %d hellos, want 2", n)
+	}
+}
+
+func TestExecWorkingDirIsResolvedCommandDir(t *testing.T) {
+	bin, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := NewExecCollector(Env{NodeID: "n1"}, "fx", spec.ExecSpec{Command: filepath.Base(bin), Args: []string{"-test.run=^$"}}, time.Second, nil)
+	e.extraEnv = []string{"DI_FIXTURE=good"}
+	p, err := e.startProcess()
+	if err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+	e.proc = p
+	defer e.Close()
+	if want := filepath.Dir(bin); p.cmd.Dir != want {
+		t.Fatalf("Dir = %q, want %q", p.cmd.Dir, want)
+	}
+}

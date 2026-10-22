@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -75,6 +77,17 @@ func fixtureMain(mode string) {
 				continue
 			case "hang":
 				continue
+			case "hang-grandchild":
+				// A wrapper's own child is usually what hangs; it must die with the
+				// plugin, not be orphaned.
+				gc := exec.Command("sleep", "60")
+				if gc.Start() == nil {
+					os.WriteFile(filepath.Join(dir, "grandchild"), []byte(strconv.Itoa(gc.Process.Pid)), 0o600)
+				}
+				continue
+			case "exit-after-collect":
+				reply(CollectReply{Seq: req.Seq, Samples: fixtureSamples(req.NowUnix)})
+				return
 			case "stale-seq":
 				reply(CollectReply{Seq: req.Seq - 1, Samples: fixtureSamples(req.NowUnix)})
 				continue
