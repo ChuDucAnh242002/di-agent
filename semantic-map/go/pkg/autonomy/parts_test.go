@@ -92,7 +92,7 @@ func TestLogprobsReadsADistributionOverTheLetters(t *testing.T) {
 	}
 }
 
-func TestMostProbabilityOffTheOptionsEscalates(t *testing.T) {
+func TestMostProbabilityOffTheOptionsIsUndecided(t *testing.T) {
 	var seen []map[string]any
 	srv := logprobsServer(t, map[string]float64{"A": 0.3, "I": 0.7}, &seen) // sure of A among the letters, but wanting to talk
 	defer srv.Close()
@@ -104,8 +104,8 @@ func TestMostProbabilityOffTheOptionsEscalates(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: cfg.Decider})
-	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewEscalate {
-		t.Errorf("%v review %+v; want escalated: 0.3 of the probability was on the options", c.Status, c.Review)
+	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewUndecided {
+		t.Errorf("%v review %+v; want undecided: 0.3 of the probability was on the options", c.Status, c.Review)
 	}
 }
 

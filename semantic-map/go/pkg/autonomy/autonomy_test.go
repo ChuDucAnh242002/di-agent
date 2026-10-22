@@ -175,15 +175,15 @@ func TestTheLevelDecidesWhichTierActs(t *testing.T) {
 	}
 }
 
-func TestAnUnsureModelGoesUpATierAndThenToTheOperator(t *testing.T) {
+func TestAnUnsureModelGoesUpATierAndThenWaitsForEvidence(t *testing.T) {
 	const id = "cpu_utilization@pod:a->cpu_pressure"
 	unsure := map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}
 
-	// With no tier 2, it escalates.
+	// With no tier 2, it is undecided until its evidence moves.
 	m := newFakeMap(t, directed(id, ""))
 	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: unsure}})
-	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewEscalate || c.Review.Tier != 1 {
-		t.Errorf("no tier 2: %v review %+v; want escalated from tier 1", c.Status, c.Review)
+	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewUndecided || c.Review.Tier != 1 {
+		t.Errorf("no tier 2: %v review %+v; want undecided at tier 1", c.Status, c.Review)
 	}
 
 	// Tier 2's analysis is scored by the decision model, and its number is the one acted on.
@@ -226,8 +226,8 @@ func TestAnUndirectedConfirmationNeedsADriver(t *testing.T) {
 	m := newFakeMap(t, und())
 	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: confident(types.ReviewConfirm),
 		orientation: map[string]float64{"FROM": 0.4, "TO": 0.3, "unclear": 0.3}}})
-	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewEscalate {
-		t.Errorf("no clear driver: %v review %+v; want escalated", c.Status, c.Review)
+	if c := m.cands[id]; c.Status != types.Pending || c.Review.Action != types.ReviewUndecided {
+		t.Errorf("no clear driver: %v review %+v; want undecided", c.Status, c.Review)
 	}
 	m = newFakeMap(t, und())
 	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: confident(types.ReviewConfirm),
@@ -296,4 +296,69 @@ type telling struct {
 func (d *telling) Decide(ctx context.Context, e autonomy.Evidence, analysis string) (*autonomy.Verdict, error) {
 	d.facts = e.Facts
 	return d.fixed.Decide(ctx, e, analysis)
+}
+
+// down is a reasoning model that cannot be reached.
+type down struct{ calls int }
+
+func (d *down) Name() string { return "down" }
+func (d *down) Reason(context.Context, autonomy.Evidence) (*autonomy.Analysis, error) {
+	d.calls++
+	return nil, errors.New("connection refused")
+}
+
+// TestAnOutageSkipsOnlyWhatNeedsTheModel: on a machine with no reasoning model, the
+// review still runs. What needs the missing tier waits, unrecorded — an outage is not
+// a judgement — and the rest of the queue is settled by the tiers that answer, so a
+// default that names a reasoning model cannot stall review on a node without one.
+func TestAnOutageSkipsOnlyWhatNeedsTheModel(t *testing.T) {
+	const a, b = "cpu_utilization@pod:a->cpu_pressure", "cpu_utilization@pod:b->cpu_pressure"
+	const comp = "cpu_utilization@pod:c->cpu_utilization"
+	unsure := map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}
+	m := newFakeMap(t, directed(a, ""), directed(b, ""), directed(comp, types.CandidateKindComposition))
+	m.cands[comp].MIScore = 0.1 // reviewed last
+	rs := &down{}
+	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: unsure}, Reasoner: rs})
+	for _, id := range []string{a, b} {
+		if c := m.cands[id]; c.Status != types.Pending || c.Review != nil {
+			t.Errorf("%s %v review %+v; want it untouched until the reasoning model answers", id, c.Status, c.Review)
+		}
+	}
+	if c := m.cands[comp]; c.Status != types.Confirmed {
+		t.Errorf("composition %v review %+v; want the rule to settle it despite the outage", c.Status, c.Review)
+	}
+	if rs.calls != 1 {
+		t.Errorf("the reasoning model was asked %d times; want once, then skipped for the cycle", rs.calls)
+	}
+	if s := r.Status(); s.Errors != 1 {
+		t.Errorf("status %+v; want the outage counted once", s)
+	}
+}
+
+// TestRulesSettleWhatTheyCanBeforeAModelIsAsked: tier 0 costs nothing and a model call
+// costs a minute or more on the node, so a cycle settles every candidate a rule decides
+// before it spends models on the rest. Ordered strongest-first with the models' cap,
+// a composition candidate behind slower ones waited for an hour on the case-study node.
+func TestRulesSettleWhatTheyCanBeforeAModelIsAsked(t *testing.T) {
+	const comp = "memory_utilization@pod:wave->memory_utilization"
+	var cands []*types.CandidateEdge
+	for _, p := range []string{"a", "b", "c", "d", "e"} {
+		cands = append(cands, directed("cpu_utilization@pod:"+p+"->cpu_pressure", ""))
+	}
+	weak := directed(comp, types.CandidateKindComposition)
+	weak.MIScore = 0.01
+	cands = append(cands, weak)
+	m := newFakeMap(t, cands...)
+	unsure := map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}
+	d := &fixed{actions: unsure}
+	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: d, MaxPer: 2})
+	if c := m.cands[comp]; c.Status != types.Confirmed || c.Review == nil || c.Review.By != types.ReviewerRules {
+		t.Fatalf("composition %v review %+v; want the rule to confirm it in the first cycle", c.Status, c.Review)
+	}
+	if len(d.analyses) != 2 {
+		t.Fatalf("the model was asked %d times; want the cap of 2, the rule's candidate not counted", len(d.analyses))
+	}
+	if s := r.Status(); s.Reviewed != 3 {
+		t.Fatalf("reviewed %d; want the rule's one and the models' two", s.Reviewed)
+	}
 }

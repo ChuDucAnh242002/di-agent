@@ -160,7 +160,7 @@ semantic-map/
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
     │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
-    │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
+    │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
     │   │   ├── rules.go        Tier 0: Rule, and the composition rule
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
@@ -487,7 +487,7 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
 `decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
 actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
-`defer`, or `escalate` when no tier was sure enough and the candidate stays in this queue),
+`defer`, or `undecided` when no tier was sure enough: the candidate stays pending and is reviewed again when its evidence moves),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
@@ -1081,17 +1081,19 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
-| `loops.review.level`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
+| `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
 | `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
-| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle escalates. |
+| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
 | `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
-| `loops.review.reasoning.backend` | `none`              | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. |
+| `loops.review.reasoning.backend` | `openai-tools`      | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. Unreachable, it skips only what needs it, each cycle. |
+| `loops.review.decision.timeout`  | `5m`                | How long one tier-1 call may take. A decision model on the node's own CPUs scoring a candidate with tier 2's analysis takes minutes; a call past this fails and the candidate waits for the next cycle. |
+| `loops.review.reasoning.timeout` | `10m`               | How long one tier-2 analysis may take, tool calls included. |
 | `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
 | `loops.review.reasoning.model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |
 | `loops.review.reasoning.keep_alive` | `10m`            | Ollama `keep_alive` for the tier 2 model. |
@@ -1498,22 +1500,23 @@ A missing planner or critic prompt disables that stage with a log line rather th
 
 ## 9. Autonomous Candidate Review (`loops.review.level`)
 
-The proposer's candidates wait for an operator. With `loops.review.level` set, the agent reviews
-them itself, as far as the level allows, and every review is a decision record.
+The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, with a
+decision model and a reasoning model, and every review is a decision record. `suggest` and `off` are
+the manual modes, for an operator who wants to decide.
 
 ```bash
-# A node (8 GB): a decision model only; what it is unsure of escalates to the operator.
-# agent.yaml: loops: {review: {level: full}}
+# A node (8 GB): a decision model only; what it is unsure of waits for its evidence to move.
+# agent.yaml: loops.review: {reasoning: {backend: none}}
 ollama pull tev1:4b
 ./agent -config agent.yaml
 
 # A machine with memory to spare: a stronger decision model and a reasoning tier.
-# agent.yaml: loops.review: {level: full, decision: {model: "nimble-v3:9b-nvfp4"}, reasoning: {backend: openai-tools}}
+# agent.yaml: loops.review: {decision: {model: "nimble-v3:9b-nvfp4"}}  (the reasoning tier is on by default)
 ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
 ./agent -config agent.yaml
 
 # Any OpenAI-compatible server instead of Ollama (llama.cpp's llama-server, vLLM):
-# agent.yaml: loops.review: {level: full, decision: {backend: openai-logprobs, url: "http://localhost:8081/v1", model: <model>}}
+# agent.yaml: loops.review: {decision: {backend: openai-logprobs, url: "http://localhost:8081/v1", model: <model>}}
 ./agent -config agent.yaml
 
 curl -s localhost:8080/autonomy
@@ -1526,9 +1529,9 @@ A candidate goes up the tiers only as far as it has to:
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
 | 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
-| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, escalating when less than half the model's probability fell on any letter. |
+| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
-| — | operator | What no tier was sure of is escalated: it stays in `GET /candidates` with `Review.Action: "escalate"`. |
+| — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
 
 The level decides who may act:
 
@@ -1536,8 +1539,8 @@ The level decides who may act:
 | ----- | --------- | --------------- |
 | `suggest` (0) | no | no — every review is recorded as a suggestion (`Review.Applied: false`) |
 | `rules` (1) | yes | no |
-| `bounded` (2) | yes | confirm and defer; a model's rejection is escalated |
-| `full` (3) | yes | yes |
+| `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
+| `full` (3), the default | yes | yes |
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
 returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is

@@ -1376,7 +1376,7 @@ func (p *MICorrelationProposer) Defer(candidateID string, rv types.CandidateRevi
 }
 
 // Annotate records a review of a Pending candidate without acting on it: an
-// escalation, or what a reviewer would have done had the autonomy level let it.
+// an undecided review, or what a reviewer would have done had the autonomy level let it.
 // The candidate stays Pending, in the operator's queue.
 func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateReview) error {
 	p.mu.Lock()
@@ -1389,7 +1389,7 @@ func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateR
 		return fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
 	rv.Applied = false
-	c.Review = stamp(c, rv, types.ReviewEscalate)
+	c.Review = stamp(c, rv, types.ReviewUndecided)
 	return nil
 }
 

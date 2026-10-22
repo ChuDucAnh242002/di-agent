@@ -26,11 +26,11 @@ func buildReviewer(sm *semmap.SemanticMap, opt spec.Review) (*autonomy.Reviewer,
 		Rules:           opt.Rules,
 		DecisionBackend: opt.Decision.Backend,
 		Decision: autonomy.Spec{URL: opt.Decision.URL, Model: opt.Decision.Model, KeepAlive: opt.Decision.KeepAlive,
-			APIKey:  opt.Decision.APIKey,
+			APIKey: opt.Decision.APIKey, Timeout: opt.Decision.Timeout,
 			Options: map[string]string{"reasoning_effort": opt.Decision.ReasoningEffort}},
 		ReasoningBackend: opt.Reasoning.Backend,
 		Reasoning: autonomy.Spec{URL: opt.Reasoning.URL, Model: opt.Reasoning.Model, KeepAlive: opt.Reasoning.KeepAlive,
-			APIKey: opt.Reasoning.APIKey},
+			APIKey: opt.Reasoning.APIKey, Timeout: opt.Reasoning.Timeout},
 		Tools: opt.Reasoning.Tools,
 	})
 	if err != nil {
