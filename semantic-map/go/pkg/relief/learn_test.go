@@ -83,7 +83,7 @@ func (h *harness) secondStep(subject string, share, p float64) {
 
 func interventionsOn(t *testing.T, m *statemap.Map, subject string) *statemap.Interventions {
 	t.Helper()
-	for _, r := range m.Relationships(usage(subject), NodePressure) {
+	for _, r := range m.Relationships(usage(subject), NodeContention) {
 		if r.Interventions != nil {
 			return r.Interventions
 		}
@@ -123,20 +123,22 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.3, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.02, t0)
 	at := map[string]float64{"pod:a": 0.4, "pod:c": 0.01}
-	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
+	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
 		t.Fatalf("moved %v; a pod going 0.01 → 0.02 of the node is not a confound", moved)
 	}
-	if confounded(m, at, "pod:a", 0.25) {
+	if confounded(m, at, "pod:a", 0.25, true) {
 		t.Fatal("confounded; want not")
 	}
+	// pod:a back at its share at act, so pod:c's rise is not CPU the cap freed.
+	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.04, t0)
-	if !confounded(m, at, "pod:a", 0.25) {
+	if !confounded(m, at, "pod:a", 0.25, true) {
 		t.Fatal("pod:c at 0.04 from 0.01 moved 0.03: want confounded")
 	}
 	// A workload that arrived since the act moved from nothing.
 	record(t, m, usage("pod:c"), "pod:c", 0.01, t0)
 	record(t, m, usage("pod:d"), "pod:d", 0.1, t0)
-	if moved, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
+	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
 		t.Fatalf("moved %v; want the newcomer pod:d", moved)
 	}
 }
@@ -204,8 +206,8 @@ func (h *harness) twoAgreeing() {
 
 func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "other", FromID: usage("pod:b"), ToID: NodePressure},
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodePressure},
+		{CandidateID: "other", FromID: usage("pod:b"), ToID: NodeContention},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
 	}}
 	h := settleFixture(t, cands, true)
 	h.judged("pod:a", 0.44)
@@ -225,13 +227,13 @@ func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 		t.Fatalf("confirmation %+v; want c1 from pod:a's usage by intervention, citing %s", c, verify.ID)
 	}
 	iv, _ := verify.Inputs["intervention"].(map[string]any)
-	if iv == nil || iv["changed"] != "created" || iv["relationship"] != statemap.RelationshipID(usage("pod:a"), NodePressure, "") {
+	if iv == nil || iv["changed"] != "created" || iv["relationship"] != statemap.RelationshipID(usage("pod:a"), NodeContention, "") {
 		t.Fatalf("intervention input %v; want the created relationship", verify.Inputs["intervention"])
 	}
 	if verify.Inputs["candidate"] != "c1" {
 		t.Errorf("candidate input %v; want c1", verify.Inputs["candidate"])
 	}
-	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodePressure, ""))
+	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, ""))
 	if !ok || r.Provenance != statemap.Intervened {
 		t.Fatalf("relationship %+v; want it created with intervened provenance", r)
 	}
@@ -239,7 +241,7 @@ func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 
 func TestAnUndirectedCandidateIsSettledFromTheWorkload(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "u1", FromID: NodePressure, ToID: usage("pod:a"), Undirected: true},
+		{CandidateID: "u1", FromID: NodeContention, ToID: usage("pod:a"), Undirected: true},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -251,7 +253,7 @@ func TestAnUndirectedCandidateIsSettledFromTheWorkload(t *testing.T) {
 
 func TestAReversedDirectedCandidateIsNotSettled(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "rev", FromID: NodePressure, ToID: usage("pod:a")},
+		{CandidateID: "rev", FromID: NodeContention, ToID: usage("pod:a")},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -262,7 +264,7 @@ func TestAReversedDirectedCandidateIsNotSettled(t *testing.T) {
 
 func TestAFailedSettlementIsACaveat(t *testing.T) {
 	cands := &fakeCandidates{err: errTest, pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodePressure},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -276,14 +278,14 @@ func TestAFailedSettlementIsACaveat(t *testing.T) {
 	if !found {
 		t.Fatalf("caveats %v; want the failed settlement stated", d.Caveats)
 	}
-	if _, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodePressure, "")); !ok {
+	if _, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok {
 		t.Fatal("the relationship the interventions created is missing")
 	}
 }
 
 func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodePressure},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
 	}}
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1}, noRelate: true,
 		evidence: true, candidates: cands})
@@ -299,7 +301,7 @@ func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
 		t.Errorf("effect %v; want 1", got)
 	}
-	if rs := h.m.Relationships(usage("pod:a"), NodePressure); len(rs) != 0 {
+	if rs := h.m.Relationships(usage("pod:a"), NodeContention); len(rs) != 0 {
 		t.Errorf("relationships %+v; confounded outcomes must not create one", rs)
 	}
 	if calls := cands.calls(); len(calls) != 0 {
@@ -313,11 +315,11 @@ func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 
 func TestDryRunTeachesNothing(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodePressure},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
 	}}
 	h := settleFixture(t, cands, false)
 	h.twoAgreeing()
-	if rs := h.m.Relationships(usage("pod:a"), NodePressure); len(rs) != 0 {
+	if rs := h.m.Relationships(usage("pod:a"), NodeContention); len(rs) != 0 {
 		t.Errorf("relationships %+v; a dry run changes nothing, so it shows nothing", rs)
 	}
 	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
@@ -338,7 +340,7 @@ func TestDryRunTeachesNothing(t *testing.T) {
 
 func TestAResumedActionWithoutAPredictionTeachesNothing(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
-	record(t, h.m, NodePressure, "", 0.5, h.now)
+	record(t, h.m, NodeContention, "", 0.5, h.now)
 	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
 	if err := h.l.Reconcile(h.ctx); err != nil {
@@ -525,5 +527,135 @@ func TestAUsageEffectDoesNotScaleAMapPrediction(t *testing.T) {
 	e.Observe("pod:a", BasisMap, 0.5)
 	if p, _, _ = MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, e.Of); !near(p.Predicted, 0.1*0.85) {
 		t.Fatalf("plan %+v; want the map factor 0.85 applied", p)
+	}
+}
+
+// TestAVictimTakingUpTheFreedCPUDoesNotConfound: capping a workload frees CPU, and a
+// contended workload beside it takes it up — that is the relief, not another workload
+// moving. Rises up to what the capped workload gave up are not confounds; a rise
+// beyond it, a fall, an arrival and a departure still are.
+func TestAVictimTakingUpTheFreedCPUDoesNotConfound(t *testing.T) {
+	m := newMap(t, func() time.Time { return t0 })
+	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
+	record(t, m, usage("pod:hog"), "pod:hog", 0.38, t0)
+	record(t, m, usage("pod:victim"), "pod:victim", 0.5, t0)
+	if moved, left, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved)+len(left) != 0 || len(absorbed) != 1 {
+		t.Fatalf("moved %v left %v absorbed %v; the victim took up the 0.12 the hog gave up", moved, left, absorbed)
+	}
+	// The victim rose by more than the hog gave up: something besides the cap moved it.
+	record(t, m, usage("pod:victim"), "pod:victim", 0.7, t0)
+	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+		t.Fatalf("moved %v; a rise of 0.32 against 0.12 freed is a confound", moved)
+	}
+	// A workload that fell lowered contention on its own.
+	record(t, m, usage("pod:victim"), "pod:victim", 0.2, t0)
+	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+		t.Fatalf("moved %v; a fall is a confound whatever the hog gave up", moved)
+	}
+}
+
+// TestAnAbsorbedRiseConfoundsARevert: a rise passed over as the victim taking up freed
+// CPU is only the relief working when the outcome agreed. When contention did not drop,
+// the same rise may be a workload growing on its own and hiding the cap's effect, so a
+// revert with an absorbed rise beside it is confounded rather than a null that teaches.
+func TestAnAbsorbedRiseConfoundsARevert(t *testing.T) {
+	absorbed := []string{"pod:victim"}
+	if c := confoundedBy(nil, nil, absorbed, true); len(c) != 0 {
+		t.Fatalf("confounded by %v; an agreeing outcome with the freed CPU taken up is the relief", c)
+	}
+	if c := confoundedBy(nil, nil, absorbed, false); len(c) != 1 || c[0] != "pod:victim" {
+		t.Fatalf("confounded by %v; a revert beside an absorbed rise must not teach", c)
+	}
+	if c := confoundedBy([]string{"pod:x"}, []string{"pod:y"}, nil, true); len(c) != 2 {
+		t.Fatalf("confounded by %v; moved and left confound whatever the verdict", c)
+	}
+}
+
+// TestNothingIsFreedByAWorkloadTheMapNoLongerHolds: with no live share for the capped
+// workload, what it gave up is unknown, not its whole share at act, so rises beside it
+// are not passed over.
+func TestNothingIsFreedByAWorkloadTheMapNoLongerHolds(t *testing.T) {
+	m := newMap(t, func() time.Time { return t0 })
+	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
+	record(t, m, usage("pod:victim"), "pod:victim", 0.6, t0)
+	if moved, _, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || len(absorbed) != 0 {
+		t.Fatalf("moved %v absorbed %v; nothing is known to have been freed", moved, absorbed)
+	}
+}
+
+// TestAnInterventionsEffectIsWhatItMeasured: an unconfounded outcome hands the map the
+// drop in contention per unit drop in the workload's share — the units the estimate
+// projects in — and the relationship the interventions create reasons with it, not
+// with the co-variation of a workload the cap holds still.
+func TestAnInterventionsEffectIsWhatItMeasured(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.act("pod:a")
+	// The cap takes 0.1 of the node off pod:a's usage.
+	record(t, h.m, usage("pod:a"), "pod:a", h.action("pod:a").SharesAtAct["pod:a"]-0.1, h.now)
+	h.run(2*time.Minute, 0.44)
+	d := h.lastVerify()
+	ss, _ := d.Inputs["subject_share"].(map[string]any)
+	iv, _ := d.Inputs["intervention"].(map[string]any)
+	atAct, _ := ss["at_act"].(float64)
+	atVerify, _ := ss["at_verify"].(float64)
+	observed, _ := d.Inputs["observed"].(float64)
+	want := math.Min(1, observed/(atAct-atVerify))
+	if got, ok := iv["effect"].(float64); !ok || math.Abs(got-want) > 1e-9 {
+		t.Fatalf("intervention input %v; want effect %v = observed %v / share drop %v", iv, want, observed, atAct-atVerify)
+	}
+}
+
+// TestTheCreatedRelationshipReasonsFromTheMeasuredEffect: the relationship two agreeing
+// outcomes create carries what they measured, and the map answers from it.
+func TestTheCreatedRelationshipReasonsFromTheMeasuredEffect(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.judged("pod:a", 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	// The second cap binds: pod:a runs at its new limit, 0.9 of 4 cores.
+	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
+	h.run(2*time.Minute, 0.40)
+	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, ""))
+	if !ok || r.Provenance != statemap.Intervened || r.Measured == nil || r.Basis() != "measured" {
+		t.Fatalf("relationship %+v; want it created and reasoning from the measured effect", r)
+	}
+	if eff, _ := r.Effective(); eff < 0.03 {
+		t.Fatalf("effective %v; the measured effect of a cap that worked is not negligible", eff)
+	}
+}
+
+// TestNoEffectIsMeasuredWhenTheShareDidNotMove: an outcome whose workload's share barely
+// moved has nothing to divide by, so it counts toward structure but measures no effect.
+func TestNoEffectIsMeasuredWhenTheShareDidNotMove(t *testing.T) {
+	if _, ok := measuredEffect(0.3, 0.5, 0.49); ok {
+		t.Fatal("a share drop of 0.01 measured an effect; want none")
+	}
+	if e, ok := measuredEffect(0.3, 0.5, 0.4); !ok || math.Abs(e-1) > 1e-9 {
+		t.Fatalf("effect %v ok=%v; want 0.3/0.1 clamped to 1", e, ok)
+	}
+	if e, ok := measuredEffect(0.05, 0.5, 0.25); !ok || math.Abs(e-0.2) > 1e-9 {
+		t.Fatalf("effect %v ok=%v; want 0.05/0.25", e, ok)
+	}
+	if e, ok := measuredEffect(-0.1, 0.5, 0.25); !ok || e != 0 {
+		t.Fatalf("effect %v ok=%v; a rise in contention is an effect of zero", e, ok)
+	}
+}
+
+// TestAMeasuredEffectReplacesTheMapPredictionsCorrection: the map-basis factor
+// corrects a map prediction for what acting has done against it. Once an outcome
+// writes a measured strength, the map's prediction already carries what the
+// interventions saw, and a factor learned against the old strength would correct it
+// a second time.
+func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
+	h := settleFixture(t, &fakeCandidates{}, true)
+	h.l.effects.Observe("pod:a", BasisMap, 2)
+	h.judged("pod:a", 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
+	h.run(2*time.Minute, 0.40)
+	if r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok || r.Measured == nil {
+		t.Fatalf("relationship %+v; want a measured strength", r)
+	}
+	if f := h.l.effects.Of("pod:a", BasisMap); f != 1 {
+		t.Fatalf("map-basis factor %v after a measured effect; want 1, nothing left to correct", f)
 	}
 }

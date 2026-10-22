@@ -51,6 +51,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/groups"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/profiles"
@@ -119,25 +120,15 @@ func main() {
 	// and discovers how they relate; what it cannot do is reason over constructs
 	// nobody declared. A path that was named and does not load is still an error,
 	// because silently running without the model someone asked for is worse.
-	var dom *domain.Spec
-	switch {
-	case cfg.Domain.Path != "":
-		var err error
-		if dom, err = domain.Load(cfg.Domain.Path); err != nil {
-			log.Fatalf("domain spec: %v", err)
-		}
-	default:
-		if p, err := domain.FindSpec(""); err == nil {
-			if dom, err = domain.Load(p); err != nil {
-				log.Fatalf("domain spec: %v", err)
-			}
-		}
+	dom, domFrom, err := loadDomain(cfg.Domain.Path, "")
+	if err != nil {
+		log.Fatalf("domain spec: %v", err)
 	}
 	if dom != nil {
-		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
-			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting))
+		log.Printf("domain model: %d constructs, %d propositions, %d routed metrics, from %s",
+			len(dom.Constructs), len(dom.Propositions), len(dom.MetricRouting), domFrom)
 	} else {
-		log.Printf("domain model: none (no domain.path and no domain_spec.json found): every " +
+		log.Printf("domain model: none (domain.path is none, or no domain_spec.json was found): every " +
 			"observed property is recorded and relationships are discovered; cost, " +
 			"recommendations and tuning return 501")
 	}
@@ -287,7 +278,7 @@ func main() {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
-	explainer, err := buildExplainer(sm, cfg.Explain)
+	explainer, err := buildExplainer(sm, cfg.Explain, dom)
 	if err != nil {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
@@ -338,6 +329,10 @@ func main() {
 	}
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
 	registerAutonomyRoutes(mux, reviewer)
+	grp := &grouper{state: state, cfg: groups.Config{LabelKeys: cfg.Groups.LabelKeys, Units: cfg.Groups.Units},
+		linux:     groups.Linux{SysRoot: "/sys", ProcRoot: "/proc", CgroupRoot: cfg.Sources.Cgroup.Root},
+		workloads: rt.Workloads, logf: log.Printf}
+	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
@@ -370,6 +365,9 @@ func main() {
 	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
+	}
+	if cfg.Groups.Interval > 0 {
+		go grp.run(ctx, cfg.Groups.Interval)
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -497,7 +495,40 @@ func runCollectionLoop(
 //
 // The bearer token is explain.api_key; write it as ${EXPLAIN_API_KEY} to keep the
 // credential out of the file.
-func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer, error) {
+// withDomain fills a prompt's {{DOMAIN}} with what the loaded domain model declares, or
+// says that none is loaded. A prompt names no construct itself: the constructs are data
+// this agent loaded, and a model told about others reasons about a map that is not here.
+// loadDomain returns the domain model and the file it came from. "none" runs without
+// one; a named path must load; an empty path searches upward from searchFrom (the
+// working directory when empty) and runs without one when nothing is found. The path is
+// returned so the log says which file supplied the constructs: a search can find a spec
+// nobody meant this agent to have.
+func loadDomain(path, searchFrom string) (*domain.Spec, string, error) {
+	switch path {
+	case "none":
+		return nil, "", nil
+	case "":
+		found, err := domain.FindSpec(searchFrom)
+		if err != nil {
+			return nil, "", nil
+		}
+		path = found
+	}
+	dom, err := domain.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return dom, path, nil
+}
+
+func withDomain(prompt string, dom *domain.Spec) string {
+	if prompt == "" {
+		return ""
+	}
+	return strings.ReplaceAll(prompt, "{{DOMAIN}}", dom.PromptSummary())
+}
+
+func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) (explain.Explainer, error) {
 	if opt.Provider == "" || opt.Provider == "none" {
 		log.Printf("explain: provider=none (POST /explain will return 501)")
 		return explain.NewDisabled(), nil
@@ -506,7 +537,7 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer
 		return nil, fmt.Errorf("unknown explain.provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
 	if opt.Prompt == "" {
-		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
+		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v2.md")
 	}
 	prompt, err := explain.LoadPrompt(opt.Prompt)
 	if err != nil {
@@ -517,8 +548,9 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain) (explain.Explainer
 	// stage rather than failing startup, so an operator can run answer-only
 	// even with a partial prompt directory.
 	promptDir := filepath.Dir(opt.Prompt)
-	plannerPrompt := loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v1.md", "planner")
-	criticPrompt := loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v1.md", "critic")
+	prompt = withDomain(prompt, dom)
+	plannerPrompt := withDomain(loadOptionalPrompt(opt.PlannerPrompt, promptDir, "planner-v2.md", "planner"), dom)
+	criticPrompt := withDomain(loadOptionalPrompt(opt.CriticPrompt, promptDir, "critic-v2.md", "critic"), dom)
 
 	var sessions *explain.SessionStore
 	if opt.Sessions {

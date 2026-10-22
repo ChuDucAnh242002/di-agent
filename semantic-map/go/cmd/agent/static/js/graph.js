@@ -367,7 +367,7 @@ export class GraphView {
 
     const nodes = props.map((p) => {
       const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
-      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: subjectOf(p) || MACHINE };
+      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: model.boxOf(p) || MACHINE };
     });
 
     const rels = model.relationships.filter((r) => ids.has(r.from) && ids.has(r.to));
@@ -449,7 +449,7 @@ export class GraphView {
     // Enclosures, drawn under everything: the machine's and each subject's.
     const bySubject = new Map();
     for (const p of props) {
-      const s = subjectOf(p) || MACHINE;
+      const s = model.boxOf(p) || MACHINE;
       if (!bySubject.has(s)) bySubject.set(s, []);
       bySubject.get(s).push(p.id);
     }
@@ -655,8 +655,8 @@ export class GraphView {
       valueText.textContent = p.n_observations ? fmt.num(p.value, 3) : 'unobserved';
       g.append(valueText);
 
-      const box = subjectOf(p) || MACHINE;
-      const boxPinned = props.every((q) => (subjectOf(q) || MACHINE) !== box || this.force.at(q.id)?.pinned);
+      const box = model.boxOf(p) || MACHINE;
+      const boxPinned = props.every((q) => (model.boxOf(q) || MACHINE) !== box || this.force.at(q.id)?.pinned);
       if (this.force.at(p.id)?.pinned && !boxPinned) {
         g.append(el('circle', { r: 2.5, cx: r - 3, cy: -(r - 3), fill: 'var(--ink-muted)' }));
       }

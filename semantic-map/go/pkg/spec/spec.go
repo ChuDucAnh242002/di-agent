@@ -42,6 +42,16 @@ type Spec struct {
 	Runtime RuntimeSpec  `yaml:"runtime"`
 	Loops   Loops        `yaml:"loops"`
 	Policy  PolicySpec   `yaml:"policy"`
+	Groups  Groups       `yaml:"groups"`
+}
+
+// Groups says how the node's subjects are grouped: pods by a label an operator sets,
+// units by name. A group whose members use the machine (pods, units) is a group:
+// subject of the map, its CPU and memory the sums of its members'.
+type Groups struct {
+	Interval  time.Duration       `yaml:"interval"`
+	LabelKeys []string            `yaml:"label_keys"`
+	Units     map[string][]string `yaml:"units"`
 }
 
 // Node is the machine the agent models. ID empty falls back to the hostname.
@@ -138,7 +148,8 @@ type Peers struct {
 	StateStale time.Duration `yaml:"state_stale"`
 }
 
-// Domain is the path to domain_spec.json; empty searches upward from the working directory.
+// Domain is the path to domain_spec.json; empty searches upward from the working directory,
+// and "none" runs without a domain model whatever the search would find.
 type Domain struct {
 	Path string `yaml:"path"`
 }
@@ -197,6 +208,9 @@ type Decision struct {
 	KeepAlive       string `yaml:"keep_alive"`
 	ReasoningEffort string `yaml:"reasoning_effort"`
 	APIKey          string `yaml:"api_key" secret:"true"`
+	// Timeout is how long one call may take. A decision model on the node's own CPUs
+	// scoring a candidate with a reasoning model's analysis needs minutes, not seconds.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Reasoning is review tier 2, the model that may call read-only tools.
@@ -207,6 +221,8 @@ type Reasoning struct {
 	KeepAlive string   `yaml:"keep_alive"`
 	Tools     []string `yaml:"tools"`
 	APIKey    string   `yaml:"api_key" secret:"true"`
+	// Timeout is how long one analysis may take, its tool calls included.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Relief is the loop that throttles a workload when the node's CPU stays hot.
@@ -216,11 +232,12 @@ type Relief struct {
 	CPU      CPURelief     `yaml:"cpu"`
 }
 
-// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU pressure,
-// the PSI stall fraction cpu_pressure_ratio in [0,1] (the share of time tasks
-// wait for a CPU, not utilisation), with Exit below Enter so a hot node is not
+// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU contention,
+// cpu_contention_ratio in [0,1]: the share of time some workload waited for a CPU
+// another was using — PSI stall less the workload's own throttling, not
+// utilisation — with Exit below Enter so a hot node is not
 // released the moment it cools by a hair. MinEffect is a planning floor: a step
-// whose predicted drop in pressure is below it is not taken. It is not the bar a
+// whose predicted drop in contention is below it is not taken. It is not the bar a
 // step is judged by afterwards: verify keeps a step whose observed drop is at
 // least half the drop it predicted, and reverts it otherwise. Expiry must be
 // longer than Settle, or a change would be given back before it is judged.
@@ -405,7 +422,7 @@ func Default() Spec {
 		Runtime: RuntimeSpec{Kind: "dry-run"},
 		Loops: Loops{
 			Review: Review{
-				Level: "off", Interval: time.Minute, PerCycle: 10,
+				Level: "full", Interval: time.Minute, PerCycle: 10,
 				Rules: []string{"composition"}, Renderer: "text",
 				Thresholds: ReviewThreshold{
 					Confirm: autonomy.DefaultThresholds.Confirm,
@@ -414,11 +431,11 @@ func Default() Spec {
 				},
 				Decision: Decision{
 					Backend: "systemone", URL: "http://localhost:11434",
-					Model: "tev1:4b", ReasoningEffort: "none",
+					Model: "tev1:4b", ReasoningEffort: "none", Timeout: 5 * time.Minute,
 				},
 				Reasoning: Reasoning{
-					Backend: "none", URL: "http://localhost:11434/v1",
-					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m",
+					Backend: "openai-tools", URL: "http://localhost:11434/v1",
+					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m", Timeout: 10 * time.Minute,
 					Tools: slices.Clone(autonomy.DefaultTools),
 				},
 			},
@@ -431,6 +448,9 @@ func Default() Spec {
 				},
 			},
 		},
+		Groups: Groups{Interval: 30 * time.Second,
+			LabelKeys: []string{"di-agent/group", "app.kubernetes.io/part-of"},
+			Units:     map[string][]string{"system": {"*"}}},
 		Policy: PolicySpec{
 			Defaults: Settings{
 				Allow: []string{"cpu.limit"}, Deny: []string{"evict"},

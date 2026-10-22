@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +55,16 @@ import (
 // declared as "fraction" on [0,1]: the share of the window in which at least one task
 // waited for that resource. Each is absent where the kernel exposes no PSI for it.
 //
+// cpu_contention_ratio is the CPU stall a subject suffered beyond its own limit: the
+// cpu.pressure "some" stall share less the cgroup's own throttled time (cpu.stat
+// throttled_usec), clamped at zero. On cgroup v2 a cgroup held back by its own quota
+// counts that time as CPU stall, and the root sums every cgroup's, so a pod running
+// at its limit makes cpu_pressure_ratio rise with nothing else on the node waiting —
+// and lowering its limit raises it further. The node's cpu_contention_ratio is the
+// worst waiting of a pod promised CPU (not BestEffort, not a unit) that gets less than its
+// weighted fair share of the pods' CPUs (owedContention): CPU it is owed another pod
+// holds. It needs subjects; with -cgroup-subjects off it is absent.
+//
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
 // declared as "fraction" on [0,1]. It is zero on bare metal and is what separates
@@ -78,6 +90,10 @@ type CgroupCollector struct {
 
 	mu   sync.Mutex
 	prev map[string]*cpuSnapshot // key: subject ("" = root)
+	// lastCollect is when the previous Collect ran: the window node contention
+	// covers. It is the collector's own, since node contention is computed from
+	// subjects and must move on when the root's cpu.stat cannot be read.
+	lastCollect time.Time
 	// Each condition below is said once (or, for the cap, whenever the count
 	// changes): a collector that goes silent is the failure this project treats as
 	// worse than an error, because nothing about an empty map looks wrong.
@@ -86,6 +102,8 @@ type CgroupCollector struct {
 	lastSkipped  int
 
 	podNames map[string][2]string // pod UID → namespace, name; from PodLogRoot
+	// containerNames is container ID → name, from ContainerLogRoot.
+	containerNames map[string]string
 }
 
 func (c *CgroupCollector) log(format string, args ...any) {
@@ -120,6 +138,12 @@ type CgroupOptions struct {
 	// entry per pod; each pod subject is labelled namespace=<namespace> and
 	// pod=<name> from it. Empty names nothing: the subject stays the UID either way.
 	PodLogRoot string
+	// ContainerLogRoot is the kubelet's /var/log/containers, one link per container,
+	// <pod>_<namespace>_<container>-<id>.log. A pod with more than one container named
+	// there is broken down into container:<uid>.<name> subjects, each labelled with its
+	// pod as parent; a pod with one container is that container, and gets none. Empty
+	// breaks down nothing.
+	ContainerLogRoot string
 	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
 	// advance it instead of sleeping.
 	Now func() time.Time
@@ -134,6 +158,10 @@ type cpuSnapshot struct {
 	usageUsec   uint64
 	nrPeriods   uint64
 	nrThrottled uint64
+	// throttledUsec is cpu.stat's cumulative throttled time; hasThrottledUsec is
+	// false where the line is absent (no cpu controller, so nothing can throttle).
+	throttledUsec    uint64
+	hasThrottledUsec bool
 	// stall holds each PSI file's cumulative "some" stall time, in psiResources
 	// order; hasStall is false where the file is absent (a kernel booted with psi=0,
 	// or a cgroup without it).
@@ -163,6 +191,7 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.IOPressureRatio,
 	types.MemoryPressureRatio,
 	types.CPUStealRatio,
+	types.CPUContentionRatio,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -184,7 +213,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	}
 	c := &CgroupCollector{
 		nodeID: nodeID, cgroupRoot: cgroupRoot, sid: "cgroup:" + nodeID,
-		numCPU: float64(runtime.NumCPU()), opts: opts,
+		numCPU: machineCPUs(opts.ProcRoot), opts: opts,
 		prev: make(map[string]*cpuSnapshot),
 	}
 	c.memTotal = opts.MemTotalBytes
@@ -229,6 +258,13 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// The node's contention is anchored on the window it measures, as every windowed
+	// sample is: from the previous collect to this one.
+	window := now
+	if !c.lastCollect.IsZero() {
+		window = c.lastCollect
+	}
+	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
 	if rootErr != nil && !c.rootWarned {
 		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at -cgroup-root?",
@@ -239,6 +275,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		return out, nil
 	}
 	seen := map[string]bool{}
+	var promised []podCPU // pods promised CPU: the node's contention is theirs
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
@@ -281,6 +318,32 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
+			// Node contention is relief's trigger and relief acts on pods: a pod that was
+			// promised CPU sets it. A BestEffort pod's waiting is the share it was promised,
+			// and a unit's is not the runtime's to relieve; both are still emitted.
+			if labels["kind"] == "pod" && labels["qos"] != "besteffort" {
+				if pc, ok := c.podCPULocked(info.subject, p, samples); ok {
+					promised = append(promised, pc)
+				}
+			}
+			// A pod's parts are not counted again in the node's contention: the pod's
+			// own reading already holds them.
+			for _, pt := range c.containerPartsLocked(p, &rescanned) {
+				sub := "container:" + labels["pod_uid"] + "." + sanitizeContainer(pt.name)
+				if len(seen) >= c.opts.MaxSubjects {
+					skipped++
+					break
+				}
+				seen[sub] = true
+				cl := make(map[string]string, len(labels)+2)
+				for k, v := range labels {
+					cl[k] = v
+				}
+				cl["kind"], cl["container"], cl["parent"] = "container", pt.name, info.subject
+				cl["cgroup"] = labels["cgroup"] + "/" + filepath.Base(pt.dir)
+				parts, _ := c.collectOneLocked(sub, pt.dir, cl, now)
+				out = append(out, parts...)
+			}
 			return filepath.SkipDir // a subject's children are not subjects
 		}
 		return nil
@@ -299,6 +362,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		}
 		c.lastSkipped = skipped
 	}
+	if worst, ok := owedContention(promised, c.podCPUs()); ok {
+		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
+	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
 			delete(c.prev, subject)
@@ -316,7 +382,8 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		return nil, err
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
-	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
+	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled,
+		throttledUsec: cpu.throttledUsec, hasThrottledUsec: cpu.hasThrottledUsec}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
 		snap.stall[i], snap.hasStall[i] = v, err == nil
@@ -373,6 +440,11 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 			samples = append(samples, c.sample(r.metric, unitNodeShare, pressure, now, prev.ts, subject, labels))
 		}
 	}
+	if subject != "" {
+		if v, ok := contention(prev, snap, elapsedUs); ok {
+			samples = append(samples, c.sample(types.CPUContentionRatio, unitNodeShare, v, now, prev.ts, subject, labels))
+		}
+	}
 	// Steal is a share of CPU time, so it is measured in /proc/stat's own ticks on
 	// both sides of the ratio rather than against wall time, which would need
 	// USER_HZ and the CPU count to agree with the kernel's.
@@ -381,6 +453,106 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		samples = append(samples, c.sample(types.CPUStealRatio, unitNodeShare, steal, now, prev.ts, subject, labels))
 	}
 	return samples, nil
+}
+
+// contention is the CPU stall share of the window not explained by the cgroup's own
+// throttling. It is an approximation that errs toward zero: throttled_usec sums the
+// time each per-CPU runqueue of the cgroup spent throttled, while the PSI "some" total
+// is wall-clock, so a cgroup throttled on several CPUs at once has more subtracted than
+// its throttling explains, and its contention reads low — never high. psiResources[0] is cpu.pressure. A counter that went backwards (the
+// cgroup was recreated) gives no reading; a cgroup with no throttled_usec on either
+// side has no quota to be held back by, so all of its stall is contention.
+func contention(prev, snap *cpuSnapshot, elapsedUs int64) (float64, bool) {
+	if !snap.hasStall[0] || !prev.hasStall[0] || snap.stall[0] < prev.stall[0] {
+		return 0, false
+	}
+	var throttled uint64
+	switch {
+	case snap.hasThrottledUsec && prev.hasThrottledUsec:
+		if snap.throttledUsec < prev.throttledUsec {
+			return 0, false
+		}
+		throttled = snap.throttledUsec - prev.throttledUsec
+	case snap.hasThrottledUsec != prev.hasThrottledUsec:
+		return 0, false
+	}
+	stall := snap.stall[0] - prev.stall[0]
+	if throttled >= stall {
+		return 0, true
+	}
+	return clamp(float64(stall-throttled)/float64(elapsedUs), 0, 1), true
+}
+
+// worstContention is the highest subject cpu_contention_ratio among samples, and
+// whether there was one. Collect passes it only the subjects that were promised
+// CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
+// nearly all the time, and letting it set the node's signal would have relief cap
+// a workload that was promised CPU to serve one that was promised none.
+// podCPULocked is a pod's part in owedContention: its contention and the cores it used,
+// from this collect's samples, and its cpu.weight and CPU limit from its cgroup. A pod
+// with no contention reading this window has no part.
+func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.MetricSample) (podCPU, bool) {
+	pc := podCPU{subject: subject, weight: 100, limit: math.Inf(1)}
+	var have bool
+	for _, s := range samples {
+		switch s.MetricType {
+		case types.CPUContentionRatio:
+			pc.contention, have = s.Value, true
+		case types.CPUUtilization:
+			pc.cores = s.Value * c.numCPU
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "cpu.weight")); err == nil {
+		if w, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && w > 0 {
+			pc.weight = w
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "cpu.max")); err == nil {
+		if f := strings.Fields(string(b)); len(f) == 2 && f[0] != "max" {
+			q, e1 := strconv.ParseFloat(f[0], 64)
+			per, e2 := strconv.ParseFloat(f[1], 64)
+			if e1 == nil && e2 == nil && per > 0 {
+				pc.limit = q / per
+			}
+		}
+	}
+	return pc, have
+}
+
+// podCPUs is how many CPUs the pods may run on: the kubepods cgroup's cpuset when it is
+// narrower than the node (the case-study node keeps some CPUs for the agent's models),
+// the node's CPUs otherwise.
+func (c *CgroupCollector) podCPUs() float64 {
+	for _, kp := range []string{"kubepods", "kubepods.slice"} {
+		b, err := os.ReadFile(filepath.Join(c.cgroupRoot, kp, "cpuset.cpus.effective"))
+		if err != nil {
+			continue
+		}
+		if n := cpusetSize(strings.TrimSpace(string(b))); n > 0 {
+			return float64(n)
+		}
+	}
+	return c.numCPU
+}
+
+// cpusetSize counts the CPUs in a cpuset list such as 0-5,8.
+func cpusetSize(list string) int {
+	n := 0
+	for _, part := range strings.Split(list, ",") {
+		lo, hi, rng := strings.Cut(part, "-")
+		a, err := strconv.Atoi(lo)
+		if err != nil {
+			continue
+		}
+		if !rng {
+			n++
+			continue
+		}
+		if b, err := strconv.Atoi(hi); err == nil && b >= a {
+			n += b - a + 1
+		}
+	}
+	return n
 }
 
 // cmdLabel returns the basename of argv0 of the first process in the cgroup, or "".
@@ -501,9 +673,11 @@ func (c *CgroupCollector) sample(mt types.MetricType, unit string, value float64
 // ── cgroup v2 file readers ────────────────────────────────────────────────────
 
 type rawCPUStat struct {
-	usageUsec   uint64
-	nrPeriods   uint64
-	nrThrottled uint64
+	usageUsec        uint64
+	nrPeriods        uint64
+	nrThrottled      uint64
+	throttledUsec    uint64
+	hasThrottledUsec bool
 }
 
 // readCPUStat parses the cgroups v2 cpu.stat key-value file.
@@ -536,6 +710,8 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 			stat.nrPeriods = v
 		case "nr_throttled":
 			stat.nrThrottled = v
+		case "throttled_usec":
+			stat.throttledUsec, stat.hasThrottledUsec = v, true
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -662,4 +838,99 @@ func (c *CgroupCollector) podNameLocked(uid string, rescanned *bool) ([2]string,
 	}
 	nn, ok := c.podNames[uid]
 	return nn, ok
+}
+
+// containerPart is one container's cgroup inside a pod's, and the name it runs under.
+type containerPart struct{ dir, name string }
+
+// containerPartsLocked is the named containers in a pod's cgroup, by name, when there
+// are two or more; none otherwise, since a single container is the pod. A child whose
+// ID has no log link — the sandbox, a container not yet linked — is not one of them.
+func (c *CgroupCollector) containerPartsLocked(podDir string, rescanned *bool) []containerPart {
+	if c.opts.ContainerLogRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(podDir)
+	if err != nil {
+		return nil
+	}
+	var parts []containerPart
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := containerID(e.Name())
+		name, ok := c.containerNames[id]
+		if !ok && !*rescanned {
+			c.rescanContainersLocked()
+			*rescanned = true
+			name, ok = c.containerNames[id]
+		}
+		if ok {
+			parts = append(parts, containerPart{dir: filepath.Join(podDir, e.Name()), name: name})
+		}
+	}
+	if len(parts) < 2 {
+		return nil
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].name < parts[j].name })
+	return parts
+}
+
+// containerID is the runtime's ID in a container cgroup's name: the name itself under
+// the cgroupfs driver, cri-containerd-<id>.scope (or crio-, docker-) under systemd.
+func containerID(dir string) string {
+	dir = strings.TrimSuffix(dir, ".scope")
+	for _, p := range []string{"cri-containerd-", "crio-", "docker-"} {
+		dir = strings.TrimPrefix(dir, p)
+	}
+	return dir
+}
+
+// rescanContainersLocked rereads the kubelet's container links,
+// <pod>_<namespace>_<container>-<id>.log; pod and namespace are DNS names with no '_'.
+func (c *CgroupCollector) rescanContainersLocked() {
+	entries, err := os.ReadDir(c.opts.ContainerLogRoot)
+	if err != nil {
+		return
+	}
+	c.containerNames = make(map[string]string, len(entries))
+	for _, e := range entries {
+		n := strings.TrimSuffix(e.Name(), ".log")
+		parts := strings.SplitN(n, "_", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		i := strings.LastIndex(parts[2], "-")
+		if i <= 0 {
+			continue
+		}
+		c.containerNames[parts[2][i+1:]] = parts[2][:i]
+	}
+}
+
+// sanitizeContainer makes a container name a subject identity part.
+func sanitizeContainer(name string) string { return sanitiseIdentity(name) }
+
+// machineCPUs is the machine's CPU count, one cpuN line in /proc/stat each. Every CPU
+// fraction is a share of the node, so it divides by this — not runtime.NumCPU, which is the
+// CPUs the agent's own process may run on and is smaller when the agent is pinned (it was
+// six of twelve on the case-study node, and every share came out doubled). runtime.NumCPU
+// is the fallback when /proc/stat cannot be read.
+func machineCPUs(procRoot string) float64 {
+	b, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err == nil {
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) > 0 && len(f[0]) > 3 && strings.HasPrefix(f[0], "cpu") {
+				if _, err := strconv.Atoi(f[0][3:]); err == nil {
+					n++
+				}
+			}
+		}
+		if n > 0 {
+			return float64(n)
+		}
+	}
+	return float64(runtime.NumCPU())
 }

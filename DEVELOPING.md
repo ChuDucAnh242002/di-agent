@@ -257,7 +257,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 
 **Tools must stay read-only.** The registry is what makes "the LLM cannot mutate the graph" true by construction rather than by policy. Adding a mutating tool breaks the human-judgment anchor described in [ARCHITECTURE §8](semantic-map/ARCHITECTURE.md#8-connection-to-research). If the model should be able to suggest a change, it already can — as a draft `Proposal` the operator POSTs themselves.
 
-**A new prompt version:** copy `cmd/agent/prompts/explain-v1.md` to `-v2.md` and edit the copy. Never edit `v1` in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against v1 must stay reproducible.
+**A new prompt version:** copy the newest `cmd/agent/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
 
 ---
 

@@ -125,6 +125,10 @@ type Property struct {
 
 	// Members are the properties a derived property aggregates.
 	Members []string `json:"members,omitempty"`
+	// Aggregate is how a derived property combines its members: the mean by default,
+	// a summary of comparable signals; AggregateSum for a group's use of the machine,
+	// which is what its members use together.
+	Aggregate string `json:"aggregate,omitempty"`
 
 	// Subject names what this property is a property of: "" for the node itself,
 	// "<kind>:<identity>" for anything narrower. It is part of the id and immutable
@@ -225,6 +229,17 @@ type Relationship struct {
 	// its system, the less an operator could steer it. An assertion does not decay.
 	Assertion *float64 `json:"assertion,omitempty"`
 
+	// Measured is the effect the agent's own interventions on this pair observed: the
+	// mean, over unconfounded outcomes, of the target's change per unit change of the
+	// source, both normalised by their ranges — the same units the estimate projects
+	// in. It outranks both learned layers and yields to an assertion. Co-variation is
+	// the wrong measure once the agent acts on the source: a capped workload stops
+	// moving with the contention it caused, because the cap is what holds it still, so
+	// the learned layers settle near zero exactly when the relationship is strongest.
+	// Each effect is clamped to [0, 1], so a measured 1 is a lower bound on the
+	// sensitivity, and the estimate's caveat says so.
+	Measured *float64 `json:"measured,omitempty"`
+
 	NObservations int        `json:"n_observations"`
 	Provenance    Provenance `json:"provenance"`
 
@@ -269,6 +284,9 @@ func (r *Relationship) Effective() (float64, bool) {
 	if r.Assertion != nil {
 		return clamp01(*r.Assertion), true
 	}
+	if r.Measured != nil {
+		return clamp01(*r.Measured), true
+	}
 	if r.Established != nil {
 		return clamp01(*r.Established), true
 	}
@@ -296,6 +314,8 @@ func (r *Relationship) Basis() string {
 	switch {
 	case r.Assertion != nil:
 		return "asserted"
+	case r.Measured != nil:
+		return "measured"
 	case r.Established != nil:
 		return "established"
 	case r.NObservations > 0:
@@ -576,10 +596,16 @@ func (m *Map) DeclareProperty(p Property) error {
 	default:
 		return fmt.Errorf("property %q declares status %q; want active, stale or retired", p.ID, p.Status)
 	}
-	if p.Kind == Derived && p.Subject != "" {
+	if p.Kind == Derived && p.Subject != "" && !IsGroup(p.Subject) {
 		// A derived property is node-level structure: a summary scoped to one
-		// subject would be a subject summarising itself.
-		return fmt.Errorf("derived property %q cannot be scoped to a subject", p.ID)
+		// subject would be a subject summarising itself. A group is the one subject
+		// made of others.
+		return fmt.Errorf("derived property %q cannot be scoped to a subject other than a group", p.ID)
+	}
+	switch p.Aggregate {
+	case "", AggregateSum:
+	default:
+		return fmt.Errorf("property %q aggregates by %q; want the mean or %q", p.ID, p.Aggregate, AggregateSum)
 	}
 	if p.RangeDeclared && p.Range == ([2]float64{}) {
 		return fmt.Errorf("property %q declares a range it does not give", p.ID)
@@ -648,6 +674,10 @@ func (m *Map) DeclareProperty(p Property) error {
 			changed["range_declared"] = true
 			existing.RangeDeclared = true
 		}
+	}
+	if p.Aggregate != existing.Aggregate && p.Kind == Derived {
+		changed["aggregate"] = p.Aggregate
+		existing.Aggregate = p.Aggregate
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members
@@ -1101,7 +1131,11 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 			}
 			continue
 		}
-		d.Value = sum / float64(n)
+		if d.Aggregate == AggregateSum {
+			d.Value = sum
+		} else {
+			d.Value = sum / float64(n)
+		}
 		d.Confidence = conf / float64(n)
 		d.NObservations = obs
 		d.LastObserved = at

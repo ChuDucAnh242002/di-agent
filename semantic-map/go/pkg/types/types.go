@@ -87,9 +87,12 @@ type EdgeDescriptor struct {
 	// measured then entered every decision with weight (1 − confidence).
 	Established *float64
 	Assertion   *float64
+	// Measured is what the agent's own interventions on this pair observed; nil when
+	// none has measured anything. It outranks Established and yields to Assertion.
+	Measured *float64
 
 	// Effective is the value the agent reasons with, nil when there is not one yet,
-	// and Basis names which of the three layers it came from.
+	// and Basis names which layer it came from.
 	Effective *float64
 	Basis     string
 
@@ -240,6 +243,8 @@ type OutcomeSimulation struct {
 //	IOPressureRatio      PSI io.some stall fraction
 //	MemoryPressureRatio  PSI memory.some stall fraction
 //	CPUStealRatio        share of CPU time the hypervisor gave to others (node-level)
+//	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
+//	                     node's is the worst-off subject's (cgroup collector)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -263,6 +268,7 @@ const (
 	IOPressureRatio     MetricType = "io_pressure_ratio"
 	MemoryPressureRatio MetricType = "memory_pressure_ratio"
 	CPUStealRatio       MetricType = "cpu_steal_ratio"
+	CPUContentionRatio  MetricType = "cpu_contention_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
@@ -493,13 +499,13 @@ const (
 	ReviewerIntervention   = "intervention"    // the agent's own verified actions showed it
 )
 
-// What a review decided. Escalate means no tier was sure enough to act, and the
-// candidate stays in the operator's queue.
+// What a review decided. Undecided means no tier was sure enough to act: the
+// candidate stays pending and the agent reviews it again when its evidence moves.
 const (
-	ReviewConfirm  = "confirm"
-	ReviewReject   = "reject"
-	ReviewDefer    = "defer"
-	ReviewEscalate = "escalate"
+	ReviewConfirm   = "confirm"
+	ReviewReject    = "reject"
+	ReviewDefer     = "defer"
+	ReviewUndecided = "undecided"
 )
 
 // CandidateReview records one review of a candidate. Applied is false when the
@@ -526,7 +532,7 @@ type CandidateReview struct {
 // sign or kind changed, or its |r| moved by more than two standard errors of
 // Fisher's z at the smaller of the two windows. A review that is outdated no
 // longer speaks for the candidate, so an agent's rejection or deferral reopens and
-// an escalated candidate is reviewed again.
+// an undecided candidate is reviewed again.
 func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if r == nil {
 		return true

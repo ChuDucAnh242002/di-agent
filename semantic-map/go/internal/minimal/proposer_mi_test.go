@@ -1867,7 +1867,7 @@ func TestAnnotateKeepsTheCandidateInTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := historyOf(t, p, id)
-	if c.Status != types.Pending || c.Review == nil || c.Review.Action != types.ReviewEscalate || c.Review.Applied {
-		t.Errorf("annotated: %v review %+v; want pending, escalated and not applied", c.Status, c.Review)
+	if c.Status != types.Pending || c.Review == nil || c.Review.Action != types.ReviewUndecided || c.Review.Applied {
+		t.Errorf("annotated: %v review %+v; want pending, undecided and not applied", c.Status, c.Review)
 	}
 }

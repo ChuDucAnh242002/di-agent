@@ -22,6 +22,7 @@ let interval = 2000;
 let lastRevision = -1;
 let failures = 0;
 let inflight = false;
+let groupTicks = 0; // GET /groups every tenth poll: the topology moves with pods, not with values
 let statusFilter = 'live';
 
 /**
@@ -270,6 +271,9 @@ async function tick() {
     if (!actingAwaited) {
       actingAwaited = true;
       await Promise.race([acting, new Promise((r) => setTimeout(r, 1500))]);
+    }
+    if (groupTicks++ % 10 === 0) {
+      try { model.topology = await api.groups(); } catch { /* keep the last; boxes fall back to subjects */ }
     }
     renderStats(model.counts);
     graph.render(model);
