@@ -97,12 +97,7 @@ type lineResult struct {
 // NewExecCollector prepares the plugin entry name; nothing runs until Start. A
 // non-positive timeout takes the default, min(interval/2, 5s).
 func NewExecCollector(env Env, name string, sp spec.ExecSpec, timeout time.Duration, config map[string]any) *ExecCollector {
-	if timeout <= 0 {
-		timeout = defaultTimeout
-		if half := env.Interval / 2; half > 0 && half < timeout {
-			timeout = half
-		}
-	}
+	timeout = resolveTimeout(env, timeout)
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -170,11 +165,8 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	if err := json.Unmarshal(line, &r); err != nil {
 		return nil, e.fault(fmt.Errorf("collect reply is not JSON: %w", err))
 	}
-	if r.Error != "" {
-		return nil, e.fault(fmt.Errorf("plugin error: %s", r.Error))
-	}
-	if r.Seq != seq {
-		return nil, e.fault(fmt.Errorf("reply seq %d, want %d", r.Seq, seq))
+	if err := checkCollect(&r, seq); err != nil {
+		return nil, e.fault(err)
 	}
 	samples, avail := stampReply(e.name, e.env.NodeID, &r)
 	e.availMu.Lock()
@@ -246,11 +238,8 @@ func (e *ExecCollector) spawn(deadline time.Time) error {
 	if err := json.Unmarshal(line, &r); err != nil {
 		return e.fault(fmt.Errorf("hello reply is not JSON: %w", err))
 	}
-	if r.Error != "" {
-		return e.fault(fmt.Errorf("hello refused: %s", r.Error))
-	}
-	if r.Protocol != ProtocolVersion {
-		return e.fault(fmt.Errorf("plugin speaks protocol %d, agent speaks %d", r.Protocol, ProtocolVersion))
+	if err := checkHello(r); err != nil {
+		return e.fault(err)
 	}
 	return nil
 }

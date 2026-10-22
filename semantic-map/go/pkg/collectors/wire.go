@@ -108,3 +108,40 @@ func stampReply(name, nodeID string, r *CollectReply) ([]*types.MetricSample, []
 	}
 	return out, avail
 }
+
+// resolveTimeout is the per-request timeout of an entry: the configured one, or
+// min(interval/2, 5s) when it is unset, so both transports default alike.
+func resolveTimeout(env Env, timeout time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	timeout = defaultTimeout
+	if half := env.Interval / 2; half > 0 && half < timeout {
+		timeout = half
+	}
+	return timeout
+}
+
+// checkHello decides whether a hello reply accepts the session: a refusal or a
+// protocol other than ProtocolVersion is a hello failure.
+func checkHello(r HelloReply) error {
+	if r.Error != "" {
+		return fmt.Errorf("hello refused: %s", r.Error)
+	}
+	if r.Protocol != ProtocolVersion {
+		return fmt.Errorf("plugin speaks protocol %d, agent speaks %d", r.Protocol, ProtocolVersion)
+	}
+	return nil
+}
+
+// checkCollect decides whether a collect reply is a usable answer to request seq:
+// an error reply is a fault, and so is a reply to another request.
+func checkCollect(r *CollectReply, seq uint64) error {
+	if r.Error != "" {
+		return fmt.Errorf("plugin error: %s", r.Error)
+	}
+	if r.Seq != seq {
+		return fmt.Errorf("reply seq %d, want %d", r.Seq, seq)
+	}
+	return nil
+}
