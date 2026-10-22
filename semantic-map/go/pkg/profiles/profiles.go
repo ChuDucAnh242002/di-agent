@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
@@ -398,6 +399,9 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
 		PodLogRoot: cfg.CgroupPodLogRoot,
+		// The kubelet links each container's log under /var/log/containers, beside the
+		// per-pod /var/log/pods.
+		ContainerLogRoot: containerLogRoot(cfg.CgroupPodLogRoot),
 	}
 
 	if cfg.ScriptPath != "" {
@@ -453,3 +457,11 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 // seeding declared structure only. They are removed rather than kept "in case",
 // because a lookup helper for a field the artefact no longer emits is an invitation
 // to reintroduce the seeding it served.
+
+// containerLogRoot is the kubelet's per-container link directory beside its per-pod one.
+func containerLogRoot(podLogs string) string {
+	if podLogs == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(podLogs)), "containers")
+}

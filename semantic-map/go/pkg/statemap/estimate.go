@@ -159,6 +159,17 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			excluded = append(excluded, w)
 			continue
 		}
+		if members := m.GroupMembers(w); len(members) > 0 {
+			// Without a group is without every member: its own properties are sums
+			// of theirs, and what relates to the target is the members' properties.
+			for _, s := range members {
+				for _, p := range m.State(Query{Subject: s}).Properties {
+					assume[p.ID] = p.Range[0]
+				}
+			}
+			excluded = append(excluded, w)
+			continue
+		}
 		view := m.State(Query{Subject: w})
 		if len(view.Properties) == 0 {
 			withoutCaveats = append(withoutCaveats, fmt.Sprintf("without %s names nothing in the map", w))

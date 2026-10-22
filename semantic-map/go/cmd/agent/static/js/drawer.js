@@ -11,7 +11,7 @@
 //     happened.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, directionSign, isEditing, factValue } from './model.js';
+import { fmt, escapeHTML, effective, directionSign, isEditing, factValue, consumers, machineSummary, resourceTree } from './model.js';
 
 const JOURNAL_BUFFER = 400;
 
@@ -41,7 +41,7 @@ export class Drawer {
     // The row whose part of the map is highlighted on the canvas: {pane, id}.
     this.pointed = null;
     this.panes = {};
-    for (const name of ['actions', 'journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
+    for (const name of ['actions', 'journal', 'decisions', 'discovery', 'subjects', 'resources', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
     }
     this.wireTabs();
@@ -123,6 +123,7 @@ export class Drawer {
       this.pollCandidates(),
       this.active === 'decisions' || force ? this.pollDecisions() : null,
       this.active === 'cluster' ? this.pollPeers() : null,
+      this.active === 'resources' ? this.pollGroups() : null,
       this.active === 'backbone' && (!this.backbone || force) ? this.pollBackbone() : null,
     ]);
     // The acting data is read by the page with /state (the hulls need it too), so
@@ -155,6 +156,7 @@ export class Drawer {
       case 'decisions': return this.renderDecisions();
       case 'discovery': return this.renderDiscovery();
       case 'subjects': return this.renderSubjects();
+      case 'resources': return this.renderResources();
       case 'cluster': return this.renderCluster();
       case 'backbone': return this.renderBackbone();
       case 'ask': return this.renderAsk();
@@ -167,6 +169,7 @@ export class Drawer {
     set('c-journal', this.events.length);
     set('c-decisions', this.decisions.length);
     set('c-subjects', model?.counts?.subjects ?? 0);
+    set('c-resources', model ? consumers(model).rows.length : 0);
     set('c-cluster', (this.peers?.peers?.length ?? 0)
       + Object.keys(this.peers?.silent || {}).length);
     const cEl = document.getElementById('c-discovery');
@@ -617,6 +620,79 @@ export class Drawer {
     });
     this.panes.subjects.querySelectorAll('[data-subject]').forEach((row) => {
       row.addEventListener('click', () => this.ctx.filterSubject(row.dataset.subject));
+    });
+  }
+
+  // ── resources ─────────────────────────────────────────────────────────────
+
+  async pollGroups() {
+    this.topology = await api.groups();
+  }
+
+  /**
+   * The machine, and who is using it, as a tree: groups, their pods and units, a pod's
+   * containers and interfaces, the hardware and network as structure, and the rest. A
+   * row opens and closes; what the operator opened or closed survives the next poll.
+   */
+  renderResources() {
+    const model = this.ctx.model();
+    const t = resourceTree(model, this.topology);
+    this.opened ||= new Map();
+    const open = (n, depth) => (this.opened.has(n.id) ? this.opened.get(n.id) : depth === 0 && n.group && !n.structure);
+    const cpu = (v) => (v === null || v === undefined ? '—' : `${v.toFixed(2)} cores`);
+    const mem = (v) => (v === null || v === undefined ? '—' : fmt.bytes(Math.round(v)));
+    const bar = (v, total) => (v === null || v === undefined || !total ? '' : `<span class="meter" style="display:inline-block;width:72px;vertical-align:middle"><i style="width:${Math.min(100, (100 * v) / total).toFixed(1)}%"></i></span>`);
+    const rows = [];
+    const walk = (n, depth) => {
+      const kids = n.children || [];
+      const isOpen = kids.length && open(n, depth);
+      const toggle = kids.length ? `<button class="btn ghost small" data-toggle="${escapeHTML(n.id)}" aria-expanded="${isOpen}" style="padding:0 4px;min-width:18px">${isOpen ? '▾' : '▸'}</button>` : '<span style="display:inline-block;width:22px"></span>';
+      const label = n.group ? `<strong>${escapeHTML(n.label)}</strong> <span class="muted">(${kids.length})</span>` : escapeHTML(n.label);
+      rows.push(`<tr ${n.group ? '' : `data-subject="${escapeHTML(n.id)}"`}>
+        <td class="mono" title="${escapeHTML(n.id)}" style="padding-left:${6 + depth * 18}px">${toggle}${label}</td>
+        <td class="muted">${escapeHTML(n.role || '')}</td>
+        <td class="num">${cpu(n.cpu)}</td><td>${bar(n.cpu, t.cores)}</td>
+        <td class="num">${mem(n.mem)}</td><td>${bar(n.mem, t.memTotal)}</td>
+        <td>${n.status ? `<span class="badge status-${n.status}">${n.status}</span>` : ''}</td></tr>`);
+      if (isOpen) kids.forEach((k) => walk(k, depth + 1));
+    };
+    t.items.forEach((n) => walk(n, 0));
+    this.panes.resources.innerHTML = `<div class="pane-pad">
+      <p style="margin:0 0 8px"><strong>${escapeHTML(machineSummary(model))}</strong>${this.topology ? '' : ' <span class="muted">· this agent serves no /groups: consumers are listed flat</span>'}</p>
+      <table class="grid">
+        <thead><tr><th>consumer</th><th>what it is</th><th class="num">CPU</th><th></th>
+          <th class="num">memory</th><th></th><th>status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>the node</strong></td><td class="muted">all of it</td>
+            <td class="num">${cpu(t.node.cpu)}</td><td>${bar(t.node.cpu, t.cores)}</td>
+            <td class="num">${mem(t.node.mem)}</td><td>${bar(t.node.mem, t.memTotal)}</td><td></td></tr>
+          ${rows.join('')}
+          <tr><td><em>rest of the system</em></td><td class="muted">no subject accounts for it</td>
+            <td class="num">${cpu(t.rest.cpu)}</td><td>${bar(t.rest.cpu, t.cores)}</td>
+            <td class="num">${mem(t.rest.mem)}</td><td>${bar(t.rest.mem, t.memTotal)}</td><td></td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="font-size:11.5px;margin:9px 0 0;line-height:1.5">
+        Groups come from pod labels (<span class="mono">di-agent/group</span>, then
+        <span class="mono">app.kubernetes.io/part-of</span>) and unit names (<span class="mono">groups.units</span>);
+        a group's numbers are the map's own sums of its members, and <span class="mono">without=group:&lt;name&gt;</span>
+        asks what the node would do without all of them. A pod opens into its containers and network
+        interfaces. Every value is the map's, as a fraction of the node, shown in cores and bytes. The rest is
+        the node less every subject, computed when shown, never stored; it is blank where the subjects add up
+        to more than the node, since a cgroup's memory counts the page cache it has read and the node's
+        in-use memory does not.
+      </p>
+    </div>`;
+    this.panes.resources.querySelectorAll('[data-toggle]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = b.dataset.toggle;
+        this.opened.set(id, b.getAttribute('aria-expanded') !== 'true');
+        this.renderResources();
+      });
+    });
+    this.panes.resources.querySelectorAll('[data-subject]').forEach((r) => {
+      r.addEventListener('click', () => this.ctx.filterSubject(r.dataset.subject));
     });
   }
 
