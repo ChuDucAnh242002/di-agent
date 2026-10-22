@@ -240,6 +240,16 @@ func (s *Supervisor) Collect() ([]*types.MetricSample, error) {
 		if ch == nil {
 			continue
 		}
+		// Look for a finished call before arming the timer. Waiting on an earlier
+		// member may have used up this member's budget, which makes the timer ready
+		// at once; select would then pick between it and an on-time result at random
+		// and fault a member that answered in time.
+		select {
+		case r := <-ch:
+			results[i] = &r
+			continue
+		default:
+		}
 		timer := time.NewTimer(s.members[i].wait - time.Since(start))
 		select {
 		case r := <-ch:
@@ -394,7 +404,6 @@ func (s *Supervisor) violation(ms *memberState, smp *types.MetricSample) string 
 // Status reports every member in list order.
 func (s *Supervisor) Status() []MemberStatus {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	out := make([]MemberStatus, len(s.members))
 	for i, ms := range s.members {
 		st := MemberStatus{
@@ -413,10 +422,15 @@ func (s *Supervisor) Status() []MemberStatus {
 		if !ms.backoffUntil.IsZero() {
 			st.BackoffUntilUnix = ms.backoffUntil.Unix()
 		}
-		if r, ok := ms.m.C.(restarter); ok {
-			st.Restarts = r.Restarts()
-		}
 		out[i] = st
+	}
+	s.mu.Unlock()
+	// Restarts is asked outside mu: an exec member may hold its own lock through a
+	// restart lasting seconds, and holding mu meanwhile would stall the tick.
+	for i, ms := range s.members {
+		if r, ok := ms.m.C.(restarter); ok {
+			out[i].Restarts = r.Restarts()
+		}
 	}
 	return out
 }

@@ -399,3 +399,24 @@ type restartingFake struct {
 
 func (r *restartingFake) Restarts() int64 { return r.restarts.Load() }
 func (r *restartingFake) Close() error    { r.closed.Store(true); return nil }
+
+// An earlier member that is slow but on time can use up a later member's whole
+// wait while the supervisor is still waiting on it. The later member answered in
+// time; it must not be faulted because its result was collected late.
+func TestSupervisorPromptMemberNotFaultedBehindSlowerOne(t *testing.T) {
+	a := &fakeCollector{id: "a", delay: 150 * time.Millisecond, samples: []*types.MetricSample{sample("p", "share")}}
+	b := &fakeCollector{id: "b", samples: []*types.MetricSample{sample("q", "share")}}
+	ma, mb := member("a", a), member("b", b)
+	ma.Timeout = 200 * time.Millisecond
+	mb.Timeout = 50 * time.Millisecond
+	s, _ := newTestSupervisor(t, ma, mb)
+	for i := 0; i < 8; i++ {
+		out, _ := s.Collect()
+		if len(out) != 2 {
+			t.Fatalf("tick %d: %d samples, want 2", i+1, len(out))
+		}
+		if st := statusOf(t, s, "b"); st.State != "ok" || st.LastError != "" {
+			t.Fatalf("tick %d: b state=%q last_error=%q, want ok", i+1, st.State, st.LastError)
+		}
+	}
+}
