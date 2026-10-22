@@ -1,4 +1,4 @@
-package main
+package agentmain
 
 // HTTP surface served by the agent daemon.
 //

@@ -262,8 +262,11 @@ semantic-map/
     │   ├── build_priors_test.go  Asserts structure arrives and no magnitude does, through Build
     │   └── profiles_test.go      KD validation + prior_weights.json discovery
     │
-    ├── cmd/agent/              Daemon binary
-    │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
+    ├── cmd/agent/main.go       Daemon binary: calls agentmain.Main()
+    │
+    ├── pkg/agentmain/          The daemon's body, public so a custom binary can register extra collectors
+    │   ├── example_custom_test.go  Example_customCollector: blank-import a collector, call Main()
+    │   ├── main.go             Main(): -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
     │   ├── collectors_route.go GET /collectors: each configured collector's status
     │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch
@@ -299,7 +302,7 @@ semantic-map/
     │   │                       deprecate, construct, proposition, reset, candidates,
     │   │                       recommend, simulate, watch, dot, health, peers,
     │   │                       version, tune, completion, collector)
-    │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
+    │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from pkg/agentmain
     │   │   ├── client.go
     │   │   ├── types.go
     │   │   └── client_test.go
@@ -331,7 +334,7 @@ semantic-map/
         │   │                   averaging differs from single-run snapshot
         │   └── divergence_test.go  Range/StdDev arithmetic, sort order, formula
         └── client/             POST /ingest-sample wrapper + DTOs duplicated
-            └── client.go        from cmd/agent (same wire-boundary discipline as mapctl)
+            └── client.go        from pkg/agentmain (same wire-boundary discipline as mapctl)
 ```
 
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -1126,7 +1129,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `explain.provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
 | `explain.url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
 | `explain.model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
-| `explain.prompt`          | `cmd/agent/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `explain.prompt`          | `pkg/agentmain/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
 | `explain.planner_prompt`  | `<prompt-dir>/planner-v2.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
 | `explain.critic_prompt`   | `<prompt-dir>/critic-v2.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
 | `explain.keep_alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
@@ -1480,7 +1483,7 @@ explain:
   provider: openai-compatible
   url: http://localhost:11434/v1
   model: qwen2.5:7b-instruct
-  prompt: cmd/agent/prompts/explain-v2.md
+  prompt: pkg/agentmain/prompts/explain-v2.md
 persist:
   file: ""
 SPEC

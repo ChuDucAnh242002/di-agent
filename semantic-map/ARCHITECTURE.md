@@ -1189,7 +1189,7 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. The loop ticks the Supervisor that `pkg/collectors` built from `sources.collectors`. Both pieces are profile-agnostic — adding a new collector means registering a type or listing an `exec`/`http` plugin, no changes to the loop, to ingestion or to any profile.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/pkg/agentmain/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. The loop ticks the Supervisor that `pkg/collectors` built from `sources.collectors`. Both pieces are profile-agnostic — adding a new collector means registering a type or listing an `exec`/`http` plugin, no changes to the loop, to ingestion or to any profile.
 
 ---
 
@@ -1358,7 +1358,7 @@ The Semantic Map facade is a Go API. The agent daemon wraps it in three layers s
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer C — Web console    cmd/agent/static/{index,style,js/} │
+│  Layer C — Web console    pkg/agentmain/static/{index,style,js/} │
 │  Vanilla ES modules, no CDN, embedded via go:embed all:static │
 │  Live state-model console at /ui/                            │
 ├─────────────────────────────────────────────────────────────┤
@@ -1366,7 +1366,7 @@ The Semantic Map facade is a Go API. The agent daemon wraps it in three layers s
 │  cobra + tablewriter; one binary, sixteen subcommands        │
 │  Default --addr http://localhost:8080; --json for scripting  │
 ├─────────────────────────────────────────────────────────────┤
-│  Layer A — HTTP API       cmd/agent/{routes,dto,static}.go   │
+│  Layer A — HTTP API       pkg/agentmain/{routes,dto,static}.go   │
 │  net/http only; JSON in/out; CSRF via Content-Type guard     │
 └─────────────────────────────────────────────────────────────┘
                             │
@@ -1374,7 +1374,7 @@ The Semantic Map facade is a Go API. The agent daemon wraps it in three layers s
                   SemanticMap facade (pkg/semmap)
 ```
 
-Every layer talks to the layer above only via HTTP — the CLI does not import `cmd/agent`, and the UI is served as static assets. This is deliberate: the daemon is the single integration point, and any third tool (e.g. a future TUI, a fleet controller) only needs to speak JSON to participate.
+Every layer talks to the layer above only via HTTP — the CLI does not import `pkg/agentmain`, and the UI is served as static assets. This is deliberate: the daemon is the single integration point, and any third tool (e.g. a future TUI, a fleet controller) only needs to speak JSON to participate.
 
 ### HTTP API
 
@@ -1409,7 +1409,7 @@ Errors on the new endpoints follow a single shape:
 {"error": "Content-Type must be application/json"}
 ```
 
-`writeError` (in `cmd/agent/routes.go`) is the only path to a non-2xx response. The four surviving pre-Phase-1 endpoints retain `http.Error`'s plain-text body for backward compatibility.
+`writeError` (in `pkg/agentmain/routes.go`) is the only path to a non-2xx response. The four surviving pre-Phase-1 endpoints retain `http.Error`'s plain-text body for backward compatibility.
 
 ### CSRF mitigation: `requireJSON`
 
@@ -1419,11 +1419,11 @@ This is sufficient for the v1 threat model. When the agent grows beyond localhos
 
 ### Direction on the wire: `"+"` vs `"-"`
 
-`types.Direction` is a Go `int` internally (0 / 1). The DTO layer in `cmd/agent/dto.go` converts it to `"+"` (positive) and `"-"` (negative) before JSON serialization. Raw integers would render unreadably in CLI tables and UI legends; the string form preserves the publication notation. Mappers — `edgeToDTO`, `propositionToDTO`, `constructToDTO`, `eventToDTO` — are the only places conversion happens.
+`types.Direction` is a Go `int` internally (0 / 1). The DTO layer in `pkg/agentmain/dto.go` converts it to `"+"` (positive) and `"-"` (negative) before JSON serialization. Raw integers would render unreadably in CLI tables and UI legends; the string form preserves the publication notation. Mappers — `edgeToDTO`, `propositionToDTO`, `constructToDTO`, `eventToDTO` — are the only places conversion happens.
 
 ### Static UI: `embed.FS` with no explicit redirect
 
-`cmd/agent/static.go` declares `//go:embed all:static` and exposes the sub-tree under `/ui/` via `http.FileServer(http.FS(sub))`. The `all:` prefix is required so dot-prefixed files (e.g. `.gitkeep`) are bundled into the binary.
+`pkg/agentmain/static.go` declares `//go:embed all:static` and exposes the sub-tree under `/ui/` via `http.FileServer(http.FS(sub))`. The `all:` prefix is required so dot-prefixed files (e.g. `.gitkeep`) are bundled into the binary.
 
 There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` already serves `index.html` for directory roots that end in `/`, and it independently canonicalizes any URL ending in `/index.html` back to `./`. The two behaviors compose into an infinite redirect loop if you also add a manual `/ui/{$}` → `/ui/index.html` handler — which is what the v0 expansion did, and what hotfix `edffaa3` removed. The rule is: trust the file server, do not redirect.
 
@@ -1452,7 +1452,7 @@ There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` 
 | `dot`                               | `GET /graph` → Graphviz                     | Direct paste into `dot -Tpdf`                               |
 | `health` / `version`                | `GET /healthz` / `GET /version`             | `version` also prints client build                          |
 
-DTOs are duplicated in `cmd/mapctl/client/types.go` rather than imported from `cmd/agent` — the duplication is the contract. Treating the daemon as a remote service from day one means a third party can write a Python or Rust client without reverse-engineering Go types.
+DTOs are duplicated in `cmd/mapctl/client/types.go` rather than imported from `pkg/agentmain` — the duplication is the contract. Treating the daemon as a remote service from day one means a third party can write a Python or Rust client without reverse-engineering Go types.
 
 Dependencies: `github.com/spf13/cobra v1.8.1`, `github.com/olekukonko/tablewriter v0.0.5`. `tablewriter` is pinned below 1.x because the 1.x API revamp is breaking.
 
@@ -1833,7 +1833,7 @@ Operator → POST /explain (question)
              ▼
         pkg/explain (OpenAICompatibleExplainer)
              │
-             │  (system prompt: cmd/agent/prompts/explain-v2.md)
+             │  (system prompt: pkg/agentmain/prompts/explain-v2.md)
              │  (tool schemas: get_cost, get_edges, get_history,
              │                 get_peers, get_recommend, get_graph)
              │
@@ -1883,13 +1883,13 @@ Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary 
 explain.provider      none | openai-compatible          (default: none)
 explain.url           http://localhost:11434/v1         (default)
 explain.model         qwen2.5:7b-instruct               (default)
-explain.prompt        cmd/agent/prompts/explain-v2.md   (default)
+explain.prompt        pkg/agentmain/prompts/explain-v2.md   (default)
 explain.api_key       ""                                (write ${EXPLAIN_API_KEY} to read it from the environment)
 ```
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`pkg/agentmain/prompts/explain-v2.md`](go/pkg/agentmain/prompts/explain-v2.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 
@@ -1916,7 +1916,7 @@ The system prompt lives at [`cmd/agent/prompts/explain-v2.md`](go/cmd/agent/prom
 
 - `pkg/explain/tools_test.go` — tool registry + citation validator against live SemanticMap.
 - `pkg/explain/openai_test.go` — reflection loop end-to-end against a scripted mock LLM. Covers happy path, tool-then-answer, and fabrication-then-fix.
-- `cmd/agent/explain_route_test.go` — route wiring: 501 when disabled, 400 on malformed input, 200 with grounded answer through a mock LLM.
+- `pkg/agentmain/explain_route_test.go` — route wiring: 501 when disabled, 400 on malformed input, 200 with grounded answer through a mock LLM.
 
 None of these require a real LLM to be running. `go test ./...` stays green on any machine.
 
@@ -2075,7 +2075,7 @@ Every response carries `usage`:
 explain.provider         none | openai-compatible          (default: none)
 explain.url              http://localhost:11434/v1
 explain.model            qwen2.5:7b-instruct
-explain.prompt           cmd/agent/prompts/explain-v2.md
+explain.prompt           pkg/agentmain/prompts/explain-v2.md
 explain.planner_prompt   (derived: <prompt dir>/planner-v2.md)
 explain.critic_prompt    (derived: <prompt dir>/critic-v2.md)
 explain.keep_alive       30m
@@ -2104,7 +2104,7 @@ Three prompts, each versioned by filename (v1 is kept unedited; v2 removed the h
 | `pkg/explain/critic_test.go` | Verdict parsing, issue truncation, unactionable-rejection upgrade, prompt assembly, revision formatting |
 | `pkg/explain/streaming_test.go` | Event ordering, terminal event on success and failure, payload correctness, nil-emitter safety, interface satisfaction |
 | `pkg/explain/openai_test.go` | v2 integration: planner-runs-tools, planner-failure fallback, critic approve, **critic catches structurally-valid-but-wrong**, critic-failure ships anyway, session mint and persist, unknown session, usage accounting |
-| `cmd/agent/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
+| `pkg/agentmain/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
 
 All run against a scripted mock LLM. No test requires Ollama.
 

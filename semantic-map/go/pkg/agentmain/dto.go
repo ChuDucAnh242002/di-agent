@@ -9,7 +9,7 @@
 // serialized as the strings "+" / "-". This keeps the JSON readable for
 // curl, CLI tables, and the embedded UI.
 
-package main
+package agentmain
 
 import (
 	"fmt"

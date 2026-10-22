@@ -235,11 +235,11 @@ Then document it in the profiles table in [ARCHITECTURE §3](semantic-map/ARCHIT
 
 ### 4.5 Add an HTTP endpoint
 
-In `cmd/agent/routes.go`, register in the appropriate group function (`registerReadRoutes`, `registerMutationRoutes`, …).
+In `pkg/agentmain/routes.go`, register in the appropriate group function (`registerReadRoutes`, `registerMutationRoutes`, …).
 
 House rules for new endpoints:
 
-- Name the request/response DTOs in `cmd/agent/dto.go`. Serialise `types.Direction` as `"+"`/`"-"`, never the raw int.
+- Name the request/response DTOs in `pkg/agentmain/dto.go`. Serialise `types.Direction` as `"+"`/`"-"`, never the raw int.
 - Every mutating POST calls `requireJSON(r)` first — the CSRF mitigation.
 - Emit JSON errors via `writeError(w, code, msg)`. The five pre-existing endpoints keep plain-text `http.Error` to minimise diff; do not copy that for new work.
 - Map errors to the right status. A caller's mistake is a `4xx`. Returning `500` for a bad `session_id` sends an operator hunting for a server fault over their own typo — that was a real bug in review.
@@ -257,7 +257,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 
 **Tools must stay read-only.** The registry is what makes "the LLM cannot mutate the graph" true by construction rather than by policy. Adding a mutating tool breaks the human-judgment anchor described in [ARCHITECTURE §8](semantic-map/ARCHITECTURE.md#8-connection-to-research). If the model should be able to suggest a change, it already can — as a draft `Proposal` the operator POSTs themselves.
 
-**A new prompt version:** copy the newest `cmd/agent/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
+**A new prompt version:** copy the newest `pkg/agentmain/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
 
 ---
 
@@ -277,7 +277,7 @@ go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergenc
 | **Compliance** | `compliance/*.go` | Does this implementation honour its contract? |
 | **Scenarios** | `internal/minimal/tests/scenarios_test.go` | Do the parts compose into the promised behaviour? |
 | **Evolution** | `internal/minimal/tests/evolution_test.go` | Does the graph converge correctly over hundreds of ticks? |
-| **Integration** | `cmd/agent/*_test.go` | Does the HTTP surface behave? |
+| **Integration** | `pkg/agentmain/*_test.go` | Does the HTTP surface behave? |
 
 Scenarios and evolution tests print `t.Logf` snapshots, so `go test -v -run TestEvolution` reads like a results section. That is intentional — they double as reproducible evidence for the paper.
 

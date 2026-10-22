@@ -1,4 +1,4 @@
-package main
+package agentmain
 
 import (
 	"embed"
@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-// staticFS embeds the cmd/agent/static directory at build time. The
+// staticFS embeds the pkg/agentmain/static directory at build time. The
 // `all:` prefix is required so dot-prefixed files (e.g. .gitkeep, .well-known)
 // are included — Go's default embed pattern silently skips them.
 //
