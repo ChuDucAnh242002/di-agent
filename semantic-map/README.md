@@ -114,9 +114,10 @@ semantic-map/
 ├── sdk/python/di_collector.py  Python plugin SDK, stdlib only, one file: serve(setup) speaks wire
 │                               protocol v1 on stdin/stdout so a plugin only says what to measure
 ├── examples/collectors/
-│   └── loadavg/                Example exec plugin on the Python SDK: load1/5/15 per CPU and
-│       ├── loadavg.py          PSI some avg10 for cpu, memory, io; certified in CI by
-│       └── README.md           `mapctl collector check` (see §3)
+│   ├── loadavg/                Example exec plugin on the Python SDK: load1/5/15 per CPU and
+│   │   ├── loadavg.py          PSI some avg10 for cpu, memory, io; certified in CI by
+│   │   └── README.md           `mapctl collector check` (see §3)
+│   └── shell/load1.sh          The shell template from docs/collectors.md §11; certified in CI
 │
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
@@ -1175,7 +1176,8 @@ same JSON). Two helpers write the loop for you:
 | Python | [`sdk/python/di_collector.py`](sdk/python/di_collector.py), stdlib only | `di_collector.serve(setup)`; `setup(hello)` returns `collect(seq, now)`, which returns a list of samples or `(samples, available)` |
 | Go | `pkg/collectors/plugin` | `plugin.Serve(func(plugin.Hello) (plugin.CollectFunc, error))` |
 
-[`examples/collectors/loadavg/`](examples/collectors/loadavg/) is a complete Python plugin.
+[`examples/collectors/loadavg/`](examples/collectors/loadavg/) is a complete Python plugin. [`docs/collectors.md`](../docs/collectors.md) is the developer guide: the protocol in full,
+the producer rules, ownership, security, and Go and shell examples.
 
 A plugin is valid when it passes the collector compliance suite. `mapctl collector check`
 runs that suite over it through the agent's own exec or http adapter, with no agent

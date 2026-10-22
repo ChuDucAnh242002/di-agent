@@ -59,6 +59,11 @@ jobs:
       - name: Certify example collector plugin (loadavg)
         run: go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadavg.py
 
+      # The shell template from docs/collectors.md, so the guide's smallest example
+      # is held to the same rule as the others.
+      - name: Certify example collector plugin (shell)
+        run: go run ./cmd/mapctl collector check --exec ../examples/collectors/shell/load1.sh
+
   demo:
     name: dev.sh demo (smoke)
     runs-on: ubuntu-latest

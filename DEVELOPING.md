@@ -139,7 +139,9 @@ The architecture exists to make extension local. Nearly every change below touch
 
 A Collector reads some metric source and emits typed `MetricSample`s. This is the extension point you will use if you want the agent to observe something new.
 
-The contract is three methods:
+**Most collectors do not belong in this repository.** A collector in any language can run as an `exec` or `http` plugin, and a Go one can be compiled into a custom binary, all without editing the agent. [`docs/collectors.md`](docs/collectors.md) is the guide for those: the contract's guarantees, the wire protocol, the rules every producer follows, ownership, certification with `mapctl collector check`, and worked examples. Read it first even for an in-tree collector — its §4 producer rules apply here too.
+
+The steps below are for a collector that ships *inside* the agent as a built-in type. The contract is three methods:
 
 ```go
 type CollectorContract interface {
@@ -152,9 +154,9 @@ type CollectorContract interface {
 **Steps:**
 
 1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source, include patterns) or `collector_cgroup.go` (filesystem source).
-2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, subject, metricType, timestamp)`.
-3. Return `(nil, nil)` for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
-4. Register it as a type in `pkg/collectors/builtin.go` (`Register("<source>", factory)`), with a factory that decodes its own `config` strictly, and list it in `sources.collectors`. The Supervisor runs it beside the others; no profile changes.
+2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, subject, metricType, timestamp)`; `client.EventID` in `pkg/ingest/client` is that hash.
+3. Return an empty batch and a nil error for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
+4. Register it in `pkg/collectors/builtin.go`: `Register("<source>", newSource)` in `init()`, with a factory `func(env Env, config *yaml.Node) (contracts.CollectorContract, error)` that owns its config struct, decodes it with `decodeStrict` (an unknown key is refused) and validates it, as `newCgroup` and `newNetdata` do. List it as `type: <source>` in `sources.collectors`. The Supervisor runs it beside the others; no profile changes.
 5. Add `internal/minimal/collector_<source>_test.go` and run the compliance suite against it:
 
 ```go
@@ -165,25 +167,9 @@ func TestMyCollectorCompliance(t *testing.T) {
 }
 ```
 
-Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. `internal/scripted/collector_test.go` is the shortest working example to copy.
+Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. Build the collector over data: `CollectProducesSamples` fails on an empty batch. `internal/scripted/collector_test.go` is the shortest working example to copy.
 
 **The rule: your implementation is valid if and only if it passes the compliance suite.** That is the definition, not a check on top of one.
-
-**The rules every producer follows**, in-process collector or push producer alike — a push producer has no code in the agent, so these are its obligations:
-
-| Concern | Rule |
-| ------- | ---- |
-| What to collect | An include list of patterns over the source's own names, with a short curated default and `*` for everything. Selection happens in the producer; the map records whatever arrives. |
-| Names | The source's name for the quantity (Netdata: `<context>.<dimension>`), collapsed onto an existing type only where it means the same thing, measured the same way. Two producers that measure a quantity differently keep two names: Netdata's `system.cpu` counts iowait, the root cgroup does not. |
-| Subjects | A per-instance series is a subject: `disk:sda`, `net:eth0`, `pod:<uid>`. |
-| Units | Converted to the map's (a percentage to a fraction, KiB/s to bytes/s). A reading whose unit contradicts the held property is refused. |
-| Range | Declared where the quantity has one (a share, a percentage), not for a rate or a count; the same declaration on every sample of a type. |
-| Computed series | Skipped: a remainder (CPU idle) or a longer average of a series that is kept (PSI 60 s and 300 s). |
-| Chart | The series computed together from one reading carry one `chart`, so discovery can group the arithmetic among them. |
-
-`AvailableMetrics()` is at least every type the last `Collect` emitted; a pattern-driven collector's answer grows as its source offers more.
-
-> Watch out for the normalisation trap. A *routed* type — one `domain_spec.json` summarises into a construct — must be a fraction on `[0,1]`. A replay harness once sent network throughput in raw bytes/s and CO-adjacent edges went to tens of thousands. Unrouted types carry whatever unit and range they declare.
 
 ### 4.2 Add a MetricType
 
@@ -343,7 +329,7 @@ Never commit absolute local paths (`/Users/…`).
 
 **Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) the cgroup collector reads nothing on macOS, which has no cgroups v2 — leave it out of `sources.collectors` there; (3) the metric source is unreachable. `./dev.sh logs` shows each configured collector at startup (`collector <name>: …`), and `curl localhost:8080/collectors` shows whether each is `ok` or in `backoff`, with its last error.
 
-**Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values. Every `MetricSample.Value` must be in `[0,1]`. See the warning in [§4.1](#41-add-a-collector-most-common).
+**Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values for a routed type, which must be a fraction on `[0,1]`. See the normalisation trap in [`docs/collectors.md` §4](docs/collectors.md#4-producer-rules).
 
 **Confidence plateaus below 1.0 and never rises.** Expected. Only 9 of 15 edges touch constructs observable from CPU/RAM/network metrics, so mean confidence ceilings around 0.60. It is a property of the metric-coverage boundary, not a bug — see `convergence/NOTES.md` in the private repo.
 
