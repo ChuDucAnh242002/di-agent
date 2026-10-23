@@ -780,13 +780,27 @@ func (s Spec) Validate() error {
 //
 // A collector entry is redacted too, because the agent cannot know which of its
 // values a plugin treats as a credential: its config block becomes Redaction, an
-// exec entry's arguments each become Redaction, and an http entry's URL loses its
-// password and its query values. The command, the URL's host and path, and the
+// exec entry's arguments each become Redaction, and an http entry's URL is
+// RedactURL's view of it. The command, the URL's host and path, and the
 // built-in type stay, so the served spec still says what runs.
 func (s Spec) Redacted() Spec {
 	redact(reflect.ValueOf(&s).Elem())
 	s.Sources.Collectors = redactCollectors(s.Sources.Collectors)
 	return s
+}
+
+// emptyNode reports whether a config block holds nothing worth withholding: absent,
+// null, or an empty mapping or sequence.
+func emptyNode(n *yaml.Node) bool {
+	switch n.Kind {
+	case 0:
+		return true
+	case yaml.MappingNode, yaml.SequenceNode:
+		return len(n.Content) == 0
+	case yaml.ScalarNode:
+		return n.Tag == "!!null"
+	}
+	return false
 }
 
 // redactCollectors returns a redacted copy of entries; the receiver's slice, its
@@ -797,7 +811,7 @@ func redactCollectors(entries []CollectorEntry) []CollectorEntry {
 	}
 	out := make([]CollectorEntry, len(entries))
 	for i, e := range entries {
-		if e.Config.Kind != 0 {
+		if !emptyNode(&e.Config) {
 			e.Config = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: Redaction}
 		}
 		if e.Exec != nil {
@@ -811,33 +825,43 @@ func redactCollectors(entries []CollectorEntry) []CollectorEntry {
 			e.Exec = &ex
 		}
 		if e.HTTP != nil {
-			e.HTTP = &HTTPSpec{URL: redactURL(e.HTTP.URL)}
+			e.HTTP = &HTTPSpec{URL: RedactURL(e.HTTP.URL)}
 		}
 		out[i] = e
 	}
 	return out
 }
 
-// redactURL hides a URL's password (url.URL.Redacted) and every query value,
-// keeping the keys so the shape of the request is still visible. A URL that does
-// not parse is withheld entirely.
-func redactURL(raw string) string {
+// RedactURL is the one view of a configured URL that may be logged, served or
+// put in an error: the scheme, host and path stay; userinfo (with or without a
+// password, since a bare token is commonly put in the username) becomes
+// Redaction; a query becomes "?" + Redaction; a fragment is dropped. A URL that
+// does not parse, or an opaque one, is Redaction entirely.
+func RedactURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Opaque != "" {
 		return Redaction
 	}
-	if u.RawQuery != "" {
-		keys := make([]string, 0)
-		for k := range u.Query() {
-			keys = append(keys, url.QueryEscape(k)+"="+Redaction)
+	hadUser := u.User != nil
+	hadQuery := u.RawQuery != "" || u.ForceQuery
+	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
+	out := u.String()
+	if hadUser {
+		prefix := u.Scheme + "://"
+		if u.Scheme == "" {
+			prefix = "//"
 		}
-		slices.Sort(keys)
-		u.RawQuery = strings.Join(keys, "&")
+		out = prefix + Redaction + "@" + strings.TrimPrefix(out, prefix)
 	}
-	return u.Redacted()
+	if hadQuery {
+		out += "?" + Redaction
+	}
+	return out
 }
 
 func redact(v reflect.Value) {

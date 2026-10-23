@@ -244,3 +244,28 @@ func TestServeAvailableAbsentVersusEmpty(t *testing.T) {
 		}
 	}
 }
+
+// A reply that cannot be encoded — a NaN in a range, which the value filter does
+// not see — is that tick's error reply, and Serve answers the next request.
+func TestServeUnencodableReplyIsErrorReply(t *testing.T) {
+	n := 0
+	got, err := drive(t, func(Hello) (CollectFunc, error) {
+		return func(now time.Time) ([]*types.MetricSample, []types.MetricType, error) {
+			n++
+			s := &types.MetricSample{MetricType: "fx", Value: 1, TimestampUnix: now.Unix(), Unit: "u"}
+			if n == 1 {
+				s.Range = &[2]float64{0, math.NaN()}
+			}
+			return []*types.MetricSample{s}, nil, nil
+		}, nil
+	}, hello, `{"op":"collect","seq":1,"now_unix":5}`, `{"op":"collect","seq":2,"now_unix":6}`)
+	if err != nil {
+		t.Fatalf("serve returned %v; an unencodable reply must not end it", err)
+	}
+	if len(got) != 3 || !strings.HasPrefix(got[1], `{"seq":1,"error":"encode reply: `) {
+		t.Fatalf("replies = %q", got)
+	}
+	if !strings.HasPrefix(got[2], `{"seq":2,"samples":[{`) {
+		t.Fatalf("next tick = %q", got[2])
+	}
+}

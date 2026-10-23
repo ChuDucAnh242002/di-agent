@@ -166,6 +166,7 @@ sources:
   collectors:
     - name: cgroup
       type: cgroup
+      config: {}
     - name: gpu
       exec: {command: /opt/di/collectors/gpu, args: [--token, s3cret]}
       config: {password: hunter2}
@@ -177,8 +178,8 @@ sources:
 	}
 	r := s.Redacted()
 	c := r.Sources.Collectors
-	if c[0].Config.Kind != 0 {
-		t.Errorf("an absent config became %+v", c[0].Config)
+	if c[0].Config.Kind != yaml.MappingNode || len(c[0].Config.Content) != 0 {
+		t.Errorf("an empty config became %+v; only a config with something in it is withheld", c[0].Config)
 	}
 	if c[1].Config.Kind != yaml.ScalarNode || c[1].Config.Value != Redaction {
 		t.Errorf("config = %+v, want %q", c[1].Config, Redaction)
@@ -186,7 +187,7 @@ sources:
 	if c[1].Exec.Command != "/opt/di/collectors/gpu" || !reflect.DeepEqual(c[1].Exec.Args, []string{Redaction, Redaction}) {
 		t.Errorf("exec = %+v", *c[1].Exec)
 	}
-	if got, want := c[2].HTTP.URL, "http://user:xxxxx@localhost:9121/di/collect?b=[redacted]&token=[redacted]"; got != want {
+	if got, want := c[2].HTTP.URL, "http://[redacted]@localhost:9121/di/collect?[redacted]"; got != want {
 		t.Errorf("url = %q, want %q", got, want)
 	}
 	out, err := r.YAML()
@@ -202,5 +203,29 @@ sources:
 	o := s.Sources.Collectors
 	if o[1].Exec.Args[1] != "s3cret" || o[1].Config.Kind != yaml.MappingNode || !strings.Contains(o[2].HTTP.URL, "token=abc") {
 		t.Errorf("Redacted changed its receiver: %+v %+v", *o[1].Exec, *o[2].HTTP)
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":                                 "",
+		"http://localhost:9121/di/collect": "http://localhost:9121/di/collect",
+		"http://user:pw@host/p":            "http://[redacted]@host/p",
+		"http://ghp_TOKEN@host/":           "http://[redacted]@host/",
+		"https://host/p?token=abc&b=1":     "https://host/p?[redacted]",
+		"http://host/p?":                   "http://host/p?[redacted]",
+		"http://host/p#secret":             "http://host/p",
+		"http://u@host:1/p?token=x#frag":   "http://[redacted]@host:1/p?[redacted]",
+		"http://%zz":                       Redaction,
+		"mailto:someone@example.com":       Redaction,
+	} {
+		if got := RedactURL(raw); got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", raw, got, want)
+		}
+		for _, secret := range []string{"pw", "ghp_TOKEN", "abc", "secret", "frag"} {
+			if strings.Contains(raw, secret) && strings.Contains(RedactURL(raw), secret) {
+				t.Errorf("RedactURL(%q) keeps %q", raw, secret)
+			}
+		}
 	}
 }

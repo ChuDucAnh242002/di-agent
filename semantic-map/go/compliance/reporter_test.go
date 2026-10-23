@@ -69,10 +69,10 @@ func TestChecksCatchDuplicatesDropsAndPartOf(t *testing.T) {
 	for _, x := range rec.Results() {
 		byName[x.Name] = x
 	}
-	if r := byName["NoDuplicateSamplesInBatch"]; len(r.Failures) != 2 {
+	if r := byName["NoDuplicateSamplesInBatch"]; len(r.Failures) != 2*DefaultBatchTicks {
 		t.Errorf("NoDuplicateSamplesInBatch = %+v, want the batch duplicate and the reported drop", r)
 	}
-	if r := byName["NoMalformedSamples"]; len(r.Failures) != 1 {
+	if r := byName["NoMalformedSamples"]; len(r.Failures) != DefaultBatchTicks {
 		t.Errorf("NoMalformedSamples = %+v, want the malformed drop", r)
 	}
 	if r := byName["SamplesHaveValidTypeAndSubject"]; r.Passed() {

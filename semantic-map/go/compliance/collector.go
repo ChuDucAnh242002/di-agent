@@ -23,10 +23,23 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 	})
 }
 
+// DefaultBatchTicks is how many collects RunCollectorChecks makes in the checks
+// that hold for every batch, not only the first.
+const DefaultBatchTicks = 3
+
 // RunCollectorChecks is the assertion set behind RunCollectorCompliance, written
 // against Reporter so a command line can run it over any collector.
 func RunCollectorChecks(t Reporter, factory CheckFactory) {
 	t.Helper()
+	RunCollectorChecksTicks(t, factory, DefaultBatchTicks)
+}
+
+// RunCollectorChecksTicks is RunCollectorChecks with the number of collects the
+// every-batch checks (NoDuplicateSamplesInBatch, NoMalformedSamples) make, so a
+// source that goes bad on a later tick is caught; ticks below 1 count as 1.
+func RunCollectorChecksTicks(t Reporter, factory CheckFactory, ticks int) {
+	t.Helper()
+	ticks = max(ticks, 1)
 
 	// ── SourceID ──────────────────────────────────────────────────────────────
 
@@ -140,17 +153,19 @@ func RunCollectorChecks(t Reporter, factory CheckFactory) {
 	// contracts.DropReporter, and they fail this check too.
 	t.Run("NoDuplicateSamplesInBatch", func(t Reporter) {
 		c := factory(t)
-		samples, _ := c.Collect()
-		seen := map[string]bool{}
-		for _, s := range samples {
-			if seen[s.EventID] {
-				t.Errorf("EventID %q appears twice in one batch (%s, subject %q); the map keeps only the first", s.EventID, s.MetricType, s.Subject)
+		for i := 1; i <= ticks; i++ {
+			samples, _ := c.Collect()
+			seen := map[string]bool{}
+			for _, s := range samples {
+				if seen[s.EventID] {
+					t.Errorf("collect %d: EventID %q appears twice in one batch (%s, subject %q); the map keeps only the first", i, s.EventID, s.MetricType, s.Subject)
+				}
+				seen[s.EventID] = true
 			}
-			seen[s.EventID] = true
-		}
-		for _, d := range takeDrops(c) {
-			if d.Kind == contracts.DropDuplicate {
-				t.Errorf("the source sent a duplicate sample of %q (same type, subject and timestamp as another in its batch); the agent drops it", d.MetricType)
+			for _, d := range takeDrops(c) {
+				if d.Kind == contracts.DropDuplicate {
+					t.Errorf("collect %d: the source sent a duplicate sample of %q (same type, subject and timestamp as another in its batch); the agent drops it", i, d.MetricType)
+				}
 			}
 		}
 	})
@@ -161,17 +176,19 @@ func RunCollectorChecks(t Reporter, factory CheckFactory) {
 	// source whose samples the agent would drop at run time is not certified.
 	t.Run("NoMalformedSamples", func(t Reporter) {
 		c := factory(t)
-		_, _ = c.Collect()
-		for _, d := range takeDrops(c) {
-			switch d.Kind {
-			case contracts.DropMalformed:
-				if d.MetricType != "" {
-					t.Errorf("the source sent a malformed sample of %q (an unknown field, a field of the wrong type, or no value); the agent drops it", d.MetricType)
-				} else {
-					t.Errorf("the source sent a malformed sample (not an object, or no readable metric_type); the agent drops it")
+		for i := 1; i <= ticks; i++ {
+			_, _ = c.Collect()
+			for _, d := range takeDrops(c) {
+				switch d.Kind {
+				case contracts.DropMalformed:
+					if d.MetricType != "" {
+						t.Errorf("collect %d: the source sent a malformed sample of %q (an unknown field, a field of the wrong type, or no value); the agent drops it", i, d.MetricType)
+					} else {
+						t.Errorf("collect %d: the source sent a malformed sample (not an object, or no readable metric_type); the agent drops it", i)
+					}
+				case contracts.DropInvalidAvailable:
+					t.Errorf("collect %d: the source declared %q available, which is not a valid metric type; the agent drops it", i, d.MetricType)
 				}
-			case contracts.DropInvalidAvailable:
-				t.Errorf("the source declared %q available, which is not a valid metric type; the agent drops it", d.MetricType)
 			}
 		}
 	})

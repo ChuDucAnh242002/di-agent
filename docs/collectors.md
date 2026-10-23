@@ -198,7 +198,7 @@ List order is therefore a decision. Put the collector you trust for a quantity f
 `GET /collectors` shows what each member has done ([reference](../semantic-map/README.md#get-collectors)):
 
 ```json
-{"interval_s":10,
+{"interval_ms":10000,
  "collectors":[
   {"name":"loadavg","kind":"exec","type":"","state":"ok",
    "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
@@ -212,7 +212,7 @@ How to read it when something is wrong:
 | ------- | -------- |
 | `state: starting` | No successful collect yet. |
 | `state: backoff`, `last_error` | The last call faulted; the member is skipped until `backoff_until_unix`. `last_error` names the cause (`no reply within 3s`, `reply seq 4, want 5`, `plugin error: …`). |
-| `state: stuck` | A call outlived its timeout and has not returned (an in-process collector that hangs; the exec and http adapters enforce their own timeout, so they rarely get here). The member is skipped until it returns; then it is `backoff`, and an error it ended with is `last_error` (`abandoned call ended: …`). |
+| `state: stuck` | A call outlived its timeout and has not returned (an in-process collector that hangs; the exec and http adapters enforce their own timeout, so they rarely get here). The member is skipped until it returns. Its return is then recorded as a fault at that moment — `backoff` with a fresh `backoff_until_unix`, and `last_error` saying how it ended (`abandoned call ended: …`, or that it returned late and its samples were discarded). |
 | `restarts` climbing | An exec plugin is crashing, being killed on faults, or exiting on its own between ticks (logged as `plugin exited between ticks`). Its stderr is in the agent log under `collector[<name>]:`. |
 | `violations` > 0 | Samples broke the contract and were dropped: a malformed sample (§3.1), a duplicate within one reply, an invalid `metric_type` or `subject`, a `part_of` that is not a node-level type on a sample with a subject, no `unit`, an empty `range`, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type. An `available` entry that is not a valid type counts too. The first of each kind and type is logged. |
 | `ownership_drops` > 0 | The member emits a node-level type an earlier member owns. Rename the type if it measures something different, scope it to a subject, or reorder the list. |
@@ -247,7 +247,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | ---- | ------- | ------- |
 | `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
 | `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
-| `--ticks N` | `5` | Collects per protocol check. |
+| `--ticks N` | `5` | Collects per protocol check, and per run of the suite's every-batch checks `NoMalformedSamples` and `NoDuplicateSamplesInBatch`. |
 | `--interval D` | `10s` | The interval announced in hello. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
 | `--node-id ID` | `check` | The node id the agent side announces and stamps. |
 
@@ -260,6 +260,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | `UnitRangeStableOverTicks` | A type keeps its unit and range over `--ticks` spaced collects. |
 | `NoForeignNodeID` | No sample carries a `node_id` other than the agent's. |
 | `TimestampNearNow` | Over `--ticks` collects, every `timestamp_unix` is within 2 × `--interval` of the request's `now_unix`: Unix seconds, not milliseconds. |
+| (every batch) | `NoMalformedSamples` and `NoDuplicateSamplesInBatch` look at all `--ticks` collects of their run (3 under `go test`), so a plugin that goes bad on a later tick fails. |
 | `NoUnexpectedRestarts` | Over `--ticks` collects (at least two, spaced as above), an exec plugin is never restarted: it keeps running between requests and exits only when stdin closes. |
 | `AvailableCoversEmitted` | Every emitted type is in the `available` read after that collect. |
 
@@ -273,7 +274,7 @@ There is no sandbox. Read this before listing someone else's plugin.
 
 - **An exec plugin runs with the agent's privileges** — its user, its groups, its capabilities. The operator authorises it by writing it into the config; the agent does not check what it does. Install plugins where only the operator can write (`/opt/di/collectors/`, root-owned), and do not point `command` at a directory others can write to.
 - **The environment is minimal.** A plugin gets `PATH`, `HOME` and `LANG` from the agent (only those that are set), plus `DI_NODE_ID` (the agent's node id) and `DI_COLLECTOR_NAME` (the entry name), and nothing else the agent happens to carry. A variable your plugin needs must be set by the plugin itself or a wrapper script, or passed in `config`.
-- **`GET /config` withholds what a plugin might treat as a secret.** The agent cannot tell which value is a credential, so in the spec it serves (and prints with `-print-config`) every entry's `config` block is `[redacted]`, every `exec.args` value is `[redacted]`, and an `http.url` loses its password and its query values (`?token=[redacted]`); the command, the URL's host and path, and the built-in `type` stay. That is not a vault: the agent's HTTP surface has no authentication ([`OPERATING.md`](../OPERATING.md#read-this-first)), the values are in `agent.yaml` and the process's memory, and the plugin is sent its `config` in every hello. Prefer putting a credential in a file only the plugin's user can read, and pass the file's path.
+- **`GET /config` withholds what a plugin might treat as a secret.** The agent cannot tell which value is a credential, so in the spec it serves (and prints with `-print-config`) every entry's non-empty `config` block is `[redacted]` and every `exec.args` value is `[redacted]`. An `http.url` is shown with its userinfo masked whether or not it has a password (`http://[redacted]@host/…`, since a bare token is often put there), its whole query replaced (`?[redacted]`) and its fragment dropped; that one view (`spec.RedactURL`) is also what the startup log and an http member's errors — `last_error`, the log — show. The command, the URL's scheme, host and path, and the built-in `type` stay. That is not a vault: the agent's HTTP surface has no authentication ([`OPERATING.md`](../OPERATING.md#read-this-first)), the values are in `agent.yaml` and the process's memory, and the plugin is sent its `config` in every hello. Prefer putting a credential in a file only the plugin's user can read, and pass the file's path.
 - **An http plugin is a URL the agent POSTs to every tick.** Point it at something on the node; the agent sends it the node id, the entry name and the `config` block.
 - Collectors are read-only by contract ("pure read"). A plugin that changes system state breaks the contract even though no check can see it.
 
@@ -326,7 +327,7 @@ go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadav
 
 ## 9. Go, out of process: `plugin.Serve`
 
-[`pkg/collectors/plugin`](../semantic-map/go/pkg/collectors/plugin/plugin.go) runs the exec loop for a Go plugin. It imports the standard library and `pkg/types` only, so the plugin binary stays small and does not move when the agent's internals do. `setup` is called on every hello with a `plugin.Hello` — `Name`, `NodeID`, `Interval` (a `time.Duration`) and `Config` — and returns the collect function; an error from it, or a nil function, is sent as the hello's refusal. The collect function takes the request's `now` and returns samples, an optional available list and an error. An error or panic in `collect` becomes an error reply for that tick; a sample with a NaN or infinite value is dropped with a line on stderr. `Serve` returns `nil` when the agent closes stdin.
+[`pkg/collectors/plugin`](../semantic-map/go/pkg/collectors/plugin/plugin.go) runs the exec loop for a Go plugin. It imports the standard library and `pkg/types` only, so the plugin binary stays small and does not move when the agent's internals do. `setup` is called on every hello with a `plugin.Hello` — `Name`, `NodeID`, `Interval` (a `time.Duration`) and `Config` — and returns the collect function; an error from it, or a nil function, is sent as the hello's refusal. The collect function takes the request's `now` and returns samples, an optional available list and an error. An error or panic in `collect` becomes an error reply for that tick, and so does a reply that cannot be encoded (a NaN in a `range`, say); a sample with a NaN or infinite value is dropped with a line on stderr. `Serve` returns `nil` when the agent closes stdin.
 
 ```go
 // Command load1 is an exec collector plugin: load1_raw, the 1-minute load from

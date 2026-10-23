@@ -33,8 +33,8 @@ func getCollectors(t *testing.T, sup *collectors.Supervisor) map[string]any {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("response is not JSON: %v: %s", err, rec.Body)
 	}
-	if got["interval_s"] != float64(10) {
-		t.Errorf("interval_s = %v, want 10", got["interval_s"])
+	if got["interval_ms"] != float64(10000) {
+		t.Errorf("interval_ms = %v, want 10000", got["interval_ms"])
 	}
 	return got
 }

@@ -7,10 +7,11 @@ import (
 	"github.com/DiyazY/di-agent/pkg/collectors"
 )
 
-// collectorsBody is GET /collectors: the collection interval and every configured
+// collectorsBody is GET /collectors: the collection interval in milliseconds, so a
+// sub-second interval is not reported as 0, and every configured
 // collector's status, in the order sources.collectors lists them.
 type collectorsBody struct {
-	IntervalS  int64                     `json:"interval_s"`
+	IntervalMS int64                     `json:"interval_ms"`
 	Collectors []collectors.MemberStatus `json:"collectors"`
 }
 
@@ -20,7 +21,7 @@ type collectorsBody struct {
 // A nil supervisor (no collectors configured) answers with an empty list.
 func registerCollectorsRoute(mux *http.ServeMux, sup *collectors.Supervisor, interval time.Duration) {
 	mux.HandleFunc("GET /collectors", func(w http.ResponseWriter, r *http.Request) {
-		body := collectorsBody{IntervalS: int64(interval / time.Second), Collectors: []collectors.MemberStatus{}}
+		body := collectorsBody{IntervalMS: interval.Milliseconds(), Collectors: []collectors.MemberStatus{}}
 		if sup != nil {
 			body.Collectors = sup.Status()
 		}

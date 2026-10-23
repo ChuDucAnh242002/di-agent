@@ -100,15 +100,18 @@ func serve(in io.Reader, out, errOut io.Writer, setup func(Hello) (CollectFunc, 
 	br := bufio.NewReaderSize(in, 64<<10)
 	bw := bufio.NewWriter(out)
 	// Each reply is flushed at once: the agent waits for it before anything else.
+	writeLine := func(b []byte) error {
+		if _, err := bw.Write(append(b, '\n')); err != nil {
+			return err
+		}
+		return bw.Flush()
+	}
 	reply := func(v any) error {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return err
 		}
-		if _, err := bw.Write(append(b, '\n')); err != nil {
-			return err
-		}
-		return bw.Flush()
+		return writeLine(b)
 	}
 	var collect CollectFunc
 	for {
@@ -140,7 +143,16 @@ func serve(in io.Reader, out, errOut io.Writer, setup func(Hello) (CollectFunc, 
 				return err
 			}
 		case "collect":
-			if err := reply(answer(collect, req, errOut)); err != nil {
+			// A reply that cannot be encoded (a NaN in a range, say) costs that
+			// tick, as a collect error would, not the process.
+			b, err := json.Marshal(answer(collect, req, errOut))
+			if err != nil {
+				b, err = json.Marshal(errorReply{Seq: req.Seq, Error: fmt.Sprintf("encode reply: %v", err)})
+				if err != nil {
+					return err
+				}
+			}
+			if err := writeLine(b); err != nil {
 				return err
 			}
 		default:

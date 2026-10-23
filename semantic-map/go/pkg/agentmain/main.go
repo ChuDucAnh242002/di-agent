@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -273,7 +272,12 @@ func Main() {
 		log.Fatalf("collectors: %v", err)
 	}
 	if sup != nil {
-		defer sup.Close()
+		// Close names a plugin that needed SIGTERM or SIGKILL to stop; say so.
+		defer func() {
+			if err := sup.Close(); err != nil {
+				log.Printf("collectors: shutdown: %v", err)
+			}
+		}()
 		for _, e := range cfg.Sources.Collectors {
 			timeout := e.Timeout
 			if timeout <= 0 {
@@ -658,12 +662,9 @@ func collectorSource(e spec.CollectorEntry) string {
 	case e.Exec != nil:
 		return e.Exec.Command
 	case e.HTTP != nil:
-		// A URL may carry a password; the log gets it redacted.
-		u, err := url.Parse(e.HTTP.URL)
-		if err != nil {
-			return "<invalid url>"
-		}
-		return u.Redacted()
+		// A URL may carry credentials in its userinfo or query; the log gets the
+		// same redacted view GET /config serves.
+		return spec.RedactURL(e.HTTP.URL)
 	}
 	return e.Type
 }

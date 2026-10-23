@@ -44,12 +44,13 @@ func TestMain(m *testing.M) {
 //   - drifting-unit changes the unranged type's unit every collect;
 //   - foreign-node sets a node_id that is not the agent's;
 //   - narrow-available declares only one of the two types it emits;
-//   - duplicate sends the unranged type twice for one timestamp;
+//   - duplicate sends the unranged type twice for one timestamp, and
+//     duplicate-later does so from the second collect of a process on;
 //   - misspelled-value and exit-after-reply are written without plugin.Serve,
 //     which cannot misspell a field or exit between replies (rawFixture).
 func fixturePlugin(mode string) error {
 	switch mode {
-	case "misspelled-value", "exit-after-reply":
+	case "misspelled-value", "misspelled-later", "exit-after-reply":
 		return rawFixture(mode)
 	}
 	tick := 0
@@ -78,7 +79,10 @@ func fixturePlugin(mode string) error {
 				load.NodeID = "elsewhere"
 			case "narrow-available":
 				available = []types.MetricType{"fx_load"}
-			case "duplicate":
+			case "duplicate", "duplicate-later":
+				if mode == "duplicate-later" && tick < 2 {
+					break
+				}
 				samples = append(samples, &types.MetricSample{MetricType: "fx_load", Value: 0.75,
 					TimestampUnix: now.Unix(), Unit: "load", Labels: map[string]string{"core": "1"}})
 			}
@@ -88,9 +92,11 @@ func fixturePlugin(mode string) error {
 }
 
 // rawFixture speaks the protocol by hand. misspelled-value sends "valu" for the
-// unranged type; exit-after-reply exits after each collect reply.
+// unranged type, misspelled-later from the second collect on; exit-after-reply
+// exits after each collect reply.
 func rawFixture(mode string) error {
 	in := bufio.NewScanner(os.Stdin)
+	collects := 0
 	for in.Scan() {
 		var req struct {
 			Op      string `json:"op"`
@@ -104,8 +110,9 @@ func rawFixture(mode string) error {
 			fmt.Println(`{"protocol":1}`)
 			continue
 		}
+		collects++
 		value := "value"
-		if mode == "misspelled-value" {
+		if mode == "misspelled-value" || (mode == "misspelled-later" && collects >= 2) {
 			value = "valu"
 		}
 		fmt.Printf(`{"seq":%d,"samples":[{"metric_type":"fx_load","%s":0.5,"timestamp_unix":%d,"unit":"load"},`+
@@ -202,6 +209,8 @@ func TestCollectorCheckFailsEachRule(t *testing.T) {
 		"narrow-available": "AvailableCoversEmitted",
 		"duplicate":        "NoDuplicateSamplesInBatch",
 		"misspelled-value": "NoMalformedSamples",
+		"duplicate-later":  "NoDuplicateSamplesInBatch",
+		"misspelled-later": "NoMalformedSamples",
 		"exit-after-reply": "NoUnexpectedRestarts",
 	} {
 		t.Run(mode, func(t *testing.T) {

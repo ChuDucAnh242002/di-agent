@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -171,6 +172,18 @@ func (h *HTTPCollector) fault(err error) error {
 	return err
 }
 
+// redactURLError rewrites the URL a *url.Error carries to spec.RedactURL's view,
+// so a credential in the configured URL never reaches last_error or the log.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		c := *ue
+		c.URL = spec.RedactURL(ue.URL)
+		return &c
+	}
+	return err
+}
+
 // post sends one request and returns the response body: a non-2xx status, a
 // transport error, a timeout or a body over maxHTTPBody is an error.
 func (h *HTTPCollector) post(ctx context.Context, req any) ([]byte, error) {
@@ -180,12 +193,12 @@ func (h *HTTPCollector) post(ctx context.Context, req any) ([]byte, error) {
 	}
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, h.sp.URL, bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bad url %s", spec.RedactURL(h.sp.URL))
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := h.client.Do(hr)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

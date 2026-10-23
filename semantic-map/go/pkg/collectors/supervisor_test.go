@@ -172,6 +172,8 @@ func TestSupervisorAbandonedCallEndingIsRecorded(t *testing.T) {
 	if st := statusOf(t, s, "slow"); st.State != "stuck" {
 		t.Fatalf("state=%q, want stuck", st.State)
 	}
+	// Outlast the timeout's own 1s backoff before the call ends.
+	time.Sleep(1500 * time.Millisecond)
 	close(slow.release)
 	deadline := time.Now().Add(2 * time.Second)
 	for statusOf(t, s, "slow").State == "stuck" {
@@ -184,7 +186,12 @@ func TestSupervisorAbandonedCallEndingIsRecorded(t *testing.T) {
 	if st.State != "backoff" || st.LastError != "abandoned call ended: device wedged" {
 		t.Fatalf("status = %+v, want backoff with the late error", st)
 	}
-	if sink.count("collector[slow]: call abandoned after its timeout has ended: device wedged") != 1 {
+	// Recorded as a fault now: the backoff runs from the call's end, not from the
+	// timeout it has long outlasted.
+	if st.BackoffUntilUnix < time.Now().Unix() || st.LastErrorUnix < st.LastSuccessUnix {
+		t.Fatalf("status = %+v, want a backoff that has not yet passed", st)
+	}
+	if sink.count("collector[slow]: abandoned call ended: device wedged") != 1 {
 		t.Fatalf("log = %q", sink.lines)
 	}
 }

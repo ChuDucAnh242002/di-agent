@@ -308,3 +308,29 @@ func TestHTTPRedirectIsFault(t *testing.T) {
 		t.Fatalf("err = %v, want a fault naming the 302", err)
 	}
 }
+
+// A transport error names the URL; the credential in the configured one must not
+// reach last_error, GET /collectors or the log.
+func TestHTTPErrorsRedactTheURL(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := srv.URL
+	srv.Close() // nothing listens: every request is a transport error naming the URL
+	for _, raw := range []string{
+		addr + "/collect?token=s3cret",
+		strings.Replace(addr, "http://", "http://s3cret@", 1) + "/collect",
+		strings.Replace(addr, "http://", "http://u:s3cret@", 1) + "/collect#s3cret",
+	} {
+		c := NewHTTPCollector(Env{NodeID: "n1", Interval: 10 * time.Second}, "gpu", spec.HTTPSpec{URL: raw}, time.Second, nil)
+		err := c.Start()
+		if err == nil {
+			t.Fatalf("%s: Start succeeded against a closed server", raw)
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("Start error leaks the credential: %v", err)
+		}
+		if _, err := c.Collect(); err == nil || strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("Collect error = %v, want a fault without the credential", err)
+		}
+		c.Close()
+	}
+}

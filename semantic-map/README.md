@@ -480,7 +480,7 @@ Each collector in `sources.collectors`, in list order, with what it has done so 
 Read-only: collectors are configured in the spec, not over HTTP.
 
 ```json
-{"interval_s":10,
+{"interval_ms":10000,
  "collectors":[
   {"name":"cgroup","kind":"type","type":"cgroup","state":"ok",
    "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
@@ -492,8 +492,9 @@ Read-only: collectors are configured in the spec, not over HTTP.
 otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
 `backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
 5 min, reset by a success), and `stuck` while a call that outlived its timeout has not
-returned — the member is skipped until it does, and an error it then ends with becomes
-`last_error`. `violations` counts samples dropped for breaking the collector contract (a
+returned — the member is skipped until it does, and its return is then recorded as a
+fault at that moment (`backoff`, a fresh `backoff_until_unix`, `last_error` saying how it
+ended). `interval_ms` is `sources.interval` in milliseconds. `violations` counts samples dropped for breaking the collector contract (a
 malformed or duplicate sample in a plugin's reply, an invalid metric type, subject or
 `part_of`, no unit, a foreign `node_id`, a unit or range that changed, an invalid
 `available` entry); `ownership_drops` counts node-level samples dropped because an earlier
@@ -611,8 +612,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
-| GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]`; so are each collector entry's `config` block and `exec.args`, and an `http.url`'s password and query values |
-| GET  | `/collectors`                       | —                                                        | collectors | `{interval_s, collectors:[…]}`: each configured collector's state, counters and declared types, in list order; see [`GET /collectors`](#get-collectors) |
+| GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]`; so are each collector entry's non-empty `config` block and `exec.args`, and an `http.url`'s userinfo and query (its fragment is dropped) |
+| GET  | `/collectors`                       | —                                                        | collectors | `{interval_ms, collectors:[…]}`: `sources.interval` in milliseconds and each configured collector's state, counters and declared types, in list order; see [`GET /collectors`](#get-collectors) |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the runtime has refused; absent when none), `cooling` | relief   |
@@ -1202,7 +1203,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | ---- | ------- | ------- |
 | `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
 | `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
-| `--ticks N` | `5` | Collects per protocol check. |
+| `--ticks N` | `5` | Collects per protocol check, and per run of the every-batch checks `NoMalformedSamples` and `NoDuplicateSamplesInBatch`. |
 | `--interval D` | `10s` | The interval announced in hello. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
 | `--node-id ID` | `check` | The node id the agent side announces and stamps. |
 

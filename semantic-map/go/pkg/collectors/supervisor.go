@@ -129,8 +129,8 @@ type callResult struct {
 //     backs off exponentially and is reported through Status and the log.
 //   - At most one call per member is in flight. A Go member cannot be cancelled,
 //     so a call that outlives its timeout is abandoned, the member's state is
-//     "stuck", and it is skipped until the call returns; how that call ended is
-//     then logged and, if it failed, recorded as the member's last error.
+//     "stuck", and it is skipped until the call returns; its ending is then
+//     recorded as a fault at that moment, with how it ended as the last error.
 //   - Every delivered sample satisfies the CollectorContract's declared-meaning
 //     and node-identity guarantees; a sample that does not is dropped and counted,
 //     and the rest of its batch is kept.
@@ -335,17 +335,17 @@ func (s *Supervisor) call(ms *memberState, ch chan<- callResult) {
 	s.mu.Lock()
 	ms.inflight = false
 	if ms.abandoned {
-		// No tick is waiting for this result: its samples are discarded, but how
-		// the call ended is the member's latest news, so status and the log get it.
+		// No tick is waiting for this result, and its samples are discarded. How
+		// the call ended is the member's latest news, recorded as a fault at this
+		// moment so state, backoff_until and last_error agree as after any fault:
+		// a backoff that the hung call has outlasted would otherwise read as one
+		// already in the past.
 		ms.abandoned = false
-		ms.state = stateBackoff
+		msg := fmt.Sprintf("abandoned call returned after its timeout; %d samples discarded", len(r.samples))
 		if r.err != nil {
-			ms.lastError = "abandoned call ended: " + r.err.Error()
-			ms.lastErrorUnix = s.now().Unix()
-			s.logf("collector[%s]: call abandoned after its timeout has ended: %v", ms.m.Name, r.err)
-		} else {
-			s.logf("collector[%s]: call abandoned after its timeout has returned; its %d samples were discarded", ms.m.Name, len(r.samples))
+			msg = "abandoned call ended: " + r.err.Error()
 		}
+		s.fault(ms, s.now(), msg)
 	}
 	s.mu.Unlock()
 	ch <- r // buffered: never blocks, even when nobody is waiting any more

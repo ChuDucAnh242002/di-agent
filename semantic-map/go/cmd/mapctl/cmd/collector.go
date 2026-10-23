@@ -168,7 +168,9 @@ func runPluginChecks(o *checkOpts, args []string, config map[string]any, errOut 
 		return rec.Results()
 	}
 
-	compliance.RunCollectorChecks(root, func(r compliance.Reporter) contracts.CollectorContract { return start(r) })
+	// The every-batch checks run over --ticks collects, so a plugin that goes bad
+	// on a later tick is not certified on the strength of its first reply.
+	compliance.RunCollectorChecksTicks(root, func(r compliance.Reporter) contracts.CollectorContract { return start(r) }, o.ticks)
 
 	timeout := collectors.DefaultTimeout(o.interval)
 	spacing := max(o.interval/10, 100*time.Millisecond)
