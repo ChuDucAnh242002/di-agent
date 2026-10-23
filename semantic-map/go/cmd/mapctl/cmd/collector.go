@@ -75,8 +75,8 @@ func newCollectorCheckCmd() *cobra.Command {
 			if o.ticks < 1 {
 				return errors.New("--ticks must be at least 1")
 			}
-			if o.interval <= 0 {
-				return errors.New("--interval must be positive")
+			if o.interval < time.Second {
+				return errors.New("--interval must be at least 1s: timestamps are whole seconds")
 			}
 			config, err := loadPluginConfig(o.config)
 			if err != nil {
@@ -227,7 +227,9 @@ func runPluginChecks(o *checkOpts, args []string, config map[string]any, errOut 
 
 	// timestamp_unix is seconds. Either side of each collect bounds the request's
 	// now_unix, and a sample observed within two intervals of it passes; one in
-	// milliseconds lands decades out and fails.
+	// milliseconds lands decades out and fails. The adapter gives every collect a
+	// now_unix of its own, so collects spaced under a second apart run ahead of
+	// the clock by up to one second each: the upper bound allows for that.
 	root.Run("TimestampNearNow", func(r compliance.Reporter) {
 		p := start(r)
 		slack := int64(2 * o.interval / time.Second)
@@ -239,7 +241,7 @@ func runPluginChecks(o *checkOpts, args []string, config map[string]any, errOut 
 			}
 			after := time.Now().Unix()
 			for _, s := range samples {
-				if s.TimestampUnix < before-slack || s.TimestampUnix > after+slack {
+				if s.TimestampUnix < before-slack || s.TimestampUnix > after+slack+int64(i+1) {
 					r.Errorf("collect %d: %s timestamp_unix %d is more than 2 x --interval from now_unix %d; it must be Unix seconds", i+1, s.MetricType, s.TimestampUnix, before)
 				}
 			}

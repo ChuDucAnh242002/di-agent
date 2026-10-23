@@ -2,8 +2,10 @@ package collectors
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -156,4 +158,18 @@ func asStrings(mts []types.MetricType) []string {
 		out[i] = string(m)
 	}
 	return out
+}
+
+// Two collects in one wall-clock second get different now_unix, so a reading
+// that changed between them is not taken for a duplicate by its event id.
+func TestNowClockGivesEachCollectItsOwnSecond(t *testing.T) {
+	var c nowClock
+	t0 := time.Unix(1000, 200_000_000)
+	got := []int64{c.next(t0), c.next(t0.Add(300 * time.Millisecond)), c.next(t0.Add(600 * time.Millisecond))}
+	if want := []int64{1000, 1001, 1002}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("same-second collects: got %v, want %v", got, want)
+	}
+	if n := c.next(time.Unix(1005, 0)); n != 1005 {
+		t.Fatalf("after the clock passes the bumped value: got %d, want 1005", n)
+	}
 }

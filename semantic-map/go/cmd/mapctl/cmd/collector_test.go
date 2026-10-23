@@ -44,6 +44,8 @@ func TestMain(m *testing.M) {
 //   - drifting-unit changes the unranged type's unit every collect;
 //   - foreign-node sets a node_id that is not the agent's;
 //   - narrow-available declares only one of the two types it emits;
+//   - changing is well-behaved too, but its value moves every collect, as most
+//     real readings do;
 //   - duplicate sends the unranged type twice for one timestamp, and
 //     duplicate-later does so from the second collect of a process on;
 //   - misspelled-value and exit-after-reply are written without plugin.Serve,
@@ -73,6 +75,8 @@ func fixturePlugin(mode string) error {
 				load.PartOf = "cpu"
 			case "slow":
 				time.Sleep(800 * time.Millisecond)
+			case "changing":
+				load.Value = float64(tick)
 			case "drifting-unit":
 				load.Unit = fmt.Sprintf("load-%d", tick)
 			case "foreign-node":
@@ -136,6 +140,20 @@ func runCheck(t *testing.T, mode string) (string, error) {
 	err := root.Execute()
 	t.Logf("stdout:\n%s\nstderr:\n%s", out, errOut)
 	return out.String(), err
+}
+
+// A reading that changes between collects must certify: back-to-back collects
+// share a wall-clock second, and before the adapter gave each collect its own
+// now_unix the two batches shared event ids and EventIDDeterministic failed.
+func TestCollectorCheckCertifiesChangingValues(t *testing.T) {
+	t.Parallel()
+	out, err := runCheck(t, "changing")
+	if err != nil {
+		t.Fatalf("check of a plugin whose values change failed: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(out), "\ncertified") {
+		t.Fatalf("not certified:\n%s", out)
+	}
 }
 
 func TestCollectorCheckCertifiesGoodFixture(t *testing.T) {

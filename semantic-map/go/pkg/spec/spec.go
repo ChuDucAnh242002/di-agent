@@ -708,6 +708,11 @@ func (s Spec) Validate() error {
 	}
 
 	notNegative("sources.interval", s.Sources.Interval)
+	// now_unix and timestamp_unix are whole seconds, so a faster tick cannot
+	// give each collect a timestamp of its own.
+	if s.Sources.Interval > 0 && s.Sources.Interval < time.Second {
+		errs = append(errs, fmt.Errorf("sources.interval = %v, want 0 (off) or at least 1s: timestamps are whole seconds", s.Sources.Interval))
+	}
 	errs = append(errs, s.Sources.validateCollectors()...)
 	notNegative("map.stale_after", s.Map.StaleAfter)
 	notNegative("map.retire_after", s.Map.RetireAfter)

@@ -127,8 +127,8 @@ One envelope, two transports:
 - "No data right now" is `"samples":[]`, never an error. `error` means a fault.
 - A reply whose `seq` differs from the request is discarded, and that tick is a fault. Echo the `seq` you were sent; do not count your own, because it does not restart from 1 when the plugin does.
 - A plugin `protocol` other than 1, or a hello `error`, is a hello failure.
-- `config` is `{}` when the entry has none, so a plugin can always index it. `interval_ms` is `sources.interval` in milliseconds, so a sub-second interval is not truncated.
-- Stamp each sample with `now_unix` as its `timestamp_unix` unless the source carries its own time. `timestamp_unix` is Unix **seconds**; `mapctl collector check` fails a timestamp more than two intervals from `now_unix` (§6), which is what milliseconds look like.
+- `config` is `{}` when the entry has none, so a plugin can always index it. `interval_ms` is `sources.interval` in milliseconds; the interval is at least 1s, because timestamps are whole seconds.
+- Stamp each sample with `now_unix` as its `timestamp_unix` unless the source carries its own time. Every collect a plugin receives has a `now_unix` of its own, strictly greater than the one before: when a collect falls in the same wall-clock second as the previous one (a late tick, or `mapctl collector check` calling back to back), the agent moves `now_unix` one second on, so a reading that changed is never hashed to the previous reading's `event_id` and dropped. It may lead the wall clock by a second. `timestamp_unix` is Unix **seconds**; `mapctl collector check` fails a timestamp more than two intervals from `now_unix` (§6), which is what milliseconds look like.
 
 ### 3.2 Stamped by the agent
 
@@ -248,7 +248,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
 | `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
 | `--ticks N` | `5` | Collects per protocol check, and per run of the suite's every-batch checks `NoMalformedSamples` and `NoDuplicateSamplesInBatch`. |
-| `--interval D` | `10s` | The interval announced in hello. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
+| `--interval D` | `10s` | The interval announced in hello, at least 1s. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
 | `--node-id ID` | `check` | The node id the agent side announces and stamps. |
 
 | Check | Asserts |

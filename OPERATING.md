@@ -127,7 +127,7 @@ The agent is described by one file, `agent.yaml`, passed as `-config`; there are
 | Setting | Guidance |
 | ---- | -------- |
 | `profile.regime` | `stable` / `default` / `bursty` / `volatile`. Sets `alpha` and `convergence` to a bundle calibrated against the k0s workload matrix. **Prefer this over tuning the two numbers by hand.** Use `stable` for steady IoT nodes, `bursty` for control-plane-heavy ones. |
-| `sources.interval` | `10s` default. `5s` on nodes you want to converge faster; `0s` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
+| `sources.interval` | `10s` default, at least `1s`. `5s` on nodes you want to converge faster; `0s` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
 | `map.proposer.enabled` | `true` default. Set `false` on CPU-constrained nodes — it keeps ring buffers per construct pair. |
 
 ### Port conflict warning

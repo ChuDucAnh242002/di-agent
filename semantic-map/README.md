@@ -1065,7 +1065,7 @@ the shape of the real thing.
 | `profile.min_trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
-| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
+| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`; at least `1s`, since timestamps are whole seconds. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello — is refused at startup, naming the entry. |
 | `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
 | `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
@@ -1204,7 +1204,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
 | `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
 | `--ticks N` | `5` | Collects per protocol check, and per run of the every-batch checks `NoMalformedSamples` and `NoDuplicateSamplesInBatch`. |
-| `--interval D` | `10s` | The interval announced in hello. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
+| `--interval D` | `10s` | The interval announced in hello, at least 1s. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
 | `--node-id ID` | `check` | The node id the agent side announces and stamps. |
 
 It prints `PASS <check>` or `FAIL <check>: <why>` per check, then `certified` (exit 0) or

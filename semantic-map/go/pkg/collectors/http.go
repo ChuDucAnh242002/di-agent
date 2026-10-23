@@ -45,6 +45,7 @@ type HTTPCollector struct {
 	needHello bool
 	closed    bool
 	seq       uint64
+	clock     nowClock
 
 	// availMu guards the last successful reply's available list and drops.
 	availMu   sync.Mutex
@@ -98,7 +99,7 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	h.seq++
 	seq := h.seq
-	now := time.Now().Unix()
+	now := h.clock.next(time.Now())
 	body, err := h.post(ctx, CollectRequest{Op: "collect", Seq: seq, NowUnix: now})
 	if err != nil {
 		return nil, h.fault(err)

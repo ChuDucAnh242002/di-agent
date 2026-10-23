@@ -49,6 +49,24 @@ type CollectRequest struct {
 	NowUnix int64  `json:"now_unix"`
 }
 
+// nowClock gives each collect of one collector its own now_unix. A sample's
+// event id hashes its timestamp in whole seconds, so two collects stamped with
+// the same second would make a changed reading look like a duplicate of the
+// earlier one and the map would drop it. When a collect falls in the same second
+// as the one before (a tick that ran late, or certification calling back to
+// back), now_unix moves one second past the previous instead. With
+// sources.interval at least 1s it leads the wall clock by at most a second.
+type nowClock struct{ last int64 }
+
+func (c *nowClock) next(t time.Time) int64 {
+	n := t.Unix()
+	if n <= c.last {
+		n = c.last + 1
+	}
+	c.last = n
+	return n
+}
+
 // CollectReply is one batch as a plugin sends it. Available is three-valued on the
 // wire: absent (or null) lets the agent take the set of types in Samples; present,
 // even as [], is the full set of types the plugin can produce now. A nil Available

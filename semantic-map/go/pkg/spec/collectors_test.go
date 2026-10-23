@@ -229,3 +229,17 @@ func TestRedactURL(t *testing.T) {
 		}
 	}
 }
+
+// Timestamps are whole seconds, so a tick under a second is refused; 0 still
+// turns the loop off and 1s is the floor.
+func TestSourcesIntervalAtLeastOneSecond(t *testing.T) {
+	_, err := Parse([]byte("sources:\n  interval: 500ms\n"))
+	if err == nil || !strings.Contains(err.Error(), "sources.interval") {
+		t.Fatalf("500ms: err %v, want a sources.interval error", err)
+	}
+	for _, ok := range []string{"0s", "1s"} {
+		if _, err := Parse([]byte("sources:\n  interval: " + ok + "\n")); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+}

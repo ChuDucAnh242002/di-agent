@@ -73,6 +73,7 @@ type ExecCollector struct {
 	started bool
 	closed  bool
 	seq     uint64
+	clock   nowClock
 
 	// availMu guards the last successful reply's available list and drops.
 	availMu   sync.Mutex
@@ -178,7 +179,7 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	e.seq++
 	seq := e.seq
-	now := time.Now().Unix()
+	now := e.clock.next(time.Now())
 	line, err := e.roundTrip(CollectRequest{Op: "collect", Seq: seq, NowUnix: now}, deadline)
 	if err != nil {
 		return nil, e.fault(err)
