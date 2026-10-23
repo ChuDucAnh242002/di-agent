@@ -113,6 +113,7 @@ semantic-map/
 │
 ├── sdk/python/di_collector.py  Python plugin SDK, stdlib only, one file: serve(setup) speaks wire
 │                               protocol v1 on stdin/stdout so a plugin only says what to measure
+├── sdk/python/test_di_collector.py  Its unit tests (stdlib unittest; CI runs them)
 ├── examples/collectors/
 │   ├── loadavg/                Example exec plugin on the Python SDK: load1/5/15 per CPU and
 │   │   ├── loadavg.py          PSI some avg10 for cpu, memory, io; certified in CI by
@@ -161,7 +162,7 @@ semantic-map/
     │   │   ├── builtin.go      The built-in types: cgroup, netdata, script, each decoding its own config
     │   │   ├── supervisor.go   Supervisor — every member each tick: timeout, fault isolation, backoff,
     │   │   │                   contract enforcement, one owner per node-level type, Status()
-    │   │   ├── wire.go         Wire protocol v1 (hello, collect, shutdown) shared by both transports
+    │   │   ├── wire.go         Wire protocol v1 (hello, collect; strict sample decoding) shared by both transports
     │   │   ├── exec.go         ExecCollector — a plugin process speaking the protocol on stdin/stdout
     │   │   ├── http.go         HTTPCollector — a plugin reached over HTTP
     │   │   └── plugin/         plugin.Serve — the exec loop for a plugin written in Go (stdlib + pkg/types only)

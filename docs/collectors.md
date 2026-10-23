@@ -86,7 +86,7 @@ sources:
       type: cgroup
     - name: gpu
       exec: {command: /opt/di/collectors/gpu, args: [--fast]}
-      timeout: 3s             # optional; default min(interval/2, 5s); at most sources.interval
+      timeout: 3s             # optional; default min(interval/2, 5s); less than sources.interval
       config: {device: 0}     # sent to the plugin in hello, verbatim, as JSON
     - name: redis
       http: {url: http://localhost:9121/di/collect}
