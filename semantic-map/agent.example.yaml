@@ -13,26 +13,36 @@ profile:
     min_trust: 0.5
 sources:
     interval: 10s
-    cgroup:
-        root: /sys/fs/cgroup
-        subjects: true
-        units: []
-        max_subjects: 256
-        cmd_label: false
-        pod_logs: /var/log/pods
-    netdata:
-        url: ""
-        include:
-            - system.cpu
-            - system.ram
-            - system.io
-            - system.net
-            - disk.io
-            - disk.util
-            - disk.await
-            - net.net
-            - cpu.cpu
-    script: ""
+    # The list is the whole set: naming collectors replaces this default, it does not
+    # add to it. Order is ownership priority for node-level metric types. Each entry
+    # names exactly one of type (built-in), exec (a plugin process) or http (a plugin
+    # URL); config is the collector's own, and an unknown key in it is refused.
+    collectors:
+        - name: cgroup
+          type: cgroup
+          # config, at its defaults:
+          #   root: /sys/fs/cgroup
+          #   subjects: true
+          #   units: []
+          #   max_subjects: 256
+          #   cmd_label: false
+          #   pod_logs: /var/log/pods
+        # Netdata beside cgroup: collapse: false leaves the node's own types
+        # (cpu_utilization and the rest) to cgroup, listed first.
+        # - name: netdata
+        #   type: netdata
+        #   config:
+        #     url: http://localhost:19999
+        #     include: [system.cpu, system.ram, system.io, system.net, disk.io, disk.util, disk.await, net.net, cpu.cpu]
+        #     collapse: false
+        # An out-of-process plugin (README §3, sources.collectors):
+        # - name: loadavg
+        #   exec: {command: /opt/di/collectors/loadavg, args: []}
+        #   timeout: 3s
+        # A synthetic system (exclusive: it must be the only entry):
+        # - name: script
+        #   type: script
+        #   config: {path: scenarios/demo.json}
 facts:
     - kind: host
       root: ""

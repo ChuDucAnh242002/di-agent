@@ -24,7 +24,7 @@ func TestRoot_ListsAllSubcommands(t *testing.T) {
 	want := []string{
 		"graph", "edges", "history", "strength", "deprecate", "construct",
 		"proposition", "reset", "candidates", "recommend", "simulate",
-		"watch", "dot", "health", "peers", "version", "completion",
+		"watch", "dot", "health", "peers", "version", "completion", "collector",
 	}
 	for _, name := range want {
 		if !got[name] {
@@ -109,7 +109,7 @@ func TestRoot_HelpContainsKnownSubcommands(t *testing.T) {
 	for _, name := range []string{
 		"graph", "edges", "history", "strength", "deprecate", "construct",
 		"proposition", "reset", "candidates", "recommend", "simulate",
-		"watch", "dot", "health", "peers", "version", "completion",
+		"watch", "dot", "health", "peers", "version", "completion", "collector",
 	} {
 		if !strings.Contains(out, name) {
 			t.Errorf("--help output missing subcommand %q", name)

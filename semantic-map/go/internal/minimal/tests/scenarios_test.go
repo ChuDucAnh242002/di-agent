@@ -245,7 +245,7 @@ func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, val
 func TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
 	build := func(kd string) *semmap.SemanticMap {
-		sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		sm, err := profiles.Build("edge-minimal", profiles.Config{
 			DomainSpec: mustSpec(),
 			StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
 			EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
@@ -518,7 +518,7 @@ type coordinationAgent struct {
 // the default trust of 0.5.
 func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordinationAgent {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec:           mustSpec(),
 		StateMap:             statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
 		EMAAlpha:             0.5,
@@ -537,7 +537,7 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 
 // registerScenarioHTTP wires the minimum HTTP surface RecommendPeer needs to
 // talk to a remote peer: GET /cost, GET /healthz, POST /offload. The agent
-// daemon's full route set lives in cmd/agent (package main) and cannot be
+// daemon's full route set lives in pkg/agentmain and cannot be
 // imported by tests in this package — so we re-wire just what the scenario
 // requires. The wire shapes match the daemon exactly so peers.Client works
 // against either implementation.
@@ -640,7 +640,7 @@ func clamp01(v float64) float64 {
 }
 
 // decodeJSON / writeJSONBody are tiny helpers so registerScenarioHTTP does not
-// depend on the cmd/agent package. The encodings match the daemon's
+// depend on the pkg/agentmain package. The encodings match the daemon's
 // application/json convention.
 func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()

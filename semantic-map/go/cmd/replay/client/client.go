@@ -4,7 +4,7 @@
 // Intentionally minimal: replay only needs to ship MetricSamples; it does
 // not need /graph, /history, or any of the mutation endpoints. Keeping
 // this client narrow means cmd/replay/ stays decoupled from cmd/mapctl/
-// and from internal packages. The DTOs duplicate cmd/agent/dto.go for
+// and from internal packages. The DTOs duplicate pkg/agentmain/dto.go for
 // the same wire-boundary reason mapctl/client/types.go does.
 package client
 
@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// MetricSampleRequest mirrors cmd/agent/dto.go MetricSampleRequest. Duplicated
+// MetricSampleRequest mirrors pkg/agentmain/dto.go MetricSampleRequest. Duplicated
 // on the wire boundary so cmd/replay/ does not need to import internal Go
 // packages.
 type MetricSampleRequest struct {
@@ -35,7 +35,7 @@ type MetricSampleRequest struct {
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
-// ErrorResponse mirrors cmd/agent/dto.go ErrorResponse. Decoded from non-2xx
+// ErrorResponse mirrors pkg/agentmain/dto.go ErrorResponse. Decoded from non-2xx
 // responses so the replay tool can surface a clear failure message.
 type ErrorResponse struct {
 	Error string `json:"error"`

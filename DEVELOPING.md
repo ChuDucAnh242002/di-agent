@@ -139,7 +139,9 @@ The architecture exists to make extension local. Nearly every change below touch
 
 A Collector reads some metric source and emits typed `MetricSample`s. This is the extension point you will use if you want the agent to observe something new.
 
-The contract is three methods:
+**Most collectors do not belong in this repository.** A collector in any language can run as an `exec` or `http` plugin, and a Go one can be compiled into a custom binary, all without editing the agent. [`docs/collectors.md`](docs/collectors.md) is the guide for those: the contract's guarantees, the wire protocol, the rules every producer follows, ownership, certification with `mapctl collector check`, and worked examples. Read it first even for an in-tree collector — its §4 producer rules apply here too.
+
+The steps below are for a collector that ships *inside* the agent as a built-in type. The contract is three methods:
 
 ```go
 type CollectorContract interface {
@@ -152,9 +154,9 @@ type CollectorContract interface {
 **Steps:**
 
 1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source, include patterns) or `collector_cgroup.go` (filesystem source).
-2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. Both existing collectors hash `(sourceID, nodeID, subject, metricType, timestamp)`.
-3. Return `(nil, nil)` for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
-4. Wire it in `pkg/profiles/profiles.go`. If more than one collector is active, wrap them in `MultiCollector`.
+2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. The three built-ins all derive it deterministically: `cgroup` and `netdata` hash `(sourceID, nodeID, subject, metricType, timestamp)`, and `script` hashes `(source, node, metric, tick)` so a replay is reproducible; `client.EventID` in `pkg/ingest/client` is the first hash, and the one a new collector should use. Two samples of one batch must not share an `EventID` — the compliance suite's `NoDuplicateSamplesInBatch` fails it, since the map would keep only the first.
+3. Return an empty batch and a nil error for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
+4. Register it in `pkg/collectors/builtin.go`: `Register("<source>", newSource)` in `init()`, with a factory `func(env Env, config *yaml.Node) (contracts.CollectorContract, error)` that owns its config struct, decodes it with `decodeStrict` (an unknown key is refused) and validates it, as `newCgroup` and `newNetdata` do. List it as `type: <source>` in `sources.collectors`. The Supervisor runs it beside the others; no profile changes.
 5. Add `internal/minimal/collector_<source>_test.go` and run the compliance suite against it:
 
 ```go
@@ -165,25 +167,9 @@ func TestMyCollectorCompliance(t *testing.T) {
 }
 ```
 
-Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. `internal/scripted/collector_test.go` is the shortest working example to copy.
+Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. Build the collector over data: `CollectProducesSamples` fails on an empty batch. `internal/scripted/collector_test.go` is the shortest working example to copy.
 
 **The rule: your implementation is valid if and only if it passes the compliance suite.** That is the definition, not a check on top of one.
-
-**The rules every producer follows**, in-process collector or push producer alike — a push producer has no code in the agent, so these are its obligations:
-
-| Concern | Rule |
-| ------- | ---- |
-| What to collect | An include list of patterns over the source's own names, with a short curated default and `*` for everything. Selection happens in the producer; the map records whatever arrives. |
-| Names | The source's name for the quantity (Netdata: `<context>.<dimension>`), collapsed onto an existing type only where it means the same thing, measured the same way. Two producers that measure a quantity differently keep two names: Netdata's `system.cpu` counts iowait, the root cgroup does not. |
-| Subjects | A per-instance series is a subject: `disk:sda`, `net:eth0`, `pod:<uid>`. |
-| Units | Converted to the map's (a percentage to a fraction, KiB/s to bytes/s). A reading whose unit contradicts the held property is refused. |
-| Range | Declared where the quantity has one (a share, a percentage), not for a rate or a count; the same declaration on every sample of a type. |
-| Computed series | Skipped: a remainder (CPU idle) or a longer average of a series that is kept (PSI 60 s and 300 s). |
-| Chart | The series computed together from one reading carry one `chart`, so discovery can group the arithmetic among them. |
-
-`AvailableMetrics()` is at least every type the last `Collect` emitted; a pattern-driven collector's answer grows as its source offers more.
-
-> Watch out for the normalisation trap. A *routed* type — one `domain_spec.json` summarises into a construct — must be a fraction on `[0,1]`. A replay harness once sent network throughput in raw bytes/s and CO-adjacent edges went to tens of thousands. Unrouted types carry whatever unit and range they declare.
 
 ### 4.2 Add a MetricType
 
@@ -235,11 +221,11 @@ Then document it in the profiles table in [ARCHITECTURE §3](semantic-map/ARCHIT
 
 ### 4.5 Add an HTTP endpoint
 
-In `cmd/agent/routes.go`, register in the appropriate group function (`registerReadRoutes`, `registerMutationRoutes`, …).
+In `pkg/agentmain/routes.go`, register in the appropriate group function (`registerReadRoutes`, `registerMutationRoutes`, …).
 
 House rules for new endpoints:
 
-- Name the request/response DTOs in `cmd/agent/dto.go`. Serialise `types.Direction` as `"+"`/`"-"`, never the raw int.
+- Name the request/response DTOs in `pkg/agentmain/dto.go`. Serialise `types.Direction` as `"+"`/`"-"`, never the raw int.
 - Every mutating POST calls `requireJSON(r)` first — the CSRF mitigation.
 - Emit JSON errors via `writeError(w, code, msg)`. The five pre-existing endpoints keep plain-text `http.Error` to minimise diff; do not copy that for new work.
 - Map errors to the right status. A caller's mistake is a `4xx`. Returning `500` for a bad `session_id` sends an operator hunting for a server fault over their own typo — that was a real bug in review.
@@ -257,7 +243,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 
 **Tools must stay read-only.** The registry is what makes "the LLM cannot mutate the graph" true by construction rather than by policy. Adding a mutating tool breaks the human-judgment anchor described in [ARCHITECTURE §8](semantic-map/ARCHITECTURE.md#8-connection-to-research). If the model should be able to suggest a change, it already can — as a draft `Proposal` the operator POSTs themselves.
 
-**A new prompt version:** copy the newest `cmd/agent/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
+**A new prompt version:** copy the newest `pkg/agentmain/prompts/explain-vN.md` (and its planner and critic) to `-vN+1.md` and edit the copies. Never edit a version in place — the answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`, and results reported against an earlier version must stay reproducible.
 
 ---
 
@@ -268,6 +254,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 go test -race ./...           # what CI runs; use before pushing
 go test -v -run TestScenario ./internal/minimal/tests/    # narrated end-to-end flows
 go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergence stories
+(cd ../sdk/python && python3 -m unittest test_di_collector)  # the Python collector SDK, stdlib only; CI runs it too
 ```
 
 ### The four layers of test
@@ -277,7 +264,7 @@ go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergenc
 | **Compliance** | `compliance/*.go` | Does this implementation honour its contract? |
 | **Scenarios** | `internal/minimal/tests/scenarios_test.go` | Do the parts compose into the promised behaviour? |
 | **Evolution** | `internal/minimal/tests/evolution_test.go` | Does the graph converge correctly over hundreds of ticks? |
-| **Integration** | `cmd/agent/*_test.go` | Does the HTTP surface behave? |
+| **Integration** | `pkg/agentmain/*_test.go` | Does the HTTP surface behave? |
 
 Scenarios and evolution tests print `t.Logf` snapshots, so `go test -v -run TestEvolution` reads like a results section. That is intentional — they double as reproducible evidence for the paper.
 
@@ -341,9 +328,9 @@ Never commit absolute local paths (`/Users/…`).
 
 **Port already in use.** Under k0s, kube-router owns `:8080`; the PoC scripts use `:9090`. Use `node.addr` or `PORT=9000 ./dev.sh start`. The PoC scripts pre-check ports and fail with a clear message rather than timing out mysteriously.
 
-**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) `sources.cgroup.root: ""` disables the cgroup collector — normal on macOS, which has no cgroups v2; (3) the metric source is unreachable. `./dev.sh logs` shows which collector is configured at startup.
+**Collector emits nothing.** Three usual causes: (1) `sources.interval: 0s` disables the loop; (2) the cgroup collector reads nothing on macOS, which has no cgroups v2 — leave it out of `sources.collectors` there; (3) the metric source is unreachable. `./dev.sh logs` shows each configured collector at startup (`collector <name>: …`), and `curl localhost:8080/collectors` shows whether each is `ok` or in `backoff`, with its last error.
 
-**Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values. Every `MetricSample.Value` must be in `[0,1]`. See the warning in [§4.1](#41-add-a-collector-most-common).
+**Edge weights look absurd (thousands, not `[0,1]`).** A collector is emitting un-normalised values for a routed type, which must be a fraction on `[0,1]`. See the normalisation trap in [`docs/collectors.md` §4](docs/collectors.md#4-producer-rules).
 
 **Confidence plateaus below 1.0 and never rises.** Expected. Only 9 of 15 edges touch constructs observable from CPU/RAM/network metrics, so mean confidence ceilings around 0.60. It is a property of the metric-coverage boundary, not a bug — see `convergence/NOTES.md` in the private repo.
 

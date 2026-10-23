@@ -9,7 +9,8 @@ PROFILE=${PROFILE:-"edge-minimal"}
 KD=${KD:-"k8s"}
 COLLECT_INTERVAL=${COLLECT_INTERVAL:-"5s"}
 PROPOSER=${PROPOSER:-"false"}
-NETDATA_URL=${NETDATA_URL:-"http://localhost:19999"}
+# Unset takes the default; set to empty runs without Netdata.
+NETDATA_URL=${NETDATA_URL-"http://localhost:19999"}
 DOMAIN_SPEC=${DOMAIN_SPEC:-"/etc/di-agent/domain_spec.json"}
 
 echo "Starting di-agent with:"
@@ -37,8 +38,23 @@ domain:
   path: "${DOMAIN_SPEC}"
 sources:
   interval: ${COLLECT_INTERVAL}
-  netdata:
-    url: "${NETDATA_URL}"
+  collectors:
+    - name: cgroup
+      type: cgroup
+SPEC
+# Netdata after cgroup, which supplies the node's own types; collapse: false keeps
+# Netdata's system charts from feeding cpu_utilization a second time. An empty
+# NETDATA_URL runs cgroup alone.
+if [ -n "${NETDATA_URL}" ]; then
+cat >> "${SPEC_FILE}" <<SPEC
+    - name: netdata
+      type: netdata
+      config:
+        url: "${NETDATA_URL}"
+        collapse: false
+SPEC
+fi
+cat >> "${SPEC_FILE}" <<SPEC
 map:
   proposer:
     enabled: ${PROPOSER}

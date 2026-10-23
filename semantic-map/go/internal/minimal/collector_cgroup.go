@@ -63,7 +63,7 @@ import (
 // and lowering its limit raises it further. The node's cpu_contention_ratio is the
 // worst waiting of a pod promised CPU (not BestEffort, not a unit) that gets less than its
 // weighted fair share of the pods' CPUs (owedContention): CPU it is owed another pod
-// holds. It needs subjects; with -cgroup-subjects off it is absent.
+// holds. It needs subjects; with the cgroup config.subjects off it is absent.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
@@ -227,7 +227,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	var globs []string
 	for _, g := range opts.UnitGlobs {
 		if _, err := path.Match(g, ""); err != nil {
-			c.log("cgroup collector: -cgroup-units pattern %q is malformed (%v) and is ignored", g, err)
+			c.log("cgroup collector: config.units pattern %q is malformed (%v) and is ignored", g, err)
 			continue
 		}
 		globs = append(globs, g)
@@ -267,7 +267,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
 	if rootErr != nil && !c.rootWarned {
-		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at -cgroup-root?",
+		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at its config.root?",
 			c.cgroupRoot, rootErr)
 		c.rootWarned = true
 	}
@@ -349,16 +349,16 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		return nil
 	})
 	if !sawPods && !c.noPodsWarned {
-		c.log("cgroup collector: no kubepods cgroup under %s while -cgroup-subjects is on; if the agent runs in a container this root is its own cgroup, not the node's — mount the host's cgroup root",
+		c.log("cgroup collector: no kubepods cgroup under %s while config.subjects is on; if the agent runs in a container this root is its own cgroup, not the node's — mount the host's cgroup root",
 			c.cgroupRoot)
 		c.noPodsWarned = true
 	}
 	if skipped != c.lastSkipped {
 		if skipped > 0 {
-			c.log("cgroup collector: %d subjects beyond -cgroup-max-subjects=%d skipped this tick; the census under-counts by that many",
+			c.log("cgroup collector: %d subjects beyond config.max_subjects=%d skipped this tick; the census under-counts by that many",
 				skipped, c.opts.MaxSubjects)
 		} else {
-			c.log("cgroup collector: no subjects skipped by -cgroup-max-subjects=%d any more", c.opts.MaxSubjects)
+			c.log("cgroup collector: no subjects skipped by config.max_subjects=%d any more", c.opts.MaxSubjects)
 		}
 		c.lastSkipped = skipped
 	}

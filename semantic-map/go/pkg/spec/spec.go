@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -76,25 +78,57 @@ type Profile struct {
 // Sources is where telemetry comes from. Interval 0 disables the collection loop.
 type Sources struct {
 	Interval time.Duration `yaml:"interval"`
-	Cgroup   Cgroup        `yaml:"cgroup"`
-	Netdata  Netdata       `yaml:"netdata"`
-	Script   string        `yaml:"script"`
+	// Collectors is the ordered list of telemetry collectors; the order is the
+	// ownership priority for node-level types. An empty list disables the loop.
+	Collectors []CollectorEntry `yaml:"collectors"`
 }
 
-// Cgroup configures the cgroup collector; an empty Root disables it.
-type Cgroup struct {
-	Root        string   `yaml:"root"`
-	Subjects    bool     `yaml:"subjects"`
-	Units       []string `yaml:"units"`
-	MaxSubjects int      `yaml:"max_subjects"`
-	CmdLabel    bool     `yaml:"cmd_label"`
-	PodLogs     string   `yaml:"pod_logs"`
+// CollectorEntry is one collector instance. Exactly one of Type (a registered
+// built-in), Exec (an out-of-process plugin) or HTTP (a remote plugin) names
+// where it comes from. Config is kept as a node because its keys belong to the
+// collector, which checks them, not to this schema.
+type CollectorEntry struct {
+	Name    string        `yaml:"name"`
+	Type    string        `yaml:"type,omitempty"`
+	Exec    *ExecSpec     `yaml:"exec,omitempty"`
+	HTTP    *HTTPSpec     `yaml:"http,omitempty"`
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	Config  yaml.Node     `yaml:"config,omitempty"`
 }
 
-// Netdata configures the Netdata collector; an empty URL disables it.
-type Netdata struct {
-	URL     string   `yaml:"url"`
-	Include []string `yaml:"include"`
+// ExecSpec is a plugin run as a child process speaking the exec wire protocol.
+type ExecSpec struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
+}
+
+// HTTPSpec is a plugin reached over HTTP.
+type HTTPSpec struct {
+	URL string `yaml:"url"`
+}
+
+// Kind says which source the entry names: "type", "exec" or "http". An entry
+// naming none or several returns "", which Validate refuses.
+func (e CollectorEntry) Kind() string {
+	kinds := e.kinds()
+	if len(kinds) != 1 {
+		return ""
+	}
+	return kinds[0]
+}
+
+func (e CollectorEntry) kinds() []string {
+	var k []string
+	if e.Type != "" {
+		k = append(k, "type")
+	}
+	if e.Exec != nil {
+		k = append(k, "exec")
+	}
+	if e.HTTP != nil {
+		k = append(k, "http")
+	}
+	return k
 }
 
 // FactSource names one source of the machine's facts and where its filesystem
@@ -397,11 +431,9 @@ func Default() Spec {
 		},
 		Sources: Sources{
 			Interval: 10 * time.Second,
-			Cgroup: Cgroup{
-				Root: "/sys/fs/cgroup", Subjects: true, Units: []string{},
-				MaxSubjects: 256, PodLogs: minimal.DefaultPodLogRoot,
-			},
-			Netdata: Netdata{Include: slices.Clone(minimal.DefaultNetdataInclude)},
+			// The file's list replaces this one: decoding into a non-empty slice
+			// restarts it, so naming collectors never adds to the default.
+			Collectors: []CollectorEntry{{Name: "cgroup", Type: "cgroup"}},
 		},
 		Facts: []FactSource{{Kind: "host"}},
 		Map: MapSpec{
@@ -676,6 +708,12 @@ func (s Spec) Validate() error {
 	}
 
 	notNegative("sources.interval", s.Sources.Interval)
+	// now_unix and timestamp_unix are whole seconds, so a faster tick cannot
+	// give each collect a timestamp of its own.
+	if s.Sources.Interval > 0 && s.Sources.Interval < time.Second {
+		errs = append(errs, fmt.Errorf("sources.interval = %v, want 0 (off) or at least 1s: timestamps are whole seconds", s.Sources.Interval))
+	}
+	errs = append(errs, s.Sources.validateCollectors()...)
 	notNegative("map.stale_after", s.Map.StaleAfter)
 	notNegative("map.retire_after", s.Map.RetireAfter)
 	notNegative("persist.interval", s.Persist.Interval)
@@ -744,9 +782,91 @@ func (s Spec) Validate() error {
 
 // Redacted returns a copy with every field tagged secret:"true" replaced by
 // Redaction when it holds something, so a spec can be logged or served.
+//
+// A collector entry is redacted too, because the agent cannot know which of its
+// values a plugin treats as a credential: its config block becomes Redaction, an
+// exec entry's arguments each become Redaction, and an http entry's URL is
+// RedactURL's view of it. The command, the URL's host and path, and the
+// built-in type stay, so the served spec still says what runs.
 func (s Spec) Redacted() Spec {
 	redact(reflect.ValueOf(&s).Elem())
+	s.Sources.Collectors = redactCollectors(s.Sources.Collectors)
 	return s
+}
+
+// emptyNode reports whether a config block holds nothing worth withholding: absent,
+// null, or an empty mapping or sequence.
+func emptyNode(n *yaml.Node) bool {
+	switch n.Kind {
+	case 0:
+		return true
+	case yaml.MappingNode, yaml.SequenceNode:
+		return len(n.Content) == 0
+	case yaml.ScalarNode:
+		return n.Tag == "!!null"
+	}
+	return false
+}
+
+// redactCollectors returns a redacted copy of entries; the receiver's slice, its
+// exec and http specs and its config nodes are left untouched.
+func redactCollectors(entries []CollectorEntry) []CollectorEntry {
+	if entries == nil {
+		return nil
+	}
+	out := make([]CollectorEntry, len(entries))
+	for i, e := range entries {
+		if !emptyNode(&e.Config) {
+			e.Config = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: Redaction}
+		}
+		if e.Exec != nil {
+			ex := *e.Exec
+			if ex.Args != nil {
+				ex.Args = make([]string, len(e.Exec.Args))
+				for j := range ex.Args {
+					ex.Args[j] = Redaction
+				}
+			}
+			e.Exec = &ex
+		}
+		if e.HTTP != nil {
+			e.HTTP = &HTTPSpec{URL: RedactURL(e.HTTP.URL)}
+		}
+		out[i] = e
+	}
+	return out
+}
+
+// RedactURL is the one view of a configured URL that may be logged, served or
+// put in an error: the scheme, host and path stay; userinfo (with or without a
+// password, since a bare token is commonly put in the username) becomes
+// Redaction; a query becomes "?" + Redaction; a fragment is dropped. A URL that
+// does not parse, or an opaque one, is Redaction entirely.
+func RedactURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Opaque != "" {
+		return Redaction
+	}
+	hadUser := u.User != nil
+	hadQuery := u.RawQuery != "" || u.ForceQuery
+	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
+	out := u.String()
+	if hadUser {
+		prefix := u.Scheme + "://"
+		if u.Scheme == "" {
+			prefix = "//"
+		}
+		out = prefix + Redaction + "@" + strings.TrimPrefix(out, prefix)
+	}
+	if hadQuery {
+		out += "?" + Redaction
+	}
+	return out
 }
 
 func redact(v reflect.Value) {
@@ -769,4 +889,53 @@ func redact(v reflect.Value) {
 // YAML renders the spec as a document Parse reads back to the same spec.
 func (s Spec) YAML() ([]byte, error) {
 	return yaml.Marshal(s)
+}
+
+var collectorName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// validateCollectors reports every collector entry that cannot be what the
+// operator meant. Each message names the entry by index and name.
+func (s Sources) validateCollectors() []error {
+	var errs []error
+	seen := map[string]bool{}
+	hasScript := false
+	for i, c := range s.Collectors {
+		bad := func(format string, a ...any) {
+			errs = append(errs, fmt.Errorf("sources.collectors[%d] %s: %s", i, c.Name, fmt.Sprintf(format, a...)))
+		}
+		switch {
+		case !collectorName.MatchString(c.Name):
+			bad("name must match [A-Za-z0-9._-]+")
+		case seen[c.Name]:
+			bad("duplicate name")
+		}
+		seen[c.Name] = true
+		if k := c.kinds(); len(k) != 1 {
+			bad("want exactly one of type, exec or http, got %d", len(k))
+		}
+		if c.Exec != nil && c.Exec.Command == "" {
+			bad("exec.command is empty")
+		}
+		if c.HTTP != nil && c.HTTP.URL == "" {
+			bad("http.url is empty")
+		}
+		if c.Timeout < 0 {
+			bad("timeout = %v, want zero or more", c.Timeout)
+		}
+		// Strictly less: the supervisor waits timeout plus a short grace for an exec
+		// or http member, so a timeout at the interval would let one hung plugin
+		// stretch every tick past it.
+		if s.Interval > 0 && c.Timeout >= s.Interval {
+			bad("timeout = %v must be less than sources.interval = %v", c.Timeout, s.Interval)
+		}
+		hasScript = hasScript || c.Type == "script"
+	}
+	if hasScript && len(s.Collectors) > 1 {
+		for i, c := range s.Collectors {
+			if c.Type == "script" {
+				errs = append(errs, fmt.Errorf("sources.collectors[%d] %s: script is exclusive and cannot share the list with another collector", i, c.Name))
+			}
+		}
+	}
+	return errs
 }

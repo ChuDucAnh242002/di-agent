@@ -1,6 +1,6 @@
 // Package client provides a Go HTTP client for the di-agent semantic-map
 // daemon. The types in this file deliberately duplicate the wire DTOs from
-// cmd/agent/dto.go: the CLI treats the daemon as a remote service and must
+// pkg/agentmain/dto.go: the CLI treats the daemon as a remote service and must
 // not import server-side packages. Thirty lines of duplication buy us a
 // clean contract boundary that lets the wire format and the server
 // internals evolve independently.

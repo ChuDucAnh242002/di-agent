@@ -78,12 +78,12 @@ func recogniseKubepods(relPath string) (subjectInfo, bool) {
 	}, true
 }
 
-// ValidUnitGlobs reports the first -cgroup-units pattern path.Match cannot parse. A
+// ValidUnitGlobs reports the first cgroup config.units pattern path.Match cannot parse. A
 // bad pattern used to match nothing on every call and say nothing about it.
 func ValidUnitGlobs(globs []string) error {
 	for _, g := range globs {
 		if _, err := path.Match(g, ""); err != nil {
-			return fmt.Errorf("-cgroup-units pattern %q: %v", g, err)
+			return fmt.Errorf("config.units pattern %q: %v", g, err)
 		}
 	}
 	return nil

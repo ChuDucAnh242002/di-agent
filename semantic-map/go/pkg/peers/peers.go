@@ -238,7 +238,7 @@ func NewClient(timeout time.Duration) *Client {
 }
 
 // ActionCost mirrors the daemon's /cost response. Defined locally so this
-// package stays independent of cmd/agent — peers.Client only knows the wire
+// package stays independent of pkg/agentmain — peers.Client only knows the wire
 // format, not the server internals.
 type ActionCost struct {
 	CPUCost         float64  `json:"CPUCost"`

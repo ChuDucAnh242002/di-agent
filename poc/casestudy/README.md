@@ -18,7 +18,7 @@ From the host, in this directory:
 
 ```bash
 ./provision.sh di-node     # VM, k0s, Netdata, the tunnel key, this directory on the node
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go -C ../../semantic-map/go build -ldflags "-s -w -X main.BuildCommit=$(git rev-parse --short HEAD)" -o "$PWD/agent" ./cmd/agent
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go -C ../../semantic-map/go build -ldflags "-s -w -X github.com/DiyazY/di-agent/pkg/agentmain.BuildCommit=$(git rev-parse --short HEAD)" -o "$PWD/agent" ./cmd/agent
 multipass transfer agent di-node:/tmp/agent.new && multipass exec di-node -- sudo mv /tmp/agent.new /home/ubuntu/casestudy/agent.new
 ```
 
