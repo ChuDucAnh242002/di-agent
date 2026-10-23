@@ -142,8 +142,8 @@ func TestSupervisorSlowMemberDoesNotDelayTick(t *testing.T) {
 	if el := time.Since(start); el >= time.Second {
 		t.Fatalf("Collect took %v, want < 1s", el)
 	}
-	if st := statusOf(t, s, "slow"); st.State != "backoff" || st.LastError == "" {
-		t.Fatalf("after timeout: state=%q last_error=%q", st.State, st.LastError)
+	if st := statusOf(t, s, "slow"); st.State != "stuck" || st.LastError == "" {
+		t.Fatalf("after timeout: state=%q last_error=%q, want stuck with the timeout", st.State, st.LastError)
 	}
 
 	// Past the backoff the member would be due again, but its first call has not
@@ -155,10 +155,52 @@ func TestSupervisorSlowMemberDoesNotDelayTick(t *testing.T) {
 	if n := slow.calls.Load(); n != 1 {
 		t.Fatalf("member called %d times, want 1 while its first call is in flight", n)
 	}
-	if st := statusOf(t, s, "slow"); st.State != "backoff" {
-		t.Fatalf("in-flight member state=%q, want backoff", st.State)
+	if st := statusOf(t, s, "slow"); st.State != "stuck" {
+		t.Fatalf("in-flight member state=%q, want stuck", st.State)
 	}
 }
+
+// When an abandoned call finally ends, status stops saying stuck, and an error it
+// ended with becomes the member's last error rather than being lost.
+func TestSupervisorAbandonedCallEndingIsRecorded(t *testing.T) {
+	slow := &fakeCollector{id: "slow", delay: time.Hour, release: make(chan struct{}), err: errors.New("device wedged")}
+	m := member("slow", slow)
+	m.Timeout = 50 * time.Millisecond
+	sink := &logSink{}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{m})
+	s.Collect()
+	if st := statusOf(t, s, "slow"); st.State != "stuck" {
+		t.Fatalf("state=%q, want stuck", st.State)
+	}
+	close(slow.release)
+	deadline := time.Now().Add(2 * time.Second)
+	for statusOf(t, s, "slow").State == "stuck" {
+		if time.Now().After(deadline) {
+			t.Fatal("still stuck after the call returned")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	st := statusOf(t, s, "slow")
+	if st.State != "backoff" || st.LastError != "abandoned call ended: device wedged" {
+		t.Fatalf("status = %+v, want backoff with the late error", st)
+	}
+	if sink.count("collector[slow]: call abandoned after its timeout has ended: device wedged") != 1 {
+		t.Fatalf("log = %q", sink.lines)
+	}
+}
+
+// A panic in AvailableMetrics before the first collect is survived and logged.
+func TestSupervisorAvailablePanicIsLogged(t *testing.T) {
+	sink := &logSink{}
+	NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{{Name: "p", Kind: "type", C: &panickyAvailable{}}})
+	if sink.count("collector[p]: AvailableMetrics panicked before the first collect: no types yet") != 1 {
+		t.Fatalf("log = %q", sink.lines)
+	}
+}
+
+type panickyAvailable struct{ fakeCollector }
+
+func (*panickyAvailable) AvailableMetrics() []types.MetricType { panic("no types yet") }
 
 func TestSupervisorBackoffGrowsAndResets(t *testing.T) {
 	f := &fakeCollector{id: "f", err: errors.New("down")}

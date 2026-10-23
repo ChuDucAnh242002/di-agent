@@ -212,6 +212,7 @@ How to read it when something is wrong:
 | ------- | -------- |
 | `state: starting` | No successful collect yet. |
 | `state: backoff`, `last_error` | The last call faulted; the member is skipped until `backoff_until_unix`. `last_error` names the cause (`no reply within 3s`, `reply seq 4, want 5`, `plugin error: …`). |
+| `state: stuck` | A call outlived its timeout and has not returned (an in-process collector that hangs; the exec and http adapters enforce their own timeout, so they rarely get here). The member is skipped until it returns; then it is `backoff`, and an error it ended with is `last_error` (`abandoned call ended: …`). |
 | `restarts` climbing | An exec plugin is crashing, being killed on faults, or exiting on its own between ticks (logged as `plugin exited between ticks`). Its stderr is in the agent log under `collector[<name>]:`. |
 | `violations` > 0 | Samples broke the contract and were dropped: a malformed sample (§3.1), a duplicate within one reply, an invalid `metric_type` or `subject`, a `part_of` that is not a node-level type on a sample with a subject, no `unit`, an empty `range`, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type. An `available` entry that is not a valid type counts too. The first of each kind and type is logged. |
 | `ownership_drops` > 0 | The member emits a node-level type an earlier member owns. Rename the type if it measures something different, scope it to a subject, or reorder the list. |

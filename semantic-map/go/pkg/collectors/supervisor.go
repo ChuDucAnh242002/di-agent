@@ -33,6 +33,9 @@ const (
 	stateStarting = "starting"
 	stateOK       = "ok"
 	stateBackoff  = "backoff"
+	// stateStuck is a member whose call outlived its timeout and has not returned:
+	// it is skipped until the call ends, whatever its backoff says.
+	stateStuck = "stuck"
 )
 
 // Member is one configured source as the Supervisor sees it.
@@ -86,6 +89,9 @@ type memberState struct {
 	faults          int
 	backoffUntil    time.Time
 	inflight        bool
+	// abandoned is set when a tick gave up on the in-flight call; the call's own
+	// goroutine records how it ended once it does.
+	abandoned bool
 
 	samples, violations, ownershipDrops int64
 
@@ -122,8 +128,9 @@ type callResult struct {
 //     tick; Collect still returns the others with a nil error. The faulting member
 //     backs off exponentially and is reported through Status and the log.
 //   - At most one call per member is in flight. A Go member cannot be cancelled,
-//     so a call that outlives its timeout is abandoned and the member is skipped
-//     until the call returns.
+//     so a call that outlives its timeout is abandoned, the member's state is
+//     "stuck", and it is skipped until the call returns; how that call ended is
+//     then logged and, if it failed, recorded as the member's last error.
 //   - Every delivered sample satisfies the CollectorContract's declared-meaning
 //     and node-identity guarantees; a sample that does not is dropped and counted,
 //     and the rest of its batch is kept.
@@ -174,7 +181,7 @@ func NewSupervisor(env Env, members []Member) *Supervisor {
 			m:             m,
 			wait:          wait,
 			state:         stateStarting,
-			available:     safeAvailable(m.C),
+			available:     safeAvailable(m, logf),
 			decl:          make(map[types.MetricType]declaration),
 			loggedOwnDrop: make(map[types.MetricType]bool),
 			loggedViol:    make(map[violationKey]bool),
@@ -185,14 +192,16 @@ func NewSupervisor(env Env, members []Member) *Supervisor {
 }
 
 // safeAvailable asks a member that has not been called yet for its types; a panic
-// there leaves the set empty until the first successful Collect refreshes it.
-func safeAvailable(c contracts.CollectorContract) (out []types.MetricType) {
+// there is logged and leaves the set empty until the first successful Collect
+// refreshes it.
+func safeAvailable(m Member, logf func(string, ...any)) (out []types.MetricType) {
 	defer func() {
-		if recover() != nil {
+		if v := recover(); v != nil {
+			logf("collector[%s]: AvailableMetrics panicked before the first collect: %v", m.Name, v)
 			out = nil
 		}
 	}()
-	return append([]types.MetricType(nil), c.AvailableMetrics()...)
+	return append([]types.MetricType(nil), m.C.AvailableMetrics()...)
 }
 
 // SourceID is "supervisor:" followed by the member names in list order.
@@ -231,7 +240,7 @@ func (s *Supervisor) Collect() ([]*types.MetricSample, error) {
 		if ms.inflight {
 			// The previous call was abandoned and is still running; calling again
 			// would stack goroutines inside a member that is already stuck.
-			ms.state = stateBackoff
+			ms.state = stateStuck
 			continue
 		}
 		if now.Before(ms.backoffUntil) {
@@ -279,6 +288,11 @@ func (s *Supervisor) Collect() ([]*types.MetricSample, error) {
 		switch {
 		case timedOut[i]:
 			s.fault(ms, now, fmt.Sprintf("timeout after %s", ms.wait))
+			if ms.inflight {
+				// Still running: say so, and let the call report how it ends.
+				ms.abandoned = true
+				ms.state = stateStuck
+			}
 		case results[i] == nil:
 			// Not called this tick.
 		case results[i].err != nil:
@@ -320,6 +334,19 @@ func (s *Supervisor) call(ms *memberState, ch chan<- callResult) {
 	}()
 	s.mu.Lock()
 	ms.inflight = false
+	if ms.abandoned {
+		// No tick is waiting for this result: its samples are discarded, but how
+		// the call ended is the member's latest news, so status and the log get it.
+		ms.abandoned = false
+		ms.state = stateBackoff
+		if r.err != nil {
+			ms.lastError = "abandoned call ended: " + r.err.Error()
+			ms.lastErrorUnix = s.now().Unix()
+			s.logf("collector[%s]: call abandoned after its timeout has ended: %v", ms.m.Name, r.err)
+		} else {
+			s.logf("collector[%s]: call abandoned after its timeout has returned; its %d samples were discarded", ms.m.Name, len(r.samples))
+		}
+	}
 	s.mu.Unlock()
 	ch <- r // buffered: never blocks, even when nobody is waiting any more
 }

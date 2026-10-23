@@ -490,9 +490,12 @@ Read-only: collectors are configured in the spec, not over HTTP.
 `kind` is `type` (a built-in), `exec` or `http`; `type` is the built-in's name and empty
 otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
 `backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
-5 min, reset by a success). `violations` counts samples dropped for breaking the collector
-contract (an invalid metric type or subject, no unit, a foreign `node_id`, a unit or range
-that changed); `ownership_drops` counts node-level samples dropped because an earlier
+5 min, reset by a success), and `stuck` while a call that outlived its timeout has not
+returned — the member is skipped until it does, and an error it then ends with becomes
+`last_error`. `violations` counts samples dropped for breaking the collector contract (a
+malformed or duplicate sample in a plugin's reply, an invalid metric type, subject or
+`part_of`, no unit, a foreign `node_id`, a unit or range that changed, an invalid
+`available` entry); `ownership_drops` counts node-level samples dropped because an earlier
 collector in the list owns that type; `restarts` counts an exec plugin's process restarts,
 after a fault or after the plugin exited on its own between ticks.
 With no collectors configured the list is `[]`.
