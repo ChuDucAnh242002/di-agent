@@ -12,10 +12,12 @@ Schema:
       one row per sample; "short" files are cycle-resolved, "long" files are
       high-rate. Column Data1_<x> is paired with its Data1_time_<x> column.
 
-The multi-signal source CSVs are first split into one file per signal under
-DATA_DIR/split/ (<run>_timeseries_<source>_<signal>.csv, holding only
+The multi-signal source CSVs are first split into one file per signal next to
+them in DATA_DIR (<run>_timeseries_<source>_<signal>.csv, holding only
 Data1_<signal> and Data1_time_<signal>); the split files are what get loaded.
-`python ingest.py --split-only` performs just that step (no database needed).
+Data that is already split (the same file names) can be placed in DATA_DIR
+directly and is loaded as-is. `python ingest.py --split-only` performs just
+the split step (no database needed).
 """
 import csv
 import http.cookiejar
@@ -30,7 +32,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 FILE_RE = re.compile(r"^(?P<run>.+?)_(?P<kind>metadata|timeseries_short|timeseries_long_\d+)\.csv$")
 SPLIT_RE = re.compile(r"^(?P<run>.+?)_timeseries_(?P<source>short|long_\d+)_(?P<signal>.+)\.csv$")
-SPLIT_DIR = DATA_DIR / "split"
+SPLIT_DIR = DATA_DIR
 VALUE_PREFIX = "Data1_"
 TIME_PREFIX = "Data1_time_"
 
@@ -154,7 +156,7 @@ def main():
     import psycopg
 
     files = sorted(p for p in DATA_DIR.glob("*.csv") if (m := FILE_RE.match(p.name)) and m["kind"] == "metadata")
-    files += sorted(SPLIT_DIR.glob("*.csv")) if SPLIT_DIR.exists() else []
+    files += sorted(p for p in DATA_DIR.glob("*.csv") if SPLIT_RE.match(p.name))
     if not files:
         sys.exit(f"no CSV files found in {DATA_DIR}")
 
@@ -163,15 +165,15 @@ def main():
         done = dict(conn.execute("SELECT name, size FROM ingested_files").fetchall())
         for path in files:
             size = path.stat().st_size
-            name = f"{path.parent.name}/{path.name}" if path.parent == SPLIT_DIR else path.name
+            name = path.name
+            split = SPLIT_RE.match(name)
             if done.get(name) == size:
                 print(f"skip {name}", flush=True)
                 continue
             print(f"load {name}", flush=True)
             with conn.transaction(), conn.cursor() as cur:
-                if path.parent == SPLIT_DIR:
-                    m = SPLIT_RE.match(path.name)
-                    run, source, signal = m["run"], m["source"], m["signal"]
+                if split:
+                    run, source, signal = split["run"], split["source"], split["signal"]
                     cur.execute("INSERT INTO runs VALUES (%s) ON CONFLICT DO NOTHING", (run,))
                     cur.execute(
                         "DELETE FROM timeseries WHERE run_id = %s AND source = %s AND signal = %s",
