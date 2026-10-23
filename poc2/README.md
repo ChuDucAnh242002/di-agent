@@ -39,12 +39,12 @@ The deployment consists of two separate layers:
    - one cluster for the VM fleet
 
 2. Application and demo layer
-   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, and telemetry-writer; legacy simulators and the playground are disabled by default
+   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector; legacy simulators and the playground are disabled by default
    - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
    - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
 
-The key point is that the `di-agent` pods are intentionally not part of the Helm chart. They are created separately, one pod per VM, to model host-level peer nodes directly on the VM network.
+The default `make all` workflow deploys the multi-node `di-agent` fleet separately, one pod per worker VM, to model host-level peer nodes directly on the VM network. `agent.enabled=true` in Helm is an alternative single-agent deployment; do not enable it together with `make agent`.
 
 ## Required secrets and configuration
 
@@ -83,8 +83,12 @@ Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=
 
 The streamer defaults to `synthetic` mode, generating bounded, correlated samples from the selected run's measured signal profiles and carrying its `run_metadata` in each message. Set `streamer.mode=real` to replay the actual stored samples. Both modes publish generic engine signals to `dataset.telemetry`; telemetry-writer writes them to InfluxDB's `dataset_timeseries` measurement with `run_id`, `source`, `signal`, and `origin` tags. If PostgreSQL data is unavailable, the streamer reports the error through `/status` and retries; it never silently substitutes synthetic values for a requested real stream.
 
+The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. The first agent deployed by `make agent` is configured to poll it; the other agents collect their local cgroup metrics as before. Alternatively, run a single Helm-managed agent with `make helm-install HELM_ARGS="--set agent.enabled=true"` and do not run `make agent`.
+
+The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` for `make agent`, or `agent.collectInterval` for the Helm-managed agent): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. It emits every signal as `metric_type=<signal>`, `subject=engine:<run_id>`, `unit=unknown`, and no range. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals with unknown physical units.
+
 ```bash
-make images IMAGES="replay-streamer telemetry-writer data-ingest"
+make images IMAGES="replay-streamer telemetry-writer data-ingest dataset-collector"
 make helm-install
 # Select real samples instead:
 make helm-install STREAMER_MODE=real
@@ -168,7 +172,7 @@ That sequence does the following:
 1. `make provision` creates the libvirt VMs.
 2. `make k8s` bootstraps the cluster on the VMs.
 3. `make images` builds and pushes the workload images used by the Helm chart.
-4. `make helm-install` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, and telemetry-writer. Legacy simulations and playground remain off by default.
+4. `make helm-install` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
 5. `make agent` builds the Go agent binary and imports the image into each worker node; it then deploys one `di-agent` pod per VM.
 6. `make peers` registers each agent as a peer on the others and assigns trust values.
 7. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting.
@@ -204,8 +208,9 @@ The files that matter for understanding or running the PoC are:
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images
 - `helm/di-agent-system/values.yaml`: all chart defaults and required secrets
-- `helm/di-agent-system/templates/`: the actual Kubernetes manifests for Kafka, InfluxDB, Grafana, and simulation services
+- `helm/di-agent-system/templates/`: Kubernetes manifests for Kafka, InfluxDB, Grafana, data services, and the optional single Helm-managed agent
 - `system/replay-streamer`: configurable PostgreSQL-to-Kafka real/synthetic data source
+- `system/dataset-collector`: Python Kafka-to-di-agent HTTP collector
 - `system/*`: legacy workload generators and telemetry services
 
 ## What the system is proving

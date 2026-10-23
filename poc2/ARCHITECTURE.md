@@ -53,13 +53,16 @@ The chart under `helm/di-agent-system` manages the shared runtime services:
 - InfluxDB
 - Grafana
 - replay-streamer (real or synthetic data mode)
+- dataset-collector (Kafka to di-agent HTTP collector protocol)
 - telemetry-writer
 
 Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and playground deployments are disabled by default and can be enabled individually through Helm values.
 
 The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
-The chart wraps all of these in one release but does not include the `di-agent` itself.
+The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. The first agent deployed by `scripts/03-agent.sh` polls it; the other agents collect their local cgroup metrics only. The chart also provides an optional single-agent Deployment, but it must not be enabled alongside the multi-node script.
+
+The collector averages all new Kafka values for each `(run_id, signal)` during one agent collection window, returning one sample per key. Its default source polling interval is 5s, independent of the streamer's interval and points-per-tick: faster streams simply contribute more samples to that window, and signals with no new events are omitted. Samples use `metric_type=<signal>`, `subject=engine:<run_id>`, `unit=unknown`, and no range, with source and origin labels. Since these are engine signals rather than host resource/pressure measurements, they remain unrouted in `semantic-map/domain_spec.json`: the agent records them as scoped properties, but no existing construct summarizes them.
 
 ### 2) Direct pod deployment for the agent mesh
 

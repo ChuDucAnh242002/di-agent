@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# build-push-images.sh — build the chart-managed service images and push
+# build-push-images.sh — build the PoC service images and push
 #                         them to a container registry, for use with the
 #                         Helm chart in poc2/helm/di-agent-system (see
 #                         values.yaml: global.imageRegistry/global.imageTag).
 #
 # Usage: REGISTRY=ghcr.io/myorg TAG=v1 ./build-push-images.sh [options] [service ...]
-#   With no service names given, builds+pushes all of them. di-agent is
-#   intentionally not included here; it is still built/deployed via
-#   scripts/04-agent.sh.
+#   With no service names given, builds+pushes all of them.
 #
 # Options:
 #   -h, --help              Show this help and exit.
@@ -39,11 +37,12 @@ err()  { echo "${RED}[images] $*${RESET}" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POC_DIR="$(dirname "$SCRIPT_DIR")"
 SYSTEM_DIR="$POC_DIR/system"
+SEMANTIC_MAP_DIR="$(dirname "$POC_DIR")/semantic-map"
 
 REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
 TAG="${TAG:-latest}"
 
-ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer)
+ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer dataset-collector di-agent)
 
 usage() {
     sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -63,8 +62,29 @@ service_dir() {
         playground) printf '%s\n' "$POC_DIR/playground" ;;
         data-ingest) printf '%s\n' "$POC_DIR/data-ingest" ;;
         replay-streamer) printf '%s\n' "$SYSTEM_DIR/replay-streamer" ;;
+        dataset-collector) printf '%s\n' "$SYSTEM_DIR/dataset-collector" ;;
+        di-agent) printf '%s\n' "$SEMANTIC_MAP_DIR" ;;
         *) return 1 ;;
     esac
+}
+
+build_di_agent() {
+    local output="cmd/agent/tmp/di-agent-poc"
+
+    (
+        cd "$SEMANTIC_MAP_DIR/go"
+        mkdir -p "$(dirname "$output")"
+        if command -v go >/dev/null 2>&1; then
+            GOOS="${BUILD_GOOS:-linux}" GOARCH="${BUILD_GOARCH:-amd64}" \
+                go build -o "$output" ./cmd/agent/
+        else
+            info "go not found on host; building di-agent inside a golang container"
+            docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache \
+                -e GOOS="${BUILD_GOOS:-linux}" -e GOARCH="${BUILD_GOARCH:-amd64}" -e CGO_ENABLED=0 \
+                -v "$SEMANTIC_MAP_DIR/go":/src -w /src "${GO_IMAGE:-golang:1.26.0}" \
+                go build -o "$output" ./cmd/agent/
+        fi
+    )
 }
 
 EXCLUDE=""
@@ -120,6 +140,9 @@ for name in "${SERVICES[@]}"; do
     image="${REGISTRY}/${name}:${TAG}"
     if [ "$DO_BUILD" -eq 1 ]; then
         info "Building ${image} from ${dir} ..."
+        if [ "$name" = "di-agent" ]; then
+            build_di_agent
+        fi
         docker build -t "$image" "$dir"
     fi
     if [ "$DO_PUSH" -eq 1 ]; then

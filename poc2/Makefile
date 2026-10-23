@@ -11,6 +11,8 @@
 # Auto-detect VMs from virsh (only running VMs)
 VMS := $(shell virsh list --all --name 2>/dev/null | grep -v '^$$' | sort)
 VM_COUNT := $(words $(VMS))
+# Running VMs only: the kubeadm cluster nodes (first = control plane)
+RUNNING_VMS := $(shell virsh list --state-running --name 2>/dev/null | grep -v '^$$' | sort)
 
 # Generate VM variables dynamically (VM1, VM2, VM3, ...)
 define VM_DEFS
@@ -42,6 +44,9 @@ STREAMER_RUN_ID ?=
 STREAMER_INTERVAL_MS ?=
 STREAMER_POINTS ?=
 STREAMER_LOOP ?=
+# URL consumed by the first agent in the direct multi-node deployment.
+DATASET_COLLECTOR_URL ?= http://dataset-collector.$(HELM_NAMESPACE).svc.cluster.local:8000/collect
+AGENT_COLLECT_INTERVAL ?= 5s
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
 HELM_STREAMER_SETS = \
@@ -93,7 +98,8 @@ helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 agent:
-	@bash $(SCRIPTS)/03-agent.sh $(VMS)
+	@DATASET_COLLECTOR_URL="$(DATASET_COLLECTOR_URL)" COLLECT_INTERVAL="$(AGENT_COLLECT_INTERVAL)" \
+		bash $(SCRIPTS)/03-agent.sh $(RUNNING_VMS)
 
 peers:
 	@bash $(SCRIPTS)/04-peers.sh $(VMS)
@@ -178,7 +184,8 @@ help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
 	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
-	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest/replay-streamer images to REGISTRY (default $(REGISTRY))"
+	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest/replay-streamer/"
+	@echo "                 dataset-collector/di-agent images to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
@@ -191,7 +198,9 @@ help:
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
-	@echo "  agent        - Deploy di-agent (one pod per worker VM; not part of the Helm chart)"
+	@echo "  agent        - Deploy di-agent on worker VMs; the first agent consumes dataset telemetry"
+	@echo "                 Options: AGENT_COLLECT_INTERVAL, DATASET_COLLECTOR_URL"
+	@echo "                 Alternative: HELM_ARGS=\"--set agent.enabled=true\" (do not use both)"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"

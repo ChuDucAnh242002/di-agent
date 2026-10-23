@@ -33,6 +33,32 @@ kafka:
   nodeSelector: {}
   resources: {}
 
+datasetCollector:
+  enabled: true
+  image:
+    repository: dataset-collector
+    tag: ""
+  kafkaTopic: dataset.telemetry
+  groupId: dataset-collector
+  maxActiveSeries: 2000
+  nodeSelector: {}
+  resources: {}
+
+agent:
+  # The default multi-node agent fleet is deployed by scripts/03-agent.sh.
+  # Enable this only for a single agent managed entirely by this Helm release.
+  enabled: false
+  image:
+    repository: di-agent
+    tag: ""
+  port: 9090
+  regime: stable
+  profile: edge-minimal
+  collectInterval: 5s
+  proposer: "false"
+  nodeSelector: {}
+  resources: {}
+
 genset:
   enabled: false
   image:
