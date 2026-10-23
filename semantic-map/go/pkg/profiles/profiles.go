@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
-	"github.com/DiyazY/di-agent/internal/scripted"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
@@ -56,43 +55,11 @@ type Config struct {
 	// Empty string = no per-distribution adjustment (global priors used).
 	KD string
 
-	// NodeID identifies this agent within the cluster (used by the Collector
-	// when generating event IDs). Empty string → callers (typically main)
-	// fall back to os.Hostname().
+	// NodeID identifies this agent within the cluster: the map's owner, against
+	// which foreign samples are refused. Empty string → callers (typically main)
+	// fall back to os.Hostname(). Collectors are not built here; the daemon builds
+	// them from sources.collectors with pkg/collectors.
 	NodeID string
-
-	// CgroupRoot is the directory the CgroupCollector reads from.
-	// Production: /sys/fs/cgroup; tests use t.TempDir() with fake files.
-	// Empty string disables the cgroup collector (Build returns nil for the
-	// CollectorContract handle).
-	CgroupRoot string
-
-	// CgroupSubjects walks pod cgroups (and CgroupUnitGlobs-allowlisted units) as
-	// subjects. CgroupMaxSubjects bounds the walk (0 = 256). CgroupCmdLabel stamps a
-	// cmd= label from /proc (needs hostPID). CgroupPodLogRoot is the kubelet's pod log
-	// directory pods are named from (empty names none). See minimal.CgroupOptions.
-	CgroupSubjects    bool
-	CgroupUnitGlobs   []string
-	CgroupMaxSubjects int
-	CgroupCmdLabel    bool
-	CgroupPodLogRoot  string
-
-	// ScriptPath runs the synthetic system from a scenario file instead of any real
-	// collector — for driving a live daemon through a known story.
-	ScriptPath string
-
-	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
-	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
-	// When set together with CgroupRoot, both collectors run as a MultiCollector, and
-	// the cgroup collector alone supplies the node's own types (cpu_utilization and
-	// the rest): Netdata's system charts measure CPU differently. NetdataInclude is
-	// the chart-context patterns it selects (nil = minimal.DefaultNetdataInclude).
-	NetdataURL     string
-	NetdataInclude []string
-
-	// CollectInterval is how often the collection scheduler ticks. Zero
-	// disables the loop entirely. Callers (main.go) default to 10s.
-	CollectInterval time.Duration
 
 	// PeerURLs is the static list of known remote agent URLs to register at
 	// startup (e.g. ["http://node_1:8080", "http://node_2:8080"]). Each URL
@@ -250,18 +217,16 @@ func loadPriorWeights(path string) (*priorWeightsFile, error) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
-// Build constructs and returns a fully wired SemanticMap for the named
-// profile along with the profile's collector (if any). The returned
-// CollectorContract may be nil — the daemon must treat nil as "no
-// autonomous collection loop in this profile / configuration" and skip
-// scheduling.
-func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.CollectorContract, error) {
+// Build constructs and returns a fully wired SemanticMap for the named profile.
+// Telemetry sources are not part of a profile: the daemon builds them from
+// sources.collectors (pkg/collectors) and feeds the map through IngestSample.
+func Build(profileName string, cfg Config) (*semmap.SemanticMap, error) {
 	pw, err := loadPriorWeights(cfg.PriorWeightsPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := validateKD(pw, cfg.KD); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	switch profileName {
 	case "edge-minimal":
@@ -281,16 +246,12 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 		// in hand: relationships get this cluster's priors instead of a placeholder.
 		if cfg.DomainSpec != nil {
 			if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 		}
-		sm, coll, err := buildEdgeMinimal(cfg, pw)
-		if err != nil {
-			return nil, nil, err
-		}
-		return sm, coll, nil
+		return buildEdgeMinimal(cfg), nil
 	default:
-		return nil, nil, fmt.Errorf("unknown profile %q", profileName)
+		return nil, fmt.Errorf("unknown profile %q", profileName)
 	}
 }
 
@@ -309,7 +270,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 	return fmt.Errorf("KD %q not found in prior_weights.json distributions %v", kd, pw.Distributions)
 }
 
-func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract, error) {
+func buildEdgeMinimal(cfg Config) *semmap.SemanticMap {
 	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
@@ -378,66 +339,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	sm.AttachState(cfg.StateMap)
 	reasoner.AttachState(cfg.StateMap)
 
-	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
-	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective
-	// collector. Both absent → nil collector, collection loop disabled.
-	var collector contracts.CollectorContract
-	hasCgroup := cfg.CgroupRoot != "" && cfg.NodeID != ""
-	hasNetdata := cfg.NetdataURL != ""
-
-	if err := minimal.ValidUnitGlobs(cfg.CgroupUnitGlobs); err != nil {
-		return nil, nil, err
-	}
-	if err := minimal.ValidNetdataInclude(cfg.NetdataInclude); err != nil {
-		return nil, nil, err
-	}
-	ndOpts := func(collapse bool) minimal.NetdataOptions {
-		return minimal.NetdataOptions{Include: cfg.NetdataInclude, Collapse: collapse}
-	}
-	cgOpts := minimal.CgroupOptions{
-		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
-		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
-		PodLogRoot: cfg.CgroupPodLogRoot,
-	}
-
-	if cfg.ScriptPath != "" {
-		// Refused rather than logged: a daemon with no collector looks exactly like
-		// one whose telemetry has not arrived yet, and the follow-up line it used to
-		// print ("collection loop disabled") is the message for a deliberate choice.
-		sc, err := scripted.LoadScenario(cfg.ScriptPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
-		}
-		// The script stamps simulated time one tick per Collect while the map sweeps
-		// on the wall clock. An interval above the tick makes every property go stale
-		// and then retire while the script is still emitting; one below it means
-		// nothing ever goes stale. Not a drift to warn about: a configuration the
-		// daemon must not start with.
-		if tick := time.Duration(sc.TickSeconds) * time.Second; cfg.CollectInterval > 0 && cfg.CollectInterval != tick {
-			return nil, nil, fmt.Errorf("sources.script %s ticks every %s but sources.interval is %s: simulated time would run "+
-				"off the wall clock the map sweeps on, retiring or immortalising every property; set sources.interval: %s",
-				sc.Name, tick, cfg.CollectInterval, tick)
-		}
-		script, err := scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
-		if err != nil {
-			return nil, nil, fmt.Errorf("sources.script %s: %w", cfg.ScriptPath, err)
-		}
-		return sm, script, nil
-	}
-
-	switch {
-	case hasCgroup && hasNetdata:
-		cgroupC := minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
-		netdataC := minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(false))
-		collector = minimal.NewMultiCollector(cgroupC, netdataC)
-	case hasNetdata:
-		collector = minimal.NewNetdataCollectorWithOptions(cfg.NodeID, cfg.NetdataURL, ndOpts(true))
-	case hasCgroup:
-		collector = minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
-		// else: collector stays nil — collection loop disabled
-	}
-
-	return sm, collector, nil
+	return sm
 }
 
 // The calibration is applied in one place — seedStateMap, which puts each per-cluster

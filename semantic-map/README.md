@@ -81,7 +81,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -108,6 +108,17 @@ semantic-map/
 │   ├── calibration.py          Construct scoring + per-proposition diagnostics (no strengths)
 │   ├── constants.py            Publication constants (J/pod, mJ/op, CIS scores, …)
 │   └── loaders.py              CSV / result file loaders
+│
+│  ── Collector plugins (out-of-process, any language) ───────────
+│
+├── sdk/python/di_collector.py  Python plugin SDK, stdlib only, one file: serve(setup) speaks wire
+│                               protocol v1 on stdin/stdout so a plugin only says what to measure
+├── sdk/python/test_di_collector.py  Its unit tests (stdlib unittest; CI runs them)
+├── examples/collectors/
+│   ├── loadavg/                Example exec plugin on the Python SDK: load1/5/15 per CPU and
+│   │   ├── loadavg.py          PSI some avg10 for cpu, memory, io; certified in CI by
+│   │   └── README.md           `mapctl collector check` (see §3)
+│   └── shell/load1.sh          The shell template from docs/collectors.md §11; certified in CI
 │
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
@@ -146,6 +157,15 @@ semantic-map/
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
     │   │   └── client_test.go  Push wire-format + EventID determinism coverage
+    │   ├── collectors/         Telemetry sources from sources.collectors (concrete, NOT a contract)
+    │   │   ├── registry.go     Register(type, Factory) + Build(env, entries) → Supervisor
+    │   │   ├── builtin.go      The built-in types: cgroup, netdata, script, each decoding its own config
+    │   │   ├── supervisor.go   Supervisor — every member each tick: timeout, fault isolation, backoff,
+    │   │   │                   contract enforcement, one owner per node-level type, Status()
+    │   │   ├── wire.go         Wire protocol v1 (hello, collect; strict sample decoding) shared by both transports
+    │   │   ├── exec.go         ExecCollector — a plugin process speaking the protocol on stdin/stdout
+    │   │   ├── http.go         HTTPCollector — a plugin reached over HTTP
+    │   │   └── plugin/         plugin.Serve — the exec loop for a plugin written in Go (stdlib + pkg/types only)
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
@@ -160,7 +180,7 @@ semantic-map/
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
     │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
-    │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
+    │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
     │   │   ├── rules.go        Tier 0: Rule, and the composition rule
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
@@ -194,7 +214,7 @@ semantic-map/
     │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
     │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
-    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up (no collectors)
     │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties; structure only
     │
     ├── internal/               Implementation packages — not importable externally
@@ -214,7 +234,6 @@ semantic-map/
     │       │                         drivers) and allowlisted system.slice units
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, include patterns
     │       │                         over chart contexts)
-    │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
     │       │                                           propositions from domain_spec.json. No
     │       │                                           strengths, no history — both live on the
@@ -234,7 +253,8 @@ semantic-map/
     │                                    ProposerNaturalDiscovery, OperatorTuneAndAuditTrail)
     │
     ├── compliance/             Go compliance test suites — one per contract
-    │   ├── collector.go        RunCollectorCompliance(t, factory)
+    │   ├── collector.go        RunCollectorCompliance(t, factory); RunCollectorChecks(reporter, factory)
+    │   ├── reporter.go         Reporter interface, *testing.T adapter, Recorder for non-test callers
     │   ├── ontology.go         RunOntologyCompliance(t, factory)  — vocabulary + validation
     │   ├── reasoner.go         RunReasonerCompliance(t, factory)
     │   ├── proposer.go         RunProposerCompliance(t, factory)
@@ -244,9 +264,13 @@ semantic-map/
     │   ├── build_priors_test.go  Asserts structure arrives and no magnitude does, through Build
     │   └── profiles_test.go      KD validation + prior_weights.json discovery
     │
-    ├── cmd/agent/              Daemon binary
-    │   ├── main.go             -config / -print-config + spec load + profile build + ListenAndServe
+    ├── cmd/agent/main.go       Daemon binary: calls agentmain.Main()
+    │
+    ├── pkg/agentmain/          The daemon's body, public so a custom binary can register extra collectors
+    │   ├── example_custom_test.go  Example_customCollector: blank-import a collector, call Main()
+    │   ├── main.go             Main(): -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
+    │   ├── collectors_route.go GET /collectors: each configured collector's status
     │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
@@ -279,8 +303,8 @@ semantic-map/
     │   ├── cmd/                One file per subcommand (graph, edges, history, strength,
     │   │                       deprecate, construct, proposition, reset, candidates,
     │   │                       recommend, simulate, watch, dot, health, peers,
-    │   │                       version, completion)
-    │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
+    │   │                       version, tune, completion, collector)
+    │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from pkg/agentmain
     │   │   ├── client.go
     │   │   ├── types.go
     │   │   └── client_test.go
@@ -312,7 +336,7 @@ semantic-map/
         │   │                   averaging differs from single-run snapshot
         │   └── divergence_test.go  Range/StdDev arithmetic, sort order, formula
         └── client/             POST /ingest-sample wrapper + DTOs duplicated
-            └── client.go        from cmd/agent (same wire-boundary discipline as mapctl)
+            └── client.go        from pkg/agentmain (same wire-boundary discipline as mapctl)
 ```
 
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -450,6 +474,34 @@ def push(base, node, subject, source, metric, unit, rng, value):
     urllib.request.urlopen(req, timeout=5).read()
 ```
 
+### `GET /collectors`
+
+Each collector in `sources.collectors`, in list order, with what it has done so far.
+Read-only: collectors are configured in the spec, not over HTTP.
+
+```json
+{"interval_ms":10000,
+ "collectors":[
+  {"name":"cgroup","kind":"type","type":"cgroup","state":"ok",
+   "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
+   "samples":51234,"violations":0,"ownership_drops":0,"restarts":0,
+   "backoff_until_unix":0,"available":["cpu_utilization","..."]}]}
+```
+
+`kind` is `type` (a built-in), `exec` or `http`; `type` is the built-in's name and empty
+otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
+`backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
+5 min, reset by a success), and `stuck` while a call that outlived its timeout has not
+returned — the member is skipped until it does, and its return is then recorded as a
+fault at that moment (`backoff`, a fresh `backoff_until_unix`, `last_error` saying how it
+ended). `interval_ms` is `sources.interval` in milliseconds. `violations` counts samples dropped for breaking the collector contract (a
+malformed or duplicate sample in a plugin's reply, an invalid metric type, subject or
+`part_of`, no unit, a foreign `node_id`, a unit or range that changed, an invalid
+`available` entry); `ownership_drops` counts node-level samples dropped because an earlier
+collector in the list owns that type; `restarts` counts an exec plugin's process restarts,
+after a fault or after the plugin exited on its own between ticks.
+With no collectors configured the list is `[]`.
+
 ### `GET /candidates`
 
 Lists Proposer candidate edges pending review. `?status=all` lists every candidate the
@@ -487,7 +539,7 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
 `decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
 actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
-`defer`, or `escalate` when no tier was sure enough and the candidate stays in this queue),
+`defer`, or `undecided` when no tier was sure enough: the candidate stays pending and is reviewed again when its evidence moves),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
@@ -560,7 +612,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/confirm`          | optional `{from}`; required for an undirected candidate  | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
-| GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]` |
+| GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]`; so are each collector entry's non-empty `config` block and `exec.args`, and an `http.url`'s userinfo and query (its fragment is dropped) |
+| GET  | `/collectors`                       | —                                                        | collectors | `{interval_ms, collectors:[…]}`: `sources.interval` in milliseconds and each configured collector's state, counters and declared types, in list order; see [`GET /collectors`](#get-collectors) |
 | GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the runtime has refused; absent when none), `cooling` | relief   |
@@ -568,6 +621,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
+| GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
@@ -584,7 +638,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses; `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
 | GET  | `/state/decisions`                  | `?limit=`                                                | State model |
 | GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
@@ -650,14 +704,18 @@ profile:
   kd: k0s
   priors: /etc/semantic-map/prior_weights.json
 sources:
-  netdata:
-    url: http://localhost:19999
+  collectors:
+    - name: cgroup
+      type: cgroup
+    - name: netdata
+      type: netdata
+      config: {url: http://localhost:19999, collapse: false}
 loops:
   review:
     level: full
 ```
 
-Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Two lists replace rather than extend their defaults: `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
+Lists are YAML lists, durations are Go durations (`10s`, `2m`, `0s`), and the old `-flag=false` booleans are plain `true`/`false` values. Three lists replace rather than extend their defaults: `sources.collectors` written in the file is the whole set of collectors (naming Netdata alone drops the default cgroup entry); `policy.rules` written in the file **replaces** the default rules (it does not append to them), so copy the default freeze rules from `agent -print-config` before adding your own — at start the agent logs `policy: policy.rules replaces the default rules and has none to freeze where …` for each default freeze rule (the `di-agent/freeze` label, and the critical priority classes) the effective rules no longer cover; `facts` likewise names the fact sources outright (`facts: []` reads none). A rule's `floor` is not a list: it names `cpu_cores`, `of_original` or both, and the bound it leaves out is the default's, so `floor: {cpu_cores: 0.5}` keeps `of_original: 0.5`.
 
 Values that cannot be what was meant are refused at startup, every one named. In the policy: an `allow` or `deny` entry that is not an action (`cpu.limit`, or `evict`, which no runtime performs and the defaults deny), in the defaults or any rule, since a misspelt deny would deny nothing; and a `match.kind` that is not a workload kind (`pod`, `container`, `unit`, `app`), since a misspelt kind would match nothing. In relief: `loops.relief.cpu.expiry` must be longer than `settle`, or a change would be given back before it is judged. `min_effect` is a planning floor: a step whose predicted drop in pressure is below it is not taken. A step is then judged against its own prediction: kept when the observed drop is at least half the predicted one, reverted otherwise; a change taken up after a restart is always kept, as its baseline was read with the cap in force.
 
@@ -680,7 +738,7 @@ loops:
       exit: 0.10        # contention below which caps are given back, held for exit_for
 ```
 
-The trigger is the node's CPU contention, `cpu_contention_ratio`: the share of time some workload waited for a CPU another was using — PSI stall less each workload's own throttling — not CPU utilisation, and not `cpu_pressure_ratio`, which counts a pod held back by its own limit as pressure. A node can be fully used and not contended, and the loop acts only on the waiting. It comes from the cgroup collector with subjects on (the default).
+The trigger is the node's CPU contention, `cpu_contention_ratio`: the share of time a pod waited for CPU it was owed and another pod held — PSI stall less the pod's own throttling, counted only for a pod getting less than its weighted fair share of the pods' CPUs (a pod past its share waits on its own threads, and capping a neighbour cannot help it) — not CPU utilisation, and not `cpu_pressure_ratio`, which counts a pod held back by its own limit as pressure. A node can be fully used and not contended, and the loop acts only on the waiting. It comes from the cgroup collector with subjects on (the default).
 
 The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the runtime count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
 
@@ -1007,17 +1065,25 @@ the shape of the real thing.
 | `profile.min_trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
-| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `sources.cgroup.root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
-| `sources.cgroup.subjects`  | `true`           | Walk pod cgroups (and `sources.cgroup.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
-| `sources.cgroup.units`     | `[]`             | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
-| `sources.cgroup.max_subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
-| `sources.cgroup.cmd_label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
-| `sources.cgroup.pod_logs` | `/var/log/pods`   | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. |
+| `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`; at least `1s`, since timestamps are whole seconds. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
+| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello — is refused at startup, naming the entry. |
+| `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
+| `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
+| `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |
+| `sources.collectors[].http` | — | `{url}`: a plugin reached over HTTP, speaking the same protocol. |
+| `sources.collectors[].timeout` | `min(interval/2, 5s)` | The longest one collect may take. Less than `sources.interval`: the supervisor waits it plus 500 ms for an exec or http member, so a timeout at the interval would let one hung plugin stretch every tick past it. |
+| `sources.collectors[].config` | — | The collector's own settings. A built-in decodes them strictly (an unknown key is refused); an `exec` or `http` plugin receives them in its hello. |
+| `type: cgroup` `config.root` | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. On macOS or a node without cgroups v2, leave the cgroup entry out of the list. The agent's `GET /groups` reads cgroups from the first cgroup entry's root. |
+| `type: cgroup` `config.subjects` | `true` | Walk pod cgroups (and `config.units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
+| `type: cgroup` `config.units` | `[]` | A list of globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `[k0s*.service, containerd.service]`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
+| `type: cgroup` `config.max_subjects` | `256` | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
+| `type: cgroup` `config.cmd_label` | `false` | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
+| `type: cgroup` `config.pod_logs` | `/var/log/pods` | The kubelet's pod log directory, one `<namespace>_<name>_<uid>` entry per pod. Each pod subject is labelled `namespace` and `pod` from it, which the console shows instead of the UID; the subject stays `pod:<uid>`. Empty names none; in a container, mount the host's directory. The kubelet's per-container links beside it (`/var/log/containers`) break a pod with more than one container into `container:<uid>.<name>` subjects, each labelled with its pod as `parent`. |
+| `type: netdata` `config.url` | required | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). |
+| `type: netdata` `config.include` | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
+| `type: netdata` `config.collapse` | `true` | Also emit the node's own types (`cpu_utilization` and the rest) from Netdata's system charts. Set `false` when a cgroup entry is listed before it: the cgroup collector supplies those types, and Netdata measures CPU differently. |
+| `type: script` `config.path` | required | Run the synthetic system from this scenario file. Exclusive: a list holding a `script` entry and any other is refused. `sources.interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `node.id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
-| `sources.netdata.url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `sources.cgroup.root`, both run as a `MultiCollector` and the cgroup collector alone supplies the node's own types (`cpu_utilization` and the rest), since Netdata measures CPU differently. |
-| `sources.netdata.include`  | CPU, memory, I/O, network, disk | A list of `path.Match` patterns over Netdata chart contexts (`system.*`, `disk.io`); each selected chart's dimensions become properties named `<context>.<dimension>`. `*` selects every chart Netdata has. The default is `system.cpu,system.ram,system.io,system.net,disk.io,disk.util,disk.await,net.net,cpu.cpu`; pressure is left out because the cgroup collector reads it, and alone Netdata still supplies the pressure types. |
-| `sources.script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `sources.interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `map.proposer.enabled`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values; pairs any two properties — subject → node, node ↔ node, subject ↔ subject — within the pair budget). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `map.proposer.threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
@@ -1040,7 +1106,7 @@ A scenario is JSON with a name, `seed`, `tick_seconds`, `duration_seconds`, opti
 
 Property names are metric types (`[A-Za-z0-9._-]`); the runner addresses a subject's property as `<property>@<subject>`. The loader validates all of this and refuses a file it cannot run: every `of` must name an existing subject property (or, for `logistic`, a non-logistic node property), a `linear` counterfactual needs `tolerance > 0` and a `saturated` one `min_error > 0`, its target must be a node property and its `assume` keys must name existing subject properties. Past `duration_seconds` the script emits nothing and logs once that the scenario finished.
 
-See `scenarios/` for five seed scenario files to drive `sources.script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
+See `scenarios/` for five seed scenario files to drive a `script` collector with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 
@@ -1070,7 +1136,7 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `explain.provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
 | `explain.url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
 | `explain.model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
-| `explain.prompt`          | `cmd/agent/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `explain.prompt`          | `pkg/agentmain/prompts/explain-v2.md`| Answering-agent system prompt. Required when the provider is enabled.   |
 | `explain.planner_prompt`  | `<prompt-dir>/planner-v2.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
 | `explain.critic_prompt`   | `<prompt-dir>/critic-v2.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
 | `explain.keep_alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
@@ -1081,17 +1147,22 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
-| `loops.review.level`                 | `off`                 | `off`, or a level: `suggest` (0), `rules` (1), `bounded` (2), `full` (3). |
+| `groups.label_keys`                  | `[di-agent/group, app.kubernetes.io/part-of]` | Pod labels naming a pod's group, first set wins; a `kube-system` pod with none is in `kube-system`. Label your storage pods `di-agent/group: storage` and the map holds what the storage group uses. |
+| `groups.units`                       | `{system: ["*"]}`     | Group name → globs of the units a cgroup collector's `config.units` models. CPU cores, disks and physical NICs are `hardware`, other virtual interfaces `network`, a `veth` is its pod's. |
+| `groups.interval`                    | `30s`                 | How often the topology is recomputed; `0` turns grouping off. |
+| `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
 | `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
-| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle escalates. |
+| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
 | `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
-| `loops.review.reasoning.backend` | `none`              | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. |
+| `loops.review.reasoning.backend` | `openai-tools`      | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. Unreachable, it skips only what needs it, each cycle. |
+| `loops.review.decision.timeout`  | `5m`                | How long one tier-1 call may take. A decision model on the node's own CPUs scoring a candidate with tier 2's analysis takes minutes; a call past this fails and the candidate waits for the next cycle. |
+| `loops.review.reasoning.timeout` | `10m`               | How long one tier-2 analysis may take, tool calls included. |
 | `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
 | `loops.review.reasoning.model` | `qwen3.8:27b-nvfp4`   | Tier 2 model. |
 | `loops.review.reasoning.keep_alive` | `10m`            | Ollama `keep_alive` for the tier 2 model. |
@@ -1099,6 +1170,47 @@ See `scenarios/` for five seed scenario files to drive `sources.script` with a k
 | `loops.review.thresholds.confirm`         | `0.85`                | Probability a model tier needs to confirm, and to orient an undirected candidate. |
 | `loops.review.thresholds.reject`          | `0.95`                | Probability a model tier needs to reject. |
 | `loops.review.thresholds.defer`           | `0.7`                 | Probability a model tier needs to defer. |
+
+### Collector plugins and `mapctl collector check`
+
+A collector in any language is an `exec` plugin (the agent starts it and speaks wire
+protocol v1 on its stdin and stdout) or an `http` one (each request is a `POST` of the
+same JSON). Two helpers write the loop for you:
+
+| Language | Helper | Shape |
+| -------- | ------ | ----- |
+| Python | [`sdk/python/di_collector.py`](sdk/python/di_collector.py), stdlib only | `di_collector.serve(setup)`; `setup(hello)` returns `collect(now)`, which returns a list of samples or `(samples, available)`; tests in `sdk/python/test_di_collector.py` |
+| Go | `pkg/collectors/plugin` | `plugin.Serve(func(plugin.Hello) (plugin.CollectFunc, error))`; a `CollectFunc` is `func(now time.Time) (samples, available, error)` |
+
+[`examples/collectors/loadavg/`](examples/collectors/loadavg/) is a complete Python plugin. [`docs/collectors.md`](../docs/collectors.md) is the developer guide: the protocol in full,
+the producer rules, ownership, security, and Go and shell examples.
+
+A plugin is valid when it passes the collector compliance suite. `mapctl collector check`
+runs that suite over it through the agent's own exec or http adapter, with no agent
+running — including `NoMalformedSamples` and `NoDuplicateSamplesInBatch`, which fail on
+the samples the adapter drops from a reply — plus the protocol checks `HelloRoundTrip`,
+`SeqEcho`, `ReplyWithinTimeout`, `UnitRangeStableOverTicks`, `NoForeignNodeID`,
+`TimestampNearNow`, `NoUnexpectedRestarts` and `AvailableCoversEmitted`:
+
+```bash
+cd semantic-map/go
+go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadavg.py
+go run ./cmd/mapctl collector check --exec ./gpu --config gpu.yaml -- --device 0   # plugin arguments after --
+go run ./cmd/mapctl collector check --http http://localhost:9100/collect
+```
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--exec CMD [-- ARGS…]` / `--http URL` | — | The plugin; exactly one. |
+| `--config FILE` | none | A YAML mapping sent as the hello's `config`, as an entry's `config` block would be. |
+| `--ticks N` | `5` | Collects per protocol check, and per run of the every-batch checks `NoMalformedSamples` and `NoDuplicateSamplesInBatch`. |
+| `--interval D` | `10s` | The interval announced in hello, at least 1s. The timeout is the default an entry gets, `min(D/2, 5s)`; `UnitRangeStableOverTicks` spaces its collects `D/10` apart, at least 100 ms. |
+| `--node-id ID` | `check` | The node id the agent side announces and stamps. |
+
+It prints `PASS <check>` or `FAIL <check>: <why>` per check, then `certified` (exit 0) or
+`not certified (k failed)` (exit 1). Every check starts the plugin afresh; its stderr
+is shown. A plugin that does not complete its hello stops the run at `HelloRoundTrip`.
+CI certifies the loadavg example this way on Linux.
 
 ---
 
@@ -1381,7 +1493,7 @@ explain:
   provider: openai-compatible
   url: http://localhost:11434/v1
   model: qwen2.5:7b-instruct
-  prompt: cmd/agent/prompts/explain-v2.md
+  prompt: pkg/agentmain/prompts/explain-v2.md
 persist:
   file: ""
 SPEC
@@ -1498,22 +1610,23 @@ A missing planner or critic prompt disables that stage with a log line rather th
 
 ## 9. Autonomous Candidate Review (`loops.review.level`)
 
-The proposer's candidates wait for an operator. With `loops.review.level` set, the agent reviews
-them itself, as far as the level allows, and every review is a decision record.
+The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, with a
+decision model and a reasoning model, and every review is a decision record. `suggest` and `off` are
+the manual modes, for an operator who wants to decide.
 
 ```bash
-# A node (8 GB): a decision model only; what it is unsure of escalates to the operator.
-# agent.yaml: loops: {review: {level: full}}
+# A node (8 GB): a decision model only; what it is unsure of waits for its evidence to move.
+# agent.yaml: loops.review: {reasoning: {backend: none}}
 ollama pull tev1:4b
 ./agent -config agent.yaml
 
 # A machine with memory to spare: a stronger decision model and a reasoning tier.
-# agent.yaml: loops.review: {level: full, decision: {model: "nimble-v3:9b-nvfp4"}, reasoning: {backend: openai-tools}}
+# agent.yaml: loops.review: {decision: {model: "nimble-v3:9b-nvfp4"}}  (the reasoning tier is on by default)
 ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
 ./agent -config agent.yaml
 
 # Any OpenAI-compatible server instead of Ollama (llama.cpp's llama-server, vLLM):
-# agent.yaml: loops.review: {level: full, decision: {backend: openai-logprobs, url: "http://localhost:8081/v1", model: <model>}}
+# agent.yaml: loops.review: {decision: {backend: openai-logprobs, url: "http://localhost:8081/v1", model: <model>}}
 ./agent -config agent.yaml
 
 curl -s localhost:8080/autonomy
@@ -1526,9 +1639,9 @@ A candidate goes up the tiers only as far as it has to:
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
 | 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
-| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, escalating when less than half the model's probability fell on any letter. |
+| 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
-| — | operator | What no tier was sure of is escalated: it stays in `GET /candidates` with `Review.Action: "escalate"`. |
+| — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
 
 The level decides who may act:
 
@@ -1536,8 +1649,8 @@ The level decides who may act:
 | ----- | --------- | --------------- |
 | `suggest` (0) | no | no — every review is recorded as a suggestion (`Review.Applied: false`) |
 | `rules` (1) | yes | no |
-| `bounded` (2) | yes | confirm and defer; a model's rejection is escalated |
-| `full` (3) | yes | yes |
+| `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
+| `full` (3), the default | yes | yes |
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
 returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is

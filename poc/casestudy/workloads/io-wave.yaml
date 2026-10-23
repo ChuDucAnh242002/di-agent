@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata: { name: io-wave, labels: { check: casestudy, di-agent/group: storage } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    # 48 s of direct (uncached) disk writes, then 49 s idle (a 97 s cycle): I/O pressure without
+    # page cache.
+    command: ["sh", "-c", "while true; do end=$(( $(date +%s) + 48 )); while [ $(date +%s) -lt $end ]; do dd if=/dev/zero of=/data/f bs=1M count=64 oflag=direct 2>/dev/null; done; sleep 49; done"]
+    resources: { requests: { cpu: 50m, memory: 16Mi }, limits: { cpu: 300m, memory: 64Mi } }
+    volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, emptyDir: {} }]

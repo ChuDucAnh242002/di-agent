@@ -10,7 +10,7 @@ import (
 )
 
 // TestBuildSeedsStructureAndNoMagnitude exercises the path the daemon actually uses —
-// Build() with the same Config literal cmd/agent/main.go constructs — rather
+// Build() with the same Config literal pkg/agentmain/main.go constructs — rather
 // than calling applyPriorWeights and seedFromOntology directly the way
 // TestPerKDSeedingMatchesPriorWeights does.
 //
@@ -20,7 +20,7 @@ import (
 // silently drop every flag after it, including -priors and -kd. The daemon then
 // started normally on hardcoded ontology defaults. A library-level test could
 // not catch that; this test pins the Build-with-full-Config contract, and
-// TestRejectsPositionalArgs in cmd/agent covers the CLI side.
+// TestRejectsPositionalArgs in pkg/agentmain covers the CLI side.
 //
 // What it pins has since inverted. Build used to seed each relationship's strength
 // from prior_weights.json, and this test checked the number arrived. Strengths are
@@ -47,12 +47,10 @@ func TestBuildSeedsStructureAndNoMagnitude(t *testing.T) {
 				PriorWeightsPath:     pwPath,
 				KD:                   kd,
 				NodeID:               "testnode",
-				CgroupRoot:           "/sys/fs/cgroup",
-				CollectInterval:      0,
 				UseProposer:          false,
 			}
 
-			sm, _, err := Build("edge-minimal", cfg)
+			sm, err := Build("edge-minimal", cfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -162,7 +160,7 @@ func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
 			cfg.PriorWeightsPath = pwPath
 			cfg.KD = kd
 
-			sm, _, err := Build("edge-minimal", cfg)
+			sm, err := Build("edge-minimal", cfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -214,7 +212,7 @@ func TestBuildMakesCostAnswersTraceable(t *testing.T) {
 	cfg.DomainSpec = mustSpec()
 	cfg.StateMap = state
 
-	sm, _, err := Build("edge-minimal", cfg)
+	sm, err := Build("edge-minimal", cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

@@ -460,7 +460,7 @@ func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateRevie
 }
 
 // AnnotateCandidate records a review of a pending candidate that did not act on it:
-// an escalation, or a suggestion under an autonomy level that reserves the action.
+// an undecided review, or a suggestion under an autonomy level that reserves the action.
 func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
 	return m.proposer.Annotate(candidateID, rv)
 }

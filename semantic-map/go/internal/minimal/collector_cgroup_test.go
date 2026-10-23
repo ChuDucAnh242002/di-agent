@@ -755,8 +755,9 @@ func writeThrottledUsec(t *testing.T, dir string, usec uint64) {
 // TestCPUContentionIsStallNotExplainedByOwnThrottling: a cgroup's CPU "some" stall
 // counts the time its own quota held it back, so a pod at its limit reports pressure
 // with nothing else on the node waiting. cpu_contention_ratio is the stall share left
-// after the cgroup's own throttled time, per subject, and the node's is the worst-off
-// subject's — not the root's stall, which carries every subject's throttling.
+// after the cgroup's own throttled time, per subject. The node's is not the root's stall,
+// which carries every subject's throttling: it is the waiting of a pod owed CPU it does not
+// get (owedContention), and podA's 0.01 is under the waiting floor, so the node's is 0.
 func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 	root, podA, podB, _, procRoot := fakeTree(t)
 	podBSubject := "pod:11111111-2222-3333-4444-555555555555"
@@ -787,8 +788,8 @@ func TestCPUContentionIsStallNotExplainedByOwnThrottling(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := bySubject(samples)
-	// podB is BestEffort, so the node takes podA's reading (TestABestEffortPodDoesNotSetNodeContention).
-	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0.01} {
+	// podB is BestEffort, so only podA is promised CPU (TestABestEffortPodDoesNotSetNodeContention).
+	for subject, want := range map[string]float64{"pod:" + testUID: 0.01, podBSubject: 0.3, "": 0} {
 		s := got[subject][types.CPUContentionRatio]
 		if s == nil {
 			t.Errorf("subject %q: no cpu_contention_ratio after two collects", subject)
@@ -953,5 +954,105 @@ func TestNodeContentionMovesOnWhenTheRootIsUnreadable(t *testing.T) {
 	}
 	if ids[0] == ids[1] {
 		t.Fatalf("both node contention samples have event id %s; want each anchored on its own window", ids[0])
+	}
+}
+
+// TestAPodsContainersAreItsPartsWhenItHasSeveral: a pod with more than one container is
+// broken down into container:<uid>.<name> subjects, each naming its pod as parent, named
+// from the kubelet's /var/log/containers links (<pod>_<ns>_<container>-<id>.log). A pod
+// with one container is that container, so it gets no part that would only repeat it,
+// and a cgroup with no log (the sandbox) is no container anyone wrote.
+func TestAPodsContainersAreItsPartsWhenItHasSeveral(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	writeCgroup(t, filepath.Join(podA, "cri-containerd-def.scope"), 100_000, 0, 0, "50000000")
+	writeCgroup(t, filepath.Join(podA, "cri-containerd-0sandbox.scope"), 1_000, 0, 0, "1000000")
+	cl := t.TempDir()
+	for _, n := range []string{"cycler_default_db-abc.log", "cycler_default_exporter-def.log"} {
+		if err := os.Symlink("/dev/null", filepath.Join(cl, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 16, MemTotalBytes: 4 << 30,
+		ProcRoot: procRoot, ContainerLogRoot: cl})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := bySubject(samples)
+	for name, mem := range map[string]float64{"db": 200000000, "exporter": 50000000} {
+		s := by["container:"+testUID+"."+name][types.MemoryUtilization]
+		if s == nil {
+			t.Fatalf("no container:%s.%s; subjects %v", testUID, name, keys(by))
+		}
+		if s.Labels["parent"] != "pod:"+testUID || s.Labels["container"] != name || s.Labels["kind"] != "container" {
+			t.Errorf("%s labels %v; want its pod as parent and its name", name, s.Labels)
+		}
+		if want := mem / float64(4<<30); s.Value < want*0.99 || s.Value > want*1.01 {
+			t.Errorf("%s memory %v; want %v of the node", name, s.Value, want)
+		}
+	}
+	for s := range by {
+		if strings.Contains(s, "sandbox") || strings.HasPrefix(s, "container:11111111") {
+			t.Errorf("subject %s; want no part for the sandbox or for a single-container pod", s)
+		}
+	}
+}
+
+// TestAUnitDoesNotSetNodeContention: node contention is relief's trigger, and relief acts
+// on the runtime's workloads. A unit's waiting is not theirs to relieve: the node's own
+// decision model, alone on CPUs no pod can use, waited 0.6 of the time on its own runner
+// threads, which held node contention above relief's exit level whatever was capped and
+// made every verification read as no effect. The unit's own reading is still emitted.
+func TestAUnitDoesNotSetNodeContention(t *testing.T) {
+	root, podA, _, unit, procRoot := fakeTree(t)
+	for _, d := range []string{root, podA, unit} {
+		writePressure(t, d, 0)
+	}
+	writeThrottledUsec(t, podA, 0)
+	writeThrottledUsec(t, unit, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, UnitGlobs: []string{"*"},
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	advance(t, podA, 2_000_000, 200, 0)
+	writeThrottledUsec(t, podA, 0)
+	writePressure(t, podA, 1_000_000) // 0.1
+	advance(t, unit, 3_000_000, 0, 0)
+	writeThrottledUsec(t, unit, 0)
+	writePressure(t, unit, 9_000_000) // 0.9, on its own threads
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if s := got[""][types.CPUContentionRatio]; s == nil || s.Value != 0.1 {
+		t.Fatalf("node cpu_contention_ratio %v; want the pod's 0.1, not the unit's 0.9", s)
+	}
+	if s := got["unit:k0sworker.service"][types.CPUContentionRatio]; s == nil || s.Value != 0.9 {
+		t.Fatalf("unit's own cpu_contention_ratio %v; want it still reported, 0.9", s)
+	}
+}
+
+// TestSharesAreOfTheMachinesCPUsNotTheAgents: every CPU fraction is a share of the node,
+// so it divides by the machine's CPUs. runtime.NumCPU is the CPUs the agent's own process
+// may run on: pinned to six of twelve, the agent reported its decision model at 0.998 of
+// the node and the node at its ceiling (case-study run 2026-10-20i). /proc/stat lists one
+// cpuN line per CPU the machine has.
+func TestSharesAreOfTheMachinesCPUsNotTheAgents(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	stat := "cpu  100 0 100 1000 0 0 0 0 0 0\n"
+	for i := 0; i < 12; i++ {
+		stat += "cpu" + strconv.Itoa(i) + " 10 0 10 100 0 0 0 0 0 0\n"
+	}
+	stat += "intr 0\nctxt 0\n"
+	if err := os.WriteFile(filepath.Join(procRoot, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if c.numCPU != 12 {
+		t.Fatalf("numCPU %v; want the machine's 12 from /proc/stat", c.numCPU)
 	}
 }

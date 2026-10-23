@@ -129,7 +129,7 @@ var DefaultNetdataInclude = []string{
 func ValidNetdataInclude(patterns []string) error {
 	for _, p := range patterns {
 		if _, err := path.Match(p, ""); err != nil {
-			return fmt.Errorf("-netdata-include pattern %q: %v", p, err)
+			return fmt.Errorf("config.include pattern %q: %v", p, err)
 		}
 	}
 	return nil

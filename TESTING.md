@@ -54,8 +54,11 @@ cat > /tmp/di-agent/agent.yaml <<'SPEC'
 node:
   addr: 127.0.0.1:8080
 sources:
-  script: /tmp/di-agent/linear-fast.json
   interval: 1s
+  collectors:
+    - name: script
+      type: script
+      config: {path: /tmp/di-agent/linear-fast.json}
 map:
   stale_after: 20s
   retire_after: 60s
@@ -112,7 +115,7 @@ The push returns `202` with `"routed": false`. Any `metric_type` is admitted as 
 
 **The operator console.** Open <http://localhost:8080/ui/>. It loads nothing from a CDN. Watch the force graph while the pod's load cycles. The drawer tabs (Journal, Decisions, Discovery, Subjects, Backbone) show the same state as the commands above.
 
-Try the other scenarios at their native tick: `sources.script: ../scenarios/<name>.json` with `sources.interval: 10s`. The `sed` above only rescales `linear`, because the others set noise periods and arrival times in seconds as well. Allow up to the `within_seconds` in each file's `expect` block (20–25 minutes). That block states what a correct agent does:
+Try the other scenarios at their native tick: the script entry's `config.path: ../scenarios/<name>.json` with `sources.interval: 10s`. The `sed` above only rescales `linear`, because the others set noise periods and arrival times in seconds as well. Allow up to the `within_seconds` in each file's `expect` block (20–25 minutes). That block states what a correct agent does:
 
 | Scenario | A correct agent… |
 | -------- | ---------------- |
@@ -134,8 +137,11 @@ cat > /tmp/di-agent/agent.yaml <<'SPEC'
 node:
   addr: 127.0.0.1:8080
 sources:
-  script: /tmp/di-agent/linear-fast.json
   interval: 1s
+  collectors:
+    - name: script
+      type: script
+      config: {path: /tmp/di-agent/linear-fast.json}
 explain:
   provider: openai-compatible
 SPEC
@@ -146,7 +152,7 @@ Answers are checked before they leave the daemon. If the model cites a value the
 
 ## 5. Optional: on a real Linux node
 
-On Linux with cgroup v2, drop `sources.script` and the agent walks `/sys/fs/cgroup`, modelling each pod (and any systemd unit you name in `sources.cgroup.units`) as a subject. Point `sources.netdata.url` at a local Netdata for node-level telemetry. [`OPERATING.md`](OPERATING.md) covers systemd, multi-node peers and what the agent touches on your system.
+On Linux with cgroup v2, drop `sources.collectors` (the default list is one cgroup entry) and the agent walks `/sys/fs/cgroup`, modelling each pod (and any systemd unit you name in the cgroup entry's `config.units`) as a subject. For Netdata's node-level telemetry too, list a cgroup entry and then `{name: netdata, type: netdata, config: {url: http://localhost:19999, collapse: false}}`. `curl localhost:8080/collectors` shows what each collector is doing. [`OPERATING.md`](OPERATING.md) covers systemd, multi-node peers and what the agent touches on your system.
 
 ---
 

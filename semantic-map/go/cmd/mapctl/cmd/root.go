@@ -109,6 +109,7 @@ func NewRootCmd() *cobra.Command {
 		newPeersCmd(deps),
 		newVersionCmd(deps),
 		newTuneCmd(deps),
+		newCollectorCmd(),
 		newCompletionCmd(),
 	)
 

@@ -339,6 +339,13 @@ func ValidSubject(s string) bool {
 	return subjectRe.MatchString(s)
 }
 
+// ValidPartOf reports whether partOf may stand on a sample of subject: empty, or a
+// valid node-level metric type on a sample that has a subject, since only a
+// subject's quantity is a part of a node total.
+func ValidPartOf(partOf, subject string) bool {
+	return partOf == "" || (ValidMetricType(partOf) && subject != "")
+}
+
 // ── Tuner types ───────────────────────────────────────────────────────────────
 
 // TuneIntent is the raw output of TunerContract.ParseIntent — a signed delta
@@ -499,13 +506,13 @@ const (
 	ReviewerIntervention   = "intervention"    // the agent's own verified actions showed it
 )
 
-// What a review decided. Escalate means no tier was sure enough to act, and the
-// candidate stays in the operator's queue.
+// What a review decided. Undecided means no tier was sure enough to act: the
+// candidate stays pending and the agent reviews it again when its evidence moves.
 const (
-	ReviewConfirm  = "confirm"
-	ReviewReject   = "reject"
-	ReviewDefer    = "defer"
-	ReviewEscalate = "escalate"
+	ReviewConfirm   = "confirm"
+	ReviewReject    = "reject"
+	ReviewDefer     = "defer"
+	ReviewUndecided = "undecided"
 )
 
 // CandidateReview records one review of a candidate. Applied is false when the
@@ -532,7 +539,7 @@ type CandidateReview struct {
 // sign or kind changed, or its |r| moved by more than two standard errors of
 // Fisher's z at the smaller of the two windows. A review that is outdated no
 // longer speaks for the candidate, so an agent's rejection or deferral reopens and
-// an escalated candidate is reviewed again.
+// an undecided candidate is reviewed again.
 func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if r == nil {
 		return true

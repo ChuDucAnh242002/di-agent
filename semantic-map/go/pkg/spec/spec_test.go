@@ -12,9 +12,6 @@ func TestDefaultsAreTodaysFlags(t *testing.T) {
 	if d.Node.Addr != ":8080" {
 		t.Errorf("Node.Addr = %q", d.Node.Addr)
 	}
-	if d.Loops.Review.Level != "off" {
-		t.Errorf("Review.Level = %q", d.Loops.Review.Level)
-	}
 	if d.Loops.Relief.CPU.Enter != 0.25 {
 		t.Errorf("Relief.CPU.Enter = %v", d.Loops.Relief.CPU.Enter)
 	}
@@ -313,5 +310,19 @@ func TestTheExampleIsTheDefaults(t *testing.T) {
 	}
 	if string(gotYAML) != string(want) {
 		t.Fatalf("agent.example.yaml differs from the defaults; regenerate it with agent -print-config")
+	}
+}
+
+// TestTheAgentReviewsOnItsOwnByDefault: discovery's candidates are settled by the
+// agent — rules, a decision model, and a reasoning model when that is not sure — at
+// full autonomy. A person reviewing is a mode an operator turns on, not the default:
+// nobody checks thousands of machines one candidate at a time.
+func TestTheAgentReviewsOnItsOwnByDefault(t *testing.T) {
+	r := Default().Loops.Review
+	if r.Level != "full" {
+		t.Errorf("review level %q by default; want full", r.Level)
+	}
+	if r.Decision.Backend == "none" || r.Reasoning.Backend != "openai-tools" {
+		t.Errorf("decision %q, reasoning %q by default; want both model tiers on", r.Decision.Backend, r.Reasoning.Backend)
 	}
 }

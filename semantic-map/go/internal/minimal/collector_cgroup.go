@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,8 +61,9 @@ import (
 // counts that time as CPU stall, and the root sums every cgroup's, so a pod running
 // at its limit makes cpu_pressure_ratio rise with nothing else on the node waiting —
 // and lowering its limit raises it further. The node's cpu_contention_ratio is the
-// worst-off subject's: the share of the window in which some workload waited for a
-// CPU another was using. It needs subjects; with -cgroup-subjects off it is absent.
+// worst waiting of a pod promised CPU (not BestEffort, not a unit) that gets less than its
+// weighted fair share of the pods' CPUs (owedContention): CPU it is owed another pod
+// holds. It needs subjects; with the cgroup config.subjects off it is absent.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
@@ -99,6 +102,8 @@ type CgroupCollector struct {
 	lastSkipped  int
 
 	podNames map[string][2]string // pod UID → namespace, name; from PodLogRoot
+	// containerNames is container ID → name, from ContainerLogRoot.
+	containerNames map[string]string
 }
 
 func (c *CgroupCollector) log(format string, args ...any) {
@@ -133,6 +138,12 @@ type CgroupOptions struct {
 	// entry per pod; each pod subject is labelled namespace=<namespace> and
 	// pod=<name> from it. Empty names nothing: the subject stays the UID either way.
 	PodLogRoot string
+	// ContainerLogRoot is the kubelet's /var/log/containers, one link per container,
+	// <pod>_<namespace>_<container>-<id>.log. A pod with more than one container named
+	// there is broken down into container:<uid>.<name> subjects, each labelled with its
+	// pod as parent; a pod with one container is that container, and gets none. Empty
+	// breaks down nothing.
+	ContainerLogRoot string
 	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
 	// advance it instead of sleeping.
 	Now func() time.Time
@@ -202,7 +213,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	}
 	c := &CgroupCollector{
 		nodeID: nodeID, cgroupRoot: cgroupRoot, sid: "cgroup:" + nodeID,
-		numCPU: float64(runtime.NumCPU()), opts: opts,
+		numCPU: machineCPUs(opts.ProcRoot), opts: opts,
 		prev: make(map[string]*cpuSnapshot),
 	}
 	c.memTotal = opts.MemTotalBytes
@@ -216,7 +227,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	var globs []string
 	for _, g := range opts.UnitGlobs {
 		if _, err := path.Match(g, ""); err != nil {
-			c.log("cgroup collector: -cgroup-units pattern %q is malformed (%v) and is ignored", g, err)
+			c.log("cgroup collector: config.units pattern %q is malformed (%v) and is ignored", g, err)
 			continue
 		}
 		globs = append(globs, g)
@@ -256,7 +267,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
 	if rootErr != nil && !c.rootWarned {
-		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at -cgroup-root?",
+		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at its config.root?",
 			c.cgroupRoot, rootErr)
 		c.rootWarned = true
 	}
@@ -264,7 +275,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		return out, nil
 	}
 	seen := map[string]bool{}
-	var promised []*types.MetricSample // subjects promised CPU: the node's contention is theirs
+	var promised []podCPU // pods promised CPU: the node's contention is theirs
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
@@ -307,28 +318,51 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
-			if labels["qos"] != "besteffort" {
-				promised = append(promised, samples...)
+			// Node contention is relief's trigger and relief acts on pods: a pod that was
+			// promised CPU sets it. A BestEffort pod's waiting is the share it was promised,
+			// and a unit's is not the runtime's to relieve; both are still emitted.
+			if labels["kind"] == "pod" && labels["qos"] != "besteffort" {
+				if pc, ok := c.podCPULocked(info.subject, p, samples); ok {
+					promised = append(promised, pc)
+				}
+			}
+			// A pod's parts are not counted again in the node's contention: the pod's
+			// own reading already holds them.
+			for _, pt := range c.containerPartsLocked(p, &rescanned) {
+				sub := "container:" + labels["pod_uid"] + "." + sanitizeContainer(pt.name)
+				if len(seen) >= c.opts.MaxSubjects {
+					skipped++
+					break
+				}
+				seen[sub] = true
+				cl := make(map[string]string, len(labels)+2)
+				for k, v := range labels {
+					cl[k] = v
+				}
+				cl["kind"], cl["container"], cl["parent"] = "container", pt.name, info.subject
+				cl["cgroup"] = labels["cgroup"] + "/" + filepath.Base(pt.dir)
+				parts, _ := c.collectOneLocked(sub, pt.dir, cl, now)
+				out = append(out, parts...)
 			}
 			return filepath.SkipDir // a subject's children are not subjects
 		}
 		return nil
 	})
 	if !sawPods && !c.noPodsWarned {
-		c.log("cgroup collector: no kubepods cgroup under %s while -cgroup-subjects is on; if the agent runs in a container this root is its own cgroup, not the node's — mount the host's cgroup root",
+		c.log("cgroup collector: no kubepods cgroup under %s while config.subjects is on; if the agent runs in a container this root is its own cgroup, not the node's — mount the host's cgroup root",
 			c.cgroupRoot)
 		c.noPodsWarned = true
 	}
 	if skipped != c.lastSkipped {
 		if skipped > 0 {
-			c.log("cgroup collector: %d subjects beyond -cgroup-max-subjects=%d skipped this tick; the census under-counts by that many",
+			c.log("cgroup collector: %d subjects beyond config.max_subjects=%d skipped this tick; the census under-counts by that many",
 				skipped, c.opts.MaxSubjects)
 		} else {
-			c.log("cgroup collector: no subjects skipped by -cgroup-max-subjects=%d any more", c.opts.MaxSubjects)
+			c.log("cgroup collector: no subjects skipped by config.max_subjects=%d any more", c.opts.MaxSubjects)
 		}
 		c.lastSkipped = skipped
 	}
-	if worst, ok := worstContention(promised); ok {
+	if worst, ok := owedContention(promised, c.podCPUs()); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
 	for subject := range c.prev {
@@ -454,14 +488,71 @@ func contention(prev, snap *cpuSnapshot, elapsedUs int64) (float64, bool) {
 // CPU: a BestEffort pod has no request, so on a node that is merely busy it waits
 // nearly all the time, and letting it set the node's signal would have relief cap
 // a workload that was promised CPU to serve one that was promised none.
-func worstContention(samples []*types.MetricSample) (float64, bool) {
-	worst, ok := 0.0, false
+// podCPULocked is a pod's part in owedContention: its contention and the cores it used,
+// from this collect's samples, and its cpu.weight and CPU limit from its cgroup. A pod
+// with no contention reading this window has no part.
+func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.MetricSample) (podCPU, bool) {
+	pc := podCPU{subject: subject, weight: 100, limit: math.Inf(1)}
+	var have bool
 	for _, s := range samples {
-		if s.MetricType == types.CPUContentionRatio && s.Subject != "" && (!ok || s.Value > worst) {
-			worst, ok = s.Value, true
+		switch s.MetricType {
+		case types.CPUContentionRatio:
+			pc.contention, have = s.Value, true
+		case types.CPUUtilization:
+			pc.cores = s.Value * c.numCPU
 		}
 	}
-	return worst, ok
+	if b, err := os.ReadFile(filepath.Join(dir, "cpu.weight")); err == nil {
+		if w, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && w > 0 {
+			pc.weight = w
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "cpu.max")); err == nil {
+		if f := strings.Fields(string(b)); len(f) == 2 && f[0] != "max" {
+			q, e1 := strconv.ParseFloat(f[0], 64)
+			per, e2 := strconv.ParseFloat(f[1], 64)
+			if e1 == nil && e2 == nil && per > 0 {
+				pc.limit = q / per
+			}
+		}
+	}
+	return pc, have
+}
+
+// podCPUs is how many CPUs the pods may run on: the kubepods cgroup's cpuset when it is
+// narrower than the node (the case-study node keeps some CPUs for the agent's models),
+// the node's CPUs otherwise.
+func (c *CgroupCollector) podCPUs() float64 {
+	for _, kp := range []string{"kubepods", "kubepods.slice"} {
+		b, err := os.ReadFile(filepath.Join(c.cgroupRoot, kp, "cpuset.cpus.effective"))
+		if err != nil {
+			continue
+		}
+		if n := cpusetSize(strings.TrimSpace(string(b))); n > 0 {
+			return float64(n)
+		}
+	}
+	return c.numCPU
+}
+
+// cpusetSize counts the CPUs in a cpuset list such as 0-5,8.
+func cpusetSize(list string) int {
+	n := 0
+	for _, part := range strings.Split(list, ",") {
+		lo, hi, rng := strings.Cut(part, "-")
+		a, err := strconv.Atoi(lo)
+		if err != nil {
+			continue
+		}
+		if !rng {
+			n++
+			continue
+		}
+		if b, err := strconv.Atoi(hi); err == nil && b >= a {
+			n += b - a + 1
+		}
+	}
+	return n
 }
 
 // cmdLabel returns the basename of argv0 of the first process in the cgroup, or "".
@@ -747,4 +838,99 @@ func (c *CgroupCollector) podNameLocked(uid string, rescanned *bool) ([2]string,
 	}
 	nn, ok := c.podNames[uid]
 	return nn, ok
+}
+
+// containerPart is one container's cgroup inside a pod's, and the name it runs under.
+type containerPart struct{ dir, name string }
+
+// containerPartsLocked is the named containers in a pod's cgroup, by name, when there
+// are two or more; none otherwise, since a single container is the pod. A child whose
+// ID has no log link — the sandbox, a container not yet linked — is not one of them.
+func (c *CgroupCollector) containerPartsLocked(podDir string, rescanned *bool) []containerPart {
+	if c.opts.ContainerLogRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(podDir)
+	if err != nil {
+		return nil
+	}
+	var parts []containerPart
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := containerID(e.Name())
+		name, ok := c.containerNames[id]
+		if !ok && !*rescanned {
+			c.rescanContainersLocked()
+			*rescanned = true
+			name, ok = c.containerNames[id]
+		}
+		if ok {
+			parts = append(parts, containerPart{dir: filepath.Join(podDir, e.Name()), name: name})
+		}
+	}
+	if len(parts) < 2 {
+		return nil
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].name < parts[j].name })
+	return parts
+}
+
+// containerID is the runtime's ID in a container cgroup's name: the name itself under
+// the cgroupfs driver, cri-containerd-<id>.scope (or crio-, docker-) under systemd.
+func containerID(dir string) string {
+	dir = strings.TrimSuffix(dir, ".scope")
+	for _, p := range []string{"cri-containerd-", "crio-", "docker-"} {
+		dir = strings.TrimPrefix(dir, p)
+	}
+	return dir
+}
+
+// rescanContainersLocked rereads the kubelet's container links,
+// <pod>_<namespace>_<container>-<id>.log; pod and namespace are DNS names with no '_'.
+func (c *CgroupCollector) rescanContainersLocked() {
+	entries, err := os.ReadDir(c.opts.ContainerLogRoot)
+	if err != nil {
+		return
+	}
+	c.containerNames = make(map[string]string, len(entries))
+	for _, e := range entries {
+		n := strings.TrimSuffix(e.Name(), ".log")
+		parts := strings.SplitN(n, "_", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		i := strings.LastIndex(parts[2], "-")
+		if i <= 0 {
+			continue
+		}
+		c.containerNames[parts[2][i+1:]] = parts[2][:i]
+	}
+}
+
+// sanitizeContainer makes a container name a subject identity part.
+func sanitizeContainer(name string) string { return sanitiseIdentity(name) }
+
+// machineCPUs is the machine's CPU count, one cpuN line in /proc/stat each. Every CPU
+// fraction is a share of the node, so it divides by this — not runtime.NumCPU, which is the
+// CPUs the agent's own process may run on and is smaller when the agent is pinned (it was
+// six of twelve on the case-study node, and every share came out doubled). runtime.NumCPU
+// is the fallback when /proc/stat cannot be read.
+func machineCPUs(procRoot string) float64 {
+	b, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err == nil {
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) > 0 && len(f[0]) > 3 && strings.HasPrefix(f[0], "cpu") {
+				if _, err := strconv.Atoi(f[0][3:]); err == nil {
+					n++
+				}
+			}
+		}
+		if n > 0 {
+			return float64(n)
+		}
+	}
+	return float64(runtime.NumCPU())
 }

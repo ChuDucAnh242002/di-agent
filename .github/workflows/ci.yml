@@ -58,6 +58,21 @@ jobs:
       - name: Test (race detector, 5m timeout)
         run: go test -race -timeout 5m ./...
 
+      # The example plugin is certified by the same suite every Go collector
+      # passes, through the agent's real exec adapter. Linux only: it reads /proc.
+      - name: Certify example collector plugin (loadavg)
+        run: go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadavg.py
+
+      # The shell template from docs/collectors.md, so the guide's smallest example
+      # is held to the same rule as the others.
+      - name: Certify example collector plugin (shell)
+        run: go run ./cmd/mapctl collector check --exec ../examples/collectors/shell/load1.sh
+
+      # The Python SDK's own unit tests: standard library unittest, no install.
+      - name: Test Python collector SDK
+        working-directory: semantic-map/sdk/python
+        run: python3 -m unittest -v test_di_collector
+
   demo:
     name: dev.sh demo (smoke)
     runs-on: ubuntu-latest

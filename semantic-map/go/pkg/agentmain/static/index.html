@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Semantic Map — operator console</title>
+  <link rel="stylesheet" href="./style.css" />
+  <!--
+    No external dependencies, by design.
+
+    The previous console pulled Cytoscape from a CDN, which makes the operator
+    surface of an edge agent unusable on exactly the node it was written for: one
+    that is offline, air-gapped, or on a metered link. The force layout and every
+    chart here are drawn in ./js — the page is whatever the binary already
+    embeds, and nothing else.
+  -->
+  <script>
+    // Applied before first paint so a dark-themed console never flashes white.
+    try {
+      const t = localStorage.getItem('sm-theme');
+      if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+    } catch (_) { /* private mode: fall through to the OS preference */ }
+  </script>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>Semantic Map</h1>
+    <span class="owner" id="owner" title="the system these properties describe">…</span>
+  </div>
+
+  <div class="header-spacer"></div>
+
+  <div class="header-group">
+    <div class="revision" id="revision" title="every mutation advances the revision">
+      <span>rev</span><span class="n" id="revision-n">—</span>
+    </div>
+
+    <div class="toggle" role="group" aria-label="polling">
+      <button id="live-btn" aria-pressed="true" title="poll the agent continuously">Live</button>
+      <button id="step-btn" title="fetch once">Step</button>
+    </div>
+
+    <select id="interval" aria-label="poll interval" style="width:auto">
+      <option value="1000">1s</option>
+      <option value="2000" selected>2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+
+    <button class="btn ghost" id="theme-btn" title="light / dark / follow system" aria-label="theme">◐</button>
+
+    <span class="health" id="health" data-state="unknown">
+      <span class="dot"></span><span id="health-label">connecting…</span>
+    </span>
+  </div>
+</header>
+
+<section class="stats" id="stats" aria-label="map census"></section>
+
+<main>
+  <div id="canvas-wrap">
+    <svg id="graph" role="img" aria-label="the state map: properties and the relationships between them"></svg>
+
+    <div class="canvas-overlay top-left">
+      <div class="search-box">
+        <input type="search" id="search" placeholder="Filter properties  (/)" aria-label="filter properties" />
+      </div>
+      <select id="status-filter" aria-label="status filter" style="width:auto">
+        <option value="live">active + stale</option>
+        <option value="all">everything</option>
+        <option value="active">active only</option>
+        <option value="stale">stale only</option>
+        <option value="retired">retired only</option>
+      </select>
+    </div>
+
+    <div class="canvas-overlay top-right">
+      <button class="btn small" id="relayout-btn" title="re-run the force layout">Re-layout</button>
+      <button class="btn small" id="fit-btn" title="fit the graph to the viewport">Fit</button>
+      <button class="btn small" id="legend-btn" aria-pressed="true">Legend</button>
+    </div>
+
+    <div id="legends">
+      <div class="legend">
+        <section>
+          <h3>Sign</h3>
+          <ul>
+            <li><span class="line" style="background:var(--sign-pos)"></span> raises target</li>
+            <li><span class="line" style="background:var(--sign-neg)"></span> lowers target</li>
+            <li><span class="line dashed"></span> nothing observed yet</li>
+            <li class="muted">width = strength · opacity = confidence</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Provenance</h3>
+          <ul>
+            <li><span class="swatch" style="background:var(--prov-seeded)"></span> seeded</li>
+            <li><span class="swatch" style="background:var(--prov-learned)"></span> learned</li>
+            <li><span class="swatch" style="background:var(--prov-discovered)"></span> discovered</li>
+            <li><span class="swatch" style="background:var(--prov-asserted)"></span> asserted</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Property</h3>
+          <ul>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="var(--ink-secondary)"/></svg> observed</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.2" fill="none" stroke="var(--ink-secondary)" stroke-width="1.6"/><circle cx="7" cy="7" r="1.8" fill="var(--ink-secondary)"/></svg> derived</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--status-serious)" stroke-width="1.6"/></svg> stale</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--ink-muted)" stroke-width="1.4" stroke-dasharray="2 2"/></svg> retired</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <aside id="inspector" class="hidden" aria-label="inspector"></aside>
+</main>
+
+<section id="drawer" aria-label="live record">
+  <div class="drawer-resize" id="drawer-resize" role="separator" aria-orientation="horizontal"
+       title="drag to resize · double-click to reset"></div>
+  <div class="drawer-tabs" role="tablist">
+    <button class="tab" role="tab" data-pane="actions" aria-selected="false">Actions <span class="count" id="c-actions">0</span></button>
+    <button class="tab" role="tab" data-pane="journal" aria-selected="true">Journal <span class="count" id="c-journal">0</span></button>
+    <button class="tab" role="tab" data-pane="decisions" aria-selected="false">Decisions <span class="count" id="c-decisions">0</span></button>
+    <button class="tab" role="tab" data-pane="discovery" aria-selected="false">Discovery <span class="count" id="c-discovery">0</span></button>
+    <button class="tab" role="tab" data-pane="subjects" aria-selected="false">Subjects <span class="count" id="c-subjects">0</span></button>
+    <button class="tab" role="tab" data-pane="resources" aria-selected="false">Resources <span class="count" id="c-resources">0</span></button>
+    <button class="tab" role="tab" data-pane="cluster" aria-selected="false">Cluster <span class="count" id="c-cluster">0</span></button>
+    <button class="tab" role="tab" data-pane="backbone" aria-selected="false">Backbone</button>
+    <button class="tab" role="tab" data-pane="ask" aria-selected="false">Ask</button>
+    <div class="header-spacer"></div>
+    <button class="btn ghost small" id="drawer-toggle" title="collapse / expand">▾</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-pane" id="pane-actions" role="tabpanel"></div>
+    <div class="drawer-pane active" id="pane-journal" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-decisions" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-discovery" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-subjects" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-resources" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-cluster" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-backbone" role="tabpanel"></div>
+    <div class="drawer-pane" id="pane-ask" role="tabpanel"></div>
+  </div>
+</section>
+
+<div id="tooltip" role="tooltip" aria-hidden="true"></div>
+<div id="toasts" aria-live="polite"></div>
+
+<dialog id="prompt-dialog">
+  <h2 id="prompt-title">Confirm</h2>
+  <div class="body" id="prompt-body"></div>
+  <div class="foot">
+    <button class="btn" value="cancel" id="prompt-cancel">Cancel</button>
+    <button class="btn primary" value="ok" id="prompt-ok">Apply</button>
+  </div>
+</dialog>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
