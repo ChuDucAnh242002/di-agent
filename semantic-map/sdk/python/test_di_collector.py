@@ -34,7 +34,7 @@ class ServeTest(unittest.TestCase):
 
         def setup(hello):
             seen.append(hello)
-            return lambda seq, now: []
+            return lambda now: []
 
         replies, _ = drive(setup, HELLO)
         self.assertEqual(replies, [{"protocol": 1}])
@@ -42,24 +42,24 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(seen[0]["config"], {"device": 0})
 
     def test_collect(self):
-        replies, _ = drive(lambda h: (lambda seq, now: ([sample(now=now)], ["fx", "fy"])), HELLO, collect_req(42))
+        replies, _ = drive(lambda h: (lambda now: ([sample(now=now)], ["fx", "fy"])), HELLO, collect_req(42))
         self.assertEqual(replies[1]["seq"], 42)
         self.assertEqual(replies[1]["available"], ["fx", "fy"])
         self.assertEqual(replies[1]["samples"], [sample()])
 
     def test_no_data_is_empty_samples_and_available_absent(self):
-        replies, _ = drive(lambda h: (lambda seq, now: None), HELLO, collect_req(3))
+        replies, _ = drive(lambda h: (lambda now: None), HELLO, collect_req(3))
         self.assertEqual(replies[1], {"seq": 3, "samples": []})
 
     def test_available_empty_is_sent(self):
-        replies, _ = drive(lambda h: (lambda seq, now: ([], [])), HELLO, collect_req(3))
+        replies, _ = drive(lambda h: (lambda now: ([], [])), HELLO, collect_req(3))
         self.assertEqual(replies[1], {"seq": 3, "samples": [], "available": []})
 
     def test_collect_exception_is_error_reply_and_serving_continues(self):
         calls = []
 
-        def collect(seq, now):
-            calls.append(seq)
+        def collect(now):
+            calls.append(now)
             if len(calls) == 1:
                 raise RuntimeError("device gone")
             return [sample()]
@@ -80,21 +80,21 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(replies, [{"error": "setup returned no collect function"}])
 
     def test_unknown_op(self):
-        replies, _ = drive(lambda h: (lambda seq, now: []), HELLO, '{"op":"flush","seq":7}')
+        replies, _ = drive(lambda h: (lambda now: []), HELLO, '{"op":"flush","seq":7}')
         self.assertEqual(replies[1]["seq"], 7)
         self.assertIn("unknown op", replies[1]["error"])
 
     def test_collect_before_hello(self):
-        replies, _ = drive(lambda h: (lambda seq, now: []), collect_req(1))
+        replies, _ = drive(lambda h: (lambda now: []), collect_req(1))
         self.assertEqual(replies, [{"seq": 1, "error": "collect before hello"}])
 
     def test_eof_shuts_down(self):
         out = io.StringIO()
-        di_collector.serve(lambda h: (lambda seq, now: []), stdin=io.StringIO(""), stdout=out, stderr=io.StringIO())
+        di_collector.serve(lambda h: (lambda now: []), stdin=io.StringIO(""), stdout=out, stderr=io.StringIO())
         self.assertEqual(out.getvalue(), "")
 
     def test_nan_and_inf_dropped_with_one_stderr_line_per_type(self):
-        def collect(seq, now):
+        def collect(now):
             return [sample("ok"), sample("bad", float("nan")), sample("bad", float("inf")), sample("worse", float("-inf"))]
 
         replies, err = drive(lambda h: collect, HELLO, collect_req(1))
@@ -105,7 +105,7 @@ class ServeTest(unittest.TestCase):
         self.assertIn("dropped 1 sample(s) of 'worse'", err)
 
     def test_nan_elsewhere_is_error_reply_not_invalid_json(self):
-        def collect(seq, now):
+        def collect(now):
             s = sample()
             s["range"] = [0, float("nan")]
             return [s]
@@ -118,20 +118,20 @@ class ServeTest(unittest.TestCase):
     def test_bad_return_shapes_are_error_replies(self):
         for bad in (42, "samples", ([], [], []), ([1], None), ("x", None), ([], 7)):
             with self.subTest(bad=bad):
-                replies, _ = drive(lambda h, bad=bad: (lambda seq, now: bad), HELLO, collect_req(1), collect_req(2))
+                replies, _ = drive(lambda h, bad=bad: (lambda now: bad), HELLO, collect_req(1), collect_req(2))
                 self.assertEqual(len(replies), 3)
                 self.assertEqual(replies[1]["seq"], 1)
                 self.assertIn("error", replies[1])
 
     def test_unserialisable_sample_is_error_reply(self):
-        replies, _ = drive(lambda h: (lambda seq, now: [{"metric_type": "x", "value": 1, "when": object()}]),
+        replies, _ = drive(lambda h: (lambda now: [{"metric_type": "x", "value": 1, "when": object()}]),
                            HELLO, collect_req(1))
         self.assertEqual(replies[1]["seq"], 1)
         self.assertIn("error", replies[1])
 
     def test_malformed_line_raises(self):
         with self.assertRaises(ValueError):
-            drive(lambda h: (lambda seq, now: []), "not json")
+            drive(lambda h: (lambda now: []), "not json")
 
 
 if __name__ == "__main__":

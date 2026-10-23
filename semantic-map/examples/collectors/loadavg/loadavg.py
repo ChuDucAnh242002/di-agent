@@ -64,7 +64,7 @@ def read_pressure(resource, now):
 
 
 def setup(hello):
-    def collect(seq, now):
+    def collect(now):
         samples = read_load(now)
         for resource in ("cpu", "memory", "io"):
             samples += read_pressure(resource, now)

@@ -8,14 +8,15 @@ loop so a plugin only says what to measure::
 
     def setup(hello):
         # hello: {"op", "protocol", "name", "node_id", "interval_ms", "config"}
-        def collect(seq, now):
+        def collect(now):
             return [{"metric_type": "queue_depth", "value": 3.0,
                      "timestamp_unix": now, "unit": "items"}]
         return collect
 
     di_collector.serve(setup)
 
-``collect(seq, now)`` returns a list of samples (``types.MetricSample`` JSON, as
+``collect(now)`` is called with the request's ``now_unix`` (Unix seconds, the
+timestamp a sample should carry; the SDK echoes ``seq`` itself) and returns a list of samples (``types.MetricSample`` JSON, as
 ``POST /ingest-sample`` takes) or a ``(samples, available)`` pair, where
 ``available`` lists every type the plugin can produce now (``[]`` says none);
 without it the agent takes the types in ``samples``. An empty list is "no data
@@ -56,7 +57,7 @@ def _write(out, line):
 def _collect_reply(collect, req, err):
     """Run one collect and encode its reply; any failure raises to the caller."""
     seq = req.get("seq", 0)
-    result = collect(seq, req.get("now_unix", 0))
+    result = collect(req.get("now_unix", 0))
     available = None
     if isinstance(result, tuple):
         if len(result) != 2:
