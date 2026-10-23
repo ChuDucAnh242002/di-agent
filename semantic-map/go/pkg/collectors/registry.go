@@ -85,12 +85,12 @@ func Build(env Env, entries []spec.CollectorEntry) (*Supervisor, error) {
 		}
 		members = append(members, m)
 	}
-	return NewSupervisor(env.NodeID, members, env.Logf), nil
+	return NewSupervisor(env, members), nil
 }
 
 func buildMember(env Env, e spec.CollectorEntry) (m Member, err error) {
-	// Always set here so the default has one source; the supervisor's own fallback
-	// only guards a Member built by hand.
+	// Set here so status and the adapters agree on it; NewSupervisor applies the
+	// same default to a Member built by hand.
 	timeout := e.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout(env.Interval)

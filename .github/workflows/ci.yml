@@ -64,6 +64,11 @@ jobs:
       - name: Certify example collector plugin (shell)
         run: go run ./cmd/mapctl collector check --exec ../examples/collectors/shell/load1.sh
 
+      # The Python SDK's own unit tests: standard library unittest, no install.
+      - name: Test Python collector SDK
+        working-directory: semantic-map/sdk/python
+        run: python3 -m unittest -v test_di_collector
+
   demo:
     name: dev.sh demo (smoke)
     runs-on: ubuntu-latest

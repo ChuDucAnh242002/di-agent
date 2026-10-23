@@ -7,7 +7,7 @@ loop so a plugin only says what to measure::
     import di_collector
 
     def setup(hello):
-        # hello: {"op", "protocol", "name", "node_id", "interval_s", "config"}
+        # hello: {"op", "protocol", "name", "node_id", "interval_ms", "config"}
         def collect(seq, now):
             return [{"metric_type": "queue_depth", "value": 3.0,
                      "timestamp_unix": now, "unit": "items"}]
@@ -17,10 +17,15 @@ loop so a plugin only says what to measure::
 
 ``collect(seq, now)`` returns a list of samples (``types.MetricSample`` JSON, as
 ``POST /ingest-sample`` takes) or a ``(samples, available)`` pair, where
-``available`` lists every type the plugin can produce now; without it the agent
-takes the types in ``samples``. An empty list is "no data right now". Raising in
-``setup`` refuses the hello; raising in ``collect`` faults that tick, and the agent
-restarts the plugin with backoff. Leave ``node_id``, ``source`` and ``event_id``
+``available`` lists every type the plugin can produce now (``[]`` says none);
+without it the agent takes the types in ``samples``. An empty list is "no data
+right now". A sample whose value is NaN or infinite cannot be sent as JSON: it is
+left out of the reply and a line on stderr says so.
+
+Raising in ``setup`` refuses the hello. Raising in ``collect``, or returning
+something that is not a list of samples or a ``(samples, available)`` pair, is that
+tick's error reply, and the agent restarts the plugin with backoff; the plugin
+itself never dies of a bad tick. Leave ``node_id``, ``source`` and ``event_id``
 out: the agent stamps them. Log to stderr; stdout belongs to the protocol.
 
 Standard library only, one file: copy it beside the plugin or put its directory
@@ -28,6 +33,7 @@ on ``sys.path``. Certify the plugin with ``mapctl collector check --exec PLUGIN`
 """
 
 import json
+import math
 import sys
 
 PROTOCOL_VERSION = 1
@@ -35,45 +41,86 @@ PROTOCOL_VERSION = 1
 __all__ = ["PROTOCOL_VERSION", "serve"]
 
 
-def _reply(out, msg):
-    out.write(json.dumps(msg, separators=(",", ":")) + "\n")
+def _encode(msg):
+    # allow_nan=False is the backstop: a non-finite number that got past the
+    # filter raises here, inside the tick, rather than writing invalid JSON.
+    return json.dumps(msg, separators=(",", ":"), allow_nan=False)
+
+
+def _write(out, line):
+    out.write(line + "\n")
     # The agent waits for each reply before sending anything else.
     out.flush()
 
 
-def _answer(collect, req):
+def _collect_reply(collect, req, err):
+    """Run one collect and encode its reply; any failure raises to the caller."""
     seq = req.get("seq", 0)
-    if collect is None:
-        return {"seq": seq, "error": "collect before hello"}
-    try:
-        result = collect(seq, req.get("now_unix", 0))
-    except Exception as e:  # a bad tick costs that tick, not the process
-        return {"seq": seq, "error": str(e) or type(e).__name__}
+    result = collect(seq, req.get("now_unix", 0))
     available = None
     if isinstance(result, tuple):
+        if len(result) != 2:
+            raise TypeError("collect returned a tuple of %d; want (samples, available)" % len(result))
         samples, available = result
     else:
         samples = result
-    reply = {"seq": seq, "samples": list(samples or [])}
+    if samples is None:
+        samples = []
+    if not isinstance(samples, (list, tuple)):
+        raise TypeError("collect returned %s; want a list of samples" % type(samples).__name__)
+    kept, dropped = [], {}
+    for s in samples:
+        if s is None:
+            continue
+        if not isinstance(s, dict):
+            raise TypeError("a sample is %s; want a dict" % type(s).__name__)
+        v = s.get("value")
+        if isinstance(v, float) and not math.isfinite(v):
+            mt = str(s.get("metric_type", ""))
+            dropped[mt] = dropped.get(mt, 0) + 1
+            continue
+        kept.append(s)
+    for mt, n in dropped.items():
+        err.write("di_collector: dropped %d sample(s) of %r with a NaN or infinite value\n" % (n, mt))
+    if dropped:
+        err.flush()
+    reply = {"seq": seq, "samples": kept}
     if available is not None:
+        if not isinstance(available, (list, tuple)):
+            raise TypeError("available is %s; want a list of metric types" % type(available).__name__)
         reply["available"] = list(available)
-    return reply
+    return _encode(reply)
 
 
-def serve(setup, stdin=None, stdout=None):
+def _answer(collect, req, err):
+    """One collect request's reply line. Nothing a tick does escapes as an exception."""
+    seq = req.get("seq", 0)
+    if collect is None:
+        return _encode({"seq": seq, "error": "collect before hello"})
+    try:
+        return _collect_reply(collect, req, err)
+    except Exception as e:  # a bad tick costs that tick, not the process
+        return _encode({"seq": seq, "error": str(e) or type(e).__name__})
+
+
+def serve(setup, stdin=None, stdout=None, stderr=None):
     """Answer the agent until stdin closes, which is how the agent stops a plugin.
 
     ``setup(hello)`` is called on every hello and returns the collect function. If
-    it raises, the refusal is sent and ``serve`` returns, since the agent will not
-    use a plugin that refused. A line that is not JSON raises ``ValueError``.
+    it raises or returns None, the refusal is sent and ``serve`` returns, since the
+    agent will not use a plugin that refused. A line that is not a JSON object
+    raises ``ValueError``: the agent never sends one.
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
     collect = None
     for line in stdin:
         if not line.strip():
             continue
         req = json.loads(line)
+        if not isinstance(req, dict):
+            raise ValueError("request is not a JSON object: %r" % line)
         op = req.get("op")
         if op == "hello":
             try:
@@ -81,11 +128,11 @@ def serve(setup, stdin=None, stdout=None):
                 if collect is None:
                     raise ValueError("setup returned no collect function")
             except Exception as e:
-                _reply(stdout, {"error": str(e) or type(e).__name__})
+                _write(stdout, _encode({"error": str(e) or type(e).__name__}))
                 return
-            _reply(stdout, {"protocol": PROTOCOL_VERSION})
+            _write(stdout, _encode({"protocol": PROTOCOL_VERSION}))
         elif op == "collect":
-            _reply(stdout, _answer(collect, req))
+            _write(stdout, _answer(collect, req, stderr))
         else:
             # One reply per request keeps the agent's reads in step.
-            _reply(stdout, {"seq": req.get("seq", 0), "error": "unknown op %r" % op})
+            _write(stdout, _encode({"seq": req.get("seq", 0), "error": "unknown op %r" % op}))

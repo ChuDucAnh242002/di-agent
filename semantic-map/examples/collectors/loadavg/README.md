@@ -10,8 +10,9 @@ Node load and pressure for di-agent, written against the Python SDK
 
 All are node-level (no subject), timestamped with the agent's `now`. A kernel
 without PSI has no `/proc/pressure`; the plugin then emits only the load types.
-Without `/proc` (macOS) it emits nothing, which is not an error but does not
-certify.
+An unreadable `/proc/loadavg` is a fault: the tick is an error reply, which the
+agent shows in `GET /collectors`, rather than an empty batch that would look
+healthy. Without `/proc` (macOS) every tick is that error, so it does not certify.
 
 ## Use it
 
@@ -37,7 +38,7 @@ CI runs exactly this on Linux. To try it by hand against a fake tree, set
 `DI_PROC_ROOT` (default `/proc`) and pipe requests in:
 
 ```bash
-printf '%s\n' '{"op":"hello","protocol":1,"name":"loadavg","node_id":"n1","interval_s":10,"config":{}}' \
+printf '%s\n' '{"op":"hello","protocol":1,"name":"loadavg","node_id":"n1","interval_ms":10000,"config":{}}' \
               '{"op":"collect","seq":1,"now_unix":1761160000}' \
   | DI_PROC_ROOT=/tmp/fakeproc ./loadavg.py
 ```

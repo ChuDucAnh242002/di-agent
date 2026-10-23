@@ -254,6 +254,7 @@ Then update the endpoint table in README §2 and the header comment at the top o
 go test -race ./...           # what CI runs; use before pushing
 go test -v -run TestScenario ./internal/minimal/tests/    # narrated end-to-end flows
 go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergence stories
+(cd ../sdk/python && python3 -m unittest test_di_collector)  # the Python collector SDK, stdlib only; CI runs it too
 ```
 
 ### The four layers of test

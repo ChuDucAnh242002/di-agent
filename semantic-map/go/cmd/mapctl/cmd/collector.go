@@ -57,7 +57,9 @@ func newCollectorCheckCmd() *cobra.Command {
 			"the same compliance suite every Go collector passes, plus the wire-protocol\n" +
 			"checks: hello round trip, seq echo, reply within the timeout, unit and range\n" +
 			"stable over --ticks collects, no foreign node_id, timestamps in Unix seconds\n" +
-			"within 2 x --interval of now, and available covering every emitted type.\n" +
+			"within 2 x --interval of now, no restart between collects, and available\n" +
+			"covering every emitted type. A malformed or duplicate sample, which the agent\n" +
+			"would drop, fails the suite's NoMalformedSamples or NoDuplicateSamplesInBatch.\n" +
 			"Prints PASS or FAIL per check, then the verdict; exits 0 only when certified.\n" +
 			"Each check starts the plugin afresh.",
 		Example: "  mapctl collector check --exec ./loadavg.py\n" +
@@ -239,6 +241,22 @@ func runPluginChecks(o *checkOpts, args []string, config map[string]any, errOut 
 					r.Errorf("collect %d: %s timestamp_unix %d is more than 2 x --interval from now_unix %d; it must be Unix seconds", i+1, s.MetricType, s.TimestampUnix, before)
 				}
 			}
+		}
+	})
+
+	// A plugin that exits after every reply still works — the adapter restarts it
+	// before the next collect — but each restart re-runs hello and the plugin's
+	// setup, and under the agent it shows as restarts climbing in GET /collectors.
+	// Only an exec plugin has a process to restart.
+	root.Run("NoUnexpectedRestarts", func(r compliance.Reporter) {
+		p := start(r)
+		rs, ok := p.(interface{ Restarts() int64 })
+		if !ok {
+			return
+		}
+		ticks(r, p, max(o.ticks, 2), spacing, func(int, []*types.MetricSample, []types.MetricType) {})
+		if n := rs.Restarts(); n > 0 {
+			r.Errorf("the plugin was restarted %d time(s) over %d collects; it must keep running between requests and exit only when stdin closes", n, max(o.ticks, 2))
 		}
 	})
 

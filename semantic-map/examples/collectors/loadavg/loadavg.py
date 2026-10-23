@@ -11,6 +11,8 @@ Emits, node-level (no subject):
   at least one task waited on that resource. Unit ``share`` on [0, 1]. A kernel
   without PSI has no such files; the plugin then emits only the load types.
 
+An unreadable /proc/loadavg is a fault (an error reply), not an empty batch.
+
 DI_PROC_ROOT (default /proc) points the plugin at another tree, so it can be run
 against a fake /proc by hand. The agent starts plugins with a minimal environment,
 so under the agent it is always /proc.
@@ -28,11 +30,13 @@ CPUS = os.cpu_count() or 1
 
 
 def read_load(now):
-    try:
-        with open(os.path.join(PROC, "loadavg")) as f:
-            fields = f.read().split()
-    except OSError:
-        return []
+    # Every Linux has /proc/loadavg, so failing to read it is a fault, not "no
+    # data": raising makes the tick an error reply the operator sees in
+    # GET /collectors, where an empty list would look like a healthy plugin.
+    with open(os.path.join(PROC, "loadavg")) as f:
+        fields = f.read().split()
+    if len(fields) < 3:
+        raise ValueError("%s/loadavg has %d fields, want at least 3" % (PROC, len(fields)))
     return [
         {"metric_type": name, "value": float(v) / CPUS, "timestamp_unix": now,
          "unit": "load_per_cpu", "chart": "loadavg"}
@@ -41,6 +45,7 @@ def read_load(now):
 
 
 def read_pressure(resource, now):
+    # A kernel without PSI has no /proc/pressure: that is no data, not a fault.
     try:
         with open(os.path.join(PROC, "pressure", resource)) as f:
             lines = f.read().splitlines()

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -64,8 +65,10 @@ type ExecCollector struct {
 	closed  bool
 	seq     uint64
 
+	// availMu guards the last successful reply's available list and drops.
 	availMu   sync.Mutex
 	available []types.MetricType
+	drops     []contracts.SampleDrop
 
 	restarts atomic.Int64
 
@@ -136,6 +139,9 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	if e.closed {
 		return nil, errors.New("collector closed")
 	}
+	e.availMu.Lock()
+	e.drops = nil
+	e.availMu.Unlock()
 	deadline := time.Now().Add(e.timeout)
 	if e.proc != nil {
 		// A plugin that exited quietly between ticks is not a fault of this tick;
@@ -162,18 +168,29 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	if err != nil {
 		return nil, e.fault(err)
 	}
-	var r CollectReply
-	if err := json.Unmarshal(line, &r); err != nil {
-		return nil, e.fault(fmt.Errorf("collect reply is not JSON: %w", err))
-	}
-	if err := checkCollect(&r, seq); err != nil {
+	r, err := decodeReply(line)
+	if err != nil {
 		return nil, e.fault(err)
 	}
-	samples, avail := stampReply(e.name, e.env.NodeID, now, &r)
+	if err := checkCollect(r, seq); err != nil {
+		return nil, e.fault(err)
+	}
+	samples, avail, drops := stampReply(e.name, e.env.NodeID, now, r)
 	e.availMu.Lock()
 	e.available = avail
+	e.drops = drops
 	e.availMu.Unlock()
 	return samples, nil
+}
+
+// TakeDrops returns what the last Collect dropped from the plugin's reply —
+// malformed and duplicate samples, invalid available entries — and forgets it.
+func (e *ExecCollector) TakeDrops() []contracts.SampleDrop {
+	e.availMu.Lock()
+	defer e.availMu.Unlock()
+	d := e.drops
+	e.drops = nil
+	return d
 }
 
 // SourceID is the entry name, so it is stable across restarts.
@@ -229,8 +246,7 @@ func (e *ExecCollector) spawn(deadline time.Time) error {
 		return err
 	}
 	e.proc = p
-	hello := Hello{Op: "hello", Protocol: ProtocolVersion, Name: e.name, NodeID: e.env.NodeID,
-		IntervalS: int(e.env.Interval / time.Second), Config: e.config}
+	hello := newHello(e.env, e.name, e.config)
 	line, err := e.roundTrip(hello, deadline)
 	if err != nil {
 		return e.fault(fmt.Errorf("hello: %w", err))

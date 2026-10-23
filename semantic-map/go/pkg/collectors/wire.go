@@ -1,10 +1,13 @@
 package collectors
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/ingest/client"
 	"github.com/DiyazY/di-agent/pkg/types"
 	"go.yaml.in/yaml/v3"
@@ -15,13 +18,21 @@ import (
 const ProtocolVersion = 1
 
 // Hello is sent once when a plugin is started or reconnected, before any collect.
+// IntervalMS is sources.interval in milliseconds, so a sub-second interval is not
+// truncated to zero.
 type Hello struct {
-	Op        string         `json:"op"`
-	Protocol  int            `json:"protocol"`
-	Name      string         `json:"name"`
-	NodeID    string         `json:"node_id"`
-	IntervalS int            `json:"interval_s"`
-	Config    map[string]any `json:"config"`
+	Op         string         `json:"op"`
+	Protocol   int            `json:"protocol"`
+	Name       string         `json:"name"`
+	NodeID     string         `json:"node_id"`
+	IntervalMS int64          `json:"interval_ms"`
+	Config     map[string]any `json:"config"`
+}
+
+// newHello is the hello an adapter sends for entry name.
+func newHello(env Env, name string, config map[string]any) Hello {
+	return Hello{Op: "hello", Protocol: ProtocolVersion, Name: name, NodeID: env.NodeID,
+		IntervalMS: env.Interval.Milliseconds(), Config: config}
 }
 
 // HelloReply accepts the hello with the plugin's protocol, or refuses it with Error.
@@ -38,14 +49,93 @@ type CollectRequest struct {
 	NowUnix int64  `json:"now_unix"`
 }
 
-// CollectReply is one batch. Available, when present, is the full set of types the
-// plugin can produce now; when absent it is the set of types in Samples. An empty
-// Samples is "no data right now"; Error is a fault.
+// CollectReply is one batch as a plugin sends it. Available is three-valued on the
+// wire: absent (or null) lets the agent take the set of types in Samples; present,
+// even as [], is the full set of types the plugin can produce now. A nil Available
+// encodes as absent, a non-nil empty one as []. An empty Samples is "no data right
+// now"; Error is a fault.
 type CollectReply struct {
-	Seq       uint64                `json:"seq"`
-	Available []types.MetricType    `json:"available,omitempty"`
-	Samples   []*types.MetricSample `json:"samples"`
-	Error     string                `json:"error,omitempty"`
+	Seq       uint64
+	Available []types.MetricType
+	Samples   []*types.MetricSample
+	Error     string
+}
+
+// MarshalJSON writes available only when it is non-nil, and samples always.
+func (r CollectReply) MarshalJSON() ([]byte, error) {
+	type out struct {
+		Seq       uint64                `json:"seq"`
+		Available *[]types.MetricType   `json:"available,omitempty"`
+		Samples   []*types.MetricSample `json:"samples"`
+		Error     string                `json:"error,omitempty"`
+	}
+	o := out{Seq: r.Seq, Samples: r.Samples, Error: r.Error}
+	if r.Available != nil {
+		o.Available = &r.Available
+	}
+	if o.Samples == nil {
+		o.Samples = []*types.MetricSample{}
+	}
+	return json.Marshal(o)
+}
+
+// rawReply is a collect reply as the agent decodes it: each sample is kept raw so
+// one bad sample is dropped on its own rather than failing the whole reply.
+type rawReply struct {
+	Seq       uint64             `json:"seq"`
+	Available []types.MetricType `json:"available"`
+	Samples   []json.RawMessage  `json:"samples"`
+	Error     string             `json:"error"`
+}
+
+// decodeReply parses a collect reply. Only a body that is not a JSON object of
+// this shape is an error; what is wrong inside a sample is stampReply's business.
+func decodeReply(b []byte) (*rawReply, error) {
+	var r rawReply
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil, fmt.Errorf("collect reply is not JSON: %w", err)
+	}
+	return &r, nil
+}
+
+// wireSample is a sample as a plugin sends it. Value is a pointer, and shadows the
+// embedded one, so an absent or null value is told apart from a zero.
+type wireSample struct {
+	types.MetricSample
+	Value *float64 `json:"value"`
+}
+
+// decodeSample decodes one sample strictly: a field types.MetricSample does not
+// have (a misspelt "valu") and a missing or null value are errors, so a typo cannot
+// turn into a reading of zero.
+func decodeSample(raw json.RawMessage) (*types.MetricSample, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var w *wireSample
+	if err := dec.Decode(&w); err != nil {
+		return nil, err
+	}
+	if w == nil {
+		return nil, errors.New("null sample")
+	}
+	if w.Value == nil {
+		return nil, errors.New("no value")
+	}
+	s := w.MetricSample
+	s.Value = *w.Value
+	return &s, nil
+}
+
+// metricTypeOf reads metric_type out of a sample that did not decode, so its drop
+// can still be logged against a type; "" when even that is not there.
+func metricTypeOf(raw json.RawMessage) types.MetricType {
+	var v struct {
+		MetricType types.MetricType `json:"metric_type"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v.MetricType
 }
 
 // configJSON turns an entry's YAML config block into the JSON object sent in hello.
@@ -83,38 +173,65 @@ func stamp(name, nodeID string, s *types.MetricSample) {
 	}
 }
 
-// stampReply stamps a successful reply's samples and works out the types the
-// plugin declares available. Null entries are dropped. The returned slice is
-// never nil, so "no data" stays distinguishable from a fault.
+// stampReply decodes and stamps a successful reply's samples, works out the types
+// the plugin declares available, and reports what it dropped on the way:
+//   - a sample that does not decode strictly (decodeSample) is DropMalformed;
+//   - a sample whose event id repeats an earlier one in the reply is DropDuplicate,
+//     and the first is kept. The map would drop the rest as already seen, so
+//     passing them on would count samples the map never takes;
+//   - an available entry that is not a valid metric type is DropInvalidAvailable,
+//     and a repeated one is folded into the first.
+//
+// The returned samples and available list are never nil, so "no data" stays
+// distinguishable from a fault.
 //
 // A sample with no timestamp takes nowUnix, the now_unix of the request it
 // answers, before its event id is computed: hashed at time zero it would carry
 // the same event id every tick, and the map would drop every sample after the
 // first as a duplicate.
-func stampReply(name, nodeID string, nowUnix int64, r *CollectReply) ([]*types.MetricSample, []types.MetricType) {
+func stampReply(name, nodeID string, nowUnix int64, r *rawReply) ([]*types.MetricSample, []types.MetricType, []contracts.SampleDrop) {
 	out := make([]*types.MetricSample, 0, len(r.Samples))
-	for _, s := range r.Samples {
-		if s == nil {
+	var drops []contracts.SampleDrop
+	seenEvent := make(map[string]bool, len(r.Samples))
+	for _, raw := range r.Samples {
+		s, err := decodeSample(raw)
+		if err != nil {
+			drops = append(drops, contracts.SampleDrop{Kind: contracts.DropMalformed, MetricType: metricTypeOf(raw)})
 			continue
 		}
 		if s.TimestampUnix == 0 {
 			s.TimestampUnix = nowUnix
 		}
 		stamp(name, nodeID, s)
+		if seenEvent[s.EventID] {
+			drops = append(drops, contracts.SampleDrop{Kind: contracts.DropDuplicate, MetricType: s.MetricType})
+			continue
+		}
+		seenEvent[s.EventID] = true
 		out = append(out, s)
-	}
-	if r.Available != nil {
-		return out, r.Available
 	}
 	avail := []types.MetricType{}
 	seen := map[types.MetricType]bool{}
+	if r.Available != nil {
+		for _, mt := range r.Available {
+			if !types.ValidMetricType(string(mt)) {
+				drops = append(drops, contracts.SampleDrop{Kind: contracts.DropInvalidAvailable, MetricType: mt})
+				continue
+			}
+			if !seen[mt] {
+				seen[mt] = true
+				avail = append(avail, mt)
+			}
+		}
+		return out, avail, drops
+	}
 	for _, s := range out {
 		if !seen[s.MetricType] {
 			seen[s.MetricType] = true
 			avail = append(avail, s.MetricType)
 		}
 	}
-	return out, avail
+	return out, avail, drops
 }
 
 // resolveTimeout is the per-request timeout of an entry: the configured one, or
@@ -144,7 +261,7 @@ func checkHello(r HelloReply) error {
 
 // checkCollect decides whether a collect reply is a usable answer to request seq:
 // an error reply is a fault, and so is a reply to another request.
-func checkCollect(r *CollectReply, seq uint64) error {
+func checkCollect(r *rawReply, seq uint64) error {
 	if r.Error != "" {
 		return fmt.Errorf("plugin error: %s", r.Error)
 	}

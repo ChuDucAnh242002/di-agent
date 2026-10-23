@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -87,7 +88,7 @@ func member(name string, c *fakeCollector) Member {
 func newTestSupervisor(t *testing.T, members ...Member) (*Supervisor, *fakeClock) {
 	t.Helper()
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
-	s := NewSupervisor(testNode, members, t.Logf)
+	s := NewSupervisor(Env{NodeID: testNode, Logf: t.Logf}, members)
 	s.now = clk.Now
 	return s, clk
 }
@@ -440,5 +441,71 @@ func TestSupervisorPromptMemberNotFaultedBehindSlowerOne(t *testing.T) {
 		if st := statusOf(t, s, "b"); st.State != "ok" || st.LastError != "" {
 			t.Fatalf("tick %d: b state=%q last_error=%q, want ok", i+1, st.State, st.LastError)
 		}
+	}
+}
+
+// droppingFake reports drops the way the exec and http adapters do.
+type droppingFake struct {
+	fakeCollector
+	drops []contracts.SampleDrop
+}
+
+func (d *droppingFake) TakeDrops() []contracts.SampleDrop {
+	out := d.drops
+	d.drops = nil
+	return out
+}
+
+// What an adapter dropped from its plugin's reply is a violation like any other:
+// counted in status and logged once per kind and type.
+func TestSupervisorCountsAdapterDropsAsViolations(t *testing.T) {
+	d := &droppingFake{fakeCollector: fakeCollector{id: "d", samples: []*types.MetricSample{sample("ok", "share")}}}
+	d.drops = []contracts.SampleDrop{{Kind: contracts.DropMalformed, MetricType: "x"}, {Kind: contracts.DropDuplicate, MetricType: "ok"}}
+	sink := &logSink{}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{{Name: "d", Kind: "exec", C: d, Timeout: time.Second}})
+	out, _ := s.Collect()
+	if len(out) != 1 {
+		t.Fatalf("got %d samples, want the clean batch", len(out))
+	}
+	st := statusOf(t, s, "d")
+	if st.Violations != 2 || st.Samples != 1 || st.State != "ok" {
+		t.Fatalf("status = %+v, want 2 violations, 1 sample, ok", st)
+	}
+	if sink.count(`collector[d]: dropped "x": malformed sample`) != 1 || sink.count(`collector[d]: dropped "ok": duplicate sample`) != 1 {
+		t.Fatalf("log = %q", sink.lines)
+	}
+}
+
+// A violation is logged once per kind and metric type, not once per kind: the
+// second type broken the same way is news an operator needs.
+func TestSupervisorViolationLogKeyedByKindAndType(t *testing.T) {
+	sink := &logSink{}
+	f := &fakeCollector{id: "f", samples: []*types.MetricSample{sample("a", ""), sample("a", ""), sample("b", "")}}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{member("f", f)})
+	s.Collect()
+	s.Collect()
+	if n := sink.count(`collector[f]: dropped "a": missing unit`); n != 1 {
+		t.Errorf("type a logged %d times, want 1", n)
+	}
+	if n := sink.count(`collector[f]: dropped "b": missing unit`); n != 1 {
+		t.Errorf("type b logged %d times, want 1", n)
+	}
+	if v := statusOf(t, s, "f").Violations; v != 6 {
+		t.Errorf("violations = %d, want 6", v)
+	}
+}
+
+// A member built by hand without a timeout gets the one Build would give its entry,
+// min(interval/2, 5s), not a fixed 5s.
+func TestSupervisorHandBuiltMemberTimeoutFollowsInterval(t *testing.T) {
+	s := NewSupervisor(Env{NodeID: testNode, Interval: 2 * time.Second}, []Member{
+		{Name: "t", Kind: "type", C: &fakeCollector{id: "t"}},
+		{Name: "x", Kind: "exec", C: &fakeCollector{id: "x"}},
+	})
+	if w := s.members[0].wait; w != time.Second {
+		t.Errorf("type member waits %s, want 1s", w)
+	}
+	if w := s.members[1].wait; w != time.Second+outOfProcessGrace {
+		t.Errorf("exec member waits %s, want 1s plus the grace", w)
 	}
 }

@@ -26,8 +26,8 @@ const (
 	// grace lets that clearer error arrive before the supervisor gives up on the call.
 	outOfProcessGrace = 500 * time.Millisecond
 
-	// defaultTimeout applies to a member built without one, so a zero value cannot
-	// mean "wait forever" and stall every tick behind one member.
+	// defaultTimeout caps the timeout of an entry or member that sets none, so a
+	// zero value cannot mean "wait forever" and stall every tick behind one member.
 	defaultTimeout = 5 * time.Second
 
 	stateStarting = "starting"
@@ -94,15 +94,24 @@ type memberState struct {
 	// concurrently with an abandoned call still inside the member.
 	available []types.MetricType
 
-	decl           map[types.MetricType]declaration
-	loggedOwnDrop  map[types.MetricType]bool
-	loggedViolKind map[string]bool
+	decl          map[types.MetricType]declaration
+	loggedOwnDrop map[types.MetricType]bool
+	loggedViol    map[violationKey]bool
+}
+
+// violationKey is what a violation is logged once per: its kind and the metric
+// type it concerned, so a second type broken the same way is still logged.
+type violationKey struct {
+	kind string
+	mt   types.MetricType
 }
 
 type callResult struct {
 	samples   []*types.MetricSample
 	available []types.MetricType
-	err       error
+	// drops are what the member discarded from its own source's batch.
+	drops []contracts.SampleDrop
+	err   error
 }
 
 // Supervisor collects from every member each tick and implements
@@ -135,14 +144,17 @@ type Supervisor struct {
 	owner   map[types.MetricType]int
 }
 
-// NewSupervisor wraps members, in configuration order, for the node nodeID. logf
-// receives fault, violation and ownership messages; nil discards them.
-func NewSupervisor(nodeID string, members []Member, logf func(string, ...any)) *Supervisor {
+// NewSupervisor wraps members, in configuration order, for the node env.NodeID.
+// env.Logf receives fault, violation and ownership messages; nil discards them. A
+// member with no Timeout gets DefaultTimeout(env.Interval), the timeout Build
+// gives an entry that sets none, so a hand-built member behaves like a built one.
+func NewSupervisor(env Env, members []Member) *Supervisor {
+	logf := env.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	s := &Supervisor{
-		nodeID: nodeID,
+		nodeID: env.NodeID,
 		logf:   logf,
 		now:    time.Now,
 		owner:  make(map[types.MetricType]int),
@@ -152,20 +164,20 @@ func NewSupervisor(nodeID string, members []Member, logf func(string, ...any)) *
 		names[i] = m.Name
 		timeout := m.Timeout
 		if timeout <= 0 {
-			timeout = defaultTimeout
+			timeout = DefaultTimeout(env.Interval)
 		}
 		wait := timeout
 		if m.Kind == "exec" || m.Kind == "http" {
 			wait += outOfProcessGrace
 		}
 		s.members = append(s.members, &memberState{
-			m:              m,
-			wait:           wait,
-			state:          stateStarting,
-			available:      safeAvailable(m.C),
-			decl:           make(map[types.MetricType]declaration),
-			loggedOwnDrop:  make(map[types.MetricType]bool),
-			loggedViolKind: make(map[string]bool),
+			m:             m,
+			wait:          wait,
+			state:         stateStarting,
+			available:     safeAvailable(m.C),
+			decl:          make(map[types.MetricType]declaration),
+			loggedOwnDrop: make(map[types.MetricType]bool),
+			loggedViol:    make(map[violationKey]bool),
 		})
 	}
 	s.sid = "supervisor:" + strings.Join(names, ",")
@@ -277,6 +289,9 @@ func (s *Supervisor) Collect() ([]*types.MetricSample, error) {
 			ms.state = stateOK
 			ms.lastSuccessUnix = now.Unix()
 			ms.available = results[i].available
+			for _, d := range results[i].drops {
+				s.violate(ms, d.Kind, d.MetricType)
+			}
 			out = s.admit(i, ms, results[i].samples, out)
 		}
 	}
@@ -295,6 +310,10 @@ func (s *Supervisor) call(ms *memberState, ch chan<- callResult) {
 			}
 		}()
 		r.samples, r.err = ms.m.C.Collect()
+		if d, ok := ms.m.C.(contracts.DropReporter); ok {
+			// Taken after every call so a failed one cannot leave drops behind.
+			r.drops = d.TakeDrops()
+		}
 		if r.err == nil {
 			r.available = append([]types.MetricType(nil), ms.m.C.AvailableMetrics()...)
 		}
@@ -329,15 +348,11 @@ func (s *Supervisor) fault(ms *memberState, now time.Time, msg string) {
 func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSample, out []*types.MetricSample) []*types.MetricSample {
 	for _, smp := range samples {
 		if kind := s.violation(ms, smp); kind != "" {
-			ms.violations++
-			if !ms.loggedViolKind[kind] {
-				ms.loggedViolKind[kind] = true
-				mt := types.MetricType("")
-				if smp != nil {
-					mt = smp.MetricType
-				}
-				s.logf("collector[%s]: dropped sample %q: %s (further drops of this kind are counted, not logged)", ms.m.Name, mt, kind)
+			mt := types.MetricType("")
+			if smp != nil {
+				mt = smp.MetricType
 			}
+			s.violate(ms, kind, mt)
 			continue
 		}
 		if smp.Subject == "" && !s.owns(idx, smp.MetricType) {
@@ -352,6 +367,18 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 		out = append(out, smp)
 	}
 	return out
+}
+
+// violate counts one violation of kind on a sample (or available entry) of type mt
+// and logs the first of each kind and type.
+func (s *Supervisor) violate(ms *memberState, kind string, mt types.MetricType) {
+	ms.violations++
+	k := violationKey{kind, mt}
+	if ms.loggedViol[k] {
+		return
+	}
+	ms.loggedViol[k] = true
+	s.logf("collector[%s]: dropped %q: %s (further drops of this kind and type are counted, not logged)", ms.m.Name, mt, kind)
 }
 
 // owns applies the ownership rule for an unscoped sample of mt from member idx and

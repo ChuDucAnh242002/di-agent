@@ -105,7 +105,7 @@ One envelope, two transports:
 
 ```jsonc
 // agent → plugin: once at start and after every (re)start / reconnect
-{"op":"hello","protocol":1,"name":"gpu","node_id":"rpi-2","interval_s":10,
+{"op":"hello","protocol":1,"name":"gpu","node_id":"rpi-2","interval_ms":10000,
  "config":{ /* the entry's config block, verbatim, as JSON */ }}
 // plugin → agent
 {"protocol":1}
@@ -121,12 +121,13 @@ One envelope, two transports:
 // or {"seq":42,"error":"…"}
 ```
 
-- `samples` entries are `types.MetricSample` JSON, the same body `POST /ingest-sample` takes ([field reference](../semantic-map/README.md#post-ingest-sample)). `null` entries are dropped.
-- `available` is optional. When absent it is exactly the set of types in that reply's samples — no union with earlier replies — which satisfies the contract (`AvailableMetrics` ⊇ the last `Collect`'s types). Send it when you can produce more types than one reply happens to carry.
+- `samples` entries are `types.MetricSample` JSON, the same body `POST /ingest-sample` takes ([field reference](../semantic-map/README.md#post-ingest-sample)). Each entry is decoded **strictly**: a field `MetricSample` does not have (a misspelt `"valu"`), a field of the wrong type, a missing or `null` `value`, a `null` entry or one that is not an object makes that sample *malformed*. A malformed sample is dropped and counted as a violation (`malformed sample`, §5); the rest of the reply is kept, and the tick is not a fault. A typo therefore never becomes a reading of zero.
+- Within one reply, a sample whose `event_id` (§3.2) repeats an earlier one's is a *duplicate*: the first is kept, the rest are dropped and counted as violations (`duplicate sample`). The map would drop them anyway; dropping them here keeps the `samples` counter to what reaches the map.
+- `available` is optional and three-valued. **Absent** (or `null`): it is exactly the set of types in that reply's samples — no union with earlier replies — which satisfies the contract (`AvailableMetrics` ⊇ the last `Collect`'s types). **Present**, even as `[]`: it is the full set of types the plugin can produce now, so `[]` says "nothing now". Send it when you can produce more types than one reply happens to carry. An entry that is not a valid `metric_type` is dropped and counted as a violation; a repeated one counts once.
 - "No data right now" is `"samples":[]`, never an error. `error` means a fault.
 - A reply whose `seq` differs from the request is discarded, and that tick is a fault. Echo the `seq` you were sent; do not count your own, because it does not restart from 1 when the plugin does.
 - A plugin `protocol` other than 1, or a hello `error`, is a hello failure.
-- `config` is `{}` when the entry has none, so a plugin can always index it. `interval_s` is `sources.interval` in whole seconds.
+- `config` is `{}` when the entry has none, so a plugin can always index it. `interval_ms` is `sources.interval` in milliseconds, so a sub-second interval is not truncated.
 - Stamp each sample with `now_unix` as its `timestamp_unix` unless the source carries its own time. `timestamp_unix` is Unix **seconds**; `mapctl collector check` fails a timestamp more than two intervals from `now_unix` (§6), which is what milliseconds look like.
 
 ### 3.2 Stamped by the agent
@@ -176,7 +177,8 @@ These hold for every producer — an in-process collector, an exec or http plugi
 | Range | Declared where the quantity has one (a share, a percentage), not for a rate or a count; the same declaration on every sample of a type. |
 | Computed series | Skipped: a remainder (CPU idle) or a longer average of a series that is kept (PSI 60 s and 300 s). |
 | Chart | The series computed together from one reading carry one `chart`, so discovery can group the arithmetic among them. |
-| Values | Finite numbers only. **Never emit NaN or ±Inf**: they are not valid JSON. The agent faults the reply and restarts the plugin, and neither helper catches it for you — Go's `plugin.Serve` fails to encode the reply and returns the error, and the Python SDK writes `NaN`, which the agent cannot parse. A reading you cannot compute is a sample you leave out. |
+| Values | Finite numbers only: NaN and ±Inf are not valid JSON. Both SDKs drop a sample whose value is not finite before encoding the reply, and write one stderr line per tick for each type that lost one; the rest of the reply is sent. A plugin that writes JSON itself must leave such a sample out — `NaN` on the wire is a reply the agent cannot parse, so a fault and a restart. A reading you cannot compute is a sample you leave out. |
+| Identity | A sample is identified by source, node, `subject`, `metric_type` and `timestamp_unix` (its `event_id`). `timestamp_unix` is the reading's time, in seconds. A reading re-sent unchanged on a later tick with the same timestamp is the same observation and is deduplicated by the map — by design, so a source that has not refreshed costs nothing. `labels` are not part of identity: two samples of one type and subject in one reply must not differ only by labels, or the second is a duplicate and dropped. |
 
 `AvailableMetrics()` is at least every type the last `Collect` emitted; a pattern-driven collector's answer grows as its source offers more.
 
@@ -210,7 +212,7 @@ How to read it when something is wrong:
 | `state: starting` | No successful collect yet. |
 | `state: backoff`, `last_error` | The last call faulted; the member is skipped until `backoff_until_unix`. `last_error` names the cause (`no reply within 3s`, `reply seq 4, want 5`, `plugin error: …`). |
 | `restarts` climbing | An exec plugin is crashing or being killed on faults. Its stderr is in the agent log under `collector[<name>]:`. |
-| `violations` > 0 | Samples broke the contract and were dropped: an invalid `metric_type` or `subject`, a `part_of` that is not a node-level type on a sample with a subject, no `unit`, an empty `range`, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type. The first of each kind is logged. |
+| `violations` > 0 | Samples broke the contract and were dropped: a malformed sample (§3.1), a duplicate within one reply, an invalid `metric_type` or `subject`, a `part_of` that is not a node-level type on a sample with a subject, no `unit`, an empty `range`, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type. An `available` entry that is not a valid type counts too. The first of each kind and type is logged. |
 | `ownership_drops` > 0 | The member emits a node-level type an earlier member owns. Rename the type if it measures something different, scope it to a subject, or reorder the list. |
 | `available` | The member's `AvailableMetrics` answer, read right after its last successful collect; the supervisor's own answer is the union of these. |
 
@@ -250,12 +252,13 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 | Check | Asserts |
 | ----- | ------- |
 | `HelloRoundTrip` | The plugin starts and accepts hello with protocol 1. If it fails, the run stops here. |
-| The compliance suite | `SourceIDNonEmpty`, `SourceIDStable`, `AvailableMetricsNonEmpty`, `AvailableMetricsStableWithoutACollect`, `CollectDoesNotError`, `CollectTwiceNoError`, `SamplesHaveNonEmptyNodeID`, `SamplesHaveNonEmptyEventID`, `SamplesHaveValidTypeAndSubject`, `CollectProducesSamples`, `SamplesDeclareUnitAndRange`, `UnitAndRangeStablePerType`, `SamplesMetricTypeInAvailable`, `EventIDDeterministic` — the same assertions a Go collector passes. |
+| The compliance suite | `SourceIDNonEmpty`, `SourceIDStable`, `AvailableMetricsNonEmpty`, `AvailableMetricsStableWithoutACollect`, `CollectDoesNotError`, `CollectTwiceNoError`, `SamplesHaveNonEmptyNodeID`, `SamplesHaveNonEmptyEventID`, `SamplesHaveValidTypeAndSubject` (`metric_type`, `subject` and `part_of`), `NoDuplicateSamplesInBatch`, `NoMalformedSamples`, `CollectProducesSamples`, `SamplesDeclareUnitAndRange`, `UnitAndRangeStablePerType`, `SamplesMetricTypeInAvailable`, `EventIDDeterministic` — the same assertions a Go collector passes. The adapter drops a malformed or duplicate sample before the suite sees the batch, and reports it ([`contracts.DropReporter`](../semantic-map/go/pkg/contracts/contracts.go)); `NoMalformedSamples` and `NoDuplicateSamplesInBatch` fail on those reports. |
 | `SeqEcho` | At least two collects in a row are answered with the request's `seq`. |
 | `ReplyWithinTimeout` | Each of `--ticks` collects returns within the timeout. |
 | `UnitRangeStableOverTicks` | A type keeps its unit and range over `--ticks` spaced collects. |
 | `NoForeignNodeID` | No sample carries a `node_id` other than the agent's. |
 | `TimestampNearNow` | Over `--ticks` collects, every `timestamp_unix` is within 2 × `--interval` of the request's `now_unix`: Unix seconds, not milliseconds. |
+| `NoUnexpectedRestarts` | Over `--ticks` collects (at least two, spaced as above), an exec plugin is never restarted: it keeps running between requests and exits only when stdin closes. |
 | `AvailableCoversEmitted` | Every emitted type is in the `available` read after that collect. |
 
 It prints `PASS <check>` or `FAIL <check>: <why>` per check, then `certified` (exit 0) or `not certified (k failed)` (exit 1). Each check starts the plugin afresh, and the plugin's stderr is shown. For an exec plugin the entry name is the command's base name without its extension (`loadavg` for `loadavg.py`).
@@ -286,7 +289,7 @@ What to notice, in the order the file does it:
 1. **It finds the SDK by its own location** (`../../../sdk/python`), not by the working directory or `PYTHONPATH` — the agent passes neither. Keep the `semantic-map/` layout or copy `di_collector.py` beside the plugin.
 2. **`setup(hello)` returns `collect`.** The SDK calls `setup` on every hello; raising there refuses the hello, which at startup refuses the daemon. `loadavg` needs no config, so its `setup` just returns `collect`.
 3. **`collect(seq, now)` returns a list of samples**, each with `unit`, a `range` where the quantity has one (pressure is a share; load has no ceiling, so none), a `chart` per reading, and `timestamp_unix` set to `now`. It leaves out `node_id`, `source` and `event_id`; the agent stamps them. Returning `(samples, available)` instead would declare more types than one reply carries.
-4. **A missing source is no data, not an error.** A kernel without PSI has no `/proc/pressure`; `read_pressure` returns `[]` and the plugin emits only the load types. Raising in `collect` would fault the tick and restart the plugin.
+4. **A source that may legitimately be absent is no data; one that must be there is a fault.** A kernel without PSI has no `/proc/pressure`; `read_pressure` returns `[]` and the plugin emits only the load types. Every Linux has `/proc/loadavg`, so `read_load` lets a failure to read it raise: the tick becomes an error reply, the member backs off, and `GET /collectors` shows why — where an empty batch would look healthy. Anything `collect` raises, or returns in the wrong shape, is an error reply; the SDK never lets a tick kill the process.
 5. **Logging goes to stderr.** Stdout belongs to the protocol.
 
 Its entry in `agent.yaml`:
@@ -307,7 +310,7 @@ The `#!/usr/bin/env python3` line resolves `python3` on the agent's `PATH`, whic
 Try it by hand, without an agent, by piping two requests in. `DI_PROC_ROOT` points it at a fake tree on a machine without `/proc`; the agent's minimal environment never passes it, so under the agent it always reads `/proc`:
 
 ```bash
-printf '%s\n' '{"op":"hello","protocol":1,"name":"loadavg","node_id":"n1","interval_s":10,"config":{}}' \
+printf '%s\n' '{"op":"hello","protocol":1,"name":"loadavg","node_id":"n1","interval_ms":10000,"config":{}}' \
               '{"op":"collect","seq":1,"now_unix":1761160000}' \
   | DI_PROC_ROOT=/tmp/fakeproc semantic-map/examples/collectors/loadavg/loadavg.py
 ```
@@ -321,7 +324,7 @@ go run ./cmd/mapctl collector check --exec ../examples/collectors/loadavg/loadav
 
 ## 9. Go, out of process: `plugin.Serve`
 
-[`pkg/collectors/plugin`](../semantic-map/go/pkg/collectors/plugin/plugin.go) runs the exec loop for a Go plugin. It imports the standard library and `pkg/types` only, so the plugin binary stays small and does not move when the agent's internals do. `setup` is called on every hello and returns the collect function; an error from it is sent as the hello's refusal. An error or panic in `collect` becomes an error reply for that tick. `Serve` returns `nil` when the agent closes stdin.
+[`pkg/collectors/plugin`](../semantic-map/go/pkg/collectors/plugin/plugin.go) runs the exec loop for a Go plugin. It imports the standard library and `pkg/types` only, so the plugin binary stays small and does not move when the agent's internals do. `setup` is called on every hello with a `plugin.Hello` — `Name`, `NodeID`, `Interval` (a `time.Duration`) and `Config` — and returns the collect function; an error from it, or a nil function, is sent as the hello's refusal. The collect function takes the request's `now` and returns samples, an optional available list and an error. An error or panic in `collect` becomes an error reply for that tick; a sample with a NaN or infinite value is dropped with a line on stderr. `Serve` returns `nil` when the agent closes stdin.
 
 ```go
 // Command load1 is an exec collector plugin: load1_raw, the 1-minute load from
@@ -345,7 +348,7 @@ func main() {
         if p, ok := h.Config["path"].(string); ok && p != "" {
             path = p
         }
-        return func(seq uint64, now time.Time) ([]*types.MetricSample, []types.MetricType, error) {
+        return func(now time.Time) ([]*types.MetricSample, []types.MetricType, error) {
             b, err := os.ReadFile(path)
             if err != nil {
                 return nil, nil, nil // no data right now: not a fault
@@ -370,7 +373,7 @@ func main() {
 }
 ```
 
-Returning `nil` samples is sent as `"samples":[]`; returning `nil` available lets the agent take the types in the batch. Build it, certify it with `mapctl collector check --exec ./load1`, and list it as an `exec` entry.
+Returning `nil` samples is sent as `"samples":[]`; returning `nil` available lets the agent take the types in the batch, and a non-nil empty available is sent as `"available":[]`. Build it, certify it with `mapctl collector check --exec ./load1`, and list it as an `exec` entry.
 
 ## 10. Go, in process: a custom binary
 
@@ -460,15 +463,16 @@ The smallest collector that certifies. It is in the repository as [`semantic-map
 #!/bin/sh
 # Minimal exec collector: one JSON line in, one JSON line out.
 while IFS= read -r line; do
+  seq=$(printf '%s' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
   case "$line" in
     *'"op":"hello"'*) echo '{"protocol":1}' ;;
     *'"op":"collect"'*)
-      seq=$(printf '%s' "$line" | sed 's/.*"seq":\([0-9]*\).*/\1/')
       now=$(printf '%s' "$line" | sed 's/.*"now_unix":\([0-9]*\).*/\1/')
       v=$(cut -d' ' -f1 /proc/loadavg)
       printf '{"seq":%s,"samples":[{"metric_type":"load1_raw","value":%s,"timestamp_unix":%s,"unit":"load"}]}\n' "$seq" "$v" "$now" ;;
+    *) printf '{"seq":%s,"error":"unknown op"}\n' "${seq:-0}" ;;
   esac
 done
 ```
 
-It names its metric `load1_raw` (unit `load`) so it can run beside the loadavg example, whose `load1` is divided by the CPU count (unit `load_per_cpu`): under one name the two would contend for ownership of one node-level type (§5), and the later-listed one's samples would be dropped. It relies on the agent writing compact JSON (no spaces after `:`), which it does. It is a template, not a robust plugin: it answers no other `op`, so an unknown one would cost a timeout rather than an error reply, and without `/proc/loadavg` it prints an empty `value`, which is not JSON — a fault and a restart every tick, where a plugin should answer `"samples":[]`. Once a plugin needs more than this, write it on the Python SDK (§8) or `plugin.Serve` (§9).
+It names its metric `load1_raw` (unit `load`) so it can run beside the loadavg example, whose `load1` is divided by the CPU count (unit `load_per_cpu`): under one name the two would contend for ownership of one node-level type (§5), and the later-listed one's samples would be dropped. It relies on the agent writing compact JSON (no spaces after `:`), which it does. Any other `op` gets an error reply echoing its `seq`, as §3 requires, so an operation a later agent adds costs that request rather than a timeout. It is a template, not a robust plugin: without `/proc/loadavg` it prints an empty `value`, which is not JSON — a fault and a restart every tick, where a plugin should send an error reply. Once a plugin needs more than this, write it on the Python SDK (§8) or `plugin.Serve` (§9).

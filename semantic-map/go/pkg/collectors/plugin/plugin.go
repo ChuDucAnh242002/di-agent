@@ -4,8 +4,8 @@
 //
 // It imports the standard library and pkg/types and nothing of the agent, so a
 // plugin binary stays small and does not move when the agent's internals do. The
-// message shapes are therefore copies of pkg/collectors' wire types; a test keeps
-// them encoding identically.
+// message shapes are therefore copies of pkg/collectors' wire types; tests keep
+// them in step with the agent's.
 package plugin
 
 import (
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -26,37 +27,54 @@ const ProtocolVersion = 1
 // maxLine bounds one request line, the same 4 MiB the agent allows a reply.
 const maxLine = 4 << 20
 
-// Hello is the agent's first message to a started plugin: who it is, which node it
-// runs on, how often it will be asked, and its entry's config block.
+// Hello is what a plugin is told when the agent starts or reconnects it: its
+// entry name, the node it runs on, how often it will be asked, and its entry's
+// config block (an empty map when the entry has none).
 type Hello struct {
-	Op        string         `json:"op"`
-	Protocol  int            `json:"protocol"`
-	Name      string         `json:"name"`
-	NodeID    string         `json:"node_id"`
-	IntervalS int            `json:"interval_s"`
-	Config    map[string]any `json:"config"`
+	Name     string
+	NodeID   string
+	Interval time.Duration
+	Config   map[string]any
 }
 
-// CollectFunc answers one collect request. seq is the request's sequence number
-// and now the agent's clock for it, which is the timestamp a sample should carry.
+// CollectFunc answers one collect request. now is the agent's clock for the
+// request, which is the timestamp a sample should carry.
 //
 // No samples is "no data right now", not an error. available, when non-nil, is
-// every type the plugin can produce now; when nil the agent takes the types in
-// samples. An error is a fault: the agent restarts the plugin with backoff.
-type CollectFunc func(seq uint64, now time.Time) (samples []*types.MetricSample, available []types.MetricType, err error)
+// every type the plugin can produce now, and an empty non-nil slice says it can
+// produce none; when nil the agent takes the types in samples. A sample whose
+// value is NaN or ±Inf cannot be sent as JSON: it is left out of the reply and a
+// line on stderr says so. An error is a fault: the agent restarts the plugin with
+// backoff.
+type CollectFunc func(now time.Time) (samples []*types.MetricSample, available []types.MetricType, err error)
 
 // Serve answers the agent on stdin and stdout until stdin closes, which is how the
-// agent stops a plugin. setup is called on every hello; an error from it is sent as
-// the hello's refusal and Serve returns it, since the agent will not use a plugin
-// that refused. A line that is not a request ends Serve with an error.
+// agent stops a plugin. setup is called on every hello; an error from it, or a nil
+// CollectFunc, is sent as the hello's refusal and Serve returns it, since the
+// agent will not use a plugin that refused. A line that is not a request ends
+// Serve with an error. Notes about dropped samples go to stderr.
 func Serve(setup func(Hello) (CollectFunc, error)) error {
-	return serve(os.Stdin, os.Stdout, setup)
+	return serve(os.Stdin, os.Stdout, os.Stderr, setup)
 }
 
+// request is any message from the agent; the fields an op does not use stay zero.
 type request struct {
-	Hello
-	Seq     uint64 `json:"seq"`
-	NowUnix int64  `json:"now_unix"`
+	Op         string         `json:"op"`
+	Protocol   int            `json:"protocol"`
+	Name       string         `json:"name"`
+	NodeID     string         `json:"node_id"`
+	IntervalMS int64          `json:"interval_ms"`
+	Config     map[string]any `json:"config"`
+	Seq        uint64         `json:"seq"`
+	NowUnix    int64          `json:"now_unix"`
+}
+
+func (r request) hello() Hello {
+	cfg := r.Config
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	return Hello{Name: r.Name, NodeID: r.NodeID, Interval: time.Duration(r.IntervalMS) * time.Millisecond, Config: cfg}
 }
 
 type helloReply struct {
@@ -65,9 +83,11 @@ type helloReply struct {
 }
 
 // collectReply always carries samples, so "no data" is an empty list on the wire.
+// Available is a pointer so nil is left out (the agent infers it) while an empty
+// list is sent as [].
 type collectReply struct {
 	Seq       uint64                `json:"seq"`
-	Available []types.MetricType    `json:"available,omitempty"`
+	Available *[]types.MetricType   `json:"available,omitempty"`
 	Samples   []*types.MetricSample `json:"samples"`
 }
 
@@ -76,7 +96,7 @@ type errorReply struct {
 	Error string `json:"error"`
 }
 
-func serve(in io.Reader, out io.Writer, setup func(Hello) (CollectFunc, error)) error {
+func serve(in io.Reader, out, errOut io.Writer, setup func(Hello) (CollectFunc, error)) error {
 	br := bufio.NewReaderSize(in, 64<<10)
 	bw := bufio.NewWriter(out)
 	// Each reply is flushed at once: the agent waits for it before anything else.
@@ -105,7 +125,7 @@ func serve(in io.Reader, out io.Writer, setup func(Hello) (CollectFunc, error)) 
 		}
 		switch req.Op {
 		case "hello":
-			c, err := setup(req.Hello)
+			c, err := callSetup(setup, req.hello())
 			if err == nil && c == nil {
 				err = errors.New("setup returned no collect function")
 			}
@@ -120,7 +140,7 @@ func serve(in io.Reader, out io.Writer, setup func(Hello) (CollectFunc, error)) 
 				return err
 			}
 		case "collect":
-			if err := reply(answer(collect, req)); err != nil {
+			if err := reply(answer(collect, req, errOut)); err != nil {
 				return err
 			}
 		default:
@@ -133,9 +153,21 @@ func serve(in io.Reader, out io.Writer, setup func(Hello) (CollectFunc, error)) 
 	}
 }
 
+// callSetup runs setup, turning a panic into a refusal like an error.
+func callSetup(setup func(Hello) (CollectFunc, error), h Hello) (c CollectFunc, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			c, err = nil, fmt.Errorf("setup panicked: %v", p)
+		}
+	}()
+	return setup(h)
+}
+
 // answer runs one collect, turning an error or a panic into an error reply so a
-// bad tick costs that tick and not the process.
-func answer(collect CollectFunc, req request) (r any) {
+// bad tick costs that tick and not the process. Non-finite samples are dropped
+// here, before encoding, and each type that lost one gets a line on errOut; a nil
+// sample is dropped silently.
+func answer(collect CollectFunc, req request, errOut io.Writer) (r any) {
 	if collect == nil {
 		return errorReply{Seq: req.Seq, Error: "collect before hello"}
 	}
@@ -144,14 +176,34 @@ func answer(collect CollectFunc, req request) (r any) {
 			r = errorReply{Seq: req.Seq, Error: fmt.Sprintf("collect panicked: %v", p)}
 		}
 	}()
-	samples, available, err := collect(req.Seq, time.Unix(req.NowUnix, 0))
+	samples, available, err := collect(time.Unix(req.NowUnix, 0))
 	if err != nil {
 		return errorReply{Seq: req.Seq, Error: err.Error()}
 	}
-	if samples == nil {
-		samples = []*types.MetricSample{}
+	kept := make([]*types.MetricSample, 0, len(samples))
+	var dropped []types.MetricType
+	count := map[types.MetricType]int{}
+	for _, s := range samples {
+		if s == nil {
+			continue
+		}
+		if math.IsNaN(s.Value) || math.IsInf(s.Value, 0) {
+			if count[s.MetricType] == 0 {
+				dropped = append(dropped, s.MetricType)
+			}
+			count[s.MetricType]++
+			continue
+		}
+		kept = append(kept, s)
 	}
-	return collectReply{Seq: req.Seq, Available: available, Samples: samples}
+	for _, mt := range dropped {
+		fmt.Fprintf(errOut, "plugin: dropped %d sample(s) of %q with a NaN or infinite value\n", count[mt], mt)
+	}
+	cr := collectReply{Seq: req.Seq, Samples: kept}
+	if available != nil {
+		cr.Available = &available
+	}
+	return cr
 }
 
 // readLine returns one line without its newline. A final line without a newline

@@ -42,9 +42,9 @@ func getCollectors(t *testing.T, sup *collectors.Supervisor) map[string]any {
 // TestCollectorsRouteLists pins that GET /collectors reports each member under the
 // field names the spec gives.
 func TestCollectorsRouteLists(t *testing.T) {
-	sup := collectors.NewSupervisor("n1", []collectors.Member{
+	sup := collectors.NewSupervisor(collectors.Env{NodeID: "n1"}, []collectors.Member{
 		{Name: "probe", Kind: "type", Type: "fake", C: fakeCollector{}, Timeout: time.Second},
-	}, nil)
+	})
 	got := getCollectors(t, sup)
 	list, ok := got["collectors"].([]any)
 	if !ok || len(list) != 1 {

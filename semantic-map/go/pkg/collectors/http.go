@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -44,8 +45,10 @@ type HTTPCollector struct {
 	closed    bool
 	seq       uint64
 
+	// availMu guards the last successful reply's available list and drops.
 	availMu   sync.Mutex
 	available []types.MetricType
+	drops     []contracts.SampleDrop
 }
 
 // NewHTTPCollector prepares the sidecar entry name; nothing is sent until Start. A
@@ -82,6 +85,9 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	if h.closed {
 		return nil, errors.New("collector closed")
 	}
+	h.availMu.Lock()
+	h.drops = nil
+	h.availMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
 	defer cancel()
 	if h.needHello {
@@ -96,18 +102,29 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	if err != nil {
 		return nil, h.fault(err)
 	}
-	var r CollectReply
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, h.fault(fmt.Errorf("collect reply is not JSON: %w", err))
-	}
-	if err := checkCollect(&r, seq); err != nil {
+	r, err := decodeReply(body)
+	if err != nil {
 		return nil, h.fault(err)
 	}
-	samples, avail := stampReply(h.name, h.env.NodeID, now, &r)
+	if err := checkCollect(r, seq); err != nil {
+		return nil, h.fault(err)
+	}
+	samples, avail, drops := stampReply(h.name, h.env.NodeID, now, r)
 	h.availMu.Lock()
 	h.available = avail
+	h.drops = drops
 	h.availMu.Unlock()
 	return samples, nil
+}
+
+// TakeDrops returns what the last Collect dropped from the plugin's reply —
+// malformed and duplicate samples, invalid available entries — and forgets it.
+func (h *HTTPCollector) TakeDrops() []contracts.SampleDrop {
+	h.availMu.Lock()
+	defer h.availMu.Unlock()
+	d := h.drops
+	h.drops = nil
+	return d
 }
 
 // SourceID is the entry name, so it is stable across reconnects.
@@ -132,8 +149,7 @@ func (h *HTTPCollector) Close() error {
 
 // hello performs the handshake and clears needHello on success. Called with mu held.
 func (h *HTTPCollector) hello(ctx context.Context) error {
-	req := Hello{Op: "hello", Protocol: ProtocolVersion, Name: h.name, NodeID: h.env.NodeID,
-		IntervalS: int(h.env.Interval / time.Second), Config: h.config}
+	req := newHello(h.env, h.name, h.config)
 	body, err := h.post(ctx, req)
 	if err != nil {
 		return h.fault(fmt.Errorf("hello: %w", err))

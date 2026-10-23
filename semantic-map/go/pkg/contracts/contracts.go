@@ -248,6 +248,38 @@ type CollectorContract interface {
 	AvailableMetrics() []types.MetricType
 }
 
+// Kinds of SampleDrop a collector that validates its own source reports.
+const (
+	// DropMalformed is a sample the source sent that is not a sample: not an
+	// object, an unknown field, a field of the wrong type, or no value.
+	DropMalformed = "malformed sample"
+	// DropDuplicate is a sample whose EventID repeats an earlier one in the same
+	// batch. The first is kept; the map would drop the rest as already seen.
+	DropDuplicate = "duplicate sample"
+	// DropInvalidAvailable is an entry of a declared available list that is not a
+	// valid MetricType.
+	DropInvalidAvailable = "invalid available metric_type"
+)
+
+// SampleDrop is one thing a collector discarded before returning a batch, and
+// why. MetricType is the type it carried, or empty when it could not be read.
+type SampleDrop struct {
+	Kind       string
+	MetricType types.MetricType
+}
+
+// DropReporter is implemented by a collector that checks what its source sends
+// and drops the bad parts itself — the exec and http adapters, which wrap a
+// plugin's replies. Without it those drops would be invisible: the batch it
+// returns is already clean.
+//
+// TakeDrops returns the drops of the most recent Collect and forgets them; a
+// second call before the next Collect returns none. The supervisor counts them as
+// violations, and certification fails a collector that has any.
+type DropReporter interface {
+	TakeDrops() []SampleDrop
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 type contractError string

@@ -1173,16 +1173,18 @@ same JSON). Two helpers write the loop for you:
 
 | Language | Helper | Shape |
 | -------- | ------ | ----- |
-| Python | [`sdk/python/di_collector.py`](sdk/python/di_collector.py), stdlib only | `di_collector.serve(setup)`; `setup(hello)` returns `collect(seq, now)`, which returns a list of samples or `(samples, available)` |
-| Go | `pkg/collectors/plugin` | `plugin.Serve(func(plugin.Hello) (plugin.CollectFunc, error))` |
+| Python | [`sdk/python/di_collector.py`](sdk/python/di_collector.py), stdlib only | `di_collector.serve(setup)`; `setup(hello)` returns `collect(seq, now)`, which returns a list of samples or `(samples, available)`; tests in `sdk/python/test_di_collector.py` |
+| Go | `pkg/collectors/plugin` | `plugin.Serve(func(plugin.Hello) (plugin.CollectFunc, error))`; a `CollectFunc` is `func(now time.Time) (samples, available, error)` |
 
 [`examples/collectors/loadavg/`](examples/collectors/loadavg/) is a complete Python plugin. [`docs/collectors.md`](../docs/collectors.md) is the developer guide: the protocol in full,
 the producer rules, ownership, security, and Go and shell examples.
 
 A plugin is valid when it passes the collector compliance suite. `mapctl collector check`
 runs that suite over it through the agent's own exec or http adapter, with no agent
-running, plus the protocol checks `HelloRoundTrip`, `SeqEcho`, `ReplyWithinTimeout`,
-`UnitRangeStableOverTicks`, `NoForeignNodeID` and `AvailableCoversEmitted`:
+running — including `NoMalformedSamples` and `NoDuplicateSamplesInBatch`, which fail on
+the samples the adapter drops from a reply — plus the protocol checks `HelloRoundTrip`,
+`SeqEcho`, `ReplyWithinTimeout`, `UnitRangeStableOverTicks`, `NoForeignNodeID`,
+`TimestampNearNow`, `NoUnexpectedRestarts` and `AvailableCoversEmitted`:
 
 ```bash
 cd semantic-map/go

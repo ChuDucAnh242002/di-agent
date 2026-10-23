@@ -53,56 +53,93 @@ type Result struct {
 func (r Result) Passed() bool { return len(r.Failures) == 0 }
 
 // Recorder is a Reporter that keeps each check's outcome instead of printing it,
-// for callers that are not a test binary.
+// for callers that are not a test binary. The zero value is ready to use.
+//
+// A failure raised outside any check — Errorf or Fatalf on the Recorder itself —
+// is recorded as a result named RootCheck, so it is not lost. A root-level Fatalf
+// cannot end a check that does not exist, so it records and returns.
 type Recorder struct {
-	mu      *sync.Mutex
-	results *[]Result
-	cur     *Result
+	shared *recorderState
+	once   sync.Once
+	cur    *Result // nil on the root
 }
+
+type recorderState struct {
+	mu      sync.Mutex
+	results []Result
+	root    int // index of the RootCheck result, or -1
+}
+
+// RootCheck names the result holding failures raised outside any check.
+const RootCheck = "(root)"
 
 // NewRecorder returns an empty Recorder.
-func NewRecorder() *Recorder {
-	return &Recorder{mu: &sync.Mutex{}, results: &[]Result{}}
+func NewRecorder() *Recorder { return &Recorder{} }
+
+func (r *Recorder) state() *recorderState {
+	r.once.Do(func() {
+		if r.shared == nil {
+			r.shared = &recorderState{root: -1}
+		}
+	})
+	return r.shared
 }
 
-// Results returns the checks run so far, in the order they finished starting.
+// Results returns the checks run so far, in the order they started.
 func (r *Recorder) Results() []Result {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]Result(nil), *r.results...)
+	st := r.state()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make([]Result, len(st.results))
+	for i, res := range st.results {
+		res.Failures = append([]string(nil), res.Failures...)
+		out[i] = res
+	}
+	return out
 }
 
 func (r *Recorder) Helper() {}
 
 func (r *Recorder) Errorf(format string, args ...any) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	st := r.state()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	msg := fmt.Sprintf(format, args...)
 	if r.cur != nil {
-		r.cur.Failures = append(r.cur.Failures, fmt.Sprintf(format, args...))
+		r.cur.Failures = append(r.cur.Failures, msg)
+		return
 	}
+	if st.root < 0 {
+		st.results = append(st.results, Result{Name: RootCheck})
+		st.root = len(st.results) - 1
+	}
+	st.results[st.root].Failures = append(st.results[st.root].Failures, msg)
 }
 
 func (r *Recorder) Fatalf(format string, args ...any) {
 	r.Errorf(format, args...)
-	panic(fatalSignal{})
+	if r.cur != nil {
+		panic(fatalSignal{})
+	}
 }
 
 func (r *Recorder) Run(name string, fn func(Reporter)) (passed bool) {
+	st := r.state()
 	res := &Result{Name: name}
-	r.mu.Lock()
-	*r.results = append(*r.results, Result{})
-	idx := len(*r.results) - 1
-	r.mu.Unlock()
-	child := &Recorder{mu: r.mu, results: r.results, cur: res}
+	st.mu.Lock()
+	st.results = append(st.results, Result{Name: name})
+	idx := len(st.results) - 1
+	st.mu.Unlock()
+	child := &Recorder{shared: st, cur: res}
 	defer func() {
 		if p := recover(); p != nil {
 			if _, ok := p.(fatalSignal); !ok {
 				panic(p)
 			}
 		}
-		r.mu.Lock()
-		(*r.results)[idx] = *res
-		r.mu.Unlock()
+		st.mu.Lock()
+		st.results[idx] = *res
+		st.mu.Unlock()
 		passed = res.Passed()
 	}()
 	fn(child)

@@ -126,6 +126,53 @@ func RunCollectorChecks(t Reporter, factory CheckFactory) {
 			if !types.ValidSubject(s.Subject) {
 				t.Errorf("MetricSample.Subject %q must be empty or <kind>:<identity> over [A-Za-z0-9._:-]; got %+v", s.Subject, s)
 			}
+			if !types.ValidPartOf(s.PartOf, s.Subject) {
+				t.Errorf("MetricSample.PartOf %q must be empty, or a valid node-level metric type on a sample with a subject; got %+v", s.PartOf, s)
+			}
+		}
+	})
+
+	// Two samples of one batch with one EventID are one observation to the map,
+	// which keeps the first and drops the rest. A collector that sends them loses
+	// readings without knowing it — typically two samples of one type and subject
+	// that differ only in labels, which are not part of a sample's identity. An
+	// adapter that drops such duplicates itself reports them through
+	// contracts.DropReporter, and they fail this check too.
+	t.Run("NoDuplicateSamplesInBatch", func(t Reporter) {
+		c := factory(t)
+		samples, _ := c.Collect()
+		seen := map[string]bool{}
+		for _, s := range samples {
+			if seen[s.EventID] {
+				t.Errorf("EventID %q appears twice in one batch (%s, subject %q); the map keeps only the first", s.EventID, s.MetricType, s.Subject)
+			}
+			seen[s.EventID] = true
+		}
+		for _, d := range takeDrops(c) {
+			if d.Kind == contracts.DropDuplicate {
+				t.Errorf("the source sent a duplicate sample of %q (same type, subject and timestamp as another in its batch); the agent drops it", d.MetricType)
+			}
+		}
+	})
+
+	// A collector that validates what its source sends (the exec and http
+	// adapters) drops a sample it cannot read rather than guessing at it; the batch
+	// it returns is clean, so the drop is visible only through DropReporter. A
+	// source whose samples the agent would drop at run time is not certified.
+	t.Run("NoMalformedSamples", func(t Reporter) {
+		c := factory(t)
+		_, _ = c.Collect()
+		for _, d := range takeDrops(c) {
+			switch d.Kind {
+			case contracts.DropMalformed:
+				if d.MetricType != "" {
+					t.Errorf("the source sent a malformed sample of %q (an unknown field, a field of the wrong type, or no value); the agent drops it", d.MetricType)
+				} else {
+					t.Errorf("the source sent a malformed sample (not an object, or no readable metric_type); the agent drops it")
+				}
+			case contracts.DropInvalidAvailable:
+				t.Errorf("the source declared %q available, which is not a valid metric type; the agent drops it", d.MetricType)
+			}
 		}
 	})
 
@@ -227,6 +274,14 @@ func metricSet(ms []types.MetricType) map[types.MetricType]bool {
 		out[m] = true
 	}
 	return out
+}
+
+// takeDrops is what c dropped from its last Collect, when it reports drops.
+func takeDrops(c contracts.CollectorContract) []contracts.SampleDrop {
+	if d, ok := c.(contracts.DropReporter); ok {
+		return d.TakeDrops()
+	}
+	return nil
 }
 
 func mustCollect(t Reporter, c contracts.CollectorContract) []*types.MetricSample {
