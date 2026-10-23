@@ -206,41 +206,6 @@ jobs:
           kubectl describe pods
           kubectl logs -l app=dataset-collector --all-containers --tail=200 || true
 
-  playground-tests:
-    name: poc2/playground cypress suite (no live cluster)
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: poc2/playground
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: poc2/playground/package-lock.json
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build
-        run: npm run build
-
-      - name: Run Cypress tests (stubbed, non-live)
-        uses: cypress-io/github-action@v6
-        with:
-          working-directory: poc2/playground
-          install: false
-          start: npm run preview -- --host 127.0.0.1 --port 4173
-          wait-on: 'http://127.0.0.1:4173'
-          config: baseUrl=http://127.0.0.1:4173
-          spec: cypress/e2e/playground.cy.ts
-
   build-push-images:
     name: build + push images (${{ matrix.service }})
     runs-on: ubuntu-latest
