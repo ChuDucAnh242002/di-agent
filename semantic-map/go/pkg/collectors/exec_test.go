@@ -308,7 +308,8 @@ func TestConfigJSON(t *testing.T) {
 }
 
 func TestExecExitedBetweenTicksRestartsFirst(t *testing.T) {
-	e, dir := fixture(t, "exit-after-collect", 2*time.Second, nil)
+	sink := &logSink{}
+	e, dir := fixture(t, "exit-after-collect", 2*time.Second, sink)
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -332,23 +333,102 @@ func TestExecExitedBetweenTicksRestartsFirst(t *testing.T) {
 	if n := strings.Count(string(b), "hello\n"); n != 2 {
 		t.Fatalf("fixture saw %d hellos, want 2", n)
 	}
+	// Not a fault, but not silent either: the operator is told, with the status.
+	if sink.count("collector[fx]: WARNING plugin exited between ticks (exit status 0)") != 1 {
+		t.Fatalf("log = %q, want one warning naming the exit status", sink.lines)
+	}
 }
 
-func TestExecWorkingDirIsResolvedCommandDir(t *testing.T) {
+// A bare command name found on PATH runs in the agent's working directory; a
+// command given as a path runs in its own directory.
+func TestExecWorkingDir(t *testing.T) {
 	bin, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	e := NewExecCollector(Env{NodeID: "n1"}, "fx", spec.ExecSpec{Command: filepath.Base(bin), Args: []string{"-test.run=^$"}}, time.Second, nil)
-	e.extraEnv = []string{"DI_FIXTURE=good"}
-	p, err := e.startProcess()
-	if err != nil {
-		t.Fatalf("startProcess: %v", err)
+	for _, tc := range []struct{ command, dir string }{
+		{filepath.Base(bin), ""},
+		{bin, filepath.Dir(bin)},
+	} {
+		e := NewExecCollector(Env{NodeID: "n1"}, "fx", spec.ExecSpec{Command: tc.command, Args: []string{"-test.run=^$"}}, time.Second, nil)
+		e.extraEnv = []string{"DI_FIXTURE=good"}
+		p, err := e.startProcess()
+		if err != nil {
+			t.Fatalf("startProcess %s: %v", tc.command, err)
+		}
+		e.proc = p
+		if p.cmd.Dir != tc.dir {
+			t.Errorf("command %q: Dir = %q, want %q", tc.command, p.cmd.Dir, tc.dir)
+		}
+		e.Close()
 	}
-	e.proc = p
-	defer e.Close()
-	if want := filepath.Dir(bin); p.cmd.Dir != want {
-		t.Fatalf("Dir = %q, want %q", p.cmd.Dir, want)
+}
+
+// Close escalates against a plugin that does not exit on stdin closing, and says
+// so in its error, so the supervisor's joined Close error names it.
+func TestExecCloseEscalates(t *testing.T) {
+	for _, tc := range []struct{ mode, want string }{
+		{"linger", "SIGTERM"},
+		{"linger-ignore-term", "killed"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			e, _ := fixture(t, tc.mode, 2*time.Second, nil)
+			e.grace = 200 * time.Millisecond
+			if err := e.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			p := e.proc
+			err := e.Close()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Close = %v, want an error naming %s", err, tc.want)
+			}
+			if !exited(p) {
+				t.Fatal("process still running after Close")
+			}
+		})
+	}
+}
+
+// A plugin that can no longer be started — its binary removed between ticks — is
+// a fault of the tick that tried: the restart is counted, the error says it was a
+// restart, and no process is left behind.
+func TestExecRestartFailure(t *testing.T) {
+	bin, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "plugin")
+	if err := os.Symlink(bin, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	e := NewExecCollector(Env{NodeID: "n1", Interval: 10 * time.Second}, "fx",
+		spec.ExecSpec{Command: link, Args: []string{"-test.run=^$"}}, 2*time.Second, nil)
+	e.extraEnv = []string{"DI_FIXTURE=exit-after-collect"}
+	t.Cleanup(func() { e.Close() })
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p := e.proc
+	if _, err := e.Collect(); err != nil {
+		t.Fatalf("first Collect: %v", err)
+	}
+	select {
+	case <-p.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fixture did not exit after its reply")
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Collect()
+	if err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("Collect with the binary gone = %v, want a restart error", err)
+	}
+	if e.Restarts() != 1 {
+		t.Fatalf("Restarts = %d, want the attempt counted", e.Restarts())
+	}
+	if e.proc != nil || !exited(p) {
+		t.Fatal("a process was left behind")
 	}
 }

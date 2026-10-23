@@ -493,7 +493,8 @@ otherwise. `state` is `starting` until the first successful collect, `ok` after 
 5 min, reset by a success). `violations` counts samples dropped for breaking the collector
 contract (an invalid metric type or subject, no unit, a foreign `node_id`, a unit or range
 that changed); `ownership_drops` counts node-level samples dropped because an earlier
-collector in the list owns that type; `restarts` counts an exec plugin's process restarts.
+collector in the list owns that type; `restarts` counts an exec plugin's process restarts,
+after a fault or after the plugin exited on its own between ticks.
 With no collectors configured the list is `[]`.
 
 ### `GET /candidates`

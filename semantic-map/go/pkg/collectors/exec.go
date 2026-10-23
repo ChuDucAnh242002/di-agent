@@ -34,6 +34,13 @@ const (
 	// shutdownGrace is waited after closing stdin, and again after SIGTERM, before
 	// the next, harder step of Close.
 	shutdownGrace = 2 * time.Second
+	// reapWait bounds the wait for a process to be reaped after SIGKILL. One that
+	// is still not gone (stuck in uninterruptible sleep) is logged and abandoned
+	// rather than allowed to hang the caller.
+	reapWait = 2 * time.Second
+	// exitLogEvery spaces the log lines about a plugin that exits between ticks;
+	// the exits in between are counted into the next line.
+	exitLogEvery = time.Minute
 	// relayDrain bounds how long a reaped process's stderr may still be relayed
 	// before the pipe is closed under it, in case a grandchild holds it open.
 	relayDrain = 200 * time.Millisecond
@@ -57,6 +64,8 @@ type ExecCollector struct {
 	// extraEnv is appended to the child's environment; tests use it to select a
 	// fixture mode.
 	extraEnv []string
+	// grace is shutdownGrace; tests shorten it.
+	grace time.Duration
 
 	// mu serialises Start, Collect and Close, which own proc.
 	mu      sync.Mutex
@@ -78,6 +87,10 @@ type ExecCollector struct {
 	windowStart time.Time
 	windowLines int
 	suppressed  int
+
+	// Exits between ticks are logged at most once per exitLogEvery. Guarded by mu.
+	lastExitLog   time.Time
+	exitsUnlogged int
 }
 
 // execProc is one running instance of the plugin.
@@ -108,7 +121,7 @@ func NewExecCollector(env Env, name string, sp spec.ExecSpec, timeout time.Durat
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &ExecCollector{env: env, name: name, sp: sp, timeout: timeout, config: config, logf: logf}
+	return &ExecCollector{env: env, name: name, sp: sp, timeout: timeout, config: config, logf: logf, grace: shutdownGrace}
 }
 
 // Start spawns the plugin and completes hello. An error means the plugin could
@@ -144,10 +157,12 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	e.availMu.Unlock()
 	deadline := time.Now().Add(e.timeout)
 	if e.proc != nil {
-		// A plugin that exited quietly between ticks is not a fault of this tick;
-		// reap it and start a fresh one instead of writing into a dead pipe.
+		// A plugin that exited between ticks is not a fault of this tick; reap it
+		// and start a fresh one instead of writing into a dead pipe. It is still a
+		// plugin that does not keep running, so it is logged.
 		select {
 		case <-e.proc.done:
+			e.logExit(e.proc.cmd.ProcessState)
 			e.fault(nil)
 		default:
 		}
@@ -209,7 +224,9 @@ func (e *ExecCollector) AvailableMetrics() []types.MetricType {
 func (e *ExecCollector) Restarts() int64 { return e.restarts.Load() }
 
 // Close shuts the plugin down: stdin is closed so a well-behaved plugin exits on
-// EOF; then SIGTERM, then SIGKILL, each after shutdownGrace.
+// EOF; then SIGTERM, then SIGKILL, each after the shutdown grace. The error is nil
+// when the plugin exited on EOF, and says which signal it took otherwise, so a
+// caller joining Close errors learns which plugins ignore the protocol's stop.
 func (e *ExecCollector) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -221,21 +238,64 @@ func (e *ExecCollector) Close() error {
 	}
 	close(p.quit)
 	p.stdin.Close()
+	var err error
 	select {
 	case <-p.done:
-	case <-time.After(shutdownGrace):
+	case <-time.After(e.grace):
 		signalGroup(p.cmd, syscall.SIGTERM)
 		select {
 		case <-p.done:
-		case <-time.After(shutdownGrace):
+			err = fmt.Errorf("plugin did not exit within %s of stdin closing; stopped by SIGTERM", e.grace)
+		case <-time.After(e.grace):
 			signalGroup(p.cmd, syscall.SIGKILL)
-			<-p.done
+			err = fmt.Errorf("plugin ignored stdin closing and SIGTERM for %s each; killed", e.grace)
+			if !e.awaitReap(p) {
+				err = fmt.Errorf("%w, and not reaped within %s; abandoned", err, reapWait)
+			}
 		}
 	}
 	// Whatever the plugin started and left running goes with it.
 	signalGroup(p.cmd, syscall.SIGKILL)
 	p.release()
-	return nil
+	return err
+}
+
+// awaitReap waits up to reapWait for a killed process to be reaped, and logs and
+// gives up on one that is not.
+func (e *ExecCollector) awaitReap(p *execProc) bool {
+	select {
+	case <-p.done:
+		return true
+	case <-time.After(reapWait):
+		pid := 0
+		if p.cmd.Process != nil {
+			pid = p.cmd.Process.Pid
+		}
+		e.logf("collector[%s]: plugin pid %d not reaped %s after SIGKILL; abandoning it", e.name, pid, reapWait)
+		return false
+	}
+}
+
+// logExit logs a plugin that exited between ticks, with its exit status, at most
+// once per exitLogEvery; the exits in between are counted into the next line.
+// Called with mu held.
+func (e *ExecCollector) logExit(ps *os.ProcessState) {
+	e.exitsUnlogged++
+	now := time.Now()
+	if !e.lastExitLog.IsZero() && now.Sub(e.lastExitLog) < exitLogEvery {
+		return
+	}
+	status := "unknown status"
+	if ps != nil {
+		status = ps.String()
+	}
+	if e.exitsUnlogged > 1 {
+		e.logf("collector[%s]: WARNING plugin exited between ticks (%s; %d exits since the last notice); restarting it. A plugin must keep running and exit only when stdin closes",
+			e.name, status, e.exitsUnlogged)
+	} else {
+		e.logf("collector[%s]: WARNING plugin exited between ticks (%s); restarting it. A plugin must keep running and exit only when stdin closes", e.name, status)
+	}
+	e.lastExitLog, e.exitsUnlogged = now, 0
 }
 
 // spawn starts the process and sends hello, answered before deadline; on any
@@ -265,8 +325,6 @@ func (e *ExecCollector) spawn(deadline time.Time) error {
 // The pipes are made here rather than by os/exec so the agent owns their ends:
 // Wait then never closes a pipe under a reader, and stdin can take a deadline.
 func (e *ExecCollector) startProcess() (*execProc, error) {
-	// The working directory is the command's own, also for a bare name found on
-	// PATH, so a plugin can read files shipped beside it by relative path.
 	path, err := exec.LookPath(e.sp.Command)
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", e.sp.Command, err)
@@ -275,7 +333,13 @@ func (e *ExecCollector) startProcess() (*execProc, error) {
 		return nil, fmt.Errorf("start %s: %w", e.sp.Command, err)
 	}
 	cmd := exec.Command(path, e.sp.Args...)
-	cmd.Dir = filepath.Dir(path)
+	// A command given as a path runs in its own directory, so a plugin can read
+	// files shipped beside it by relative path. A bare name found on PATH runs in
+	// the agent's working directory: its directory is a shared bin directory, not
+	// the plugin's.
+	if filepath.Base(e.sp.Command) != e.sp.Command {
+		cmd.Dir = filepath.Dir(path)
+	}
 	cmd.Env = e.childEnv()
 	ownGroup(cmd)
 
@@ -366,9 +430,9 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 	}
 }
 
-// fault kills the current process group, reaps the process, and returns err,
-// noting the exit status when the process had already ended on its own. A nil err
-// only reaps. Called with mu held.
+// fault kills the current process group, reaps the process (waiting at most
+// reapWait), and returns err, noting the exit status when the process had already
+// ended on its own. A nil err only reaps. Called with mu held.
 func (e *ExecCollector) fault(err error) error {
 	p := e.proc
 	e.proc = nil
@@ -384,7 +448,7 @@ func (e *ExecCollector) fault(err error) error {
 	close(p.quit)
 	signalGroup(p.cmd, syscall.SIGKILL)
 	p.stdin.Close()
-	<-p.done
+	e.awaitReap(p)
 	p.release()
 	if err == nil {
 		return nil

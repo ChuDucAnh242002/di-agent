@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -27,10 +30,14 @@ func TestMain(m *testing.M) {
 }
 
 // fixtureMain speaks wire protocol v1 on stdin/stdout, misbehaving as mode says.
+// linger keeps running after stdin closes; linger-ignore-term also ignores SIGTERM.
 // It records each hello it receives in $DI_FIXTURE_DIR/hellos so a test can count
 // restarts from the plugin's side.
 func fixtureMain(mode string) {
 	dir := os.Getenv("DI_FIXTURE_DIR")
+	if mode == "linger-ignore-term" {
+		signal.Ignore(syscall.SIGTERM)
+	}
 	in := bufio.NewReaderSize(os.Stdin, 1<<20)
 	out := bufio.NewWriter(os.Stdout)
 	reply := func(v any) {
@@ -41,6 +48,10 @@ func fixtureMain(mode string) {
 	for {
 		line, err := in.ReadBytes('\n')
 		if err != nil {
+			if strings.HasPrefix(mode, "linger") {
+				// Does not take stdin closing as the signal to stop.
+				time.Sleep(time.Hour)
+			}
 			return
 		}
 		var req struct {

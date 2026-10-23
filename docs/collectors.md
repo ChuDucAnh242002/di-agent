@@ -144,12 +144,13 @@ Leave these out; the agent is authoritative for them.
 - **Timeout.** Each tick has one deadline, the entry's `timeout` (default `min(interval/2, 5s)`). It covers everything the adapter does that tick: a restart, its hello, and the collect. The supervisor waits 500 ms beyond it, so the adapter's own, clearer error arrives first.
 - **Startup.** Every member is built and, for exec and http, sent `hello` before the collection loop starts. Any failure — unknown type, bad config, hello error, protocol mismatch, program not found — **refuses daemon start**, naming the entry (`sources.collectors[2] gpu: hello refused: …`). After startup every fault is isolated: it costs that member's tick and puts it in backoff.
 - **exec.**
-  - The command is resolved once per start: a bare name is looked up on the agent's `PATH`, a relative path against the agent's working directory. The plugin's **working directory is the directory of the resolved command**, so it can read files shipped beside it by relative path.
+  - The command is resolved once per start: a bare name is looked up on the agent's `PATH`, a relative path against the agent's working directory. A command **given as a path** (it contains a `/`) runs with the **directory of the resolved command as its working directory**, so it can read files shipped beside it by relative path. A **bare name** found on `PATH` runs in the **agent's working directory**: its directory is a shared bin directory, not the plugin's.
   - The environment is minimal (§7).
   - The plugin runs in **its own process group**. A fault — a timeout, a crash, a line that is not JSON, a wrong `seq`, an error reply, an oversized line — kills the whole group, so the children of a wrapper script die with it. The next collect after the backoff starts the program again and re-sends `hello`; `restarts` in `GET /collectors` counts these.
-  - A plugin that **exited between ticks** is restarted before the next collect, without that tick counting as a fault.
-  - stderr is copied to the agent log as `collector[<name>]: <line>`, at most 20 lines per 10 s per member (lines over 4 KiB are truncated); the rest are counted and the count is logged when the next window opens.
-  - **Shutdown:** stdin is closed — a well-behaved plugin exits on EOF — then after 2 s the group gets SIGTERM, after 2 s more SIGKILL. Anything left in the group is killed after the plugin exits.
+  - A plugin that **exited between ticks** is restarted before the next collect, without that tick counting as a fault. It is counted in `restarts`, and logged as `WARNING plugin exited between ticks (exit status N)` — at most once a minute, with the number of exits since the last line — because a plugin must keep running and exit only when stdin closes. `mapctl collector check` fails such a plugin (`NoUnexpectedRestarts`, §6).
+  - stderr is copied to the agent log as `collector[<name>]: <line>`, at most 20 lines per 10 s window per member (lines over 4 KiB are truncated). The first line over the allowance in a window logs a one-time `suppressing the rest of this window` notice; the lines after it are counted, and the count is logged (`N stderr lines suppressed`) when the next stderr line arrives after the window has ended. A plugin that falls silent after a burst therefore leaves its last count unlogged.
+  - **Shutdown:** stdin is closed — a well-behaved plugin exits on EOF — then after 2 s the group gets SIGTERM, after 2 s more SIGKILL. Anything left in the group is killed after the plugin exits. A plugin that needed SIGTERM or SIGKILL is named in the error the agent logs at shutdown.
+  - After a SIGKILL, on a fault or at shutdown, the agent waits at most 2 s for the process to be reaped; one that is still not gone (stuck in the kernel) is logged and abandoned rather than allowed to hang the collection loop or the shutdown.
 - **http.** A timeout, transport error or non-2xx is a fault with backoff. Redirects are not followed: a 3xx is a non-2xx like any other. There is no connection to lose, so a fault is only remembered: the next contact sends `hello` before `collect`, within the same deadline. A sidecar that restarts on its own between ticks hears no new `hello` unless a request failed meanwhile, so it should answer a `collect` that arrives before any `hello` — with an `error` reply if it cannot, which faults the tick and brings the `hello` on the next contact.
 
 ### 3.4 Limits
@@ -162,7 +163,7 @@ Leave these out; the agent is authoritative for them.
 | Backoff after consecutive faults | 1 s, doubling to 5 min, reset by a success |
 | Default timeout | `min(interval/2, 5s)`; an explicit `timeout` must be less than `sources.interval`, because the supervisor waits `timeout` + 500 ms for an exec or http member and a timeout at the interval would let one hung plugin stretch every tick past it |
 | stderr relayed (exec) | 20 lines per 10 s per member, 4 KiB per line |
-| Shutdown (exec) | close stdin, 2 s, SIGTERM, 2 s, SIGKILL |
+| Shutdown (exec) | close stdin, 2 s, SIGTERM, 2 s, SIGKILL; then at most 2 s for the reap |
 
 ## 4. Producer rules
 
@@ -211,7 +212,7 @@ How to read it when something is wrong:
 | ------- | -------- |
 | `state: starting` | No successful collect yet. |
 | `state: backoff`, `last_error` | The last call faulted; the member is skipped until `backoff_until_unix`. `last_error` names the cause (`no reply within 3s`, `reply seq 4, want 5`, `plugin error: …`). |
-| `restarts` climbing | An exec plugin is crashing or being killed on faults. Its stderr is in the agent log under `collector[<name>]:`. |
+| `restarts` climbing | An exec plugin is crashing, being killed on faults, or exiting on its own between ticks (logged as `plugin exited between ticks`). Its stderr is in the agent log under `collector[<name>]:`. |
 | `violations` > 0 | Samples broke the contract and were dropped: a malformed sample (§3.1), a duplicate within one reply, an invalid `metric_type` or `subject`, a `part_of` that is not a node-level type on a sample with a subject, no `unit`, an empty `range`, a foreign `node_id`, or a unit or range that differs from the member's first declaration of that type. An `available` entry that is not a valid type counts too. The first of each kind and type is logged. |
 | `ownership_drops` > 0 | The member emits a node-level type an earlier member owns. Rename the type if it measures something different, scope it to a subject, or reorder the list. |
 | `available` | The member's `AvailableMetrics` answer, read right after its last successful collect; the supervisor's own answer is the union of these. |
