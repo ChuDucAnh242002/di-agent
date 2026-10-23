@@ -70,3 +70,20 @@ func TestThePromptIsToldTheLoadedDomain(t *testing.T) {
 		t.Fatalf("a missing optional prompt stays missing, got %q", got)
 	}
 }
+
+// TestDefaultExplainPromptExists: the default prompt path is relative to the module
+// root, the directory dev.sh and the README run the daemon from. It once still
+// named cmd/agent/prompts after the prompts moved, so enabling the explain layer
+// without a prompt path failed at startup.
+func TestDefaultExplainPromptExists(t *testing.T) {
+	root := filepath.Join("..", "..")
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("module root not at %s: %v", root, err)
+	}
+	dir := filepath.Dir(DefaultExplainPrompt)
+	for _, p := range []string{DefaultExplainPrompt, filepath.Join(dir, "planner-v2.md"), filepath.Join(dir, "critic-v2.md")} {
+		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+			t.Errorf("default prompt %s is missing relative to the module root: %v", p, err)
+		}
+	}
+}

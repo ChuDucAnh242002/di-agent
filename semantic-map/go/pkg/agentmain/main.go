@@ -1,23 +1,17 @@
-// Command agent is the edge-minimal Semantic Map daemon.
+// Package agentmain is the edge-minimal Semantic Map daemon as a library: Main
+// loads the agent's spec, builds the map, the collectors and the loops it names,
+// and serves the HTTP/JSON surface until interrupted. cmd/agent is Main and
+// nothing else; a custom binary blank-imports a package whose init registers a
+// collector with collectors.Register and then calls Main, so an out-of-tree
+// collector runs in the stock daemon without a fork.
 //
-// It loads the configured profile, seeds the graph from Di-Select priors,
-// and serves the agent queries plus the graph control surface over
-// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest-sample. The graph
-// introspection (/graph, /edges, /history, /constructs, /propositions,
-// /neighbors), ontology mutation (/ontology/*), candidate review
-// (/candidates/{id}/{confirm,reject,defer}), edge reset (/agent/reset),
-// and operator meta (/healthz, /version, /ui/) routes are wired by
-// registerRoutes in routes.go.
-//
-// Usage:
-//
-//	agent -config agent.yaml
-//	agent -print-config                  # the defaults, as a file to copy and edit
-//	agent -config agent.yaml -print-config   # the effective spec
-//
-// The agent is described by one document, agent.yaml (see pkg/spec): the file
-// overlays the defaults, so it names only what it changes, and a key the agent does
-// not know is refused. These are the only flags.
+// The daemon loads the configured profile, seeds the graph from Di-Select priors,
+// and serves the agent queries plus the graph control surface. Telemetry is
+// accepted via POST /ingest-sample. The graph introspection (/graph, /edges,
+// /history, /constructs, /propositions, /neighbors), ontology mutation
+// (/ontology/*), candidate review (/candidates/{id}/{confirm,reject,defer}), edge
+// reset (/agent/reset), and operator meta (/healthz, /version, /ui/) routes are
+// wired by registerRoutes in routes.go.
 //
 // The profile's kd (profile.kd) selects the distribution named in profile.priors
 // when set. Omit it to use the global Di-Select proposition strengths.
@@ -68,6 +62,12 @@ import (
 // Version is the daemon's reported semver. Returned by GET /version.
 // Phase 1 ships 0.1.0 (HTTP expansion). Bump for future control-surface work.
 const Version = "0.1.0"
+
+// DefaultExplainPrompt is explain.prompt when the spec leaves it empty. It is
+// relative to the working directory, which is the module root (semantic-map/go)
+// when the daemon is run as dev.sh and the README run it; the planner and critic
+// defaults are looked up beside it.
+var DefaultExplainPrompt = filepath.Join("pkg", "agentmain", "prompts", "explain-v2.md")
 
 // BuildCommit is the short git SHA the binary was built from. Empty when the
 // binary is built without `-ldflags "-X github.com/DiyazY/di-agent/pkg/agentmain.BuildCommit=…"`.
@@ -338,6 +338,8 @@ func Main() {
 	}
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
 	registerAutonomyRoutes(mux, reviewer)
+	// CgroupRoot does not re-check the entries: collectors.Build above has already
+	// refused a list whose cgroup config does not decode.
 	grp := &grouper{state: state, cfg: groups.Config{LabelKeys: cfg.Groups.LabelKeys, Units: cfg.Groups.Units},
 		linux:     groups.Linux{SysRoot: "/sys", ProcRoot: "/proc", CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors)},
 		workloads: rt.Workloads, logf: log.Printf}
@@ -552,7 +554,7 @@ func buildExplainer(sm *semmap.SemanticMap, opt spec.Explain, dom *domain.Spec) 
 		return nil, fmt.Errorf("unknown explain.provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
 	if opt.Prompt == "" {
-		opt.Prompt = filepath.Join("cmd", "agent", "prompts", "explain-v2.md")
+		opt.Prompt = DefaultExplainPrompt
 	}
 	prompt, err := explain.LoadPrompt(opt.Prompt)
 	if err != nil {
