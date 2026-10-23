@@ -142,15 +142,8 @@ jobs:
         run: |
           set -euo pipefail
           declare -A contexts=(
-            [genset]=poc2/system/genset
-            [switchboard]=poc2/system/switchboard
-            [propulsion]=poc2/system/propulsion
-            [battery]=poc2/system/battery
-            [shore-power]=poc2/system/shore-power
-            [auxload]=poc2/system/auxiliary-load
             [telemetry-writer]=poc2/system/telemetry-writer
-            [navigation]=poc2/system/navigation
-            [playground]=poc2/playground
+            [dataset-collector]=poc2/system/dataset-collector
           )
           for service in "${!contexts[@]}"; do
             docker build -t "smoke/${service}:test" "${contexts[$service]}"
@@ -159,7 +152,7 @@ jobs:
       - name: Load images into kind
         run: |
           set -euo pipefail
-          for service in genset switchboard propulsion battery shore-power auxload telemetry-writer navigation playground; do
+          for service in telemetry-writer dataset-collector; do
             kind load docker-image "smoke/${service}:test" --name di-agent-smoke
           done
 
@@ -182,24 +175,28 @@ jobs:
             --set kafka.persistence.enabled=false \
             --set influxdb.persistence.enabled=false \
             --set postgres.enabled=false \
+            --set streamer.enabled=false \
             --set prometheus.persistence.enabled=false \
             --wait --timeout 6m0s
 
-      - name: Smoke-test genset REST endpoint
+      - name: Smoke-test default dataset collector
         run: |
           set -euo pipefail
+          trap 'kubectl delete pod smoke-curl --ignore-not-found --wait=false' EXIT
           kubectl run smoke-curl --image=curlimages/curl --restart=Never \
             --command -- sleep 3600
           kubectl wait --for=condition=Ready pod/smoke-curl --timeout=60s
           for i in $(seq 1 12); do
-            if kubectl exec smoke-curl -- curl -sf --max-time 10 http://genset-1:8000/health; then
-              kubectl delete pod smoke-curl --wait=false
+            if kubectl exec smoke-curl -- curl -fsS --max-time 10 http://dataset-collector:8000/ready \
+                | tee /tmp/collector-ready.json \
+                | grep -q '"connected":true'; then
+              cat /tmp/collector-ready.json
               exit 0
             fi
-            echo "genset-1 not reachable yet, retrying (${i}/12)..."
+            echo "dataset-collector not ready yet, retrying (${i}/12)..."
             sleep 5
           done
-          echo "::error::genset-1 /health endpoint never became reachable"
+          echo "::error::default dataset-collector never became ready"
           exit 1
 
       - name: Dump cluster state on failure
@@ -207,7 +204,7 @@ jobs:
         run: |
           kubectl get pods -o wide
           kubectl describe pods
-          kubectl logs -l app=genset --all-containers --tail=200 || true
+          kubectl logs -l app=dataset-collector --all-containers --tail=200 || true
 
   playground-tests:
     name: poc2/playground cypress suite (no live cluster)
@@ -239,8 +236,9 @@ jobs:
         with:
           working-directory: poc2/playground
           install: false
-          start: npm run preview -- --port 4173
-          wait-on: 'http://localhost:4173'
+          start: npm run preview -- --host 127.0.0.1 --port 4173
+          wait-on: 'http://127.0.0.1:4173'
+          config: baseUrl=http://127.0.0.1:4173
           spec: cypress/e2e/playground.cy.ts
 
   build-push-images:
@@ -272,6 +270,10 @@ jobs:
             context: poc2/playground
           - service: data-ingest
             context: poc2/data-ingest
+          - service: replay-streamer
+            context: poc2/system/replay-streamer
+          - service: dataset-collector
+            context: poc2/system/dataset-collector
 
     steps:
       - name: Checkout
