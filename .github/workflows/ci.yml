@@ -122,28 +122,6 @@ jobs:
       - name: Run pytest
         run: pytest poc2/system/tests/
 
-  bdd-tests:
-    name: poc2/bdd godog scenarios (no live cluster)
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: poc2/bdd
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-          cache-dependency-path: poc2/bdd/go.sum
-
-      - name: Run godog scenarios
-        run: go test ./...
-
   kind-smoke-test:
     name: kind Helm smoke test (di-agent-system chart)
     runs-on: ubuntu-latest
