@@ -57,7 +57,7 @@ The chart under `helm/di-agent-system` manages the shared runtime services:
 
 Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and playground deployments are disabled by default and can be enabled individually through Helm values.
 
-The replay-streamer reads the selected `run_id` and `source` from PostgreSQL. In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` control the emission rate.
+The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
 The chart wraps all of these in one release but does not include the `di-agent` itself.
 

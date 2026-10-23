@@ -301,9 +301,10 @@ streamer:
   # Both modes use the selected run's PostgreSQL signal statistics and metadata.
   mode: synthetic
   runId: 1000rpm_150kW_0001
-  source: short
+  # Every source of the run (short + long_*) is streamed together, aligned by t.
+  # One "point" is one time step: every active signal emits one sample.
   intervalMs: 1000
-  pointsPerInterval: 10
+  pointsPerInterval: 1
   loop: true
   readAheadRows: 1000
   randomSeed: 1

@@ -1,6 +1,8 @@
 """Replay real engine data or generate profile-matched synthetic telemetry."""
 
+import contextlib
 import heapq
+import itertools
 import json
 import logging
 import math
@@ -35,7 +37,6 @@ READ_AHEAD_ROWS = int(os.environ.get("READ_AHEAD_ROWS", "1000"))
 class StreamConfig:
     mode: Literal["real", "synthetic"]
     run_id: str
-    source: str
     interval_ms: int
     points_per_interval: int
     loop: bool
@@ -51,7 +52,7 @@ def _initial_config() -> StreamConfig:
     else:
         raise ValueError("MODE must be either 'real' or 'synthetic'")
     interval_ms = int(os.environ.get("INTERVAL_MS", "1000"))
-    points_per_interval = int(os.environ.get("POINTS_PER_INTERVAL", "10"))
+    points_per_interval = int(os.environ.get("POINTS_PER_INTERVAL", "1"))
     if not 10 <= interval_ms <= 3_600_000:
         raise ValueError("INTERVAL_MS must be between 10 and 3600000")
     if not 1 <= points_per_interval <= 10_000:
@@ -61,7 +62,6 @@ def _initial_config() -> StreamConfig:
     return StreamConfig(
         mode=mode,
         run_id=os.environ.get("RUN_ID", "1000rpm_150kW_0001"),
-        source=os.environ.get("SOURCE", "short"),
         interval_ms=interval_ms,
         points_per_interval=points_per_interval,
         loop=os.environ.get("LOOP", "true").lower() == "true",
@@ -72,7 +72,6 @@ def _initial_config() -> StreamConfig:
 class ConfigUpdate(BaseModel):
     mode: Literal["real", "synthetic"] | None = None
     run_id: str | None = Field(default=None, min_length=1, max_length=200)
-    source: str | None = Field(default=None, min_length=1, max_length=100)
     interval_ms: int | None = Field(default=None, ge=10, le=3_600_000)
     points_per_interval: int | None = Field(default=None, ge=1, le=10_000)
     loop: bool | None = None
@@ -81,6 +80,7 @@ class ConfigUpdate(BaseModel):
 
 @dataclass(frozen=True)
 class SignalProfile:
+    source: str
     signal: str
     minimum: float
     maximum: float
@@ -95,59 +95,93 @@ class SignalProfile:
         return max((self.last_t - self.first_t) / max(self.sample_count - 1, 1), 1e-9)
 
 
+def _metadata(connection, run_id: str) -> dict[str, str | None]:
+    rows = connection.execute(
+        "SELECT parameter, value FROM run_metadata WHERE run_id = %s ORDER BY parameter",
+        (run_id,),
+    ).fetchall()
+    return {str(key): None if value is None else str(value) for key, value in rows}
+
+
+def _series_rows(cursor, run_id: str, source: str, signal: str) -> Iterator[tuple]:
+    cursor.execute(
+        """
+        SELECT source, signal, t, value
+        FROM timeseries
+        WHERE run_id = %s AND source = %s AND signal = %s AND value IS NOT NULL
+        ORDER BY t
+        """,
+        (run_id, source, signal),
+    )
+    while rows := cursor.fetchmany(READ_AHEAD_ROWS):
+        yield from rows
+
+
 def real_records(config: StreamConfig) -> Iterator[dict]:
-    """Yield ordered, non-null samples using a bounded server-side cursor."""
+    """Yield every source/signal of the run merged by source time.
+
+    Each (source, signal) series is read through its own bounded server-side
+    cursor and the series are merged lazily, so memory stays constant. Series
+    share the time grid, so shorter ones simply end before the longer ones.
+    """
     while True:
-        connection = psycopg.connect(**PG_CONFIG)
-        try:
-            metadata_rows = connection.execute(
-                "SELECT parameter, value FROM run_metadata WHERE run_id = %s ORDER BY parameter",
+        with psycopg.connect(**PG_CONFIG) as connection:
+            metadata = _metadata(connection, config.run_id)
+            series = connection.execute(
+                """
+                SELECT DISTINCT source, signal FROM timeseries
+                WHERE run_id = %s AND value IS NOT NULL
+                ORDER BY source, signal
+                """,
                 (config.run_id,),
             ).fetchall()
-            metadata = {
-                str(key): None if value is None else str(value)
-                for key, value in metadata_rows
-            }
-            with connection.cursor(name="replay_timeseries") as cursor:
-                cursor.execute(
-                    """
-                    SELECT source, signal, t, value
-                    FROM timeseries
-                    WHERE run_id = %s AND source = %s AND value IS NOT NULL
-                    ORDER BY t, signal
-                    """,
-                    (config.run_id, config.source),
-                )
-                while rows := cursor.fetchmany(READ_AHEAD_ROWS):
-                    for source, signal, t_source, value in rows:
-                        yield {
-                            "run_id": config.run_id,
-                            "source": source,
-                            "signal": signal,
-                            "t_source": float(t_source),
-                            "value": float(value),
-                            "origin": "real",
-                            "metadata": metadata,
-                        }
-        finally:
-            connection.close()
+            if not series:
+                raise ValueError(f"no usable samples found for run_id={config.run_id!r}")
+            with contextlib.ExitStack() as stack:
+                streams = [
+                    _series_rows(
+                        stack.enter_context(connection.cursor(name=f"replay_{index}")),
+                        config.run_id,
+                        source,
+                        signal,
+                    )
+                    for index, (source, signal) in enumerate(series)
+                ]
+                for source, signal, t_source, value in heapq.merge(
+                    *streams, key=lambda row: (row[2], row[0], row[1])
+                ):
+                    yield {
+                        "run_id": config.run_id,
+                        "source": source,
+                        "signal": signal,
+                        "t_source": float(t_source),
+                        "value": float(value),
+                        "origin": "real",
+                        "metadata": metadata,
+                    }
         if not config.loop:
             return
         time.sleep(0.1)
+
+
+def time_steps(records: Iterator[dict]) -> Iterator[list[dict]]:
+    """Group the merged stream into steps: all samples sharing one source time."""
+    for _, group in itertools.groupby(records, key=lambda record: record["t_source"]):
+        yield list(group)
 
 
 def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, str | None]]:
     with psycopg.connect(**PG_CONFIG) as connection:
         rows = connection.execute(
             """
-            SELECT signal, min(value), max(value), avg(value),
+            SELECT source, signal, min(value), max(value), avg(value),
                    coalesce(stddev_samp(value), 0), count(*), min(t), max(t)
             FROM timeseries
-            WHERE run_id = %s AND source = %s AND value IS NOT NULL
-            GROUP BY signal
-            ORDER BY signal
+            WHERE run_id = %s AND value IS NOT NULL
+            GROUP BY source, signal
+            ORDER BY source, signal
             """,
-            (config.run_id, config.source),
+            (config.run_id,),
         ).fetchall()
         metadata_rows = connection.execute(
             "SELECT parameter, value FROM run_metadata WHERE run_id = %s ORDER BY parameter",
@@ -155,6 +189,7 @@ def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, 
         ).fetchall()
     profiles = [
         SignalProfile(
+            source=source,
             signal=signal,
             minimum=float(minimum),
             maximum=float(maximum),
@@ -164,12 +199,10 @@ def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, 
             first_t=float(first_t),
             last_t=float(last_t),
         )
-        for signal, minimum, maximum, mean, stddev, count, first_t, last_t in rows
+        for source, signal, minimum, maximum, mean, stddev, count, first_t, last_t in rows
     ]
     if not profiles:
-        raise ValueError(
-            f"no usable samples found for run_id={config.run_id!r}, source={config.source!r}"
-        )
+        raise ValueError(f"no usable samples found for run_id={config.run_id!r}")
     return profiles, {
         str(key): None if value is None else str(value)
         for key, value in metadata_rows
@@ -193,9 +226,9 @@ def synthetic_records(config: StreamConfig) -> Iterator[dict]:
                 previous = value
                 yield {
                     "run_id": config.run_id,
-                    "source": config.source,
+                    "source": profile.source,
                     "signal": profile.signal,
-                    "t_source": profile.first_t + offset * profile.step,
+                    "t_source": round(profile.first_t + offset * profile.step, 6),
                     "value": value,
                     "origin": "synthetic",
                     "metadata": metadata,
@@ -204,7 +237,7 @@ def synthetic_records(config: StreamConfig) -> Iterator[dict]:
         streams = [signal_records(profile) for profile in profiles]
         yield from heapq.merge(
             *streams,
-            key=lambda record: (record["t_source"], record["signal"]),
+            key=lambda record: (record["t_source"], record["source"], record["signal"]),
         )
         if not config.loop:
             return
@@ -274,6 +307,7 @@ class ReplayService:
             self._set_status(state="running", last_error=None)
             try:
                 records = real_records(config) if config.mode == "real" else synthetic_records(config)
+                steps = time_steps(records)
                 deadline = time.monotonic()
                 while not self._stop.is_set():
                     current, current_revision = self.snapshot()
@@ -282,7 +316,7 @@ class ReplayService:
                     batch = []
                     for _ in range(config.points_per_interval):
                         try:
-                            batch.append(next(records))
+                            batch.extend(next(steps))
                         except StopIteration:
                             break
                     if not batch:
@@ -302,7 +336,7 @@ class ReplayService:
                         }
                         self._producer.send(
                             KAFKA_TOPIC,
-                            key=f"{config.run_id}:{config.source}:{record['signal']}",
+                            key=f"{config.run_id}:{record['source']}:{record['signal']}",
                             value=message,
                         )
                     self._producer.flush(timeout=max(config.interval_ms / 1000, 1))

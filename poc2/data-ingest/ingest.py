@@ -11,6 +11,11 @@ Schema:
   timeseries(run_id, source, signal, t, value)
       one row per sample; "short" files are cycle-resolved, "long" files are
       high-rate. Column Data1_<x> is paired with its Data1_time_<x> column.
+
+The multi-signal source CSVs are first split into one file per signal under
+DATA_DIR/split/ (<run>_timeseries_<source>_<signal>.csv, holding only
+Data1_<signal> and Data1_time_<signal>); the split files are what get loaded.
+`python ingest.py --split-only` performs just that step (no database needed).
 """
 import csv
 import http.cookiejar
@@ -22,10 +27,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-import psycopg
-
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 FILE_RE = re.compile(r"^(?P<run>.+?)_(?P<kind>metadata|timeseries_short|timeseries_long_\d+)\.csv$")
+SPLIT_RE = re.compile(r"^(?P<run>.+?)_timeseries_(?P<source>short|long_\d+)_(?P<signal>.+)\.csv$")
+SPLIT_DIR = DATA_DIR / "split"
+VALUE_PREFIX = "Data1_"
 TIME_PREFIX = "Data1_time_"
 
 SCHEMA = """
@@ -71,6 +77,52 @@ def download(url):
         part.rename(target)
 
 
+def signal_pairs(header):
+    """Return [(signal, value_index, time_index)] for paired Data1_ columns."""
+    idx = {h: i for i, h in enumerate(header)}
+    return [(h[len(VALUE_PREFIX):], i, idx[TIME_PREFIX + h[len(VALUE_PREFIX):]])
+            for h, i in idx.items()
+            if h.startswith(VALUE_PREFIX) and not h.startswith(TIME_PREFIX)
+            and TIME_PREFIX + h[len(VALUE_PREFIX):] in idx]
+
+
+def split_file(path):
+    """Split one multi-signal timeseries CSV into one file per signal."""
+    m = FILE_RE.match(path.name)
+    prefix = f"{m['run']}_{m['kind']}"
+    with path.open(newline="") as fh:
+        rows = csv.reader(fh)
+        pairs = signal_pairs(next(rows))
+        targets = {sig: SPLIT_DIR / f"{prefix}_{sig}.csv" for sig, _, _ in pairs}
+        if all(t.exists() and t.stat().st_mtime >= path.stat().st_mtime for t in targets.values()):
+            return list(targets.values())
+        SPLIT_DIR.mkdir(parents=True, exist_ok=True)
+        parts = {sig: t.with_suffix(".part") for sig, t in targets.items()}
+        outs = {sig: part.open("w", newline="") for sig, part in parts.items()}
+        writers = {sig: csv.writer(out) for sig, out in outs.items()}
+        for sig, writer in writers.items():
+            writer.writerow([VALUE_PREFIX + sig, TIME_PREFIX + sig])
+        try:
+            for row in rows:
+                for sig, vi, ti in pairs:
+                    if len(row) > max(vi, ti) and row[ti] != "":
+                        writers[sig].writerow((row[vi], row[ti]))
+        finally:
+            for out in outs.values():
+                out.close()
+        for sig, part in parts.items():
+            part.replace(targets[sig])
+    print(f"split {path.name} -> {len(targets)} signal file(s)", flush=True)
+    return list(targets.values())
+
+
+def split_all():
+    for path in sorted(DATA_DIR.glob("*.csv")):
+        m = FILE_RE.match(path.name)
+        if m and m["kind"] != "metadata":
+            split_file(path)
+
+
 def load_metadata(cur, run, path):
     with path.open(newline="") as fh, cur.copy(
             "COPY run_metadata (run_id, parameter, value) FROM STDIN") as cp:
@@ -86,20 +138,23 @@ def load_timeseries(cur, run, source, path):
             "COPY timeseries (run_id, source, signal, t, value) FROM STDIN") as cp:
         rows = csv.reader(fh)
         header = next(rows)
-        idx = {h: i for i, h in enumerate(header)}
-        pairs = [(h[len("Data1_"):], i, idx[TIME_PREFIX + h[len("Data1_"):]])
-                 for h, i in idx.items()
-                 if h.startswith("Data1_") and not h.startswith(TIME_PREFIX)
-                 and TIME_PREFIX + h[len("Data1_"):] in idx]
+        pairs = signal_pairs(header)
         for row in rows:
             for signal, vi, ti in pairs:
-                cp.write_row((run, source, signal, row[ti], row[vi] or None))
+                if row[ti] != "":
+                    cp.write_row((run, source, signal, row[ti], row[vi] or None))
 
 
 def main():
     if url := os.environ.get("DATA_URL"):
         download(url)
-    files = sorted(p for p in DATA_DIR.glob("*.csv") if FILE_RE.match(p.name))
+    split_all()
+    if "--split-only" in sys.argv:
+        return
+    import psycopg
+
+    files = sorted(p for p in DATA_DIR.glob("*.csv") if (m := FILE_RE.match(p.name)) and m["kind"] == "metadata")
+    files += sorted(SPLIT_DIR.glob("*.csv")) if SPLIT_DIR.exists() else []
     if not files:
         sys.exit(f"no CSV files found in {DATA_DIR}")
 
@@ -108,25 +163,29 @@ def main():
         done = dict(conn.execute("SELECT name, size FROM ingested_files").fetchall())
         for path in files:
             size = path.stat().st_size
-            if done.get(path.name) == size:
-                print(f"skip {path.name}", flush=True)
+            name = f"{path.parent.name}/{path.name}" if path.parent == SPLIT_DIR else path.name
+            if done.get(name) == size:
+                print(f"skip {name}", flush=True)
                 continue
-            m = FILE_RE.match(path.name)
-            run, kind = m["run"], m["kind"]
-            print(f"load {path.name}", flush=True)
+            print(f"load {name}", flush=True)
             with conn.transaction(), conn.cursor() as cur:
-                cur.execute("INSERT INTO runs VALUES (%s) ON CONFLICT DO NOTHING", (run,))
-                if kind == "metadata":
+                if path.parent == SPLIT_DIR:
+                    m = SPLIT_RE.match(path.name)
+                    run, source, signal = m["run"], m["source"], m["signal"]
+                    cur.execute("INSERT INTO runs VALUES (%s) ON CONFLICT DO NOTHING", (run,))
+                    cur.execute(
+                        "DELETE FROM timeseries WHERE run_id = %s AND source = %s AND signal = %s",
+                        (run, source, signal))
+                    load_timeseries(cur, run, source, path)
+                else:
+                    run = FILE_RE.match(path.name)["run"]
+                    cur.execute("INSERT INTO runs VALUES (%s) ON CONFLICT DO NOTHING", (run,))
                     cur.execute("DELETE FROM run_metadata WHERE run_id = %s", (run,))
                     load_metadata(cur, run, path)
-                else:
-                    source = kind.replace("timeseries_", "")
-                    cur.execute("DELETE FROM timeseries WHERE run_id = %s AND source = %s", (run, source))
-                    load_timeseries(cur, run, source, path)
                 cur.execute(
                     "INSERT INTO ingested_files (name, size) VALUES (%s, %s) "
                     "ON CONFLICT (name) DO UPDATE SET size = EXCLUDED.size, loaded_at = now()",
-                    (path.name, size))
+                    (name, size))
         for index in INDEXES:
             conn.execute(index)
         conn.execute("ANALYZE timeseries")

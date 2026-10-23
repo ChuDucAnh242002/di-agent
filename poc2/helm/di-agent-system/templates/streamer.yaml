@@ -64,8 +64,6 @@ spec:
               value: {{ .Values.streamer.mode | quote }}
             - name: RUN_ID
               value: {{ .Values.streamer.runId | quote }}
-            - name: SOURCE
-              value: {{ .Values.streamer.source | quote }}
             - name: INTERVAL_MS
               value: {{ .Values.streamer.intervalMs | quote }}
             - name: POINTS_PER_INTERVAL

@@ -29,6 +29,8 @@ SCRIPTS := ./scripts
 HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
+# The postgres-ingest hook splits and loads ~170 MB of CSVs; Helm's 5m default is too short.
+HELM_TIMEOUT ?= 30m
 REGISTRY ?= ghcr.io/chuducanh242002
 TAG ?= latest
 
@@ -37,7 +39,6 @@ TAG ?= latest
 #   make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=25
 STREAMER_MODE ?=
 STREAMER_RUN_ID ?=
-STREAMER_SOURCE ?=
 STREAMER_INTERVAL_MS ?=
 STREAMER_POINTS ?=
 STREAMER_LOOP ?=
@@ -46,7 +47,6 @@ HELM_ARGS ?=
 HELM_STREAMER_SETS = \
 	$(if $(STREAMER_MODE),--set streamer.mode=$(STREAMER_MODE)) \
 	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
-	$(if $(STREAMER_SOURCE),--set streamer.source=$(STREAMER_SOURCE)) \
 	$(if $(STREAMER_INTERVAL_MS),--set streamer.intervalMs=$(STREAMER_INTERVAL_MS)) \
 	$(if $(STREAMER_POINTS),--set streamer.pointsPerInterval=$(STREAMER_POINTS)) \
 	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP))
@@ -79,7 +79,7 @@ helm-template:
 
 helm-install:
 	@helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
-		--namespace $(HELM_NAMESPACE) --create-namespace \
+		--namespace $(HELM_NAMESPACE) --create-namespace --timeout $(HELM_TIMEOUT) \
 		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
 		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
@@ -184,7 +184,7 @@ help:
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
 	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
-	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID STREAMER_SOURCE"
+	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID"
 	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"

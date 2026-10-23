@@ -88,15 +88,15 @@ make images IMAGES="replay-streamer telemetry-writer data-ingest"
 make helm-install
 # Select real samples instead:
 make helm-install STREAMER_MODE=real
-# Real samples, 25 points every 500 ms:
-make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=25
+# Real samples, 5 time steps every 500 ms:
+make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=5
 # Any other chart value, e.g. enable the legacy genset simulator:
 make helm-install HELM_ARGS="--set genset.enabled=true"
 # Change emission rate while running:
 kubectl port-forward svc/replay-streamer 8000:8000
 curl -X PUT http://localhost:8000/config \
   -H 'Content-Type: application/json' \
-  -d '{"interval_ms":500,"points_per_interval":25}'
+  -d '{"interval_ms":500,"points_per_interval":5}'
 ```
 
 #### Streamer control API (runtime changes)
@@ -109,12 +109,12 @@ The streamer exposes `replay-streamer:8000` inside the cluster (use `kubectl por
 | `GET /status` | Active config, `state` (`running`/`error`), `published` count, `last_error` |
 | `PUT /config` | Partial update; send only the fields you want to change |
 
-`PUT /config` fields (all optional): `mode` (`real`\|`synthetic`), `run_id`, `source`, `interval_ms` (10–3,600,000), `points_per_interval` (1–10,000), `loop` (bool), `random_seed` (int, synthetic only). Throughput is `points_per_interval / interval_ms`. Changes apply within ~0.25 s without a restart.
+`PUT /config` fields (all optional): `mode` (`real`\|`synthetic`), `run_id`, `interval_ms` (10–3,600,000), `points_per_interval` (1–10,000), `loop` (bool), `random_seed` (int, synthetic only). A "point" is one time step: every signal still active at that step emits one sample, so samples per tick = `points_per_interval` × active signals. Defaults: 1 step every 1000 ms. Changes apply within ~0.25 s without a restart.
 
 ```bash
-# Switch to another run and source, in real mode
+# Switch to another run, in real mode
 curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
-  -d '{"mode":"real","run_id":"1000rpm_150kW_0001_2","source":"short"}'
+  -d '{"mode":"real","run_id":"1000rpm_150kW_0001_2"}'
 # Pause-like slow replay: 1 point every 10 s
 curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
   -d '{"interval_ms":10000,"points_per_interval":1}'
@@ -123,7 +123,9 @@ curl localhost:8000/status
 
 API changes are in memory only: a pod restart or a new `make helm-install` returns to the Helm/`STREAMER_*` values. Use those for permanent settings.
 
-`streamer.runId` and `streamer.source` select the dataset (defaults: `1000rpm_150kW_0001` and `short`). To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
+`streamer.runId` selects the dataset (default `1000rpm_150kW_0001`). All of the run's sources (`short` and every `long_*` file) are streamed together: they share the same time grid (`t` steps of 7200 from 0), so each tick emits the next `pointsPerInterval` time steps for every signal, and shorter sources simply end before the longer ones (the run then loops if `loop=true`).
+
+At ingest, each multi-signal CSV is split into one file per signal under `data/split/` (`<run>_timeseries_<source>_<signal>.csv`, containing only `Data1_<signal>` and `Data1_time_<signal>`); the split files are what is loaded into PostgreSQL. Run `DATA_DIR=poc2/data python3 poc2/data-ingest/ingest.py --split-only` to produce them locally without a database. To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
 
 ### Optional: cloud eventual-consistency sync
 
