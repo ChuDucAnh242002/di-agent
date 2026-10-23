@@ -155,3 +155,52 @@ func TestCollectorsYAMLRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// GET /config serves Redacted, and the agent cannot tell which of a plugin's
+// values is a credential: config blocks, exec arguments and URL secrets are
+// withheld, and the receiver is left as it was.
+func TestCollectorsAreRedacted(t *testing.T) {
+	s, err := Parse([]byte(`
+sources:
+  interval: 10s
+  collectors:
+    - name: cgroup
+      type: cgroup
+    - name: gpu
+      exec: {command: /opt/di/collectors/gpu, args: [--token, s3cret]}
+      config: {password: hunter2}
+    - name: redis
+      http: {url: "http://user:pw@localhost:9121/di/collect?token=abc&b=1"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := s.Redacted()
+	c := r.Sources.Collectors
+	if c[0].Config.Kind != 0 {
+		t.Errorf("an absent config became %+v", c[0].Config)
+	}
+	if c[1].Config.Kind != yaml.ScalarNode || c[1].Config.Value != Redaction {
+		t.Errorf("config = %+v, want %q", c[1].Config, Redaction)
+	}
+	if c[1].Exec.Command != "/opt/di/collectors/gpu" || !reflect.DeepEqual(c[1].Exec.Args, []string{Redaction, Redaction}) {
+		t.Errorf("exec = %+v", *c[1].Exec)
+	}
+	if got, want := c[2].HTTP.URL, "http://user:xxxxx@localhost:9121/di/collect?b=[redacted]&token=[redacted]"; got != want {
+		t.Errorf("url = %q, want %q", got, want)
+	}
+	out, err := r.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"hunter2", "s3cret", "abc", ":pw@"} {
+		if strings.Contains(string(out), secret) {
+			t.Errorf("redacted YAML still holds %q:\n%s", secret, out)
+		}
+	}
+	// The receiver keeps its values: the running agent still needs them.
+	o := s.Sources.Collectors
+	if o[1].Exec.Args[1] != "s3cret" || o[1].Config.Kind != yaml.MappingNode || !strings.Contains(o[2].HTTP.URL, "token=abc") {
+		t.Errorf("Redacted changed its receiver: %+v %+v", *o[1].Exec, *o[2].HTTP)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -776,9 +777,67 @@ func (s Spec) Validate() error {
 
 // Redacted returns a copy with every field tagged secret:"true" replaced by
 // Redaction when it holds something, so a spec can be logged or served.
+//
+// A collector entry is redacted too, because the agent cannot know which of its
+// values a plugin treats as a credential: its config block becomes Redaction, an
+// exec entry's arguments each become Redaction, and an http entry's URL loses its
+// password and its query values. The command, the URL's host and path, and the
+// built-in type stay, so the served spec still says what runs.
 func (s Spec) Redacted() Spec {
 	redact(reflect.ValueOf(&s).Elem())
+	s.Sources.Collectors = redactCollectors(s.Sources.Collectors)
 	return s
+}
+
+// redactCollectors returns a redacted copy of entries; the receiver's slice, its
+// exec and http specs and its config nodes are left untouched.
+func redactCollectors(entries []CollectorEntry) []CollectorEntry {
+	if entries == nil {
+		return nil
+	}
+	out := make([]CollectorEntry, len(entries))
+	for i, e := range entries {
+		if e.Config.Kind != 0 {
+			e.Config = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: Redaction}
+		}
+		if e.Exec != nil {
+			ex := *e.Exec
+			if ex.Args != nil {
+				ex.Args = make([]string, len(e.Exec.Args))
+				for j := range ex.Args {
+					ex.Args[j] = Redaction
+				}
+			}
+			e.Exec = &ex
+		}
+		if e.HTTP != nil {
+			e.HTTP = &HTTPSpec{URL: redactURL(e.HTTP.URL)}
+		}
+		out[i] = e
+	}
+	return out
+}
+
+// redactURL hides a URL's password (url.URL.Redacted) and every query value,
+// keeping the keys so the shape of the request is still visible. A URL that does
+// not parse is withheld entirely.
+func redactURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return Redaction
+	}
+	if u.RawQuery != "" {
+		keys := make([]string, 0)
+		for k := range u.Query() {
+			keys = append(keys, url.QueryEscape(k)+"="+Redaction)
+		}
+		slices.Sort(keys)
+		u.RawQuery = strings.Join(keys, "&")
+	}
+	return u.Redacted()
 }
 
 func redact(v reflect.Value) {
