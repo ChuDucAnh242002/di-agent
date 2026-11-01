@@ -99,7 +99,7 @@ spec:
       labels:
         app: postgres-ingest
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
       {{- include "diagent.nodeSelector" (dict "local" .Values.postgres.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

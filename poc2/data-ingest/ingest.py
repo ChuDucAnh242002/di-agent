@@ -59,7 +59,13 @@ def download(url):
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     final = opener.open(url, timeout=REQUEST_TIMEOUT_S).geturl()
     parsed = urllib.parse.urlparse(final)
-    folder = urllib.parse.parse_qs(parsed.query)["id"][0]
+    folders = urllib.parse.parse_qs(parsed.query).get("id")
+    if not folders:
+        raise ValueError(
+            "DATA_URL did not resolve to a SharePoint folder. Check that the link "
+            "allows anonymous access and update the Kubernetes data-url Secret."
+        )
+    folder = folders[0]
     base = f"{parsed.scheme}://{parsed.netloc}{'/'.join(folder.split('/')[:3])}/_api/web"
     req = urllib.request.Request(
         f"{base}/GetFolderByServerRelativeUrl('{urllib.parse.quote(folder, safe='')}')/Files"

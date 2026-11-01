@@ -35,7 +35,7 @@ resource "libvirt_volume" "vm_disk" {
     }
   }
 
-  capacity      = 15 
+  capacity      = var.vm_disk_size_gib
   capacity_unit = "GiB"
 
   backing_store = {
