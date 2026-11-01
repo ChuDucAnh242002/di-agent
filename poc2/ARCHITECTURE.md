@@ -46,7 +46,7 @@ PoC2 uses a two-part deployment strategy:
 
 ### 1) Helm chart for the system services
 
-The chart under `helm/di-agent-system` manages the shared runtime services:
+The chart under `helm/di-agent-system` manages the worker agent DaemonSet and shared runtime services:
 
 - Kafka
 - PostgreSQL engine-test dataset
@@ -60,22 +60,22 @@ Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and 
 
 The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
-The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. When `DATASET_COLLECTOR_URL` is configured, the first agent deployed by `scripts/03-agent.sh` polls it; otherwise all agents collect only local cgroup metrics. The chart also provides an optional single-agent Deployment, but it must not be enabled alongside the multi-node script.
+The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. `agent.datasetNodeName` designates one worker whose agent polls it; empty disables dataset ingestion. All agents collect local host cgroup metrics. A shared collector drains its aggregates on each poll, so only the designated agent connects to it.
 
 The collector averages all new Kafka values for each `(run_id, signal)` during one agent collection window, returning one sample per key. Its default source polling interval is 5s, independent of the streamer's interval and points-per-tick: faster streams simply contribute more samples to that window, and signals with no new events are omitted. Events provide per-signal units and ranges as `metadata.signals` JSON keyed by signal, for example `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. Replay-streamer preserves explicit declarations from PostgreSQL; when absent in the supplied dataset, both real and synthetic modes preserve raw values and declare `dataset-native` units with observed min/max ranges pooled across sources. Constant signals receive symmetric padding of 1% (at least 1 unit). Generated metadata records its provenance and is logged, without inventing physical units or changing database rows. The collector forwards those values as `unit` and `range`, with source and origin labels. Since these are engine signals rather than host resource/pressure measurements, they remain unrouted in `semantic-map/domain_spec.json`: the agent records them as scoped properties, but no existing construct summarizes them. Replay-streamer also exposes HTTP instrumentation at `/metrics` for Prometheus.
 
-### 2) Direct pod deployment for the agent mesh
+### 2) Helm-managed worker agent mesh
 
-`/scripts/03-agent.sh` handles the `di-agent` runtime separately:
+`helm/di-agent-system/templates/agent.yaml` deploys the `di-agent` runtime:
 
-- builds the Go binary from the `semantic-map` project,
-- builds a Docker image,
-- imports the image into each worker VM's containerd runtime,
-- creates a Kubernetes `Deployment` per VM,
-- applies `nodeSelector` so each pod lands on its expected host,
-- uses `hostNetwork: true` so each agent can reach the others over VM networking.
+- `scripts/build-push-images.sh` builds the Go binary and publishes the image,
+- a DaemonSet runs one pod on each eligible worker, excluding both control-plane role labels,
+- `NODE_ID` comes from the pod's assigned node name,
+- the host cgroup tree is mounted read-only,
+- `hostNetwork: true` preserves individually addressable worker endpoints,
+- `scripts/04-peers.sh` discovers ready agent pods and registers their host-IP endpoints.
 
-This split matters: the workload and telemetry services are cluster-native; the agent peers are host-native VM processes that behave like edge nodes in the same lab.
+The agent mesh and telemetry services now share one Helm lifecycle. Three agents require three eligible workers in addition to the control plane. Legacy agent Deployments must be removed before migration to avoid host-port conflicts.
 
 ## Infrastructure architecture
 
@@ -149,7 +149,7 @@ The `di-agent` layer is the heart of the experiment.
 
 ### Agent placement
 
-Each worker VM hosts one agent pod. The pod runs with `hostNetwork: true` and is pinned to the VM hostname via `nodeSelector`. This lets the agent:
+Each eligible worker hosts one DaemonSet agent pod. The pod runs with `hostNetwork: true`; node affinity excludes control-plane/master nodes, and optional node selectors narrow the worker set. This lets the agent:
 
 - interact with local runtime configuration,
 - reach other agent nodes directly over the VM network,
@@ -157,7 +157,7 @@ Each worker VM hosts one agent pod. The pod runs with `hostNetwork: true` and is
 
 ### Peer registration
 
-`scripts/04-peers.sh` resolves each VM IP, calls `POST /peers` on each target agent, and then issues `POST /peers/{id}/trust` to assign an explicit trust value. The result is a dense mesh where each agent knows about all the others.
+`scripts/04-peers.sh` lists ready agent pods for the Helm release through kubectl. It executes HTTP requests inside each target pod, registering every other worker's host IP and configured HTTP port, then sets trust to 0.8. The result is a dense mesh where each agent knows all the others; three agents have two peers each. It checks the exact resulting peer sets and fails visibly on missing, duplicate, unready or stale endpoints. Re-run registration after agent restarts or topology changes; this container configuration does not persist peers.
 
 This is important because the trust model is not implicit. It is explicit, observable, and adjustable.
 
@@ -181,12 +181,12 @@ This project has a few hard boundaries that matter in practice:
 - Terraform is only responsible for VM creation.
 - Kubernetes bootstrap is separate from application deployment.
 - The custom app images are built and pushed to a registry before the Helm chart is installed.
-- The `di-agent` binary is built from the `semantic-map` Go sources and deployed separately.
+- The `di-agent` binary is built from the `semantic-map` Go sources and deployed by Helm.
 - The telemetry service credentials are required before chart deployment.
 
 The scripts support kubeadm (with Flannel), k3s, and a KubeEdge CloudCore/EdgeCore deployment path. These boundaries keep the lab understandable: one step creates the nodes, one step creates the cluster, one step deploys services, and one step deploys the peer agent mesh.
 
-The multi-node agent script configures each pod with `NODE_ID`, `REGIME`, `KAFKA_BROKERS`, and `COLLECT_INTERVAL`. `DATASET_COLLECTOR_URL` is optional and defaults to empty; the first worker only receives the collector URL when it is configured. The Makefile exposes `DATASET_COLLECTOR_URL` and `AGENT_COLLECT_INTERVAL` for deployments that enable dataset collection.
+The chart configures each pod with its node identity, regime, collection interval and host cgroup root. The entrypoint enables the dataset HTTP collector only when `NODE_ID` equals `DATASET_NODE_NAME`. The Makefile exposes `DATASET_NODE_NAME` and `AGENT_COLLECT_INTERVAL`; peer registration checks that a nonempty dataset node names a ready agent.
 
 ## Execution flow
 
@@ -196,8 +196,7 @@ The real operational flow is:
 Terraform -> VM fleet
   -> kubeadm/k3s/KubeEdge cluster
   -> image build + registry push
-  -> Helm chart deployment
-  -> agent deployment on each worker VM
+  -> Helm chart deployment (services + worker agent DaemonSet)
   -> peer registration and trust assignment
   -> workload telemetry into Kafka
   -> telemetry writer to InfluxDB
@@ -221,7 +220,7 @@ That makes this PoC valuable as a local testbed for distributed trust-aware rout
 
 - `main.tf`: VM lifecycle and node shape
 - `scripts/02-k8s.sh`: cluster construction
-- `scripts/03-agent.sh`: per-node agent deployment
+- `helm/di-agent-system/templates/agent.yaml`: per-worker agent deployment
 - `scripts/04-peers.sh`: peer + trust registration
 - `scripts/coordinator.sh`: trust-aware routing experiment
 - `helm/di-agent-system/values.yaml`: runtime service defaults and secret references

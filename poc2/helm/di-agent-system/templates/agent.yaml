@@ -1,12 +1,11 @@
 {{- if .Values.agent.enabled }}
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: di-agent
   labels:
     app: di-agent
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: di-agent
@@ -14,7 +13,20 @@ spec:
     metadata:
       labels:
         app: di-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "diagent.podAnnotations" (dict "root" .) | nindent 6 }}
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: node-role.kubernetes.io/master
+                    operator: DoesNotExist
       {{- include "diagent.nodeSelector" (dict "local" .Values.agent.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -46,6 +58,8 @@ spec:
             - name: CGROUP_ROOT
               value: /host/cgroup
             {{- if .Values.datasetCollector.enabled }}
+            - name: DATASET_NODE_NAME
+              value: {{ .Values.agent.datasetNodeName | quote }}
             - name: DATASET_COLLECTOR_URL
               value: "http://dataset-collector:8000/collect"
             {{- end }}

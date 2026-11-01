@@ -45,9 +45,8 @@ datasetCollector:
   resources: {}
 
 agent:
-  # The default multi-node agent fleet is deployed by scripts/03-agent.sh.
-  # Enable this only for a single agent managed entirely by this Helm release.
-  enabled: false
+  # One agent on each eligible worker; control-plane/master nodes are excluded.
+  enabled: true
   image:
     repository: di-agent
     tag: ""
@@ -56,6 +55,8 @@ agent:
   profile: edge-minimal
   collectInterval: 5s
   proposer: "false"
+  # Only this worker polls the shared dataset collector. Empty disables ingestion.
+  datasetNodeName: ""
   nodeSelector: {}
   resources: {}
 

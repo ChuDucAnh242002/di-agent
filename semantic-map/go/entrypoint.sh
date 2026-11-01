@@ -13,6 +13,9 @@ PROPOSER=${PROPOSER:-"false"}
 NETDATA_URL=${NETDATA_URL-"http://localhost:19999"}
 DOMAIN_SPEC=${DOMAIN_SPEC:-"/etc/di-agent/domain_spec.json"}
 DATASET_COLLECTOR_URL=${DATASET_COLLECTOR_URL:-}
+if [ "${DATASET_NODE_NAME+x}" = x ] && [ "${DATASET_NODE_NAME}" != "${NODE_ID}" ]; then
+    DATASET_COLLECTOR_URL=""
+fi
 CGROUP_ROOT=${CGROUP_ROOT:-"/sys/fs/cgroup"}
 
 echo "Starting di-agent with:"

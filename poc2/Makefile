@@ -1,7 +1,7 @@
 ## poc/Makefile — multi-VM PoC for di-agent trust-weighted peer routing
 ##
 ## Usage:
-##   make all          # full stack: provision → k0s → netdata → agent → peers
+##   make all          # provision → Kubernetes → images → Helm agents → peers
 ##   make demo         # run coordinator for 8 rounds (10s interval)
 ##   make status       # curl /cost from all agents
 ##   make teardown     # stop, delete, purge all VMs
@@ -11,8 +11,6 @@
 # Auto-detect VMs from virsh (only running VMs)
 VMS := $(shell virsh list --all --name 2>/dev/null | grep -v '^$$' | sort)
 VM_COUNT := $(words $(VMS))
-# Running VMs only: the kubeadm cluster nodes (first = control plane)
-RUNNING_VMS := $(shell virsh list --state-running --name 2>/dev/null | grep -v '^$$' | sort)
 
 # Generate VM variables dynamically (VM1, VM2, VM3, ...)
 define VM_DEFS
@@ -24,7 +22,7 @@ $(eval $(VM_DEFS))
 
 SCRIPTS := ./scripts
 
-# Helm chart covering every service except di-agent (kafka, postgres,
+# Helm chart covering the worker agent DaemonSet and services (kafka, postgres,
 # replay-streamer, influxdb, telemetry-writer, grafana, and opt-in legacy
 # simulations/playground) — see helm/di-agent-system. Any pod can be
 # scheduled on any cluster node; there is no per-service VM pinning.
@@ -44,8 +42,8 @@ STREAMER_RUN_ID ?=
 STREAMER_INTERVAL_MS ?=
 STREAMER_POINTS ?=
 STREAMER_LOOP ?=
-# Optional URL consumed by the first agent in the direct multi-node deployment.
-DATASET_COLLECTOR_URL ?=
+# Optional worker hostname that alone ingests engine signals.
+DATASET_NODE_NAME ?=
 AGENT_COLLECT_INTERVAL ?= 5s
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
@@ -54,12 +52,19 @@ HELM_STREAMER_SETS = \
 	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
 	$(if $(STREAMER_INTERVAL_MS),--set streamer.intervalMs=$(STREAMER_INTERVAL_MS)) \
 	$(if $(STREAMER_POINTS),--set streamer.pointsPerInterval=$(STREAMER_POINTS)) \
-	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP))
+	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP)) \
+	--set agent.collectInterval=$(AGENT_COLLECT_INTERVAL) \
+	$(if $(DATASET_NODE_NAME),--set-string agent.datasetNodeName=$(DATASET_NODE_NAME))
 
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
 
-all: provision k8s images helm-install agent peers
+all:
+	@$(MAKE) provision
+	@$(MAKE) k8s
+	@$(MAKE) images
+	@$(MAKE) agent
+	@$(MAKE) peers
 
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
@@ -83,6 +88,7 @@ helm-template:
 		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
 helm-install:
+	@kubectl get nodes -o json | python3 -c 'import json,sys; nodes=json.load(sys.stdin)["items"]; pressure=[n["metadata"]["name"] for n in nodes if any(c["type"]=="DiskPressure" and c["status"]=="True" for c in n["status"]["conditions"])]; sys.exit("Deployment blocked: DiskPressure on "+", ".join(pressure)+". Restore node disk capacity before installing; do not delete persistent data." if pressure else 0)'
 	@helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) --create-namespace --timeout $(HELM_TIMEOUT) \
 		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
@@ -97,12 +103,12 @@ helm-uninstall:
 helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
-agent:
-	@DATASET_COLLECTOR_URL="$(DATASET_COLLECTOR_URL)" COLLECT_INTERVAL="$(AGENT_COLLECT_INTERVAL)" \
-		bash $(SCRIPTS)/03-agent.sh $(RUNNING_VMS)
+agent: helm-install
+	@kubectl -n "$(HELM_NAMESPACE)" rollout status daemonset/di-agent --timeout=180s
 
 peers:
-	@bash $(SCRIPTS)/04-peers.sh $(VMS)
+	@HELM_NAMESPACE="$(HELM_NAMESPACE)" HELM_RELEASE="$(HELM_RELEASE)" \
+		bash $(SCRIPTS)/04-peers.sh
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -182,7 +188,7 @@ get-ip-%:
 # Help target
 help:
 	@echo "Available targets:"
-	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
+	@echo "  all          - Full stack: provision → k8s → images → Helm agents → peers"
 	@echo "  images       - Build+push all service images (including navigation and"
 	@echo "                 telemetry-cloud-sync) to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
@@ -197,9 +203,9 @@ help:
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
-	@echo "  agent        - Deploy di-agent on worker VMs"
-	@echo "                 Optional dataset collection: DATASET_COLLECTOR_URL, AGENT_COLLECT_INTERVAL"
-	@echo "                 Alternative: HELM_ARGS=\"--set agent.enabled=true\" (do not use both)"
+	@echo "  agent        - Install/upgrade Helm and wait for one agent per worker"
+	@echo "                 Optional dataset worker: DATASET_NODE_NAME; poll interval: AGENT_COLLECT_INTERVAL"
+	@echo "  peers        - Register the ready Helm worker agents using kubectl"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"

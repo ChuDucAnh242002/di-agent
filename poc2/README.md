@@ -29,6 +29,22 @@ The default topology is simple and intentional:
 
 The first VM in the list is the control plane; all remaining VMs are treated as workers.
 
+VM root disks default to 30 GiB (`vm_disk_size_gib`). Kubernetes local-path PVC
+sizes do not reserve or enlarge the underlying disk: PostgreSQL data and container
+images can exhaust an older 15 GiB VM. Deployment checks for node `DiskPressure`
+before running Helm. Restore capacity rather than deleting database PVCs or
+disabling eviction thresholds. Existing VMs need an explicit disk, partition and
+filesystem expansion; changing the Terraform default alone does not grow their
+mounted root filesystem. Review Terraform plans before applying to an existing lab.
+
+If Helm reports a failed `postgres-ingest` hook, inspect its pod logs with
+`kubectl logs -l app=postgres-ingest -c ingest --tail=50`. Failed attempts are
+retained for diagnosis until the next upgrade recreates the hook. `DATA_URL`
+must resolve anonymously to a SharePoint folder with an `id` query parameter;
+an HTTP 200 sharing/error page alone does not prove access. The Kubernetes
+`data-url` Secret is independent of the local `.env`; keep it updated when the
+working share link changes. Never commit or print private share links.
+
 ## What this PoC deploys
 
 The deployment consists of two separate layers:
@@ -40,11 +56,13 @@ The deployment consists of two separate layers:
 
 2. Application and demo layer
    - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector; legacy simulators and the playground are disabled by default
-   - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
-   - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
+   - the Helm chart deploys the Go `di-agent` as a DaemonSet, one pod per worker node
+   - `scripts/04-peers.sh` discovers the Helm agent pods through kubectl, registers peers and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
 
-The default `make all` workflow deploys the multi-node `di-agent` fleet separately, one pod per worker VM, to model host-level peer nodes directly on the VM network. `agent.enabled=true` in Helm is an alternative single-agent deployment; do not enable it together with `make agent`.
+The default `make all` workflow deploys the entire stack through Helm, including the worker agent DaemonSet (`agent.enabled=true`). Nodes labeled `node-role.kubernetes.io/control-plane` or `node-role.kubernetes.io/master` are excluded. Three eligible worker nodes produce three agents; the control plane is additional. `agent.nodeSelector` and `global.nodeSelector` can further restrict placement. Agents use host networking and listen on each worker's port 9090 by default.
+
+When migrating, remove the old Helm Deployment `di-agent`, if present, and the script-created Deployments named `di-agent-<worker>` before installing the DaemonSet. List them with `kubectl get deployments -l app=di-agent`, then delete only those legacy Deployments by name. Do not run the old deployment script alongside the DaemonSet: both would claim the same node identity and host port.
 
 ## Required secrets and configuration
 
@@ -83,9 +101,9 @@ Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=
 
 The streamer defaults to `synthetic` mode, generating bounded, correlated samples from the selected run's measured signal profiles and carrying its `run_metadata` in each message. Set `streamer.mode=real` to replay the actual stored samples. Both modes publish generic engine signals to `dataset.telemetry`; telemetry-writer writes them to InfluxDB's `dataset_timeseries` measurement with `run_id`, `source`, `signal`, and `origin` tags. If PostgreSQL data is unavailable, the streamer reports the error through `/status` and retries; it never silently substitutes synthetic values for a requested real stream.
 
-The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. To have the first agent deployed by `make agent` poll it, set `DATASET_COLLECTOR_URL=http://dataset-collector.default.svc.cluster.local:8000/collect`; otherwise the URL is empty and agents collect their local cgroup metrics only. Alternatively, run a single Helm-managed agent with `make helm-install HELM_ARGS="--set agent.enabled=true"` and do not run `make agent`.
+The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. Set `agent.datasetNodeName` to one worker's Kubernetes node name (or use `make agent DATASET_NODE_NAME=ubuntu-vm2`) to designate the only agent that polls it. Empty means engine ingestion is disabled. Every agent still monitors its own host cgroups. Do not point multiple agents at the shared collector: each HTTP poll drains the pending aggregates, so they would split the data rather than receive copies. `make peers` rejects a configured dataset node that is absent from the ready agent fleet.
 
-The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` for `make agent`, or `agent.collectInterval` for the Helm-managed agent): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
+The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` in Make, or `agent.collectInterval` in Helm): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
 
 The supplied PostgreSQL dataset has engine/run metadata, but no per-signal physical units or operating ranges. In both stream modes, replay-streamer preserves raw values and supplements each event's metadata with `unit: "dataset-native"` and observed min/max bounds pooled across all sources for that signal in the selected run. These are normalization bounds, not claimed physical operating limits. Constant signals get symmetric padding of 1% of their absolute value (at least 1 dataset-native unit) to keep the range nonzero. Generated declarations carry `unit_source: "dataset-native"` and `range_source: "observed"` and are logged. Explicit units and ranges in `run_metadata` take precedence, including JSON `signals` and flattened `<signal>.unit`/`<signal>.range` keys; invalid explicit declarations fail visibly rather than being replaced. PostgreSQL rows are not modified.
 
@@ -168,8 +186,7 @@ Use this sequence from this directory:
 make provision
 make k8s
 make images
-make helm-install
-make agent
+make agent DATASET_NODE_NAME=ubuntu-vm2
 make peers
 make demo
 ```
@@ -178,11 +195,12 @@ That sequence does the following:
 
 1. `make provision` creates the libvirt VMs.
 2. `make k8s` bootstraps the cluster on the VMs.
-3. `make images` builds and pushes the workload images used by the Helm chart.
-4. `make helm-install` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
-5. `make agent` builds the Go agent binary and imports the image into each worker node; it then deploys one `di-agent` pod per VM.
-6. `make peers` registers each agent as a peer on the others and assigns trust values.
-7. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting.
+3. `make images` builds and pushes all chart images, including the Go agent.
+4. `make agent` installs/upgrades the chart and waits for the worker DaemonSet rollout. It deploys agents together with Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
+5. `make peers` registers each ready worker agent on the others and assigns trust values. It requires kubectl pod-list/exec permissions and Python 3, not SSH or libvirt discovery. Re-run it after agent restarts, worker additions/removals, or Helm upgrades: the container configuration does not persist the peer registry. The script verifies the exact peer URL set and reports stale or missing entries rather than claiming success.
+6. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting. This legacy demo still assumes the libvirt VM list starts with the control plane and uses port 9090.
+
+To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090`. Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 
 ## Useful commands
 
@@ -210,12 +228,12 @@ The files that matter for understanding or running the PoC are:
 - `providers.tf`: libvirt provider setup
 - `scripts/01-provision.sh`: creates the VM fleet
 - `scripts/02-k8s.sh`: bootstraps the cluster
-- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods
+- `helm/di-agent-system/templates/agent.yaml`: worker agent DaemonSet and shared Service
 - `scripts/04-peers.sh`: registers peers and trust values
 - `scripts/coordinator.sh`: runs the trust-based recommendation demo
 - `scripts/build-push-images.sh`: builds/pushes the runtime service images
 - `helm/di-agent-system/values.yaml`: all chart defaults and required secrets
-- `helm/di-agent-system/templates/`: Kubernetes manifests for Kafka, InfluxDB, Grafana, data services, and the optional single Helm-managed agent
+- `helm/di-agent-system/templates/`: Kubernetes manifests for Kafka, InfluxDB, Grafana, data services, and worker agents
 - `system/replay-streamer`: configurable PostgreSQL-to-Kafka real/synthetic data source
 - `system/dataset-collector`: Python Kafka-to-di-agent HTTP collector
 - `system/*`: legacy workload generators and telemetry services
