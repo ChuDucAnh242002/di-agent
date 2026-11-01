@@ -201,6 +201,14 @@ def main():
         for index in INDEXES:
             conn.execute(index)
         conn.execute("ANALYZE timeseries")
+    if url := os.environ.get("STREAMER_CONTROL_URL"):
+        request = urllib.request.Request(
+            url, data=b"{}", method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+            json.load(response)
+        print("refreshed replay-streamer dataset profiles", flush=True)
     print("done", flush=True)
 
 

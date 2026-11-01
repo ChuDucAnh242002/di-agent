@@ -36,7 +36,7 @@ class SyntheticRecordsTests(unittest.TestCase):
 
     def test_streams_all_sources_aligned_and_shorter_ends_first(self):
         metadata = {"rpm": "1000"}
-        with patch("main.load_profiles", return_value=(self.profiles, metadata)):
+        with patch.object(replay, "load_profiles", return_value=(self.profiles, metadata)):
             records = list(synthetic_records(self.config))
 
         self.assertEqual(len(records), 5)
@@ -51,14 +51,14 @@ class SyntheticRecordsTests(unittest.TestCase):
         self.assertTrue(all(record["origin"] == "synthetic" for record in records))
 
     def test_time_steps_group_samples_sharing_a_time(self):
-        with patch("main.load_profiles", return_value=(self.profiles, {})):
+        with patch.object(replay, "load_profiles", return_value=(self.profiles, {})):
             steps = list(time_steps(synthetic_records(self.config)))
 
         self.assertEqual([len(step) for step in steps], [2, 2, 1])
         self.assertEqual([step[0]["t_source"] for step in steps], [0, 1, 2])
 
     def test_generation_is_reproducible_from_seed(self):
-        with patch("main.load_profiles", return_value=(self.profiles, {})):
+        with patch.object(replay, "load_profiles", return_value=(self.profiles, {})):
             first = list(synthetic_records(self.config))
             second = list(synthetic_records(self.config))
 
@@ -80,6 +80,15 @@ class StreamConfigurationTests(unittest.TestCase):
         self.assertEqual(config.interval_ms, 250)
         self.assertEqual(config.run_id, "1000rpm_150kW_0001")
         self.assertEqual(config.points_per_interval, 1)
+
+    def test_empty_update_reloads_profiles_without_changing_configuration(self):
+        service = ReplayService()
+        before, revision = service.snapshot()
+        service.update(ConfigUpdate())
+        after, updated_revision = service.snapshot()
+
+        self.assertEqual(after, before)
+        self.assertEqual(updated_revision, revision + 1)
 
 
 class ProducerFutureTests(unittest.TestCase):

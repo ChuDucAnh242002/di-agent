@@ -86,6 +86,27 @@ This is required because `helm/di-agent-system/values.yaml` references:
 
 ### PostgreSQL engine dataset
 
+The local `data/` directory and the existing `DATA_URL` share include the added
+`IMEPn1` through `IMEPn4`, `MFB50_4`, `PMax4`, and `PowerCyl4` signal CSVs.
+Each file contains its `Data1_<signal>` value column alongside the matching
+`Data1_time_<signal>` column. Ingestion discovers new files on every Helm
+install/upgrade and leaves unchanged, already-loaded files alone. No signal
+allowlist or new DATA_URL is required. The `_0001` and `_0001_2` run IDs stay
+separate; select the desired run with `streamer.runId` or the control API.
+After loading and committing the files, the Helm ingestion job sends an empty
+`PUT /config` to replay-streamer to reload its PostgreSQL profiles. This keeps
+both modes current even when the streamer started before the new files were
+ingested, without changing its configuration. A failed refresh fails the job
+visibly and is retried by Kubernetes. Standalone ingestion can opt into the same
+behavior with `STREAMER_CONTROL_URL=http://replay-streamer:8000/config`.
+The unchanged di-agent contract requires stable units and ranges per signal
+name for the lifetime of its collector. Run one dataset at a time and restart
+the agent when changing run IDs: the same signal can have different observed
+bounds in another run. Stop the previous stream and let its queued Kafka events
+and pending collector aggregates drain before switching, so the restarted
+agent receives only the new run. Signal names, raw values and per-run bounds
+remain unchanged; no changes to `semantic-map/` are required.
+
 The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
 
 ```bash
