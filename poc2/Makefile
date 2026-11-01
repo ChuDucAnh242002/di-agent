@@ -1,7 +1,7 @@
 ## poc/Makefile — multi-VM PoC for di-agent trust-weighted peer routing
 ##
 ## Usage:
-##   make all          # full stack: provision → k0s → netdata → agent → peers
+##   make all          # provision → Kubernetes → images → Helm agents → peers
 ##   make demo         # run coordinator for 8 rounds (10s interval)
 ##   make status       # curl /cost from all agents
 ##   make teardown     # stop, delete, purge all VMs
@@ -22,20 +22,49 @@ $(eval $(VM_DEFS))
 
 SCRIPTS := ./scripts
 
-# Helm chart covering every service except di-agent (kafka, genset,
-# switchboard, propulsion, battery, auxload, influxdb, telemetry-writer,
-# grafana, playground) — see helm/di-agent-system. Any of its pods can be
+# Helm chart covering the worker agent DaemonSet and services (kafka, postgres,
+# replay-streamer, influxdb, telemetry-writer, grafana, and opt-in legacy
+# simulations/playground) — see helm/di-agent-system. Any pod can be
 # scheduled on any cluster node; there is no per-service VM pinning.
 HELM_CHART := helm/di-agent-system
 HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
-REGISTRY ?= ghcr.io/chuducanh242002
+# The postgres-ingest hook splits and loads ~170 MB of CSVs; Helm's 5m default is too short.
+HELM_TIMEOUT ?= 30m
+REGISTRY ?= ghcr.io/diyazy
 TAG ?= latest
+
+# Optional replay-streamer overrides for helm-install/helm-template. Unset
+# variables fall back to the chart defaults in values.yaml.
+#   make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=25
+STREAMER_MODE ?=
+STREAMER_RUN_ID ?=
+STREAMER_INTERVAL_MS ?=
+STREAMER_POINTS ?=
+STREAMER_LOOP ?=
+# Optional worker hostname that alone ingests engine signals.
+DATASET_NODE_NAME ?=
+AGENT_COLLECT_INTERVAL ?= 5s
+# Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
+HELM_ARGS ?=
+HELM_STREAMER_SETS = \
+	$(if $(STREAMER_MODE),--set streamer.mode=$(STREAMER_MODE)) \
+	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
+	$(if $(STREAMER_INTERVAL_MS),--set streamer.intervalMs=$(STREAMER_INTERVAL_MS)) \
+	$(if $(STREAMER_POINTS),--set streamer.pointsPerInterval=$(STREAMER_POINTS)) \
+	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP)) \
+	--set agent.collectInterval=$(AGENT_COLLECT_INTERVAL) \
+	$(if $(DATASET_NODE_NAME),--set-string agent.datasetNodeName=$(DATASET_NODE_NAME))
 
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
 
-all: provision k8s images helm-install agent peers
+all:
+	@$(MAKE) provision
+	@$(MAKE) k8s
+	@$(MAKE) images
+	@$(MAKE) agent
+	@$(MAKE) peers
 
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
@@ -43,34 +72,43 @@ provision:
 k8s:
 	@bash $(SCRIPTS)/02-k8s.sh $(VMS)
 
-# Build and push all chart-managed service images to $(REGISTRY):$(TAG).
+# Build and push chart-managed service images to $(REGISTRY):$(TAG).
+# Override IMAGES to build/push only a subset, e.g.:
+#   make images IMAGES="genset propulsion"
+IMAGES ?=
 images:
-	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh
+	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh $(IMAGES)
 
 helm-lint:
 	@helm lint $(HELM_CHART)
 
 helm-template:
-	@helm template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE)
+	@helm template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE) \
+		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
+		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
 helm-install:
+	@kubectl get nodes -o json | python3 -c 'import json,sys; nodes=json.load(sys.stdin)["items"]; pressure=[n["metadata"]["name"] for n in nodes if any(c["type"]=="DiskPressure" and c["status"]=="True" for c in n["status"]["conditions"])]; sys.exit("Deployment blocked: DiskPressure on "+", ".join(pressure)+". Restore node disk capacity before installing; do not delete persistent data." if pressure else 0)'
 	@helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
-		--namespace $(HELM_NAMESPACE) --create-namespace \
-		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG)
+		--namespace $(HELM_NAMESPACE) --create-namespace --timeout $(HELM_TIMEOUT) \
+		--set global.imageRegistry=$(REGISTRY) --set global.imageTag=$(TAG) \
+		$(HELM_STREAMER_SETS) $(HELM_ARGS)
 
 helm-upgrade: helm-install
 
 helm-uninstall:
 	@helm uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+	@kubectl -n $(HELM_NAMESPACE) delete job postgres-ingest --ignore-not-found
 
 helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
-agent:
-	@bash $(SCRIPTS)/04-agent.sh $(VMS)
+agent: helm-install
+	@kubectl -n "$(HELM_NAMESPACE)" rollout status daemonset/di-agent --timeout=180s
 
 peers:
-	@bash $(SCRIPTS)/05-peers.sh $(VMS)
+	@HELM_NAMESPACE="$(HELM_NAMESPACE)" HELM_RELEASE="$(HELM_RELEASE)" \
+		bash $(SCRIPTS)/04-peers.sh
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -114,7 +152,7 @@ status:
 		echo "=== $(vm) ==="; \
 		ip=$$(virsh domifaddr $(vm) --source lease 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1); \
 		if [ -n "$$ip" ]; then \
-			curl -s "http://$$ip:8080/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
+			curl -s "http://$$ip:9090/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
 		else \
 			echo "VM $(vm) not running or no IP assigned"; \
 		fi; \
@@ -145,23 +183,29 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
-        workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
+	workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target
 help:
 	@echo "Available targets:"
-	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
-	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
+	@echo "  all          - Full stack: provision → k8s → images → Helm agents → peers"
+	@echo "  images       - Build+push all service images (including navigation and"
+	@echo "                 telemetry-cloud-sync) to REGISTRY (default $(REGISTRY))"
+	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
+	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
-	@echo "                 telemetry-writer/playground images to REGISTRY (default $(REGISTRY))"
-	@echo "  helm-install - helm upgrade --install the di-agent-system chart (kafka..playground)"
+	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
+	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID"
+	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
-	@echo "  agent        - Deploy di-agent (one pod per worker VM; not part of the Helm chart)"
+	@echo "  agent        - Install/upgrade Helm and wait for one agent per worker"
+	@echo "                 Optional dataset worker: DATASET_NODE_NAME; poll interval: AGENT_COLLECT_INTERVAL"
+	@echo "  peers        - Register the ready Helm worker agents using kubectl"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"

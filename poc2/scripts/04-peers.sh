@@ -1,117 +1,100 @@
 #!/usr/bin/env bash
-# 04-peers.sh — discover VM IPs and register each VM as a peer on the others
-#
-# Peer topology (trust=0.8 for all pairs):
-#   each VM receives every other VM as a peer
-#
-# Usage: ./04-peers.sh [vm1 vm2 vm3 ...]
+# Register the Helm-managed worker agents with one another, with initial trust 0.8.
+# Usage: HELM_NAMESPACE=default HELM_RELEASE=di-agent-system ./04-peers.sh
 
 set -euo pipefail
 
-# ── colours ─────────────────────────────────────────────────────────────────
-GREEN=$(tput setaf 2 2>/dev/null || echo "")
-YELLOW=$(tput setaf 3 2>/dev/null || echo "")
-RED=$(tput setaf 1 2>/dev/null || echo "")
-RESET=$(tput sgr0 2>/dev/null || echo "")
+NAMESPACE="${HELM_NAMESPACE:-default}"
+RELEASE="${HELM_RELEASE:-di-agent-system}"
+SELECTOR="app=di-agent,app.kubernetes.io/instance=${RELEASE}"
 
-info() { echo "${YELLOW}[peers] $*${RESET}"; }
-ok()   { echo "${GREEN}[peers] $*${RESET}"; }
-err()  { echo "${RED}[peers] $*${RESET}" >&2; }
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-get_vm_ip() {
-    virsh domifaddr "$1" | awk '/ipv4/ {print $4}' | cut -d'/' -f1 | head -n1
-}
-
-register_peer() {
-    local target_vm="$1"   # VM whose agent receives the POST
-    local target_ip="$2"   # IP of target_vm
-    local peer_id="$3"     # human label (unused by server — kept for log readability)
-    local peer_url="$4"    # URL of the peer
-    local trust="${5:-0.8}"
-
-    info "  $target_vm ← peer $peer_id ($peer_url, trust=$trust)"
-    # POST /peers only takes url+note; server derives ID from sha256(url) and
-    # starts trust at 0.5.  We must follow up with POST /peers/{id}/trust.
-    local add_resp
-    add_resp=$(curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -d "{\"url\": \"${peer_url}\"}" \
-        "http://${target_ip}:9090/peers" 2>&1) || {
-        err "  Failed to POST /peers on $target_vm ($target_ip): $add_resp"
-        return 1
-    }
-    local derived_id
-    derived_id=$(echo "$add_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
-    if [ -z "$derived_id" ]; then
-        err "  Could not extract peer ID from response on $target_vm: $add_resp"
-        return 1
-    fi
-    # Set the initial trust explicitly.
-    curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -d "{\"value\": ${trust}}" \
-        "http://${target_ip}:9090/peers/${derived_id}/trust" >/dev/null 2>&1 || {
-        err "  Failed to set trust for $derived_id on $target_vm"
-        return 1
-    }
-    ok "  registered (id=$derived_id, trust=$trust)"
-}
-
-# ── args ─────────────────────────────────────────────────────────────────────
-if [ "$#" -eq 0 ]; then
-    # Default: use all ubuntu-vm* machines known to uc.
-    VMS=()
-    while IFS= read -r vm; do
-        [ -n "$vm" ] && VMS+=("$vm")
-    done < <(uc machine ls | awk 'NR > 1 && $1 ~ /^ubuntu-vm/ {print $1}')
-else
-    VMS=("$@")
-fi
-
-if [ "${#VMS[@]}" -eq 0 ]; then
-    err "No VMs provided and none discovered from 'uc machine ls'."
+for tool in kubectl python3; do
+    command -v "$tool" >/dev/null || { echo "[peers] Missing $tool" >&2; exit 1; }
+done
+if [ "$#" -ne 0 ]; then
+    echo "[peers] VM arguments are no longer supported; use HELM_NAMESPACE and HELM_RELEASE." >&2
     exit 1
 fi
 
-# ── discover IPs (bash 3.x compat — arrays only) ────────────────────────────
-IPS=()
-for vm in "${VMS[@]}"; do
-    ip=$(get_vm_ip "$vm")
-    if [ -z "$ip" ]; then
-        err "Could not find IP for $vm — is it running?"
-        exit 1
+kubectl -n "$NAMESPACE" rollout status daemonset/di-agent --timeout=180s
+work_dir=$(mktemp -d)
+trap 'rm -f "$work_dir/pods.json" "$work_dir/agents.tsv"; rmdir "$work_dir"' EXIT
+kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o json > "$work_dir/pods.json"
+python3 - "$work_dir/pods.json" > "$work_dir/agents.tsv" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    pods = json.load(stream)["items"]
+agents = {}
+dataset_nodes = set()
+for pod in pods:
+    if pod["metadata"].get("deletionTimestamp"):
+        continue
+    node = pod["spec"].get("nodeName")
+    ready = any(c["type"] == "Ready" and c["status"] == "True"
+                for c in pod.get("status", {}).get("conditions", []))
+    if not node or not ready or not pod.get("status", {}).get("hostIP"):
+        sys.exit("[peers] Every agent must be scheduled and Ready before registration.")
+    if node in agents:
+        sys.exit(f"[peers] Multiple agents on {node}; remove legacy deployments first.")
+    container = next(c for c in pod["spec"]["containers"] if c["name"] == "di-agent")
+    dataset_nodes.update(e["value"] for e in container.get("env", [])
+                         if e["name"] == "DATASET_NODE_NAME" and e.get("value"))
+    port = next(p["containerPort"] for p in container["ports"] if p["name"] == "http")
+    host = pod["status"]["hostIP"]
+    if ":" in host:
+        host = f"[{host}]"
+    agents[node] = (pod["metadata"]["name"], port, f"http://{host}:{port}")
+if not agents:
+    sys.exit("[peers] No Helm-managed worker agents found.")
+if len(dataset_nodes) > 1 or not dataset_nodes.issubset(agents):
+    sys.exit(f"[peers] Dataset node must name one ready worker: {dataset_nodes}")
+for node, (pod, port, url) in sorted(agents.items()):
+    print(node, pod, port, url, sep="\t")
+PY
+
+NODES=()
+PODS=()
+PORTS=()
+URLS=()
+while IFS=$'\t' read -r node pod port url; do
+    NODES+=("$node")
+    PODS+=("$pod")
+    PORTS+=("$port")
+    URLS+=("$url")
+done < "$work_dir/agents.tsv"
+
+request() {
+    local index="$1" method="$2" path="$3"; shift 3
+    local url="http://localhost:${PORTS[$index]}${path}"
+    if [[ "$path" == http://* ]]; then
+        url="$path"
     fi
-    IPS+=("$ip")
-    info "$vm → $ip"
-done
+    kubectl -n "$NAMESPACE" exec "${PODS[$index]}" -c di-agent -- \
+        curl --fail-with-body --silent --show-error --connect-timeout 5 --max-time 15 \
+        -X "$method" -H "Content-Type: application/json" \
+        "$url" "$@"
+}
 
-# ── register peers ────────────────────────────────────────────────────────────
-info ""
-info "Registering peer relationships ..."
-
-for ((i = 1; i < ${#VMS[@]}; i++)); do
-    target_vm="${VMS[$i]}"
-    target_ip="${IPS[$i]}"
-    for ((j = 1; j < ${#VMS[@]}; j++)); do
+for i in "${!NODES[@]}"; do
+    for j in "${!NODES[@]}"; do
         [ "$i" -eq "$j" ] && continue
-        peer_vm="${VMS[$j]}"
-        peer_ip="${IPS[$j]}"
-        register_peer "$target_vm" "$target_ip" "$peer_vm" "http://${peer_ip}:9090" 0.8
+        echo "[peers] ${NODES[$i]} <- ${NODES[$j]} (${URLS[$j]})"
+        request "$i" GET "${URLS[$j]}/healthz" >/dev/null
+        response=$(request "$i" POST /peers -d "{\"url\":\"${URLS[$j]}\"}")
+        id=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+        [ -n "$id" ] || { echo "[peers] Empty peer ID" >&2; exit 1; }
+        request "$i" POST "/peers/${id}/trust" -d '{"value":0.8}' >/dev/null
     done
+    response=$(request "$i" GET /peers)
+    printf '%s' "$response" | python3 -c '
+import json, sys
+peers = json.load(sys.stdin)
+expected = set(sys.argv[2:])
+actual = {p["url"] for p in peers}
+if actual != expected:
+    sys.exit(f"[peers] {sys.argv[1]}: expected {expected}, received {actual}")
+print(f"[peers] {sys.argv[1]}: verified {len(peers)} peers")
+' "${NODES[$i]}" "${URLS[@]:0:$i}" "${URLS[@]:$((i + 1))}"
 done
-
-# ── verify ────────────────────────────────────────────────────────────────────
-info ""
-info "Verifying peer lists ..."
-for ((i = 1; i < ${#VMS[@]}; i++)); do
-    vm="${VMS[$i]}"
-    ip="${IPS[$i]}"
-    peer_count=$(curl -sf "http://${ip}:9090/peers" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null \
-        || echo "?")
-    ok "$vm ($ip): $peer_count peers registered"
-done
-
-echo ""
-ok "Peer registration complete."
