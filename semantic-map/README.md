@@ -190,7 +190,7 @@ semantic-map/
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
     │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
-    │   │   ├── rules.go        Tier 0: Rule, and the composition rule
+    │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
     │   │   ├── logprobs.go     Tier 1 openai-logprobs: a general model's letter probabilities
     │   │   ├── reasoner.go     Tier 2 openai-tools: a tool-calling model reading the map
@@ -1185,7 +1185,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
+| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
 | `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
@@ -1670,7 +1670,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
+| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` confirms a directed candidate after three full qualifying windows of fresh paired observations. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1683,6 +1683,46 @@ The level decides who may act:
 | `rules` (1) | yes | no |
 | `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
 | `full` (3), the default | yes | yes |
+
+### Rules-only persistent correlation
+
+Merge this into the agent configuration to approve unfamiliar directed pairs without
+an allowlist or model calls. The default rule list remains `composition` only.
+
+```yaml
+loops:
+  review:
+    level: rules
+    rules:
+      - composition
+      - persistent-correlation
+    decision:
+      backend: none
+    reasoning:
+      backend: none
+```
+
+`persistent-correlation` requires `PersistentWindows >= 3` and no evidence caveats.
+Each counted window contains a full proposer buffer of fresh pairs, not another review
+of the same observations. Windows do not overlap. The correlation must keep its sign
+and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
+gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
+correction is enabled. Missing declared ranges prevent persistence from accumulating
+on the property path. A failed gate, sign/kind change, forgotten property, or displaced
+pair resets the run. A closer-time replacement partner revises the last pair's evidence
+instead of counting as another observation.
+
+`GET /candidates?status=all` exposes `PersistentWindows`; reviews and their decision
+records retain the count used. An increase or reset makes a previous review outdated
+even if correlation strength stays unchanged, so waiting candidates are reconsidered
+automatically. Persistence is in-memory and starts over after a restart. Unmatched and
+undirected candidates stay pending; the rule never invents an orientation.
+
+This is an opt-in statistical acceptance policy, **not proof of causation**. A confirmed
+edge is an ordinary discovered relationship and participates in estimates; this feature
+does not add probation or automatic retirement of confirmed edges. `level: suggest`
+records proposed approvals without applying them. `level: rules` alone does not disable
+model calls: set both model backends to `none` as above for rules-only operation.
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
 returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
@@ -1702,4 +1742,3 @@ Bearer tokens for a backend are `loops.review.decision.api_key` and
 environment and keep them out of the file. The agent reads no variable on its own.
 
 The thresholds are uncalibrated defaults set by what each action costs to undo.
-

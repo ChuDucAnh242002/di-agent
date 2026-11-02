@@ -51,8 +51,9 @@ import (
 type MICorrelationProposer struct {
 	lookup contracts.RelationshipLookup
 
-	mu      sync.Mutex
-	buffers map[string]*stats.PairWindow // key: fromID + "→" + toID
+	mu          sync.Mutex
+	buffers     map[string]*stats.PairWindow // key: fromID + "→" + toID
+	persistence map[string]*pairPersistence
 	// lastPair remembers, per buffer key, the timestamps of the last pair folded, so
 	// a reading takes part in at most one pair per counterpart: without it each tick
 	// at a shared cadence folded (x_i, y_{i-1}) on x's arrival and (x_i, y_i) on
@@ -114,6 +115,39 @@ type pairSlot struct {
 	r        float64
 }
 
+// persistenceRun checkpoints the rolling buffer only after a full buffer's worth
+// of new pairs. Replacing the closest-time partner is not a new observation.
+type persistenceRun struct {
+	pairs, windows int
+	sign           int
+	kind           string
+}
+
+type pairPersistence struct {
+	run, beforeLast persistenceRun
+}
+
+func (s *pairPersistence) fold(replace bool) *persistenceRun {
+	if replace {
+		s.run = s.beforeLast
+	} else {
+		s.beforeLast = s.run
+	}
+	s.run.pairs++
+	return &s.run
+}
+
+func (s *persistenceRun) check(valid bool, sign int, kind string, size int) {
+	if !valid || s.sign != 0 && (s.sign != sign || s.kind != kind) {
+		s.pairs, s.windows = 0, 0
+	}
+	s.sign, s.kind = sign, kind
+	if valid && s.pairs >= size {
+		s.windows++
+		s.pairs = 0
+	}
+}
+
 // valueRing is a property's recent values, kept to measure how far it moves.
 type valueRing struct {
 	vs   []float64
@@ -169,6 +203,7 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 	return &MICorrelationProposer{
 		lookup:           lookup,
 		buffers:          make(map[string]*stats.PairWindow),
+		persistence:      make(map[string]*pairPersistence),
 		lastPair:         make(map[string][2]int64),
 		candidates:       make(map[string]*types.CandidateEdge),
 		latestConstructs: make(map[string]float64),
@@ -481,6 +516,10 @@ func (p *MICorrelationProposer) dropLocked(key string) {
 	}
 	delete(p.slots, key)
 	delete(p.buffers, key)
+	delete(p.persistence, key)
+	if c := p.candidates[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)]; c != nil && !settled(c) {
+		c.PersistentWindows = 0
+	}
 	delete(p.lastPair, key)
 	delete(p.pvals, key)
 	delete(p.partners[sl.from], sl.to)
@@ -889,6 +928,7 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 		from, to, _ := strings.Cut(key, "→")
 		if from == propertyID || to == propertyID {
 			delete(p.buffers, key)
+			delete(p.persistence, key)
 			delete(p.lastPair, key)
 			delete(p.pvals, key)
 		}
@@ -926,6 +966,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if !ok {
 		buf = stats.NewPairWindow(p.bufSize)
 		p.buffers[key] = buf
+		p.persistence[key] = &pairPersistence{}
 	}
 	folded := buf.Fold
 	if meta.replace {
@@ -934,6 +975,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if !folded(identity, valueA, valueB) {
 		return nil
 	}
+	run := p.persistence[key].fold(meta.replace)
 	if buf.Len() < p.minPairs {
 		return nil
 	}
@@ -959,15 +1001,34 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)
 	if meta.sameChart && p.linkLocked(key, ok && math.Abs(r) >= p.linkFloorLocked(key, buf.Len())) {
+		run.check(false, 0, meta.kind, p.bufSize)
 		// Arithmetic, not a finding: the group is reported in Discovery instead, and
 		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
 		delete(p.pvals, key)
-		if c := p.candidates[candID]; c != nil && c.Status == types.Pending {
-			c.Status, c.Reason = types.Deferred, deferredGrouped
+		if c := p.candidates[candID]; c != nil && !settled(c) {
+			c.PersistentWindows = 0
+			if c.Status == types.Pending {
+				c.Status, c.Reason = types.Deferred, deferredGrouped
+			}
 		}
 		return nil
 	}
 	p.pvals[key] = pv
+	bar := p.barLocked()
+	direction, sign := types.Positive, 1
+	if r < 0 {
+		direction, sign = types.Negative, -1
+	}
+	moved, caveats := true, []string(nil)
+	if meta.property {
+		moved, caveats = p.movedEnoughLocked(fromID, toID, buf, meta)
+	}
+	run.check(ok && math.Abs(r) >= p.threshold && pv <= 0.05 &&
+		(bar == 0 || pv <= bar) && moved && len(caveats) == 0, sign, meta.kind, p.bufSize)
+	if c := p.candidates[candID]; c != nil && !settled(c) {
+		c.PersistentWindows = run.windows
+		c.Caveats = caveats
+	}
 	if !ok || math.Abs(r) < p.threshold {
 		// A pending candidate whose pair no longer holds leaves the queue with the
 		// numbers that put it out, rather than asking an operator to confirm an |r|
@@ -983,7 +1044,6 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		}
 		return nil
 	}
-	bar := p.barLocked()
 	if bar > 0 && pv > bar {
 		// Strong enough alone, not once the number of pairs tested is counted. A pending
 		// candidate the bar has tightened past leaves the queue with the numbers that
@@ -993,10 +1053,6 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			c.Status, c.Reason = types.Deferred, deferredByBar
 		}
 		return nil
-	}
-	direction, sign := types.Positive, 1
-	if r < 0 {
-		direction, sign = types.Negative, -1
 	}
 	if p.lookup != nil && (p.lookup.Covered(fromID, toID, sign) ||
 		(meta.undirected && p.lookup.Covered(toID, fromID, sign))) {
@@ -1040,18 +1096,15 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 			return nil
 		}
 	}
-	var caveats []string
-	if meta.property {
-		var moved bool
-		if moved, caveats = p.movedEnoughLocked(fromID, toID, buf, meta); !moved {
-			return nil
-		}
+	if !moved {
+		return nil
 	}
 	p.candidates[candID] = &types.CandidateEdge{
 		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
 		MIScore: math.Abs(r), PValue: pv, PBar: bar,
 		NObservations: buf.Len(), Status: types.Pending,
 		Undirected: meta.undirected, Kind: meta.kind, Caveats: caveats,
+		PersistentWindows: run.windows,
 	}
 	p.order = append(p.order, candID)
 	p.enforceCapLocked()
@@ -1287,6 +1340,7 @@ func stamp(c *types.CandidateEdge, rv types.CandidateReview, action string) *typ
 		rv.At = time.Now()
 	}
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
+	rv.PersistentWindows = c.PersistentWindows
 	return &rv
 }
 

@@ -1,6 +1,10 @@
 package autonomy
 
-import "github.com/DiyazY/di-agent/pkg/types"
+import (
+	"fmt"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
 
 // Rule is a tier 0 check: something that settles a candidate without a model. Apply
 // returns the action and why when the rule applies, and ok false when it does not.
@@ -12,6 +16,7 @@ type Rule interface {
 
 func init() {
 	RegisterRule("composition", func() Rule { return composition{} })
+	RegisterRule("persistent-correlation", func() Rule { return persistentCorrelation{} })
 }
 
 // composition confirms a directed composition candidate: a part against the whole
@@ -30,6 +35,18 @@ func (composition) Apply(ev Evidence) (string, string, bool) {
 		return types.ReviewConfirm, "composition: the source is part of the target by definition", true
 	}
 	return "", "", false
+}
+
+type persistentCorrelation struct{}
+
+func (persistentCorrelation) Name() string { return "persistent-correlation" }
+
+func (persistentCorrelation) Apply(ev Evidence) (string, string, bool) {
+	c := ev.Candidate
+	if c.Undirected || c.PersistentWindows < 3 || len(c.Caveats) != 0 {
+		return "", "", false
+	}
+	return types.ReviewConfirm, fmt.Sprintf("persistent correlation: %d full non-overlapping windows passed the evidence gates with the same sign and kind; association is not proof of causation", c.PersistentWindows), true
 }
 
 // rules is tier 0: the first configured rule that applies.

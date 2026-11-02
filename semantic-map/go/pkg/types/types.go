@@ -475,6 +475,10 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+	// PersistentWindows counts full, non-overlapping windows of fresh pairs that
+	// passed the proposer's evidence gates with the same sign and kind. It resets
+	// when evidence fails a gate or the pair stops being tested.
+	PersistentWindows int
 	// Undirected is true when nothing says which end drives the other: both are
 	// node-level or both belong to subjects, and correlation is symmetric. FromID and ToID are then the pair in
 	// lexicographic order, not a claim, and confirming one requires the operator to
@@ -537,29 +541,34 @@ const (
 // review has none. The evidence fields are the candidate's numbers when it was
 // reviewed, so Outdated can tell when they have moved.
 type CandidateReview struct {
-	By            string
-	Model         string `json:",omitempty"`
-	Tier          int
-	Action        string
-	Applied       bool
-	DecisionID    string `json:",omitempty"`
-	At            time.Time
-	MIScore       float64
-	NObservations int
-	Direction     Direction
-	Kind          string
+	By                string
+	Model             string `json:",omitempty"`
+	Tier              int
+	Action            string
+	Applied           bool
+	DecisionID        string `json:",omitempty"`
+	At                time.Time
+	MIScore           float64
+	NObservations     int
+	Direction         Direction
+	Kind              string
+	PersistentWindows int
 }
 
 // Outdated reports whether c's evidence has moved materially since the review: its
 // sign or kind changed, or its |r| moved by more than two standard errors of
-// Fisher's z at the smaller of the two windows. A review that is outdated no
-// longer speaks for the candidate, so an agent's rejection or deferral reopens and
+// Fisher's z at the smaller of the two windows, or the persistence count changed.
+// A review that is outdated no longer speaks for the candidate, so an agent's
+// rejection or deferral reopens and
 // an undecided candidate is reviewed again.
 func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if r == nil {
 		return true
 	}
 	if c.Direction != r.Direction || c.Kind != r.Kind {
+		return true
+	}
+	if c.PersistentWindows != r.PersistentWindows {
 		return true
 	}
 	n := min(c.NObservations, r.NObservations)
