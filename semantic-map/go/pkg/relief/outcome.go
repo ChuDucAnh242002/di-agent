@@ -386,7 +386,7 @@ func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyI
 // release ends Releasing once no change is left. It gives nothing back: pressure
 // under exit is low because of the caps in force, and giving one back brought the
 // pressure straight back (run 2026-10-30c). A cap comes off when it expires, when
-// an operator reverts it, or when its workload leaves.
+// an operator reverts it; one whose workload left is dropped at its expiry.
 func (l *Loop) release(now time.Time, phase Phase) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
