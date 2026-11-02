@@ -74,17 +74,26 @@ spec:
               value: {{ .Values.streamer.readAheadRows | quote }}
             - name: RANDOM_SEED
               value: {{ .Values.streamer.randomSeed | quote }}
+          startupProbe:
+            httpGet:
+              path: /status
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /status
               port: 8000
             periodSeconds: 15
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.streamer.resources | nindent 12 }}
 ---

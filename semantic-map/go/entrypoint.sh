@@ -9,6 +9,10 @@ PROFILE=${PROFILE:-"edge-minimal"}
 KD=${KD:-"k8s"}
 COLLECT_INTERVAL=${COLLECT_INTERVAL:-"5s"}
 PROPOSER=${PROPOSER:-"false"}
+REVIEW_LEVEL=${REVIEW_LEVEL:-"full"}
+REVIEW_RULES=${REVIEW_RULES-"composition"}
+DECISION_BACKEND=${DECISION_BACKEND:-"systemone"}
+REASONING_BACKEND=${REASONING_BACKEND:-"openai-tools"}
 # Unset takes the default; set to empty runs without Netdata.
 NETDATA_URL=${NETDATA_URL-"http://localhost:19999"}
 DOMAIN_SPEC=${DOMAIN_SPEC:-"/etc/di-agent/domain_spec.json"}
@@ -74,6 +78,28 @@ cat >> "${SPEC_FILE}" <<SPEC
 map:
   proposer:
     enabled: ${PROPOSER}
+loops:
+  review:
+    level: "${REVIEW_LEVEL}"
+    rules:
+SPEC
+if [ -n "${REVIEW_RULES}" ]; then
+    IFS=',' read -r -a rules <<< "${REVIEW_RULES}"
+    for rule in "${rules[@]}"; do
+        if [[ ! "${rule}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+            echo "Invalid REVIEW_RULES entry: ${rule}" >&2
+            exit 1
+        fi
+        printf '      - %s\n' "${rule}" >> "${SPEC_FILE}"
+    done
+else
+    printf '      []\n' >> "${SPEC_FILE}"
+fi
+cat >> "${SPEC_FILE}" <<SPEC
+    decision:
+      backend: "${DECISION_BACKEND}"
+    reasoning:
+      backend: "${REASONING_BACKEND}"
 SPEC
 
 exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"

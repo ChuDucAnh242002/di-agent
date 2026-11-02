@@ -126,6 +126,14 @@ The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP
 
 The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` in Make, or `agent.collectInterval` in Helm): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
 
+On startup, only the designated dataset worker waits in an init container for the
+collector's `/ready` endpoint before starting the agent's collector handshake.
+Other workers start without that dependency. If Kafka or the collector is unavailable,
+the designated pod stays initializing and logs its wait instead of crash-looping.
+The replay streamer has a five-minute startup-probe budget for its Kafka connection
+retry loop before liveness checks begin. These are chart-level settings; no image
+rebuild is required to apply them.
+
 The supplied PostgreSQL dataset has engine/run metadata, but no per-signal physical units or operating ranges. In both stream modes, replay-streamer preserves raw values and supplements each event's metadata with `unit: "dataset-native"` and observed min/max bounds pooled across all sources for that signal in the selected run. These are normalization bounds, not claimed physical operating limits. Constant signals get symmetric padding of 1% of their absolute value (at least 1 dataset-native unit) to keep the range nonzero. Generated declarations carry `unit_source: "dataset-native"` and `range_source: "observed"` and are logged. Explicit units and ranges in `run_metadata` take precedence, including JSON `signals` and flattened `<signal>.unit`/`<signal>.range` keys; invalid explicit declarations fail visibly rather than being replaced. PostgreSQL rows are not modified.
 
 The chart's Prometheus service scrapes annotated application `/metrics` endpoints. The telemetry writer commits Kafka offsets only after successful InfluxDB writes; malformed records are fatal and left uncommitted with `STRICT_VALIDATION=true`, while `false` logs and drops them before committing.
@@ -220,6 +228,46 @@ That sequence does the following:
 4. `make agent` installs/upgrades the chart and waits for the worker DaemonSet rollout. It deploys agents together with Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
 5. `make peers` registers each ready worker agent on the others and assigns trust values. It requires kubectl pod-list/exec permissions and Python 3, not SSH or libvirt discovery. Re-run it after agent restarts, worker additions/removals, or Helm upgrades: the container configuration does not persist the peer registry. The script verifies the exact peer URL set and reports stale or missing entries rather than claiming success.
 6. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting. This legacy demo still assumes the libvirt VM list starts with the control plane and uses port 9090.
+
+### Testing automatic discovery approval
+
+The chart enables discovery and rules-only review by default:
+`agent.proposer: "true"`, `agent.review.level: rules`,
+`agent.review.rules: [composition, persistent-correlation]`, and both review
+model backends set to `none`. These settings live in
+[`values.yaml`](helm/di-agent-system/values.yaml). The container entrypoint writes
+its configuration from the chart's environment variables; it does **not** load
+[`semantic-map/agent.yaml`](../semantic-map/agent.yaml).
+
+After changing Go code or the entrypoint, rebuild and push the agent image before
+deploying. Other service images do not need rebuilding if already available:
+
+```bash
+cd poc2
+mise exec go@1.26.1 -- make images IMAGES=di-agent
+make agent
+make peers
+```
+
+Use the same `REGISTRY` and `TAG` overrides for building and deploying if not using
+the defaults. `make agent` does not build images; it upgrades the whole chart and
+rolls the agents, which pull the updated image (`imagePullPolicy: Always`).
+Keep any existing deployment overrides, such as `DATASET_NODE_NAME`, on `make agent`.
+Changing only chart review settings requires a Helm upgrade, not another image build.
+
+After port-forwarding an agent, verify:
+
+```bash
+curl -s localhost:9090/autonomy
+curl -s 'localhost:9090/candidates?status=all'
+```
+
+Expect autonomy level `rules`, both rule names, and no model names. Candidates expose
+`PersistentWindows`; eligible directed pairs confirm after three qualifying full
+windows, not three review cycles. Undirected pairs (including engine-to-engine
+signals from the same subject) are not auto-oriented by this rule. Missing ranges
+also prevent persistence from accumulating. See the
+[persistence requirements](../semantic-map/README.md#rules-only-persistent-correlation).
 
 To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090`. Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 

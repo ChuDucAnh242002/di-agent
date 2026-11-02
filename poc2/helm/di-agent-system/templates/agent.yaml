@@ -32,6 +32,30 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and .Values.datasetCollector.enabled .Values.agent.datasetNodeName }}
+      initContainers:
+        - name: wait-for-dataset-collector
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.agent.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              if [ "${NODE_ID}" != "${DATASET_NODE_NAME}" ]; then
+                exit 0
+              fi
+              until curl --fail --silent --show-error --connect-timeout 2 --max-time 3 \
+                http://dataset-collector:8000/ready; do
+                echo "Waiting for dataset-collector readiness before starting di-agent"
+                sleep 2
+              done
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DATASET_NODE_NAME
+              value: {{ .Values.agent.datasetNodeName | quote }}
+      {{- end }}
       containers:
         - name: di-agent
           image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.agent.image) }}
@@ -51,6 +75,14 @@ spec:
               value: {{ .Values.agent.collectInterval | quote }}
             - name: PROPOSER
               value: {{ .Values.agent.proposer | quote }}
+            - name: REVIEW_LEVEL
+              value: {{ .Values.agent.review.level | quote }}
+            - name: REVIEW_RULES
+              value: {{ join "," .Values.agent.review.rules | quote }}
+            - name: DECISION_BACKEND
+              value: {{ .Values.agent.review.decisionBackend | quote }}
+            - name: REASONING_BACKEND
+              value: {{ .Values.agent.review.reasoningBackend | quote }}
             - name: NETDATA_URL
               value: ""
             - name: KAFKA_BROKERS
