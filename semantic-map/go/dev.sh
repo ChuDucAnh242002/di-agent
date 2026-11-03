@@ -232,6 +232,10 @@ cmd_ui() {
         warn "agent not running — starting first"
         cmd_start
     fi
+    # An agent started some other way may be headless (node.ui off).
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/ui/")" = 404 ]; then
+        warn "the agent on :$PORT is headless — start it with node.ui: true to serve the console"
+    fi
     info "opening http://localhost:$PORT/ui/"
     if command -v open >/dev/null 2>&1; then
         open "http://localhost:$PORT/ui/"        # macOS

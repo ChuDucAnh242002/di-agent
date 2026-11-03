@@ -88,6 +88,8 @@ spec:
               value: "kafka:{{ .Values.kafka.port }}"
             - name: CGROUP_ROOT
               value: /host/cgroup
+            - name: UI
+              value: {{ .Values.agent.ui | quote }}
             {{- if .Values.datasetCollector.enabled }}
             - name: DATASET_NODE_NAME
               value: {{ .Values.agent.datasetNodeName | quote }}

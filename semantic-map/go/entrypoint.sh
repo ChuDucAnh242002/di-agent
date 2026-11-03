@@ -21,8 +21,13 @@ if [ "${DATASET_NODE_NAME+x}" = x ] && [ "${DATASET_NODE_NAME}" != "${NODE_ID}" 
     DATASET_COLLECTOR_URL=""
 fi
 CGROUP_ROOT=${CGROUP_ROOT:-"/sys/fs/cgroup"}
-# true serves the web console at /ui/; the agent is headless by default.
+# true serves the web console at /ui/; the agent is headless by default. Only
+# true or false: the value is written into the spec as a YAML bool.
 UI=${UI:-"false"}
+case "${UI}" in
+    true|false) ;;
+    *) echo "UI must be true or false, got '${UI}'" >&2; exit 1 ;;
+esac
 
 echo "Starting di-agent with:"
 echo "  NODE_ID=${NODE_ID}"

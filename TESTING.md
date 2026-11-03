@@ -137,6 +137,7 @@ ollama pull qwen2.5:7b-instruct                           # or use any OpenAI-co
 cat > /tmp/di-agent/agent.yaml <<'SPEC'
 node:
   addr: 127.0.0.1:8080
+  ui: true            # the console's Ask tab
 sources:
   interval: 1s
   collectors:

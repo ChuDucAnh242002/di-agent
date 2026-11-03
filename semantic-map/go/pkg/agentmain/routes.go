@@ -40,7 +40,7 @@ package agentmain
 //                                                                          422 {error,response} (failed a gate)
 //                                                                          501 (provider disabled)
 //                                                                          200 x-ndjson (stream:true)
-// /ui/...                           GET     —                              200 (embedded HTML)
+// /ui/...                           GET     —                              200 (embedded HTML; only with node.ui)
 //
 // Endpoints above the divider are pre-existing and keep their original
 // plain-text http.Error format. Endpoints below were added in the Phase 1
@@ -83,14 +83,18 @@ func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explai
 	registerExplainRoute(mux, explainer)
 }
 
-// registerStaticRoutes serves the embedded UI under /ui/. Only an agent whose
-// spec sets node.ui registers it: the agent is headless by default.
+// registerConsole serves the embedded web console under /ui/ when on — the
+// spec's node.ui. Off, nothing is registered and /ui/ answers 404: the agent is
+// headless by default.
 //
 // http.FileServer serves index.html for the directory root automatically
 // when the URL ends in "/". An explicit "/ui/{$}" → "/ui/index.html"
 // redirect would loop because http.FileServer canonicalizes URLs ending
 // in /index.html back to "./" — so we rely on the default behavior.
-func registerStaticRoutes(mux *http.ServeMux) {
+func registerConsole(mux *http.ServeMux, on bool) {
+	if !on {
+		return
+	}
 	mux.Handle("GET /ui/", staticHandler())
 }
 

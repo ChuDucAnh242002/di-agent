@@ -38,8 +38,8 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 # domain.path loads the domain model; without it (and with no domain_spec.json found
 # above the working directory) the agent runs with none. persist.file "" keeps the
 # map in memory: the agent refuses to start where it cannot write the default,
-# /var/lib/di-agent, which usually needs root. node.ui serves the console used in
-# step 4; the agent is headless without it. See §3.
+# /var/lib/di-agent, which usually needs root. node.ui: true serves the console used
+# in step 4; the agent is headless without it. See §3.
 cd semantic-map/go
 printf 'node:\n  ui: true\ndomain:\n  path: ../domain_spec.json\npersist:\n  file: ""\n' > /tmp/agent.yaml
 go run ./cmd/agent -config /tmp/agent.yaml &
@@ -1170,7 +1170,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
 | `facts[].root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |
-| `node.ui`                    | `false` | Serve the web console at `/ui/`. The agent is headless by default: it answers its HTTP API and nothing else. `dev.sh` and the demo specs turn it on; the container's `UI` variable sets it. |
+| `node.ui`                    | `false` | Serve the web console at `/ui/`. The agent is headless by default: it answers its HTTP API and nothing else. `dev.sh`, `poc/casestudy/agent-demo.yaml` and the poc2 chart (`agent.ui`) turn it on; the container's `UI` variable (`true` or `false`) sets it. |
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |

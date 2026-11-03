@@ -226,7 +226,7 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ╔═══════════════════════════════════════════════════╗
    HUMAN / SCRIPT ─────────▶║  LAYER 4 · OPERATOR SURFACE                       ║
    "why is my cost high?"   ║                                                   ║
-                            ║   HTTP API  ·  mapctl CLI  ·  /ui/  ·  /explain   ║
+                            ║   HTTP API · mapctl CLI · /ui/ (opt) · /explain   ║
                             ║   ─────────────────────────────────────────────   ║
                             ║   pkg/explain: planner → answer → critic          ║
                             ║   (LLM CONSUMES the graph; never mutates it)      ║
@@ -1382,7 +1382,7 @@ The Semantic Map facade is a Go API. The agent daemon wraps it in three layers s
 ┌─────────────────────────────────────────────────────────────┐
 │  Layer C — Web console    pkg/agentmain/static/{index,style,js/} │
 │  Vanilla ES modules, no CDN, embedded via go:embed all:static │
-│  Live state-model console at /ui/                            │
+│  Live state-model console at /ui/, optional (node.ui)        │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer B — CLI            cmd/mapctl/                        │
 │  cobra + tablewriter; one binary, sixteen subcommands        │
@@ -1486,10 +1486,10 @@ modules under `static/js/`, embedded in the binary alongside `index.html` and
 
 The console is optional: the agent is headless by default and serves it only when
 the spec sets `node.ui`. An agent's job is to keep its map and act on it, which
-needs no one watching; at a deployment's size — hundreds of properties, a thousand
-relationships — a canvas of everything is not something to read anyway. The
-console is for demonstrating a small, worked map, and an agent that does not serve
-it has no browser-facing surface to keep.
+needs no one watching, and a deployment's map — every workload's properties and
+the relationships among them — is too large for a canvas of everything to be read.
+The console is for demonstrating a small, worked map; an agent that does not serve
+it carries no static assets or page to keep.
 
 | Module | Holds |
 | --- | --- |

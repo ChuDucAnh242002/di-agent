@@ -14,14 +14,20 @@ import (
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
 // the base URL of an httptest server bound to that map. Tests use it to
-// avoid duplicating the agent boot sequence.
+// avoid duplicating the agent boot sequence. It is headless, as the default
+// spec is; newTestServer takes node.ui.
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
+	return newTestServer(t, false)
+}
+
+func newTestServer(t *testing.T, ui bool) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, err := profiles.Build("edge-minimal", profiles.Config{
 		StateMap:             newTestState(t),
@@ -35,6 +41,7 @@ func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup
 	}
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explain.NewDisabled())
+	registerConsole(mux, ui)
 	srv := httptest.NewServer(mux)
 	return srv.URL, sm, srv.Close
 }
@@ -531,38 +538,31 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
-// newUIAgent serves the API and the console, as an agent whose spec sets node.ui.
-func newUIAgent(t *testing.T) (string, func()) {
-	t.Helper()
-	sm, err := profiles.Build("edge-minimal", profiles.Config{
-		StateMap:             newTestState(t),
-		DomainSpec:           mustSpec(t),
-		EMAAlpha:             0.2,
-		ConvergenceThreshold: 500,
-		MinTrustScore:        0.5,
-	})
+func TestStaticUI_FollowsNodeUI(t *testing.T) {
+	// The console is served exactly when the spec sets node.ui: the default spec
+	// is headless, and node.ui: true serves it.
+	on, err := spec.Parse([]byte("node: {ui: true}"))
 	if err != nil {
-		t.Fatalf("profiles.Build: %v", err)
+		t.Fatalf("spec.Parse: %v", err)
 	}
-	mux := http.NewServeMux()
-	registerRoutes(mux, sm, explain.NewDisabled())
-	registerStaticRoutes(mux)
-	srv := httptest.NewServer(mux)
-	return srv.URL, srv.Close
-}
-
-func TestStaticUI_HeadlessByDefault(t *testing.T) {
-	// The API routes alone do not serve the console: it is registered only when
-	// the spec asks for it.
-	base, _, cleanup := newTestAgent(t)
-	defer cleanup()
-	resp, err := http.Get(base + "/ui/")
-	if err != nil {
-		t.Fatalf("GET /ui/: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("/ui/ on a headless agent: status %d, want 404", resp.StatusCode)
+	for _, c := range []struct {
+		name string
+		ui   bool
+		want int
+	}{
+		{"default", spec.Default().Node.UI, http.StatusNotFound},
+		{"node.ui: true", on.Node.UI, http.StatusOK},
+	} {
+		base, _, cleanup := newTestServer(t, c.ui)
+		resp, err := http.Get(base + "/ui/")
+		if err != nil {
+			t.Fatalf("%s: GET /ui/: %v", c.name, err)
+		}
+		resp.Body.Close()
+		cleanup()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s: /ui/ status %d, want %d", c.name, resp.StatusCode, c.want)
+		}
 	}
 }
 
@@ -576,7 +576,7 @@ func TestStaticUI_ServesTheModuleTree(t *testing.T) {
 	// The content type is asserted too. A module served as anything other than
 	// JavaScript is rejected by the browser's module loader, which fails as a
 	// blank page rather than as a 404 — worth catching here instead of there.
-	base, cleanup := newUIAgent(t)
+	base, _, cleanup := newTestServer(t, true)
 	defer cleanup()
 
 	for _, mod := range []string{
@@ -619,7 +619,7 @@ func TestStaticUI_ServesTheModuleTree(t *testing.T) {
 // page is whatever the binary embeds; a reviewer adding a <script src="http…">
 // should fail here rather than discover it on a disconnected device.
 func TestStaticUI_HasNoExternalDependency(t *testing.T) {
-	base, cleanup := newUIAgent(t)
+	base, _, cleanup := newTestServer(t, true)
 	defer cleanup()
 	resp, err := http.Get(base + "/ui/")
 	if err != nil {
@@ -641,7 +641,7 @@ func TestStaticUI_ServesIndexHTML(t *testing.T) {
 	// Both responses confirm the file is present in the embed.FS; option (b)
 	// is the stdlib's intentional behavior for any URL ending in /index.html
 	// and is independent of our handler wiring.
-	base, cleanup := newUIAgent(t)
+	base, _, cleanup := newTestServer(t, true)
 	defer cleanup()
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -674,7 +674,7 @@ func TestStaticUI_RootServesIndex(t *testing.T) {
 	// directly (200 with body), without a redirect. We do NOT install an
 	// explicit /ui/{$} → /ui/index.html redirect because that would loop
 	// with the stdlib's /index.html → ./ canonicalization.
-	base, cleanup := newUIAgent(t)
+	base, _, cleanup := newTestServer(t, true)
 	defer cleanup()
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
