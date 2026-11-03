@@ -204,6 +204,14 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 			// pod is promised its request, so it is not cut below it.
 			to = math.Max(to, *res.Request)
 		}
+		if f, ok := a.(actuators.Floorer); ok {
+			fl, err := f.Floor(ctx, w)
+			if err != nil {
+				reasons = append(reasons, fmt.Sprintf("%s: reading %s floor: %v", cand.Subject, d.Action, err))
+				continue
+			}
+			to = math.Max(to, fl)
+		}
 		if to >= from {
 			reasons = append(reasons, fmt.Sprintf("%s: floor reached (%.3f %s in use, floor %.3f)", cand.Subject, from, d.Unit, to))
 			continue

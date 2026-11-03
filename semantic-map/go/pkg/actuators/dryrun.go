@@ -42,6 +42,14 @@ func (d *dryRun) Read(ctx context.Context, w runtime.Workload) (float64, bool, e
 	return v, set, err
 }
 
+// Floor is a's, so a dry run plans the steps a real one would.
+func (d *dryRun) Floor(ctx context.Context, w runtime.Workload) (float64, error) {
+	if f, ok := d.Actuator.(Floorer); ok {
+		return f.Floor(ctx, w)
+	}
+	return 0, nil
+}
+
 func (d *dryRun) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
 	if _, _, err := d.Actuator.Read(ctx, w); errors.Is(err, ErrGone) {
 		d.mu.Lock()

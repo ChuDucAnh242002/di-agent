@@ -175,6 +175,31 @@ func (a *MemoryHigh) Read(_ context.Context, w runtime.Workload) (float64, bool,
 	return parseHigh(string(b))
 }
 
+// Floor is the pod's anonymous memory, from memory.stat. With no swap reclaim
+// cannot take it, so a memory.high below it is never met and the kernel
+// throttles the pod to a standstill rather than trimming its page cache (run
+// 2026-11-02: a 5600 MiB cap on 6144 MiB of anon stalled the pod).
+func (a *MemoryHigh) Floor(_ context.Context, w runtime.Workload) (float64, error) {
+	dir, err := a.podDir(w)
+	if err != nil {
+		return 0, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
+	if err != nil {
+		return 0, missingFile(w, dir, err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "anon "); ok {
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("%s: memory.stat anon %q: %w", w.Subject, v, err)
+			}
+			return float64(n), nil
+		}
+	}
+	return 0, fmt.Errorf("%s: %s has no anon line", w.Subject, filepath.Join(dir, "memory.stat"))
+}
+
 // Set writes v bytes to the pod's memory.high, or max when set is false. The
 // kernel rounds to a page; the ledger records what Read gives back.
 func (a *MemoryHigh) Set(_ context.Context, w runtime.Workload, v float64, set bool) error {

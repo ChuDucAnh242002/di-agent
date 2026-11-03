@@ -668,3 +668,36 @@ func TestMemoryHighRefusesAnUnreadableMemoryHigh(t *testing.T) {
 		t.Fatalf("absent memory.high: %v", err)
 	}
 }
+
+// TestMemoryHighFloorIsTheAnonMemory: with no swap, reclaim cannot take a pod's
+// anonymous memory, so a memory.high below it throttles the pod to a standstill
+// (run 2026-11-02: a 5600 MiB cap on 6144 MiB of anon). The floor is anon.
+func TestMemoryHighFloorIsTheAnonMemory(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7516192768")
+	mhWrite(t, filepath.Join(d, "memory.stat"), "anon 6442450944\nfile 1073741824\nkernel 1048576")
+	a := mhNew(t, root)
+	for _, x := range []Actuator{a, DryRun(a)} {
+		f, ok := x.(Floorer)
+		if !ok {
+			t.Fatalf("%T has no Floor", x)
+		}
+		v, err := f.Floor(context.Background(), mhWL("burstable"))
+		if err != nil || v != 6442450944 {
+			t.Fatalf("%T: floor %v, %v; want 6442450944 bytes", x, v, err)
+		}
+	}
+}
+
+func TestMemoryHighFloorWithoutAnonIsAnError(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7516192768")
+	a := mhNew(t, root).(Floorer)
+	if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
+		t.Fatal("no memory.stat: want an error")
+	}
+	mhWrite(t, filepath.Join(d, "memory.stat"), "file 1073741824")
+	if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
+		t.Fatal("no anon line: want an error")
+	}
+}
