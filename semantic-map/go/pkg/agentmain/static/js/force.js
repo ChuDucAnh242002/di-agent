@@ -56,7 +56,10 @@ export class Force {
         continue;
       }
       nodesChanged = true;
-      const seed = this.seedFor(n.group);
+      // `near` names a node already placed that this one replaces — a workload
+      // box folding into one glyph, or unfolding from it — so it appears there.
+      const at = n.near && this.nodes.get(n.near);
+      const seed = at ? { x: at.x + (Math.random() - 0.5) * 30, y: at.y + (Math.random() - 0.5) * 30 } : this.seedFor(n.group);
       this.nodes.set(n.id, {
         id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
         x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: false,

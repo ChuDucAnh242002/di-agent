@@ -54,6 +54,29 @@ const GLYPH = 6.6;
 const labelHalfWidth = (p, r) => Math.max(r, (Math.max(shortLabel(p.id).length, 10) * GLYPH) / 2 + 3);
 
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)');
+
+// A folded workload box is a node of the layout with this prefix on its box id.
+const BOX = 'box:';
+const boxNode = (box) => BOX + box;
+// Half the height of a folded box's pill, and its half-width: room for its name.
+const R_BOX = 20;
+const boxHalfWidth = (name) => Math.max(48, (name.length * GLYPH) / 2 + 16);
+
+/** A folded workload's glyph: a pill with its name and what it holds. */
+function makeBox(box) {
+  const g = el('g', { 'data-box': box, class: 'node folded', style: 'cursor:pointer' });
+  const rect = el('rect', {
+    y: -R_BOX, height: 2 * R_BOX, rx: R_BOX, fill: 'var(--surface-2)',
+    stroke: 'var(--border-strong)', 'stroke-width': 1.2, 'stroke-dasharray': '4 3',
+  });
+  const name = el('text', {
+    y: -3, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 600,
+    fill: 'var(--ink-secondary)', 'font-family': 'ui-monospace, monospace',
+  });
+  const sub = el('text', { y: 11, 'text-anchor': 'middle', 'font-size': 10, fill: 'var(--ink-muted)' });
+  g.append(rect, name, sub);
+  return { g, rect, name, sub, count: 0 };
+}
 // Above this many properties moving, or edges learning, on one poll, none is
 // marked: a cue that marks most of the canvas points at nothing, and still
 // repaints all of it.
@@ -155,6 +178,12 @@ export class GraphView {
     this.ghostEls = [];
     this.edgeEls = [];
     this.hullEls = [];
+    // Folded workload boxes: each drawn as one glyph, its relationships to the rest
+    // bundled. Every workload is folded unless `fold` is off or the operator opened it.
+    this.fold = true;
+    this.unfolded = new Set();   // box ids opened by hand
+    this.boxEls = new Map();     // box id → folded glyph
+    this.bundleEls = [];
 
     this.defs = el('defs');
     this.gRoot = el('g');
@@ -206,6 +235,10 @@ export class GraphView {
     const hitAt = (target) => {
       const nodeEl = target.closest?.('[data-node]');
       if (nodeEl) return { type: 'property', id: nodeEl.dataset.node };
+      const boxEl = target.closest?.('[data-box]');
+      if (boxEl) return { type: 'box', id: boxEl.dataset.box };
+      const bundleEl = target.closest?.('[data-bundle]');
+      if (bundleEl) return { type: 'bundle', ends: bundleEl.dataset.bundle.split('\u0001') };
       const edgeEl = target.closest?.('[data-edge]');
       if (edgeEl) return { type: 'relationship', id: edgeEl.dataset.edge };
       const hullEl = target.closest?.('[data-hull]');
@@ -218,8 +251,8 @@ export class GraphView {
       const hit = hitAt(e.target);
       press = { x: e.clientX, y: e.clientY, hit, moved: false };
 
-      if (hit?.type === 'property') {
-        const n = this.force.at(hit.id);
+      if (hit?.type === 'property' || hit?.type === 'box') {
+        const n = this.force.at(hit.type === 'box' ? boxNode(hit.id) : hit.id);
         if (n) {
           dragging = { n, wasPinned: n.pinned };
           n.pinned = true;
@@ -290,7 +323,18 @@ export class GraphView {
         const hit = press.hit;
         // A click on empty canvas lets go of what the drawer pointed at, too.
         if (!hit && this.highlighted) this.highlight(null);
-        this.select(hit?.type === 'hull' ? (hit.id === MACHINE ? { type: 'machine', id: MACHINE } : null) : hit);
+        if (hit?.type === 'box' || hit?.type === 'bundle') {
+          // A folded workload opens; a bundle opens whichever of its ends is folded.
+          for (const id of hit.type === 'box' ? [hit.id] : hit.ends) {
+            if (id.startsWith(BOX)) this.unfolded.add(id.slice(BOX.length));
+            else if (hit.type === 'box') this.unfolded.add(id);
+          }
+          this.render(this.lastModel);
+        } else {
+          // Clicking an open workload's box folds it again.
+          if (hit?.type === 'hull' && hit.id !== MACHINE) this.unfolded.delete(hit.id);
+          this.select(hit?.type === 'hull' ? (hit.id === MACHINE ? { type: 'machine', id: MACHINE } : null) : hit);
+        }
       }
       press = null;
       panning = null;
@@ -416,6 +460,13 @@ export class GraphView {
     this.applyTransform();
   }
 
+  /** Fold every workload box, or open them all. */
+  setFold(on) {
+    this.fold = on;
+    this.unfolded.clear();
+    if (this.lastModel) this.render(this.lastModel);
+  }
+
   setFilter(patch) {
     Object.assign(this.filter, patch);
     if (this.lastModel) this.render(this.lastModel);
@@ -438,6 +489,36 @@ export class GraphView {
       || (p.unit || '').toLowerCase().includes(needle));
   }
 
+  /**
+   * The workload boxes drawn folded. Not the machine's — it is what the map is of —
+   * and none while a search narrows the canvas, since what it found is the point.
+   * A box holding what is selected or pointed at is open, so nothing the operator
+   * is looking at is ever inside a glyph.
+   */
+  folded(model, props) {
+    const out = new Set();
+    if (!this.fold || this.filter.text.trim()) return out;
+    for (const p of props) {
+      const box = model.boxOf(p);
+      if (box && !this.unfolded.has(box)) out.add(box);
+    }
+    const open = (id) => {
+      const p = id && model.property(id);
+      if (p) out.delete(model.boxOf(p));
+    };
+    if (this.selected?.type === 'property') open(this.selected.id);
+    if (this.selected?.type === 'relationship') {
+      const r = model.relationship(this.selected.id);
+      open(r?.from); open(r?.to);
+    }
+    for (const id of this.highlighted?.nodes || []) open(id);
+    for (const id of this.highlighted?.edges || []) {
+      const r = model.relationship(id);
+      open(r?.from); open(r?.to);
+    }
+    return out;
+  }
+
   // -- render ---------------------------------------------------------------
 
   render(model, { refit = false } = {}) {
@@ -447,16 +528,73 @@ export class GraphView {
 
     if (model.changed.size <= CUE_MAX) for (const id of model.changed) this.pulses.set(id, Date.now());
 
-    const nodes = props.map((p) => {
-      const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
-      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: model.boxOf(p) || MACHINE };
-    });
+    // Which boxes are folded, and what stands in for each property: itself, or its
+    // folded box's glyph.
+    const folded = this.folded(model, props);
+    const rep = new Map(props.map((p) => {
+      const box = model.boxOf(p) || MACHINE;
+      return [p.id, folded.has(box) ? BOX + box : p.id];
+    }));
+    const shown = props.filter((p) => rep.get(p.id) === p.id);
+    const boxes = new Map();   // box id → its properties
+    for (const p of props) {
+      if (rep.get(p.id) === p.id) continue;
+      const box = model.boxOf(p);
+      if (!boxes.has(box)) boxes.set(box, []);
+      boxes.get(box).push(p);
+    }
+    const near = (id) => (this.force.at(id) ? id : undefined);
 
-    const rels = model.relationships.filter((r) => ids.has(r.from) && ids.has(r.to));
-    const members = model.memberships().filter((m) => ids.has(m.from) && ids.has(m.to));
+    const nodes = [
+      ...shown.map((p) => {
+        const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
+        const box = model.boxOf(p);
+        return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: box || MACHINE,
+          near: box ? near(BOX + box) : undefined };
+      }),
+      ...[...boxes].map(([box, members]) => ({
+        id: BOX + box, r: R_BOX, hw: boxHalfWidth(model.nameOf(box)), below: 0,
+        near: members.map((p) => near(p.id)).find(Boolean),
+      })),
+    ];
+
+    // A relationship between two properties on screen is drawn as itself; one that
+    // reaches into a folded box joins the bundle between the two things it now runs
+    // between, and one inside a folded box is not drawn. Between a folded workload
+    // and the machine's own properties that is ONE bundle, to the machine's box:
+    // a line to each machine property it touches redrew the tangle folding removes.
+    // The layout still pulls the glyph toward each of those properties.
+    const rels = [];
+    const bundles = new Map();
+    const pulls = new Set();
+    const machineOwn = (id) => id === rep.get(id) && !model.boxOf(model.property(id));
+    for (const r of model.relationships) {
+      if (!ids.has(r.from) || !ids.has(r.to)) continue;
+      let a = rep.get(r.from), b = rep.get(r.to);
+      if (a === r.from && b === r.to) { rels.push(r); continue; }
+      if (a === b) continue;
+      if (a.startsWith(BOX) && machineOwn(b)) { pulls.add(a + '\u0001' + b); b = MACHINE; }
+      else if (b.startsWith(BOX) && machineOwn(a)) { pulls.add(b + '\u0001' + a); a = MACHINE; }
+      const [from, to] = [a, b].sort();
+      const key = from + '\u0001' + to;
+      if (!bundles.has(key)) bundles.set(key, { key, from, to, rels: [] });
+      bundles.get(key).rels.push(r);
+    }
+    const memberKeys = new Set();
+    const members = [];
+    for (const m of model.memberships()) {
+      if (!ids.has(m.from) || !ids.has(m.to)) continue;
+      const from = rep.get(m.from), to = rep.get(m.to);
+      if (from === to || memberKeys.has(from + '\u0001' + to)) continue;
+      memberKeys.add(from + '\u0001' + to);
+      members.push({ from, to });
+    }
 
     const links = [
       ...rels.map((r) => ({ source: r.from, target: r.to, distance: 210 })),
+      ...[...bundles.values()].filter((b) => b.from !== MACHINE && b.to !== MACHINE)
+        .map((b) => ({ source: b.from, target: b.to, distance: 210 })),
+      ...[...pulls].map((k) => { const [source, target] = k.split('\u0001'); return { source, target, distance: 260 }; }),
       ...members.map((m) => ({ source: m.from, target: m.to, distance: 155 })),
     ];
 
@@ -478,7 +616,7 @@ export class GraphView {
       // already placed, and warming every poll's edge changes stalled the page.
       this.force.prewarm(this.fittedOnce ? 40 : 300);
     }
-    this.draw(model, props, rels, members);
+    this.draw(model, shown, rels, members, boxes, [...bundles.values()]);
     this.position();
     if ((refit || (topologyChanged && !this.fittedOnce)) && props.length && this.fit()) {
       this.fittedOnce = true;
@@ -526,12 +664,14 @@ export class GraphView {
    * discarded thousands of elements on every poll. Enclosures, membership lines and
    * would-be edges are few, and are rebuilt.
    */
-  draw(model, props, rels, members) {
+  draw(model, props, rels, members, boxes, bundles) {
     const ids = new Set(props.map((p) => p.id));
     this.gHulls.replaceChildren();
     this.gMembers.replaceChildren();
     for (const e of this.ghostEls) e.path.remove();
+    for (const e of this.bundleEls) e.g.remove();
     this.ghostEls = [];
+    this.bundleEls = [];
     this.hullEls = [];
 
     const hl = this.highlighted;
@@ -645,6 +785,39 @@ export class GraphView {
       if (!live.has(id)) { e.g.remove(); this.relEls.delete(id); }
     }
 
+    // Bundles: the relationships between a folded workload and one counterpart, as
+    // one edge. Colour is the sign that dominates by strength, width the strongest
+    // member, and the count rides at the midpoint. No arrow: a bundle can run both ways.
+    for (const b of bundles) {
+      let net = 0, strongest = 0, confidence = 0, known = false;
+      for (const r of b.rels) {
+        const eff = effective(r);
+        if (!eff.known || r.association) continue;
+        known = true;
+        net += (r.sign < 0 ? -1 : 1) * eff.value;
+        strongest = Math.max(strongest, eff.value);
+        confidence = Math.max(confidence, r.confidence);
+      }
+      const g = el('g', { 'data-bundle': b.key, class: 'edge bundle', style: 'cursor:pointer' });
+      const hit = el('path', { fill: 'none', stroke: 'transparent', 'stroke-width': 16 });
+      const path = el('path', {
+        fill: 'none', 'stroke-linecap': 'round',
+        stroke: !known ? 'var(--baseline)' : net < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)',
+        'stroke-width': 1.5 + strongest * 5.5,
+        'stroke-opacity': known ? 0.35 + Math.min(0.65, confidence * 0.65) : 0.4,
+        'stroke-dasharray': known ? null : '5 5',
+      });
+      const count = el('text', {
+        'font-size': 10.5, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+        fill: 'var(--ink-secondary)', 'font-variant-numeric': 'tabular-nums',
+        stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke', 'stroke-linejoin': 'round',
+      });
+      count.textContent = String(b.rels.length);
+      g.append(hit, path, count);
+      this.gEdges.append(g);
+      this.bundleEls.push({ kind: 'bundle', bundle: b, from: b.from, to: b.to, g, path, hit, count, curve: 0 });
+    }
+
     // A would-be edge — a candidate not yet confirmed — in the colour a discovered
     // relationship would take, dashed because nothing has been admitted.
     for (const pr of hl?.pairs || []) {
@@ -682,7 +855,30 @@ export class GraphView {
       if (!ids.has(id)) { nd.g.remove(); this.nodeEls.delete(id); }
     }
 
-    this.edgeEls = [...memberEls, ...this.relEls.values(), ...this.ghostEls];
+    // Folded workloads: one glyph each, with the workload's name, how many of its
+    // properties it holds, and what the agent has done to it.
+    for (const [box, inside] of boxes) {
+      let bx = this.boxEls.get(box);
+      if (!bx) {
+        bx = makeBox(box);
+        this.gNodes.append(bx.g);
+        this.boxEls.set(box, bx);
+      }
+      const name = model.nameOf(box);
+      const hw = boxHalfWidth(name);
+      set(bx.rect, { x: -hw, width: 2 * hw });
+      set(bx.g, { opacity: hl ? 0.22 : null });
+      text(bx.name, name);
+      const badges = [model.throttled(box) && 'throttled', model.frozen(box) && 'frozen'].filter(Boolean);
+      text(bx.sub, `${inside.length} ${inside.length === 1 ? 'property' : 'properties'}${badges.length ? ` · ${badges.join(' · ')}` : ''}`);
+      set(bx.sub, { fill: badges.length ? 'var(--status-serious)' : 'var(--ink-muted)' });
+      bx.count = inside.length;
+    }
+    for (const [box, bx] of this.boxEls) {
+      if (!boxes.has(box)) { bx.g.remove(); this.boxEls.delete(box); }
+    }
+
+    this.edgeEls = [...memberEls, ...this.relEls.values(), ...this.bundleEls, ...this.ghostEls];
     this.applyTransform();
   }
 
@@ -765,17 +961,9 @@ export class GraphView {
       if (!n) continue;
       nd.g.setAttribute('transform', `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
     }
-
-    for (const e of this.edgeEls) {
-      const a = this.force.at(e.from);
-      const b = this.force.at(e.to);
-      if (!a || !b) continue;
-      const geom = curvePath(a, b, e.curve, nodeRadius(this.nodeEls, e.from) + (e.kind === 'ghost' ? 6 : 0),
-        nodeRadius(this.nodeEls, e.to) + (e.kind === 'ghost' ? 6 : 0), e.both);
-      e.path.setAttribute('d', geom.d);
-      if (e.hit) e.hit.setAttribute('d', geom.d);
-      if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
-      if (e.alarm) { e.alarm.setAttribute('x', geom.px); e.alarm.setAttribute('y', geom.py - 12); }
+    for (const [box, bx] of this.boxEls) {
+      const n = this.force.at(BOX + box);
+      if (n) bx.g.setAttribute('transform', `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
     }
 
     for (const h of this.hullEls) {
@@ -791,6 +979,7 @@ export class GraphView {
       }
       if (!Number.isFinite(x0)) continue;
       const pad = HULL_PAD;
+      h.bounds = { x0: x0 - pad, y0: y0 - pad - HULL_LABEL, x1: x1 + pad, y1: y1 + pad };
       h.rect.setAttribute('x', x0 - pad);
       h.rect.setAttribute('y', y0 - pad - HULL_LABEL);
       h.rect.setAttribute('width', x1 - x0 + pad * 2);
@@ -798,6 +987,25 @@ export class GraphView {
       h.label.setAttribute('x', x0 - pad + 10);
       h.label.setAttribute('y', y0 - pad + 4);
       if (h.pin) { h.pin.setAttribute('cx', x1 + pad - 10); h.pin.setAttribute('cy', y0 - pad - HULL_LABEL + 10); }
+    }
+
+    // A bundle to the machine ends on its box's border, on the line to its middle.
+    const machine = this.hullEls.find((h) => h.subject === MACHINE)?.bounds;
+    const end = (id, other) => (id === MACHINE ? machine && borderPoint(machine, this.force.at(other)) : this.force.at(id));
+    // curvePath leaves 2px before a line's start and 11 (an arrowhead) before its end;
+    // these cancel that, so a bundle touches the machine's border.
+    const trim = (id, last) => (id === MACHINE ? (last ? -11 : -2) : nodeRadius(this.nodeEls, id));
+    for (const e of this.edgeEls) {
+      const a = end(e.from, e.to);
+      const b = end(e.to, e.from);
+      if (!a || !b) continue;
+      const geom = curvePath(a, b, e.curve, trim(e.from, false) + (e.kind === 'ghost' ? 6 : 0),
+        trim(e.to, true) + (e.kind === 'ghost' ? 6 : 0), e.both);
+      e.path.setAttribute('d', geom.d);
+      if (e.hit) e.hit.setAttribute('d', geom.d);
+      if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
+      if (e.count) { e.count.setAttribute('x', geom.px); e.count.setAttribute('y', geom.py); }
+      if (e.alarm) { e.alarm.setAttribute('x', geom.px); e.alarm.setAttribute('y', geom.py - 12); }
     }
   }
 
@@ -830,6 +1038,18 @@ export class GraphView {
       const r = this.lastModel?.relationship(edgeEl.dataset.edge);
       if (r) return this.tooltip.show(e, relationshipTip(r));
     }
+    const boxEl = e.target.closest('[data-box]');
+    if (boxEl && this.lastModel) {
+      const box = boxEl.dataset.box;
+      return this.tooltip.show(e, {
+        title: this.lastModel.nameOf(box),
+        kind: 'workload, folded · click to open',
+        rows: [['subject', box], ['properties', this.boxEls.get(box)?.count ?? 0]],
+      });
+    }
+    const bundleEl = e.target.closest('[data-bundle]');
+    const b = bundleEl && this.bundleEls.find((x) => x.bundle.key === bundleEl.dataset.bundle)?.bundle;
+    if (b && this.lastModel) return this.tooltip.show(e, bundleTip(b, this.lastModel));
     this.tooltip.hide();
   }
 
@@ -888,7 +1108,17 @@ export class GraphView {
   }
 }
 
-const nodeRadius = (map, id) => map.get(id)?.r ?? R_OBSERVED;
+/** Where the line from p to the middle of box b crosses b's border. */
+function borderPoint(b, p) {
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+  if (!p) return { x: cx, y: cy };
+  const dx = p.x - cx, dy = p.y - cy;
+  const t = Math.min(Math.abs((b.x1 - cx) / (dx || 1e-9)), Math.abs((b.y1 - cy) / (dy || 1e-9)));
+  return t >= 1 ? { x: cx, y: cy } : { x: cx + dx * t, y: cy + dy * t };
+}
+
+// A folded box is a pill, so an edge meeting it is trimmed to its half-height.
+const nodeRadius = (map, id) => (id.startsWith(BOX) ? R_BOX : map.get(id)?.r ?? R_OBSERVED);
 
 /**
  * A quadratic bow from a to b, trimmed to each disc's edge so arrows land clean.
@@ -948,6 +1178,23 @@ function relationshipTip(r) {
       ...(r.sign_suspect ? [['sign status', 'contradicted by observation']] : []),
     ],
   };
+}
+
+function bundleTip(b, model) {
+  const end = (id) => (id === MACHINE ? 'the machine'
+    : id.startsWith(BOX) ? model.nameOf(id.slice(BOX.length)) : model.display(id));
+  let pos = 0, neg = 0, unknown = 0, assoc = 0, strongest = 0;
+  for (const r of b.rels) {
+    const eff = effective(r);
+    if (r.association) assoc++;
+    else if (!eff.known) unknown++;
+    else { if (r.sign < 0) neg++; else pos++; strongest = Math.max(strongest, eff.value); }
+  }
+  const rows = [['relationships', b.rels.length], ['raising', pos], ['lowering', neg]];
+  if (unknown) rows.push(['nothing observed yet', unknown]);
+  if (assoc) rows.push(['association only', assoc]);
+  if (pos + neg) rows.push(['strongest', fmt.num(strongest, 3)]);
+  return { title: `${end(b.from)} ↔ ${end(b.to)}`, kind: 'bundle · click to open', rows };
 }
 
 export function tooltipHTML({ title, kind, rows }) {
