@@ -449,3 +449,41 @@ func TestAnEmptyListingAtStartStillExpires(t *testing.T) {
 		t.Fatalf("actions %+v; want one expired", h.l.Actions())
 	}
 }
+
+// stat rewrites the pod's memory.stat.
+func (h *memHarness) stat(s string) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(h.high), "memory.stat"), []byte(s+"\n"), 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestAHeldCapIsGivenBackWhenTheFloorRisesAboveIt: a cap planned above the pod's
+// floor is given back on the next tick once what reclaim cannot take grows past
+// it, rather than throttling the pod until expiry.
+func TestAHeldCapIsGivenBackWhenTheFloorRisesAboveIt(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q before the floor rose", o)
+	}
+	h.stat("anon 5153960755\nfile 0\nshmem 0")
+	h.step(0.3)
+	h.givenBack(a.ID, OutcomeFloored)
+}
+
+// TestAHeldCapStaysWhenItsFloorCannotBeRead: an unreadable floor proves nothing
+// about the cap, which stays in force.
+func TestAHeldCapStaysWhenItsFloorCannotBeRead(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.stat("anon 5153960755")
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q with an unreadable floor; want the cap held", o)
+	}
+	if got := h.file(); got == "max" || len(h.ledger.All()) != 1 {
+		t.Fatalf("memory.high %q, ledger %+v; want the cap and its entry in force", got, h.ledger.All())
+	}
+}

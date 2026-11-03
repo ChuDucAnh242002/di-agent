@@ -17,6 +17,7 @@ const (
 	OutcomeReverted   = "reverted"    // it did not help and was undone
 	OutcomeReleased   = "released"    // the workload left and its cap was given back
 	OutcomeExpired    = "expired"     // it outlived its expiry and was given back
+	OutcomeFloored    = "floored"     // the workload's floor rose above it and it was given back
 	OutcomeGone       = "gone"        // the workload left; there was nothing to give back
 	OutcomeManual     = "manual"      // an operator undid it
 	OutcomeNotApplied = "not_applied" // it never took effect: still read as before once Settle had passed
@@ -39,13 +40,19 @@ const (
 // must not outlive the time it was granted. One the actuator will not give back
 // stays in force and is tried again next tick, and so is every one when the
 // runtime cannot be listed: a change is given back through the workload the
-// runtime lists, which is what an actuator finds it by.
+// runtime lists, which is what an actuator finds it by. A change whose
+// workload's floor (actuators.Floorer) has risen above it is given back too:
+// the plan kept it above the floor, and a cap under what reclaim cannot take
+// throttles the workload until expiry (run 2026-11-02). An unreadable floor
+// keeps the cap.
 func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	l.mu.Lock()
-	var due []*Action
+	var due, live []*Action
 	for _, a := range l.liveLocked() {
 		if !now.Before(a.Entry.Expires) {
 			due = append(due, a)
+		} else {
+			live = append(live, a)
 		}
 	}
 	l.mu.Unlock()
@@ -58,7 +65,47 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 			l.undoFailed(a, "expiring", err)
 		}
 	}
+	for _, a := range l.overFloor(ctx, live, workloads) {
+		err := l.giveBack(ctx, now, a, OutcomeFloored, "floored", "the workload's floor rose above the cap", a.cooldown, workloads)
+		switch {
+		case errors.Is(err, errNoListing):
+			return
+		case err != nil:
+			l.undoFailed(a, "giving back over its floor", err)
+		}
+	}
 	l.expireUnread(ctx, now, workloads)
+}
+
+// overFloor is the actions in as whose workload's floor now reads above the
+// setting they applied. None when the actuator has no floor or the runtime
+// cannot be listed; an action whose workload is not listed, or whose floor
+// cannot be read, is left to its expiry.
+func (l *Loop) overFloor(ctx context.Context, as []*Action, workloads lister) []*Action {
+	f, ok := l.act.(actuators.Floorer)
+	if !ok || len(as) == 0 {
+		return nil
+	}
+	ws, ok := workloads()
+	if !ok {
+		return nil
+	}
+	var over []*Action
+	for _, a := range as {
+		w, ok := workload(ws, a.Subject)
+		if !ok {
+			continue
+		}
+		fl, err := f.Floor(ctx, w)
+		if err != nil {
+			l.cfg.Logf("relief: reading the %s floor of %s: %v; the cap stays", l.d.Action, a.Subject, err)
+			continue
+		}
+		if fl > a.Entry.Applied {
+			over = append(over, a)
+		}
+	}
+	return over
 }
 
 // maxReSets bounds how many more times a given-back change is set to its
