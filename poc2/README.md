@@ -86,6 +86,27 @@ This is required because `helm/di-agent-system/values.yaml` references:
 
 ### PostgreSQL engine dataset
 
+The local `data/` directory and the existing `DATA_URL` share include the added
+`IMEPn1` through `IMEPn4`, `MFB50_4`, `PMax4`, and `PowerCyl4` signal CSVs.
+Each file contains its `Data1_<signal>` value column alongside the matching
+`Data1_time_<signal>` column. Ingestion discovers new files on every Helm
+install/upgrade and leaves unchanged, already-loaded files alone. No signal
+allowlist or new DATA_URL is required. The `_0001` and `_0001_2` run IDs stay
+separate; select the desired run with `streamer.runId` or the control API.
+After loading and committing the files, the Helm ingestion job sends an empty
+`PUT /config` to replay-streamer to reload its PostgreSQL profiles. This keeps
+both modes current even when the streamer started before the new files were
+ingested, without changing its configuration. A failed refresh fails the job
+visibly and is retried by Kubernetes. Standalone ingestion can opt into the same
+behavior with `STREAMER_CONTROL_URL=http://replay-streamer:8000/config`.
+The unchanged di-agent contract requires stable units and ranges per signal
+name for the lifetime of its collector. Run one dataset at a time and restart
+the agent when changing run IDs: the same signal can have different observed
+bounds in another run. Stop the previous stream and let its queued Kafka events
+and pending collector aggregates drain before switching, so the restarted
+agent receives only the new run. Signal names, raw values and per-run bounds
+remain unchanged; no changes to `semantic-map/` are required.
+
 The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
 
 ```bash
@@ -104,6 +125,14 @@ The streamer defaults to `synthetic` mode, generating bounded, correlated sample
 The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. Set `agent.datasetNodeName` to one worker's Kubernetes node name (or use `make agent DATASET_NODE_NAME=ubuntu-vm2`) to designate the only agent that polls it. Empty means engine ingestion is disabled. Every agent still monitors its own host cgroups. Do not point multiple agents at the shared collector: each HTTP poll drains the pending aggregates, so they would split the data rather than receive copies. `make peers` rejects a configured dataset node that is absent from the ready agent fleet.
 
 The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` in Make, or `agent.collectInterval` in Helm): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
+
+On startup, only the designated dataset worker waits in an init container for the
+collector's `/ready` endpoint before starting the agent's collector handshake.
+Other workers start without that dependency. If Kafka or the collector is unavailable,
+the designated pod stays initializing and logs its wait instead of crash-looping.
+The replay streamer has a five-minute startup-probe budget for its Kafka connection
+retry loop before liveness checks begin. These are chart-level settings; no image
+rebuild is required to apply them.
 
 The supplied PostgreSQL dataset has engine/run metadata, but no per-signal physical units or operating ranges. In both stream modes, replay-streamer preserves raw values and supplements each event's metadata with `unit: "dataset-native"` and observed min/max bounds pooled across all sources for that signal in the selected run. These are normalization bounds, not claimed physical operating limits. Constant signals get symmetric padding of 1% of their absolute value (at least 1 dataset-native unit) to keep the range nonzero. Generated declarations carry `unit_source: "dataset-native"` and `range_source: "observed"` and are logged. Explicit units and ranges in `run_metadata` take precedence, including JSON `signals` and flattened `<signal>.unit`/`<signal>.range` keys; invalid explicit declarations fail visibly rather than being replaced. PostgreSQL rows are not modified.
 
@@ -199,6 +228,64 @@ That sequence does the following:
 4. `make agent` installs/upgrades the chart and waits for the worker DaemonSet rollout. It deploys agents together with Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
 5. `make peers` registers each ready worker agent on the others and assigns trust values. It requires kubectl pod-list/exec permissions and Python 3, not SSH or libvirt discovery. Re-run it after agent restarts, worker additions/removals, or Helm upgrades: the container configuration does not persist the peer registry. The script verifies the exact peer URL set and reports stale or missing entries rather than claiming success.
 6. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting. This legacy demo still assumes the libvirt VM list starts with the control plane and uses port 9090.
+
+### Testing automatic discovery approval
+
+The chart enables discovery and rules-only review by default:
+`agent.proposer: "true"`, `agent.review.level: rules`,
+`agent.review.rules: [composition, persistent-correlation]`, and both review
+model backends set to `none`. These settings live in
+[`values.yaml`](helm/di-agent-system/values.yaml). The container entrypoint writes
+its configuration from the chart's environment variables; it does **not** load
+[`semantic-map/agent.yaml`](../semantic-map/agent.yaml).
+
+After changing Go code or the entrypoint, rebuild and push the agent image before
+deploying. Other service images do not need rebuilding if already available:
+
+```bash
+cd poc2
+mise exec go@1.26.1 -- make images IMAGES=di-agent
+make agent
+# Required when reusing the same image tag (for example latest):
+kubectl rollout restart daemonset/di-agent
+kubectl rollout status daemonset/di-agent --timeout=5m
+make peers
+```
+
+Use the same `REGISTRY` and `TAG` overrides for building and deploying if not using
+the defaults. `make agent` does not build images; it upgrades the whole chart.
+Agent pods roll when their configuration or image reference changes, not on unrelated
+service upgrades. When reusing an unchanged tag, explicitly restart the DaemonSet as
+above to pull the rebuilt image (`imagePullPolicy: Always`); an immutable new `TAG`
+changes the pod template without an extra restart.
+Keep any existing deployment overrides, such as `DATASET_NODE_NAME`, on `make agent`.
+Changing only chart review settings requires a Helm upgrade, not another image build.
+
+After port-forwarding an agent, verify:
+
+```bash
+curl -s localhost:9090/autonomy
+curl -s 'localhost:9090/candidates?status=all'
+```
+
+Expect autonomy level `rules`, both rule names, and no model names. Candidates expose
+`PersistentWindows`, `PersistencePairs` and `PersistenceWindowSize`; the discovery
+drawer displays progress toward three qualifying full windows, not three review
+cycles. Eligible directed pairs confirm as before. Undirected pairs (including
+engine-to-engine signals from the same subject) automatically become association-only
+edges without inventing a driver; they are excluded from estimates and actuation.
+Missing ranges still prevent persistence from accumulating. See the
+[persistence requirements](../semantic-map/README.md#rules-only-persistent-correlation).
+
+The agent mounts `/var/lib/di-agent` from `agent.persistence.hostPath` (default:
+`/var/lib/di-agent`) on each worker. State and discovery checkpoints survive pod
+replacement on that worker; they are not shared across nodes and do not survive loss
+of the node's disk. Fresh evidence resumes only within `map.stale_after` and under
+matching discovery settings; stale checkpoints start a new evidence run. An unclean
+exit loses at most the last snapshot interval of progress. Existing state held only
+inside an old container is not automatically migrated by adding the host mount.
+Snapshot format 5 is readable by this version (and imports format 4), but not by older
+agent binaries; back up existing state before upgrading if rollback is required.
 
 To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090`. Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 

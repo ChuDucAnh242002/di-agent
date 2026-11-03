@@ -132,6 +132,10 @@ spec:
                   key: password
             - name: DATA_DIR
               value: /data
+            {{- if .Values.streamer.enabled }}
+            - name: STREAMER_CONTROL_URL
+              value: "http://replay-streamer:8000/config"
+            {{- end }}
             {{- if .Values.postgres.ingest.dataUrlSecret }}
             - name: DATA_URL
               valueFrom:

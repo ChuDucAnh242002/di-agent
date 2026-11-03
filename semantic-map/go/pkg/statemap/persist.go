@@ -38,12 +38,16 @@ import (
 // arrive and the observation counts and timestamps would not. That is the silent
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
-// Version 4 added the intervention counters.
-const SnapshotVersion = 4
+// Version 4 added the intervention counters. Version 5 distinguishes associations
+// from directional relationships; other versions are refused rather than guessed at.
+const SnapshotVersion = 5
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
-	Version int `json:"version"`
+	// Discovery is the proposer's bounded raw evidence, validated separately on
+	// restore against its policy and freshness. The state estimator remains cold.
+	Discovery json.RawMessage `json:"discovery,omitempty"`
+	Version   int             `json:"version"`
 
 	// Owner is the system the snapshot describes, so a snapshot moved between hosts
 	// can be recognised as foreign instead of adopted as local history.
@@ -74,10 +78,11 @@ func (m *Map) Snapshot() Snapshot {
 	defer m.mu.RUnlock()
 
 	s := Snapshot{
-		Version:  SnapshotVersion,
-		Owner:    m.owner,
-		SavedAt:  m.now(),
-		Revision: m.revision,
+		Version:   SnapshotVersion,
+		Owner:     m.owner,
+		SavedAt:   m.now(),
+		Revision:  m.revision,
+		Discovery: append(json.RawMessage(nil), m.savedDiscovery...),
 	}
 	for _, p := range m.properties {
 		s.Properties = append(s.Properties, *p)
@@ -112,6 +117,19 @@ func (m *Map) Save(path string) error {
 	m.saveMu.Lock()
 	defer m.saveMu.Unlock()
 	snap := m.Snapshot()
+	m.mu.RLock()
+	capture := m.discoveryCheckpoint
+	m.mu.RUnlock()
+	if capture != nil {
+		// The map and proposer have separate locks, so these captures are not a
+		// cross-component transaction. RestoreDiscovery reconciles candidates
+		// against persisted relationships before publishing the restored queue.
+		raw, err := capture()
+		if err != nil {
+			return fmt.Errorf("capturing discovery evidence: %w", err)
+		}
+		snap.Discovery = raw
+	}
 	blob, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding snapshot: %w", err)
@@ -258,6 +276,7 @@ func (m *Map) Load(path string) (bool, error) {
 		m.interventions[k] = &iv
 	}
 	m.revision = snap.Revision
+	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)
 	m.journal.restore(snap.Events, snap.JournalDropped)
 
 	// The estimator resumes from its conclusions, not its working memory: the pair
@@ -276,6 +295,23 @@ func (m *Map) Load(path string) (bool, error) {
 			"it had concluded, and rebuilds support from the first new pairs",
 	}, m.now())
 	return true, nil
+}
+
+// DiscoveryPersistence installs the proposer checkpoint callback and returns any
+// saved evidence. The callback runs outside the state lock to avoid lock inversion.
+func (m *Map) DiscoveryPersistence(capture func() (json.RawMessage, error)) json.RawMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.discoveryCheckpoint = capture
+	return append(json.RawMessage(nil), m.savedDiscovery...)
+}
+
+// DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while
+// retaining the restored map, journal, and relationships.
+func (m *Map) DiscardDiscoveryCheckpoint() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.savedDiscovery = nil
 }
 
 // restore reinstates journal entries from a snapshot.

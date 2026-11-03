@@ -63,9 +63,28 @@ func (t getProperty) Call(args map[string]string) (any, string, error) {
 		return nil, "", fmt.Errorf("property %q is not in the map", id)
 	}
 	text, _ := st.Explain(id)
+	incoming := st.Relationships("", id)
+	outgoing := st.Relationships(id, "")
+	associations := make([]any, 0)
+	influencedBy := make([]any, 0, len(incoming))
+	influences := make([]any, 0, len(outgoing))
+	for _, relation := range incoming {
+		if relation.Association {
+			associations = append(associations, relation)
+		} else {
+			influencedBy = append(influencedBy, relation)
+		}
+	}
+	for _, relation := range outgoing {
+		if relation.Association {
+			associations = append(associations, relation)
+		} else {
+			influences = append(influences, relation)
+		}
+	}
 	return map[string]any{
 		"property": compact(p), "explanation": text,
-		"influenced_by": st.Relationships("", id), "influences": st.Relationships(id, ""),
+		"influenced_by": influencedBy, "influences": influences, "associations": associations,
 	}, fmt.Sprintf("get_property %s value=%s %s", id, num(p.Value), p.Status), nil
 }
 

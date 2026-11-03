@@ -3,7 +3,11 @@
 // estimator are two chances for the same pair of readings to be scored differently.
 package stats
 
-import "math"
+import (
+	"fmt"
+	"math"
+	"slices"
+)
 
 // PairWindow is a fixed-capacity ring of paired observations with a dedup set keyed
 // by pair identity, so a replayed batch cannot fold the same physical pair twice.
@@ -76,6 +80,41 @@ func (w *PairWindow) remember(identity string) bool {
 }
 
 func (w *PairWindow) Len() int { return len(w.xs) }
+
+// WindowSnapshot preserves ring order and duplicate identities together.
+type WindowSnapshot struct {
+	X, Y           []float64
+	Next, Capacity int
+	Seen           []string
+}
+
+func (w *PairWindow) Snapshot() WindowSnapshot {
+	s := WindowSnapshot{X: slices.Clone(w.xs), Y: slices.Clone(w.ys), Next: w.next, Capacity: w.capacity}
+	for id := range w.seen {
+		s.Seen = append(s.Seen, id)
+	}
+	slices.Sort(s.Seen)
+	return s
+}
+
+func RestoreWindow(s WindowSnapshot) (*PairWindow, error) {
+	if len(s.X) != len(s.Y) || s.Capacity <= 0 || len(s.X) > s.Capacity ||
+		s.Next < 0 || s.Next >= s.Capacity || len(s.X) < s.Capacity && s.Next != 0 ||
+		len(s.Seen) > 4*s.Capacity {
+		return nil, fmt.Errorf("invalid paired-observation window")
+	}
+	w := NewPairWindow(s.Capacity)
+	for i := range s.X {
+		if math.IsNaN(s.X[i]) || math.IsInf(s.X[i], 0) || math.IsNaN(s.Y[i]) || math.IsInf(s.Y[i], 0) {
+			return nil, fmt.Errorf("non-finite paired observation")
+		}
+	}
+	w.xs, w.ys, w.next = slices.Clone(s.X), slices.Clone(s.Y), s.Next
+	for _, id := range s.Seen {
+		w.seen[id] = struct{}{}
+	}
+	return w, nil
+}
 
 // Spread returns max − min of each side over the window: how far each series moved.
 // Correlation is scale-free, so a series that barely moves can still correlate

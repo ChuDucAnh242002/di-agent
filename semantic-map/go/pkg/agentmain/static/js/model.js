@@ -139,9 +139,9 @@ export class Model {
   relationship(id) { return this.relationships.find((r) => r.id === id) || null; }
 
   /** Relationships pointing INTO a property — what moves it. */
-  influencesOn(id) { return this.relationships.filter((r) => r.to === id); }
+  influencesOn(id) { return this.relationships.filter((r) => !r.association && r.to === id); }
   /** Relationships pointing OUT of a property — what it moves. */
-  influencesOf(id) { return this.relationships.filter((r) => r.from === id); }
+  influencesOf(id) { return this.relationships.filter((r) => !r.association && r.from === id); }
 
   /** Each subject that has a name, by subject; see subjectName and /workloads. */
   names() {

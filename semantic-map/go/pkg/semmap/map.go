@@ -3,6 +3,7 @@
 package semmap
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -367,6 +368,22 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetHistory()
 }
 
+// RestoreDiscovery attaches discovery to the state snapshot before loops start.
+func (m *SemanticMap) RestoreDiscovery(now time.Time, maxGap time.Duration) (string, error) {
+	p, ok := m.proposer.(interface {
+		Checkpoint() (json.RawMessage, error)
+		RestoreCheckpoint(json.RawMessage, time.Time, time.Duration) (string, error)
+	})
+	if !ok {
+		return "proposer has no discovery checkpoint", nil
+	}
+	if m.state == nil {
+		return "", ErrNoStateModel
+	}
+	raw := m.state.DiscoveryPersistence(p.Checkpoint)
+	return p.RestoreCheckpoint(raw, now, maxGap)
+}
+
 // ConfirmCandidate applies an operator's confirmation. from orients an undirected
 // candidate (either end) and is "" or the candidate's own source for a directed one. A
 // candidate between two properties of the state model becomes a state-map
@@ -378,6 +395,31 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 //
 // rv is the review that decided it: an operator's, or the agent's own.
 func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.CandidateReview) error {
+	if rv.Association {
+		if from != "" {
+			return fmt.Errorf("association %q cannot specify a direction", candidateID)
+		}
+		cs, err := m.proposer.GetCandidates()
+		if err != nil {
+			return err
+		}
+		var found bool
+		for _, c := range cs {
+			if c.CandidateID == candidateID {
+				internalPersistentRule := rv.IsPersistentCorrelationAssociation()
+				found = (c.Undirected || internalPersistentRule) && m.state != nil
+				if found {
+					_, a := m.state.Property(c.FromID)
+					_, b := m.state.Property(c.ToID)
+					found = a && b
+				}
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("association %q requires two state properties and an undirected candidate (directed associations are reserved for the persistent-correlation rule)", candidateID)
+		}
+	}
 	prop, err := m.proposer.Confirm(candidateID, from, rv)
 	if err != nil {
 		return err
@@ -385,7 +427,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
 	}
-	if m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
+	if rv.Association || m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
 		sign := 1
 		if prop.Direction == types.Negative {
 			sign = -1
@@ -396,8 +438,12 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 			// relationship on the pair would count one dependency twice.
 			return nil
 		}
+		label := "discovered"
+		if rv.Association {
+			label = "association"
+		}
 		err := m.state.DeclareRelationship(statemap.Relationship{
-			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
+			From: prop.FromConstruct, To: prop.ToConstruct, Label: label, Sign: sign, Association: rv.Association,
 			Provenance: statemap.Discovered,
 			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
 		})

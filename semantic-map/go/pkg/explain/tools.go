@@ -474,11 +474,31 @@ func dispatchExplainProperty(r SemanticMapReader, args map[string]any) (*ToolRes
 		return nil, err
 	}
 	p, _ := sm.Property(id)
+	incoming := sm.Relationships("", id)
+	outgoing := sm.Relationships(id, "")
+	associations := make([]any, 0)
+	influencedBy := make([]any, 0, len(incoming))
+	influences := make([]any, 0, len(outgoing))
+	for _, relation := range incoming {
+		if relation.Association {
+			associations = append(associations, relation)
+		} else {
+			influencedBy = append(influencedBy, relation)
+		}
+	}
+	for _, relation := range outgoing {
+		if relation.Association {
+			associations = append(associations, relation)
+		} else {
+			influences = append(influences, relation)
+		}
+	}
 	payload, err := json.Marshal(map[string]any{
 		"property":      p,
 		"explanation":   text,
-		"influenced_by": sm.Relationships("", id),
-		"influences":    sm.Relationships(id, ""),
+		"influenced_by": influencedBy,
+		"influences":    influences,
+		"associations":  associations,
 		"revision":      sm.Revision(),
 	})
 	if err != nil {

@@ -54,7 +54,15 @@ agent:
   regime: stable
   profile: edge-minimal
   collectInterval: 5s
-  proposer: "false"
+  proposer: "true"
+  review:
+    level: rules
+    rules: [composition, persistent-correlation]
+    decisionBackend: none
+    reasoningBackend: none
+  # Node-local: survives pod replacement, never shared between workers.
+  persistence:
+    hostPath: /var/lib/di-agent
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
   nodeSelector: {}

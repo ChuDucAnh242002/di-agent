@@ -506,11 +506,13 @@ export class Drawer {
         The map produced structure it was not told about. Confirming one admits it as a
         relationship with <span class="mono">discovered</span> provenance; rejecting tells
         the proposer to forget the pair. A pair shown with ↔ has no direction yet:
-        correlation does not say which end drives the other, so you choose when you confirm.
+        correlation does not say which end drives the other. Persistent undirected pairs
+        are accepted automatically as association-only edges when that rule is enabled;
+        manual directional confirmation still requires choosing an end.
       </p>
       <table class="grid">
         <thead><tr><th>pair</th><th>sign</th><th class="num">|r|</th><th class="num">p</th>
-          <th class="num">pairs</th><th>status</th><th></th></tr></thead>
+          <th class="num">pairs</th><th>persistence</th><th>status</th><th></th></tr></thead>
         <tbody>${this.candidates.map((c) => {
           const sign = directionSign(c.Direction);
           const from = escapeHTML(c.FromID), to = escapeHTML(c.ToID), id = escapeHTML(c.CandidateID);
@@ -533,6 +535,14 @@ export class Drawer {
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
             <td class="num" title="${c.PBar ? `cleared the bar ${Number(c.PBar).toPrecision(2)}, corrected for the pairs tested` : 'no correction for the pairs tested'}">${fmt.num(c.PValue, 4)}</td>
             <td class="num">${fmt.int(c.NObservations)}</td>
+            <td class="muted" title="Fresh non-overlapping evidence windows, not review cycles">
+              ${fmt.int(Math.min(c.PersistentWindows || 0, 3))}/3 windows
+              <div>${c.Status === 'confirmed' ? 'accepted' : c.Caveats?.length ? 'blocked by caveats' : c.Status === 'pending'
+                ? (c.PersistentWindows >= 3 ? 'ready for review' : 'collecting evidence')
+                : 'not currently qualifying'}</div>
+              ${c.PersistenceWindowSize ? `<div>${fmt.int(c.PersistencePairs || 0)}/${fmt.int(c.PersistenceWindowSize)} fresh pairs</div>` : ''}
+              <div>${c.Undirected ? 'association only' : 'directed relationship'}</div>
+            </td>
             <td class="muted">${escapeHTML(String(c.Status ?? ''))}</td>
             <td class="nowrap">
               ${confirm}

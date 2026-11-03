@@ -548,8 +548,8 @@ export class GraphView {
       const path = el('path', {
         fill: 'none', stroke: color, 'stroke-width': width,
         'stroke-opacity': opacity, 'stroke-linecap': 'round',
-        'marker-end': `url(#arrow-${eff.known ? sign : 'none'})`,
-        'stroke-dasharray': eff.known ? null : '5 5',
+        'marker-end': r.association ? null : `url(#arrow-${eff.known ? sign : 'none'})`,
+        'stroke-dasharray': r.association ? '2 5' : eff.known ? null : '5 5',
       });
       if (model.relChanged.has(r.id)) {
         path.setAttribute('class', 'flowing');
@@ -865,11 +865,11 @@ function propertyTip(p, model) {
 function relationshipTip(r) {
   const eff = effective(r);
   return {
-    title: `${r.from} -> ${r.to}`,
+    title: `${r.from} ${r.association ? '<->' : '->'} ${r.to}`,
     kind: `${r.provenance}${r.label ? ' · ' + r.label : ''}`,
     rows: [
       ['sign', r.sign < 0 ? 'negative' : 'positive'],
-      ['effective', eff.known ? `${fmt.num(eff.value)} (${eff.basis})` : 'not yet known'],
+      ['effective', r.association ? 'association only; not used in estimates' : eff.known ? `${fmt.num(eff.value)} (${eff.basis})` : 'not yet known'],
       ['confidence', fmt.num(r.confidence, 3)],
       ['pairs', fmt.int(r.n_observations)],
       ...(r.sign_suspect ? [['sign status', 'contradicted by observation']] : []),

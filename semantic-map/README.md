@@ -190,7 +190,7 @@ semantic-map/
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
     │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
-    │   │   ├── rules.go        Tier 0: Rule, and the composition rule
+    │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
     │   │   ├── logprobs.go     Tier 1 openai-logprobs: a general model's letter probabilities
     │   │   ├── reasoner.go     Tier 2 openai-tools: a tool-calling model reading the map
@@ -554,6 +554,12 @@ actions created or promoted the relationship the candidate proposed), `Model`, `
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
+`Association: true` means an approval records symmetric co-variation, not a causal
+direction. The discovery fields are `PersistentWindows` (completed consecutive
+qualifying windows), `PersistencePairs` (fresh pairs in the current window), and
+`PersistenceWindowSize` (pairs per full window). Reviews are reconsidered when the
+evidence materially changes or persistence crosses its approval threshold, not after
+every additional qualifying window.
 
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
@@ -566,6 +572,12 @@ which often hold together by construction.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
+
+`GET /state` relationship entries and the edges returned by `GET /graph` and `GET /edges`
+include `association: true` for symmetric associations. Such an edge has no causal
+orientation or effective strength and is excluded from estimates, counterfactuals,
+intervention learning, and actuation. It is separate from the directional relationships
+listed under `influenced_by` and `influences` in model tools.
 
 How many pairs are being tested is in `GET /state`, not here: an empty list means only
 that no *tested* pair has cleared the threshold.
@@ -1152,7 +1164,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.pair_window`   | `15s`   | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
-| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal, plus the proposer's discovery checkpoint. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
 | `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero. |
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
@@ -1185,7 +1197,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
+| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
 | `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
@@ -1670,7 +1682,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
+| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1684,9 +1696,74 @@ The level decides who may act:
 | `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
 | `full` (3), the default | yes | yes |
 
+### Rules-only persistent correlation
+
+Merge this into the agent configuration to approve unfamiliar metric pairs without
+an allowlist or model calls. The default rule list remains `composition` only.
+
+```yaml
+loops:
+  review:
+    level: rules
+    rules:
+      - composition
+      - persistent-correlation
+    decision:
+      backend: none
+    reasoning:
+      backend: none
+```
+
+`persistent-correlation` requires `PersistentWindows >= 3` and no evidence caveats.
+Each counted window contains a full proposer buffer of fresh pairs, not another review
+of the same observations. Windows do not overlap. The correlation must keep its sign
+and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
+gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
+correction is enabled. Missing declared ranges prevent persistence from accumulating
+on the property path. A failed gate, sign/kind change, forgotten property, or displaced
+pair resets the run. A closer-time replacement partner revises the last pair's evidence
+instead of counting as another observation.
+
+`GET /candidates?status=all` exposes `PersistentWindows`, `PersistencePairs`, and
+`PersistenceWindowSize`. The discovery drawer shows completed windows (for example
+`1/3`), fresh pairs toward the next window, and caveat blockers. Reviews and their
+decision records retain the count used. A review becomes outdated when evidence changes
+materially or the count crosses the three-window approval threshold; later increments
+do not continually reopen it.
+
+Persistent-correlation approvals become **association-only** relationships, with
+`association: true` and no claimed driver. They appear as dotted, arrowless graph edges.
+They never supply an effective causal strength, enter estimates/counterfactuals or
+actuation, or receive intervention updates. A later verified intervention may establish
+a separate directional relationship. Model- and operator-approved directional
+confirmations remain causal; operator confirmation of an undirected candidate requires
+choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
+
+When `persist.file` is set, the same atomic state snapshot also saves the discovery
+buffers, duplicate suppression, partial-window progress, candidates and completed
+windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+`map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
+Changed settings, expired evidence or a backwards clock produce an explicit cold-start
+log. A malformed discovery checkpoint is discarded with an error-level log while the
+restored map and journal remain available. Long observation gaps beyond 24 hours reset
+evidence. Pending reviews survive restart and are reconsidered only when their evidence
+becomes outdated. The map snapshot and proposer checkpoint are captured separately;
+restore reconciles candidate status against relationships already present in the map.
+A clean shutdown saves immediately; an unclean exit can lose up to `persist.interval`
+of progress. This checkpoint is separate from the state estimator's raw windows, which
+still restart cold. Snapshot format 5 is the only supported format; older versions are
+rejected, and older binaries cannot load format 5.
+
+This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
+confirmations still participate in estimates; associations do not. This feature does
+not add probation or automatic retirement of accepted edges. `level: suggest`
+records proposed approvals without applying them. `level: rules` alone does not disable
+model calls: set both model backends to `none` as above for rules-only operation.
+
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
-returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
-not reviewed again until then, so the models are not asked the same question every cycle.
+returns to pending, to be reviewed again, once its evidence moves materially or crosses
+the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
+until then, so the models are not asked the same question every cycle.
 A candidate whose end is stale waits. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
@@ -1702,4 +1779,3 @@ Bearer tokens for a backend are `loops.review.decision.api_key` and
 environment and keep them out of the file. The agent reads no variable on its own.
 
 The thresholds are uncalibrated defaults set by what each action costs to undo.
-

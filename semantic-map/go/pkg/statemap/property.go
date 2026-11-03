@@ -183,9 +183,11 @@ const (
 
 // Relationship is a directed association between two properties.
 type Relationship struct {
-	ID   string `json:"id"` // stable identity, unique per (From, To, Label)
-	From string `json:"from"`
-	To   string `json:"to"`
+	// Association is symmetric co-variation, never a directional influence.
+	Association bool   `json:"association,omitempty"`
+	ID          string `json:"id"` // stable identity, unique per (From, To, Label)
+	From        string `json:"from"`
+	To          string `json:"to"`
 
 	// Label distinguishes several relationships over the same endpoints. Two
 	// mechanisms can relate the same pair in opposite directions, and collapsing
@@ -281,6 +283,9 @@ type Relationship struct {
 // constant, so "I do not know yet" was unrepresentable and every caller was handed
 // a figure as though it had been measured.
 func (r *Relationship) Effective() (float64, bool) {
+	if r.Association {
+		return 0, false
+	}
 	if r.Assertion != nil {
 		return clamp01(*r.Assertion), true
 	}
@@ -311,6 +316,9 @@ func (r *Relationship) EffectiveOrZero() float64 {
 // Basis names which layer Effective answered from, for a decision record and for an
 // operator reading a rationale.
 func (r *Relationship) Basis() string {
+	if r.Association {
+		return "association"
+	}
 	switch {
 	case r.Assertion != nil:
 		return "asserted"
@@ -487,7 +495,9 @@ type Map struct {
 	// saveMu makes saves take turns, from the snapshot to the rename, so the later
 	// snapshot always lands last: a periodic save still writing at shutdown cannot
 	// rename an older state over the shutdown save.
-	saveMu sync.Mutex
+	saveMu              sync.Mutex
+	discoveryCheckpoint func() (json.RawMessage, error)
+	savedDiscovery      json.RawMessage
 
 	// owner is the system this map models. Fixed at construction: a map that could be
 	// reassigned to another system would carry the first one's history into the second.
@@ -1181,6 +1191,9 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	if r.Sign != 1 && r.Sign != -1 {
 		return fmt.Errorf("relationship %s->%s has sign %d, want +1 or -1", r.From, r.To, r.Sign)
 	}
+	if r.Association && r.To < r.From {
+		r.From, r.To = r.To, r.From
+	}
 	switch r.Provenance {
 	case "":
 		r.Provenance = Seeded
@@ -1214,6 +1227,9 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 
 	now := m.now()
 	if existing, ok := m.relationships[r.ID]; ok {
+		if existing.Association != r.Association {
+			return fmt.Errorf("relationship %s cannot change between association and directional influence", r.ID)
+		}
 		if existing.Sign != r.Sign {
 			// A direction reversal is a different claim, not an update. Rejecting it
 			// keeps the record honest: the old claim must be retired and the new one
@@ -1250,7 +1266,8 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	m.relationships[nr.ID] = &nr
 	m.bump(EventRelationshipDeclared, nr.ID, "system", map[string]any{
 		"from": nr.From, "to": nr.To, "label": nr.Label, "sign": nr.Sign,
-		"provenance": string(nr.Provenance), "basis": nr.Basis(),
+		"association": nr.Association,
+		"provenance":  string(nr.Provenance), "basis": nr.Basis(),
 	}, now)
 	return nil
 }
@@ -1327,6 +1344,9 @@ func (m *Map) AssertRelationshipStrength(id string, strength float64, actor, rea
 	r, ok := m.relationships[id]
 	if !ok {
 		return fmt.Errorf("relationship %q not found", id)
+	}
+	if r.Association {
+		return fmt.Errorf("association %q has no causal strength; declare a separate directional relationship with supporting evidence", id)
 	}
 	before, hadBefore := r.Effective()
 	v := clamp01(strength)
@@ -1532,6 +1552,10 @@ func (r *Relationship) String() string {
 	label := r.Label
 	if label != "" {
 		label = "[" + label + "]"
+	}
+	if r.Association {
+		return fmt.Sprintf("%s%s<->%s(%sassociation,c=%.2f,%s; no causal direction)",
+			r.From, label, r.To, sign, r.Confidence, r.Provenance)
 	}
 	eff, known := r.Effective()
 	if !known {

@@ -20,6 +20,7 @@ directly and is loaded as-is. `python ingest.py --split-only` performs just
 the split step (no database needed).
 """
 import csv
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS timeseries (
     run_id text NOT NULL REFERENCES runs, source text NOT NULL,
     signal text NOT NULL, t double precision NOT NULL, value double precision);
 CREATE TABLE IF NOT EXISTS ingested_files (
-    name text PRIMARY KEY, size bigint NOT NULL, loaded_at timestamptz NOT NULL DEFAULT now());
+    name text PRIMARY KEY, size bigint NOT NULL, sha256 text, loaded_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE ingested_files ADD COLUMN IF NOT EXISTS sha256 text;
 """
 INDEXES = (
     "CREATE INDEX IF NOT EXISTS timeseries_idx ON timeseries (run_id, signal, t)",
@@ -74,8 +76,7 @@ def download(url):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for f in json.load(opener.open(req, timeout=REQUEST_TIMEOUT_S))["value"]:
         target = DATA_DIR / f["Name"]
-        if not f["Name"].lower().endswith(".csv") or (
-                target.exists() and target.stat().st_size == int(f["Length"])):
+        if not f["Name"].lower().endswith(".csv"):
             continue
         print(f"get {f['Name']}", flush=True)
         rel = urllib.parse.quote(f["ServerRelativeUrl"], safe="")
@@ -86,7 +87,18 @@ def download(url):
         ) as r, open(part, "wb") as out:
             while chunk := r.read(1 << 20):
                 out.write(chunk)
+        if target.exists() and file_sha256(part) == file_sha256(target):
+            part.unlink()
+            continue
         part.rename(target)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def signal_pairs(header):
@@ -105,6 +117,9 @@ def split_file(path):
     with path.open(newline="") as fh:
         rows = csv.reader(fh)
         pairs = signal_pairs(next(rows))
+        if not pairs:
+            print(f"warning: {path.name} has no paired value/time columns; skipping", file=sys.stderr)
+            return []
         targets = {sig: SPLIT_DIR / f"{prefix}_{sig}.csv" for sig, _, _ in pairs}
         if all(t.exists() and t.stat().st_mtime >= path.stat().st_mtime for t in targets.values()):
             return list(targets.values())
@@ -151,6 +166,9 @@ def load_timeseries(cur, run, source, path):
         rows = csv.reader(fh)
         header = next(rows)
         pairs = signal_pairs(header)
+        if not pairs:
+            print(f"warning: {path.name} has no paired value/time columns; skipping", file=sys.stderr)
+            return
         for row in rows:
             for signal, vi, ti in pairs:
                 if row[ti] != "":
@@ -172,12 +190,14 @@ def main():
 
     with psycopg.connect(autocommit=True) as conn:
         conn.execute(SCHEMA)
-        done = dict(conn.execute("SELECT name, size FROM ingested_files").fetchall())
+        done = {name: (size, digest) for name, size, digest in conn.execute(
+            "SELECT name, size, sha256 FROM ingested_files").fetchall()}
         for path in files:
             size = path.stat().st_size
+            digest = file_sha256(path)
             name = path.name
             split = SPLIT_RE.match(name)
-            if done.get(name) == size:
+            if done.get(name) == (size, digest):
                 print(f"skip {name}", flush=True)
                 continue
             print(f"load {name}", flush=True)
@@ -195,12 +215,21 @@ def main():
                     cur.execute("DELETE FROM run_metadata WHERE run_id = %s", (run,))
                     load_metadata(cur, run, path)
                 cur.execute(
-                    "INSERT INTO ingested_files (name, size) VALUES (%s, %s) "
-                    "ON CONFLICT (name) DO UPDATE SET size = EXCLUDED.size, loaded_at = now()",
-                    (name, size))
+                    "INSERT INTO ingested_files (name, size, sha256) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (name) DO UPDATE SET size = EXCLUDED.size, "
+                    "sha256 = EXCLUDED.sha256, loaded_at = now()",
+                    (name, size, digest))
         for index in INDEXES:
             conn.execute(index)
         conn.execute("ANALYZE timeseries")
+    if url := os.environ.get("STREAMER_CONTROL_URL"):
+        request = urllib.request.Request(
+            url, data=b"{}", method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+            json.load(response)
+        print("refreshed replay-streamer dataset profiles", flush=True)
     print("done", flush=True)
 
 

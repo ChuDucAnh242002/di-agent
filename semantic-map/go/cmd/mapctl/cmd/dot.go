@@ -55,6 +55,11 @@ func writeDot(w io.Writer, snap *client.GraphSnapshot) {
 			style = "dashed"
 		}
 		label := fmt.Sprintf("%s\\nw=%.2f", e.PropositionID, e.EMAWeight)
+		if e.Association {
+			fmt.Fprintf(w, "  %q -> %q [label=%q, color=%s, style=dotted, dir=none];\n",
+				e.FromID, e.ToID, e.PropositionID+"\\nassociation only", color)
+			continue
+		}
 		fmt.Fprintf(w, "  %q -> %q [label=%q, color=%s, style=%s];\n",
 			e.FromID, e.ToID, label, color, style)
 	}

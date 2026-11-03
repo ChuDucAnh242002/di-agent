@@ -486,7 +486,7 @@ export class Inspector {
       <div class="inspector-head">
         <div class="title">
           <div class="eyebrow">relationship${r.label ? ` · ${escapeHTML(r.label)}` : ''}</div>
-          <h2>${escapeHTML(r.from)} → ${escapeHTML(r.to)}</h2>
+          <h2>${escapeHTML(r.from)} ${r.association ? '↔' : '→'} ${escapeHTML(r.to)}</h2>
         </div>
         <button class="btn ghost small" data-act="close" aria-label="close">✕</button>
       </div>
@@ -502,6 +502,7 @@ export class Inspector {
             ${r.sign_suspect ? '<span class="badge alarm">! sign suspect</span>' : ''}
           </div>
           ${r.note ? `<p class="muted" style="font-size:11.5px;margin:9px 0 0;line-height:1.5">${escapeHTML(r.note)}</p>` : ''}
+          ${r.association ? '<p class="muted">Association only: no causal direction claimed. Excluded from estimates and actuation.</p>' : ''}
         </div>
 
         <div class="section">
@@ -534,10 +535,10 @@ export class Inspector {
         <div class="section">
           <h3>Endpoints</h3>
           <table class="grid"><tbody>
-            <tr data-goto="${escapeHTML(r.from)}"><td class="muted">source</td>
+            <tr data-goto="${escapeHTML(r.from)}"><td class="muted">${r.association ? 'endpoint' : 'source'}</td>
               <td class="mono">${escapeHTML(r.from)}</td>
               <td class="num">${valueOf(model, r.from)}</td></tr>
-            <tr data-goto="${escapeHTML(r.to)}"><td class="muted">target</td>
+            <tr data-goto="${escapeHTML(r.to)}"><td class="muted">${r.association ? 'endpoint' : 'target'}</td>
               <td class="mono">${escapeHTML(r.to)}</td>
               <td class="num">${valueOf(model, r.to)}</td></tr>
           </tbody></table>
@@ -546,7 +547,7 @@ export class Inspector {
         <div class="section">
           <h3>Operator</h3>
           <div class="inline">
-            <button class="btn small" data-act="assert">Assert a strength…</button>
+            <button class="btn small" data-act="assert" ${r.association ? 'disabled' : ''}>Assert a strength…</button>
             <button class="btn small danger" data-act="retire-rel">Retire…</button>
           </div>
           <p class="muted" style="font-size:11px;margin:8px 0 0;line-height:1.5">

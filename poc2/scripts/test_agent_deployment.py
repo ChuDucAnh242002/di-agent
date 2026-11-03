@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -191,12 +192,136 @@ class AgentDeploymentTests(unittest.TestCase):
                 self.assertEqual("name: dataset" in spec.read_text(), expected)
                 self.assertIn("name: cgroup", spec.read_text())
 
+    def test_entrypoint_writes_rules_only_review(self):
+        script = ENTRYPOINT.read_text().replace(
+            'exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"', "exit 0",
+        )
+        for rules, expected in [
+            ("composition,persistent-correlation", "      - composition\n      - persistent-correlation"),
+            ("", "      []"),
+        ]:
+            with self.subTest(rules=rules):
+                spec = self.directory / "rules.yaml"
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env={
+                        **self.env, "SPEC_FILE": str(spec), "NETDATA_URL": "",
+                        "PROPOSER": "true", "REVIEW_LEVEL": "rules", "REVIEW_RULES": rules,
+                        "DECISION_BACKEND": "none", "REASONING_BACKEND": "none",
+                    },
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = spec.read_text()
+                self.assertIn("enabled: true", config)
+                self.assertIn('level: "rules"', config)
+                self.assertIn(expected, config)
+                self.assertIn('decision:\n      backend: "none"', config)
+                self.assertIn('reasoning:\n      backend: "none"', config)
+
+    def test_only_dataset_worker_waits_for_collector_readiness(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART), "--show-only", "templates/agent.yaml",
+             "--set", "agent.datasetNodeName=worker-1"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("name: wait-for-dataset-collector", rendered)
+        script = textwrap.dedent(rendered.split("            - |\n", 1)[1].split("          env:", 1)[0])
+        curl = self.directory / "curl"
+        curl.write_text("""#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+path = Path(os.environ["MOCK_DIR"]) / "curl-count"
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+sys.exit(1 if count == 1 else 0)
+""")
+        curl.chmod(0o755)
+        sleep = self.directory / "sleep"
+        sleep.write_text("#!/bin/sh\nexit 0\n")
+        sleep.chmod(0o755)
+        for node, expected_calls in [("worker-2", 0), ("worker-1", 2)]:
+            with self.subTest(node=node):
+                result = subprocess.run(
+                    ["/bin/sh", "-ec", script],
+                    env={**self.env, "NODE_ID": node, "DATASET_NODE_NAME": "worker-1"},
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                counter = self.directory / "curl-count"
+                self.assertEqual(int(counter.read_text()) if counter.exists() else 0, expected_calls)
+                if expected_calls:
+                    self.assertIn("Waiting for dataset-collector readiness", result.stdout)
+        for overrides in [[], ["--set", "datasetCollector.enabled=false", "--set", "agent.datasetNodeName=worker-1"]]:
+            result = subprocess.run(
+                ["helm", "template", "test", str(CHART), "--show-only", "templates/agent.yaml", *overrides],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertNotIn("initContainers:", result.stdout)
+
+    def test_streamer_has_startup_grace_before_liveness(self):
+        result = subprocess.run(
+            ["helm", "template", "test", str(CHART), "--show-only", "templates/streamer.yaml"],
+            capture_output=True, text=True, check=True,
+        )
+        startup = result.stdout.split("          startupProbe:\n", 1)[1].split("          readinessProbe:", 1)[0]
+        self.assertIn("path: /status", startup)
+        self.assertIn("failureThreshold: 60", startup)
+        self.assertIn("periodSeconds: 5", startup)
+        self.assertIn("timeoutSeconds: 3", startup)
+
+    def test_agent_has_node_local_state_and_only_relevant_rollouts(self):
+        def render(*overrides):
+            result = subprocess.run(
+                ["helm", "template", "test", str(CHART),
+                 "--show-only", "templates/agent.yaml", *overrides],
+                capture_output=True, text=True, check=True,
+            )
+            return result.stdout
+
+        baseline = render()
+        self.assertIn("mountPath: /var/lib/di-agent", baseline)
+        self.assertIn('path: "/var/lib/di-agent"', baseline)
+        self.assertIn("type: DirectoryOrCreate", baseline)
+        self.assertNotIn("diagent.io/restartedAt:", baseline)
+        self.assertNotIn("diagent.io/config-checksum:", baseline)
+        self.assertEqual(baseline, render())
+        self.assertEqual(baseline, render("--set", "streamer.intervalMs=2000"))
+        changed = render("--set", "agent.review.level=suggest")
+        self.assertNotEqual(baseline, changed)
+        self.assertIn('- name: REVIEW_LEVEL\n              value: "suggest"', changed)
+        self.assertNotEqual(baseline, render("--set", "global.imageTag=test-build"))
+
+    def test_entrypoint_rejects_malformed_rule_name(self):
+        script = ENTRYPOINT.read_text().replace(
+            'exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"', "exit 0",
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **self.env, "SPEC_FILE": str(self.directory / "invalid.yaml"),
+                "REVIEW_RULES": "composition,bad: rule",
+            },
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid REVIEW_RULES entry", result.stderr)
+
     def test_chart_renders_worker_daemonset_and_can_disable_agents(self):
         result = subprocess.run(
             ["helm", "template", "test", str(CHART), "--show-only", "templates/agent.yaml"],
             capture_output=True, text=True, check=True,
         )
         self.assertIn("kind: DaemonSet", result.stdout)
+        for name, value in [
+            ("PROPOSER", "true"),
+            ("REVIEW_LEVEL", "rules"),
+            ("REVIEW_RULES", "composition,persistent-correlation"),
+            ("DECISION_BACKEND", "none"),
+            ("REASONING_BACKEND", "none"),
+        ]:
+            self.assertIn(f'- name: {name}\n              value: "{value}"', result.stdout)
         self.assertNotIn("replicas:", result.stdout)
         self.assertIn("hostNetwork: true", result.stdout)
         self.assertIn("node-role.kubernetes.io/control-plane", result.stdout)
