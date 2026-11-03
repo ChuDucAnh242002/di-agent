@@ -559,6 +559,7 @@ dialog .hint { font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; }
 
 #graph text { user-select: none; pointer-events: none; }
 #graph .node:hover .disc, #graph .folded:hover rect { stroke: var(--sign-pos); }
+#graph .hull-fold:hover text { fill: var(--sign-pos); }
 #graph .edge:hover path:nth-of-type(2) { stroke-opacity: 1; }
 
 /* A drawer row whose part of the map is highlighted on the canvas, in the

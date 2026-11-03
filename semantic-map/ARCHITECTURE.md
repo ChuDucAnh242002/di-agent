@@ -1490,7 +1490,7 @@ modules under `static/js/`, embedded in the binary alongside `index.html` and
 | `api.js` | every route the console calls, and how this agent reports failure |
 | `model.js` | effective-strength precedence, per-property value history, subject grouping, workload names and the throttled/frozen facts |
 | `force.js` | the force-directed layout |
-| `graph.js` | the SVG canvas. Each workload's box is drawn folded into one glyph, its relationships bundled — one bundle per other workload, one to the machine's box — so a demo map reads at a glance; a click opens a box, and a box holding what is selected or pointed at is always open. Folding is drawing only: the map, the inspector and the drawer still carry every relationship |
+| `graph.js` | the SVG canvas. Each workload's box is drawn folded into one glyph, its relationships bundled — one bundle per thing they run between: another folded workload, a property of an open one, or the machine's box as a whole — so a demo map reads at a glance. A box holding what is selected or pointed at is always open, and none is folded while a search narrows the canvas, since what it found is the point. A folded workload's properties keep their place and pins and get them back when it opens, so folding never re-lays the canvas out. Folding is drawing only: the map, the inspector and the drawer still carry every relationship |
 | `charts.js` | sparkline, strength layers, diverging contributions, census bar |
 | `inspector.js` | property and relationship detail, and the counterfactual studio |
 | `drawer.js` | actions, journal, decisions, discovery, subjects, cluster, backbone, ask |
