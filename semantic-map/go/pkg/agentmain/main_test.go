@@ -46,3 +46,16 @@ func TestSpecReachesConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestNodeUIReachesTheConsole guards the one line that decides whether a real
+// agent serves /ui/; TestStaticUI_FollowsNodeUI covers what registerConsole does
+// with the value, and this that main.go still hands it the spec's.
+func TestNodeUIReachesTheConsole(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "registerConsole(mux, cfg.Node.UI)") {
+		t.Error("main.go no longer passes node.ui to registerConsole: the console would ignore the spec")
+	}
+}

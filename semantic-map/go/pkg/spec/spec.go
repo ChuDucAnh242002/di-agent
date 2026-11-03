@@ -62,6 +62,9 @@ type Node struct {
 	Addr        string `yaml:"addr"`
 	ID          string `yaml:"id"`
 	IngestScope string `yaml:"ingest_scope"`
+	// UI serves the web console under /ui/. Off, the default, the agent is
+	// headless and answers only its HTTP API.
+	UI bool `yaml:"ui"`
 }
 
 // Profile is the deployment profile and the dynamics of the map's estimates.
