@@ -2,6 +2,7 @@ node:
     addr: :8080
     id: ""
     ingest_scope: self
+    ui: false            # true serves the web console at /ui/; headless by default
 profile:
     name: edge-minimal
     kd: ""

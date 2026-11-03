@@ -531,6 +531,41 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
+// newUIAgent serves the API and the console, as an agent whose spec sets node.ui.
+func newUIAgent(t *testing.T) (string, func()) {
+	t.Helper()
+	sm, err := profiles.Build("edge-minimal", profiles.Config{
+		StateMap:             newTestState(t),
+		DomainSpec:           mustSpec(t),
+		EMAAlpha:             0.2,
+		ConvergenceThreshold: 500,
+		MinTrustScore:        0.5,
+	})
+	if err != nil {
+		t.Fatalf("profiles.Build: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerRoutes(mux, sm, explain.NewDisabled())
+	registerStaticRoutes(mux)
+	srv := httptest.NewServer(mux)
+	return srv.URL, srv.Close
+}
+
+func TestStaticUI_HeadlessByDefault(t *testing.T) {
+	// The API routes alone do not serve the console: it is registered only when
+	// the spec asks for it.
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp, err := http.Get(base + "/ui/")
+	if err != nil {
+		t.Fatalf("GET /ui/: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("/ui/ on a headless agent: status %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestStaticUI_ServesTheModuleTree(t *testing.T) {
 	// The console is an ES module tree under /ui/js/, so the embed.FS → /ui/
 	// chain has to carry a subdirectory, not just three sibling files. Each
@@ -541,7 +576,7 @@ func TestStaticUI_ServesTheModuleTree(t *testing.T) {
 	// The content type is asserted too. A module served as anything other than
 	// JavaScript is rejected by the browser's module loader, which fails as a
 	// blank page rather than as a 404 — worth catching here instead of there.
-	base, _, cleanup := newTestAgent(t)
+	base, cleanup := newUIAgent(t)
 	defer cleanup()
 
 	for _, mod := range []string{
@@ -584,7 +619,7 @@ func TestStaticUI_ServesTheModuleTree(t *testing.T) {
 // page is whatever the binary embeds; a reviewer adding a <script src="http…">
 // should fail here rather than discover it on a disconnected device.
 func TestStaticUI_HasNoExternalDependency(t *testing.T) {
-	base, _, cleanup := newTestAgent(t)
+	base, cleanup := newUIAgent(t)
 	defer cleanup()
 	resp, err := http.Get(base + "/ui/")
 	if err != nil {
@@ -606,7 +641,7 @@ func TestStaticUI_ServesIndexHTML(t *testing.T) {
 	// Both responses confirm the file is present in the embed.FS; option (b)
 	// is the stdlib's intentional behavior for any URL ending in /index.html
 	// and is independent of our handler wiring.
-	base, _, cleanup := newTestAgent(t)
+	base, cleanup := newUIAgent(t)
 	defer cleanup()
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -639,7 +674,7 @@ func TestStaticUI_RootServesIndex(t *testing.T) {
 	// directly (200 with body), without a redirect. We do NOT install an
 	// explicit /ui/{$} → /ui/index.html redirect because that would loop
 	// with the stdlib's /index.html → ./ canonicalization.
-	base, _, cleanup := newTestAgent(t)
+	base, cleanup := newUIAgent(t)
 	defer cleanup()
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

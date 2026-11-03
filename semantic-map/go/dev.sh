@@ -146,6 +146,7 @@ cmd_start() {
     cat > "$SPEC_FILE" <<SPEC
 node:
   addr: "$host:$PORT"
+  ui: true
 profile:
   name: "$PROFILE"
   kd: "$KD"

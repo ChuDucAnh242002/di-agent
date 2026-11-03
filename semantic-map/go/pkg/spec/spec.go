@@ -58,10 +58,13 @@ type Groups struct {
 }
 
 // Node is the machine the agent models. ID empty falls back to the hostname.
+// UI serves the web console under /ui/; off, the agent is headless and answers
+// only its HTTP API.
 type Node struct {
 	Addr        string `yaml:"addr"`
 	ID          string `yaml:"id"`
 	IngestScope string `yaml:"ingest_scope"`
+	UI          bool   `yaml:"ui"`
 }
 
 // Profile is the deployment profile and the dynamics of the map's estimates.

@@ -1423,7 +1423,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
-| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree   |
+| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
 Errors on the new endpoints follow a single shape:
 
@@ -1483,6 +1483,13 @@ Dependencies: `github.com/spf13/cobra v1.8.1`, `github.com/olekukonko/tablewrite
 `/ui/` serves a single-page console over the state model. It is a tree of ES
 modules under `static/js/`, embedded in the binary alongside `index.html` and
 `style.css`.
+
+The console is optional: the agent is headless by default and serves it only when
+the spec sets `node.ui`. An agent's job is to keep its map and act on it, which
+needs no one watching; at a deployment's size — hundreds of properties, a thousand
+relationships — a canvas of everything is not something to read anyway. The
+console is for demonstrating a small, worked map, and an agent that does not serve
+it has no browser-facing surface to keep.
 
 | Module | Holds |
 | --- | --- |

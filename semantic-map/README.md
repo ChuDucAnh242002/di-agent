@@ -38,9 +38,10 @@ Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHI
 # domain.path loads the domain model; without it (and with no domain_spec.json found
 # above the working directory) the agent runs with none. persist.file "" keeps the
 # map in memory: the agent refuses to start where it cannot write the default,
-# /var/lib/di-agent, which usually needs root. See §3.
+# /var/lib/di-agent, which usually needs root. node.ui serves the console used in
+# step 4; the agent is headless without it. See §3.
 cd semantic-map/go
-printf 'domain:\n  path: ../domain_spec.json\npersist:\n  file: ""\n' > /tmp/agent.yaml
+printf 'node:\n  ui: true\ndomain:\n  path: ../domain_spec.json\npersist:\n  file: ""\n' > /tmp/agent.yaml
 go run ./cmd/agent -config /tmp/agent.yaml &
 ```
 
@@ -69,7 +70,7 @@ go run ./cmd/mapctl estimate cpu_pressure_ratio \
 ```
 
 ```bash
-# 4. Open the operator console (no external assets — works offline)
+# 4. Open the operator console (node.ui: true; no external assets — works offline)
 open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 # → click a property → value, confidence, influences, and "what if" estimates
 # → click a relationship → the three strength layers, and which one answers
@@ -81,7 +82,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, before → after, in the action's unit, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the actuator keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. The agent is headless by default; the console is served only when the spec sets `node.ui: true`. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, before → after, in the action's unit, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the actuator keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -653,7 +654,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/peers/{id}/trust`                 | `{value}`                                                | Step 4.9 |
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
-| GET  | `/ui/...`                           | —                                                        | Phase 2B |
+| GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
 | GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
@@ -1169,6 +1170,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
 | `facts[].root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |
+| `node.ui`                    | `false` | Serve the web console at `/ui/`. The agent is headless by default: it answers its HTTP API and nothing else. `dev.sh` and the demo specs turn it on; the container's `UI` variable sets it. |
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |

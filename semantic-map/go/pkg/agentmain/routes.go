@@ -81,10 +81,10 @@ func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explai
 	registerMutationRoutes(mux, sm)
 	registerPeerRoutes(mux, sm)
 	registerExplainRoute(mux, explainer)
-	registerStaticRoutes(mux)
 }
 
-// registerStaticRoutes serves the embedded UI under /ui/.
+// registerStaticRoutes serves the embedded UI under /ui/. Only an agent whose
+// spec sets node.ui registers it: the agent is headless by default.
 //
 // http.FileServer serves index.html for the directory root automatically
 // when the URL ends in "/". An explicit "/ui/{$}" → "/ui/index.html"

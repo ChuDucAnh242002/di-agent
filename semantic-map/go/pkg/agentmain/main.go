@@ -360,6 +360,9 @@ func Main() {
 		workloads: rt.Workloads, logf: log.Printf}
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
+	if cfg.Node.UI {
+		registerStaticRoutes(mux)
+	}
 
 	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
 
@@ -367,7 +370,7 @@ func Main() {
 	defer cancel()
 
 	go func() {
-		log.Printf("semantic-map agent starting profile=%s addr=%s", cfg.Profile.Name, cfg.Node.Addr)
+		log.Printf("semantic-map agent starting profile=%s addr=%s ui=%t", cfg.Profile.Name, cfg.Node.Addr, cfg.Node.UI)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

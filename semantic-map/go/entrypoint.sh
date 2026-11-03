@@ -21,6 +21,8 @@ if [ "${DATASET_NODE_NAME+x}" = x ] && [ "${DATASET_NODE_NAME}" != "${NODE_ID}" 
     DATASET_COLLECTOR_URL=""
 fi
 CGROUP_ROOT=${CGROUP_ROOT:-"/sys/fs/cgroup"}
+# true serves the web console at /ui/; the agent is headless by default.
+UI=${UI:-"false"}
 
 echo "Starting di-agent with:"
 echo "  NODE_ID=${NODE_ID}"
@@ -34,6 +36,7 @@ echo "  NETDATA_URL=${NETDATA_URL}"
 echo "  DOMAIN_SPEC=${DOMAIN_SPEC}"
 echo "  DATASET_COLLECTOR_URL=${DATASET_COLLECTOR_URL}"
 echo "  CGROUP_ROOT=${CGROUP_ROOT}"
+echo "  UI=${UI}"
 
 # The agent is described by a spec file; write this container's from the variables.
 SPEC_FILE=${SPEC_FILE:-"/tmp/agent.yaml"}
@@ -41,6 +44,7 @@ cat > "${SPEC_FILE}" <<SPEC
 node:
   addr: ":${PORT}"
   id: "${NODE_ID}"
+  ui: ${UI}
 profile:
   name: "${PROFILE}"
   kd: "${KD}"
