@@ -34,10 +34,16 @@ export class Force {
    * nudge the picture, not redraw it somewhere else. New nodes are seeded near
    * their group's centre of mass — or near the middle — so they arrive where they
    * belong instead of flying in from a corner.
+   *
+   * Returns which of the two changed. A new or departed property reheats the
+   * layout; a relationship confirmed or retired between properties already placed
+   * only nudges it — the springs settle the one edge, and a map whose
+   * relationships change on most polls is not re-laid out on most polls.
    */
   sync(nodes, links) {
     const seen = new Set();
-    let topologyChanged = false;
+    let nodesChanged = false;
+    let linksChanged = false;
 
     for (const n of nodes) {
       seen.add(n.id);
@@ -49,7 +55,7 @@ export class Force {
         existing.group = n.group;
         continue;
       }
-      topologyChanged = true;
+      nodesChanged = true;
       const seed = this.seedFor(n.group);
       this.nodes.set(n.id, {
         id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
@@ -57,22 +63,27 @@ export class Force {
       });
     }
     for (const id of [...this.nodes.keys()]) {
-      if (!seen.has(id)) { this.nodes.delete(id); topologyChanged = true; }
+      if (!seen.has(id)) { this.nodes.delete(id); nodesChanged = true; }
     }
 
-    // Compared as a SET, not a count. One relationship retiring while another is
+    // Compared as sets, not counts. One relationship retiring while another is
     // confirmed in the same poll leaves the count unchanged, and a layout that
     // never reheats draws the new edge across positions arranged for the old one.
+    // And two links can join one pair (two relationships, or a relationship beside
+    // a membership): a link count against a key-set size then differed on every
+    // poll, and reheated a layout nothing had changed.
     const next = links.filter((l) => this.nodes.has(l.source) && this.nodes.has(l.target));
     const key = (l) => `${l.source}\u0001${l.target}`;
     const before = new Set(this.links.map(key));
-    if (next.length !== before.size || next.some((l) => !before.has(key(l)))) {
-      topologyChanged = true;
+    const after = new Set(next.map(key));
+    if (after.size !== before.size || [...after].some((k) => !before.has(k))) {
+      linksChanged = true;
     }
     this.links = next;
 
-    if (topologyChanged) this.reheat(0.75);
-    return topologyChanged;
+    if (nodesChanged) this.reheat(0.75);
+    else if (linksChanged) this.reheat(0.05);
+    return { nodes: nodesChanged, links: linksChanged };
   }
 
   seedFor(group) {
