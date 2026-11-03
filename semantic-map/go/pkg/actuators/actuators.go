@@ -51,6 +51,12 @@ type Actuator interface {
 	Set(ctx context.Context, w runtime.Workload, v float64, set bool) error
 }
 
+// Floorer is an actuator with a floor of its own per workload: the least setting
+// it can hold w to, in Unit. A step never goes below it.
+type Floorer interface {
+	Floor(ctx context.Context, w runtime.Workload) (float64, error)
+}
+
 // Env is what every actuator is built with: the node it acts on, the cgroup
 // root, the workload runtime, and where it logs. Logf may be nil, which discards.
 type Env struct {
