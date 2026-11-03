@@ -669,13 +669,17 @@ func TestMemoryHighRefusesAnUnreadableMemoryHigh(t *testing.T) {
 	}
 }
 
-// TestMemoryHighFloorIsTheAnonMemory: with no swap, reclaim cannot take a pod's
-// anonymous memory, so a memory.high below it throttles the pod to a standstill
-// (run 2026-11-02: a 5600 MiB cap on 6144 MiB of anon). The floor is anon.
-func TestMemoryHighFloorIsTheAnonMemory(t *testing.T) {
+// TestMemoryHighFloorIsAllButItsReclaimableCache: with no swap, reclaim can take
+// only a pod's page cache, and not its shmem. A memory.high below the rest is
+// never met and the kernel throttles the pod on every allocation: run 2026-11-02
+// froze page-hog at 5600 MiB on 6144 MiB of anon, and run 2026-11-03, floored at
+// anon, held it 17-34 MiB over its cap in kernel memory. The floor is
+// memory.current less file, plus shmem.
+func TestMemoryHighFloorIsAllButItsReclaimableCache(t *testing.T) {
 	root := mhRoot(t)
-	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7516192768")
-	mhWrite(t, filepath.Join(d, "memory.stat"), "anon 6442450944\nfile 1073741824\nkernel 1048576")
+	// 6 GiB anon + 1 GiB file (16 MiB of it shmem) + 32 MiB kernel.
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7549747200")
+	mhWrite(t, filepath.Join(d, "memory.stat"), "anon 6442450944\nfile 1073741824\nkernel 33554432\nshmem 16777216")
 	a := mhNew(t, root)
 	for _, x := range []Actuator{a, DryRun(a)} {
 		f, ok := x.(Floorer)
@@ -683,21 +687,23 @@ func TestMemoryHighFloorIsTheAnonMemory(t *testing.T) {
 			t.Fatalf("%T has no Floor", x)
 		}
 		v, err := f.Floor(context.Background(), mhWL("burstable"))
-		if err != nil || v != 6442450944 {
-			t.Fatalf("%T: floor %v, %v; want 6442450944 bytes", x, v, err)
+		if want := 7549747200.0 - 1073741824 + 16777216; err != nil || v != want {
+			t.Fatalf("%T: floor %v, %v; want %v bytes", x, v, err, want)
 		}
 	}
 }
 
-func TestMemoryHighFloorWithoutAnonIsAnError(t *testing.T) {
+func TestMemoryHighFloorNeedsItsStat(t *testing.T) {
 	root := mhRoot(t)
-	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7516192768")
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7549747200")
 	a := mhNew(t, root).(Floorer)
 	if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
 		t.Fatal("no memory.stat: want an error")
 	}
-	mhWrite(t, filepath.Join(d, "memory.stat"), "file 1073741824")
-	if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
-		t.Fatal("no anon line: want an error")
+	for _, stat := range []string{"anon 6442450944\nshmem 0", "anon 6442450944\nfile 1073741824", "file lots\nshmem 0"} {
+		mhWrite(t, filepath.Join(d, "memory.stat"), stat)
+		if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
+			t.Fatalf("memory.stat %q: want an error", stat)
+		}
 	}
 }

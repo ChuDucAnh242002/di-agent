@@ -175,29 +175,43 @@ func (a *MemoryHigh) Read(_ context.Context, w runtime.Workload) (float64, bool,
 	return parseHigh(string(b))
 }
 
-// Floor is the pod's anonymous memory, from memory.stat. With no swap reclaim
-// cannot take it, so a memory.high below it is never met and the kernel
-// throttles the pod to a standstill rather than trimming its page cache (run
-// 2026-11-02: a 5600 MiB cap on 6144 MiB of anon stalled the pod).
+// Floor is all of the pod's memory but its reclaimable page cache: memory.current
+// less memory.stat's file, plus its shmem, which is counted in file but with no
+// swap cannot be reclaimed. A memory.high below that is never met, and the kernel
+// throttles the pod on every allocation rather than trimming its cache: run
+// 2026-11-02 froze a pod capped under its anon, and run 2026-11-03, capped at its
+// anon, held it over the cap in kernel memory (page tables, slab).
 func (a *MemoryHigh) Floor(_ context.Context, w runtime.Workload) (float64, error) {
 	dir, err := a.podDir(w)
 	if err != nil {
 		return 0, err
 	}
+	cur, err := readInt(filepath.Join(dir, "memory.current"))
+	if err != nil {
+		return 0, fmt.Errorf("%s: memory.current: %w", w.Subject, err)
+	}
 	b, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
 	if err != nil {
 		return 0, missingFile(w, dir, err)
 	}
+	stat := map[string]int64{}
 	for _, l := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(l, "anon "); ok {
-			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if err != nil {
-				return 0, fmt.Errorf("%s: memory.stat anon %q: %w", w.Subject, v, err)
-			}
-			return float64(n), nil
+		k, v, ok := strings.Cut(strings.TrimSpace(l), " ")
+		if !ok || (k != "file" && k != "shmem") {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: memory.stat %s %q: %w", w.Subject, k, v, err)
+		}
+		stat[k] = n
+	}
+	for _, k := range []string{"file", "shmem"} {
+		if _, ok := stat[k]; !ok {
+			return 0, fmt.Errorf("%s: %s has no %s line", w.Subject, filepath.Join(dir, "memory.stat"), k)
 		}
 	}
-	return 0, fmt.Errorf("%s: %s has no anon line", w.Subject, filepath.Join(dir, "memory.stat"))
+	return float64(max(cur-stat["file"]+stat["shmem"], 0)), nil
 }
 
 // Set writes v bytes to the pod's memory.high, or max when set is false. The

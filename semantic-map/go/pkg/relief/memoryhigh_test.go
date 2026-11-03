@@ -71,7 +71,7 @@ func newMemHarness(t *testing.T) *memHarness {
 		t.Fatal(err)
 	}
 	h.high = filepath.Join(dir, "memory.high")
-	for f, v := range map[string]string{"memory.high": "max", "memory.current": "5153960755", "memory.stat": "anon 1073741824\nfile 4080218931"} {
+	for f, v := range map[string]string{"memory.high": "max", "memory.current": "5153960755", "memory.stat": "anon 1073741824\nfile 4080218931\nshmem 0"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte(v+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
