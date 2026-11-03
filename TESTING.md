@@ -53,6 +53,7 @@ sed -e 's/"tick_seconds": 10/"tick_seconds": 1/' -e 's/"period": 600/"period": 6
 cat > /tmp/di-agent/agent.yaml <<'SPEC'
 node:
   addr: 127.0.0.1:8080
+  ui: true            # the console at /ui/; the agent is headless without it
 sources:
   interval: 1s
   collectors:
@@ -136,6 +137,7 @@ ollama pull qwen2.5:7b-instruct                           # or use any OpenAI-co
 cat > /tmp/di-agent/agent.yaml <<'SPEC'
 node:
   addr: 127.0.0.1:8080
+  ui: true            # the console's Ask tab
 sources:
   interval: 1s
   collectors:

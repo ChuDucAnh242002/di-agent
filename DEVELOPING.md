@@ -93,7 +93,7 @@ All three speak the same JSON HTTP API. Pick by task, not preference.
 | ------- | ---------- |
 | `curl` | Poking one endpoint; scripting; anything you want to paste into an issue |
 | `mapctl` | Terminal work and headless ops. `mapctl graph`, `mapctl deprecate P1 "reason"`, `mapctl watch edges` |
-| `/ui/` | Demos and click-to-mutate exploration. Cytoscape graph, side panel, mutation dialogs |
+| `/ui/` | Demos and click-to-mutate exploration: force-laid SVG graph, side panel, mutation dialogs. Served only when the spec sets `node.ui: true`; the agent is headless by default |
 
 ---
 

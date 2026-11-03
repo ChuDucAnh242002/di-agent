@@ -10,8 +10,9 @@
 // accepted via POST /ingest-sample. The graph introspection (/graph, /edges,
 // /history, /constructs, /propositions, /neighbors), ontology mutation
 // (/ontology/*), candidate review (/candidates/{id}/{confirm,reject,defer}), edge
-// reset (/agent/reset), and operator meta (/healthz, /version, /ui/) routes are
-// wired by registerRoutes in routes.go.
+// reset (/agent/reset), and operator meta (/healthz, /version) routes are wired
+// by registerRoutes in routes.go; the web console (/ui/) by registerConsole, only
+// when the spec sets node.ui.
 //
 // The profile's kd (profile.kd) selects the distribution named in profile.priors
 // when set. Omit it to use the global Di-Select proposition strengths.
@@ -360,6 +361,7 @@ func Main() {
 		workloads: rt.Workloads, logf: log.Printf}
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
+	registerConsole(mux, cfg.Node.UI)
 
 	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
 
@@ -367,7 +369,7 @@ func Main() {
 	defer cancel()
 
 	go func() {
-		log.Printf("semantic-map agent starting profile=%s addr=%s", cfg.Profile.Name, cfg.Node.Addr)
+		log.Printf("semantic-map agent starting profile=%s addr=%s ui=%t", cfg.Profile.Name, cfg.Node.Addr, cfg.Node.UI)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

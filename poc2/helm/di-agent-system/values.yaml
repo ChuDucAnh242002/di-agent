@@ -54,6 +54,9 @@ agent:
   regime: stable
   profile: edge-minimal
   collectInterval: 5s
+  # Serve the web console at /ui/. The agent is headless without it; this demo
+  # opens the console (README: "To view a particular agent").
+  ui: true
   proposer: "true"
   review:
     level: rules

@@ -1,5 +1,5 @@
 # The demo's agent: the case study's, on a compressed timetable.
-node: { addr: "0.0.0.0:9090" }
+node: { addr: "0.0.0.0:9090", ui: true }
 sources:
   interval: 5s
   collectors:

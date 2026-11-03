@@ -287,7 +287,7 @@ inside an old container is not automatically migrated by adding the host mount.
 Snapshot format 5 is readable by this version (and imports format 4), but not by older
 agent binaries; back up existing state before upgrading if rollback is required.
 
-To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090`. Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
+To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090/ui/` (the chart sets `agent.ui: true`; the agent is headless without it). Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 
 ## Useful commands
 
