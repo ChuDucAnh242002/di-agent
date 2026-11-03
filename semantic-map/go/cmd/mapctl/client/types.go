@@ -47,6 +47,7 @@ type PropositionDTO struct {
 // zeros — a number shown but not used, which is the failure the graph surfaces were
 // consolidated onto the state model to avoid. It is replaced rather than defaulted.
 type EdgeDTO struct {
+	Association   bool     `json:"association,omitempty"`
 	FromID        string   `json:"from"`
 	ToID          string   `json:"to"`
 	PropositionID string   `json:"proposition_id"`

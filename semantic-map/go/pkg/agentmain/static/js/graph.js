@@ -703,8 +703,9 @@ export class GraphView {
       stroke: color,
       'stroke-width': selected ? width + 2.5 : width,
       'stroke-opacity': selected ? 1 : opacity,
-      'marker-end': `url(#arrow-${eff.known ? sign : 'none'})`,
-      'stroke-dasharray': eff.known ? null : '5 5',
+      // An association has no direction to point and no strength the agent uses.
+      'marker-end': r.association ? null : `url(#arrow-${eff.known ? sign : 'none'})`,
+      'stroke-dasharray': r.association ? '2 5' : eff.known ? null : '5 5',
     });
     // Provenance rides at the midpoint, with a ring so it reads on any backdrop.
     set(e.dot, { fill: `var(--prov-${r.provenance})` });
@@ -937,11 +938,11 @@ function propertyTip(p, model) {
 function relationshipTip(r) {
   const eff = effective(r);
   return {
-    title: `${r.from} -> ${r.to}`,
+    title: `${r.from} ${r.association ? '<->' : '->'} ${r.to}`,
     kind: `${r.provenance}${r.label ? ' · ' + r.label : ''}`,
     rows: [
       ['sign', r.sign < 0 ? 'negative' : 'positive'],
-      ['effective', eff.known ? `${fmt.num(eff.value)} (${eff.basis})` : 'not yet known'],
+      ['effective', r.association ? 'association only; not used in estimates' : eff.known ? `${fmt.num(eff.value)} (${eff.basis})` : 'not yet known'],
       ['confidence', fmt.num(r.confidence, 3)],
       ['pairs', fmt.int(r.n_observations)],
       ...(r.sign_suspect ? [['sign status', 'contradicted by observation']] : []),

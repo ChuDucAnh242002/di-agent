@@ -53,6 +53,7 @@ func (m *fakeMap) settle(id string, s types.CandidateStatus, rv types.CandidateR
 	c := m.cands[id]
 	rv.Applied = true
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
+	rv.PersistentWindows = c.PersistentWindows
 	c.Status, c.Review = s, &rv
 	return nil
 }
@@ -70,6 +71,7 @@ func (m *fakeMap) DeferCandidate(id string, rv types.CandidateReview) error {
 func (m *fakeMap) AnnotateCandidate(id string, rv types.CandidateReview) error {
 	c := m.cands[id]
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
+	rv.PersistentWindows = c.PersistentWindows
 	c.Review = &rv
 	return nil
 }

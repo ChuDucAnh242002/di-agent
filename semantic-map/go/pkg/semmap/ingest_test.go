@@ -479,6 +479,69 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 	}
 }
 
+func TestAssociationConfirmationGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		directed    bool
+		withState   bool
+		directional bool
+	}{
+		{name: "operator cannot associate a directed candidate", directed: true, withState: true},
+		{name: "association requires state properties"},
+		{name: "association cannot specify a direction", withState: true, directional: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+			p := minimal.NewMICorrelationProposer(nil, 0.8, 6, 12, 0)
+			sm := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+			sm.AttachState(state)
+			base := time.Now().Add(-time.Minute)
+			range01 := &[2]float64{0, 1}
+			for i := 0; i < 36; i++ {
+				at := base.Add(time.Duration(i) * time.Second)
+				x := float64(i%12) / 12
+				fromID := "load"
+				if tc.directed {
+					fromID = "load@pod:a"
+				}
+				readings := []types.PropertyReading{
+					{ID: fromID, Subject: "pod:a", Value: x, At: at, Range: range01},
+					{ID: "pressure", Value: 0.1 + 0.8*x, At: at, Range: range01},
+				}
+				if !tc.directed {
+					readings[0].Subject = ""
+				}
+				for _, reading := range readings {
+					if tc.withState {
+						if err := state.Record(statemap.Observation{
+							ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at,
+						}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := p.ObserveProperty(reading); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			candidates, err := sm.PendingCandidates()
+			if err != nil || len(candidates) != 1 {
+				t.Fatalf("candidate setup: %v %v", candidates, err)
+			}
+			from := ""
+			if tc.directional {
+				from = candidates[0].FromID
+			}
+			err = sm.ConfirmCandidate(candidates[0].CandidateID, from, types.CandidateReview{
+				By: types.ReviewerOperator, Action: types.ReviewConfirm, Association: true,
+			})
+			if err == nil {
+				t.Fatal("invalid association confirmation was accepted")
+			}
+		})
+	}
+}
+
 // TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne: a candidate with a
 // negative direction becomes a relationship with sign −1; with the wrong sign,
 // Covered would miss it and the pair would be proposed forever.

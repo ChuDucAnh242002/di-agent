@@ -668,3 +668,42 @@ func TestMemoryHighRefusesAnUnreadableMemoryHigh(t *testing.T) {
 		t.Fatalf("absent memory.high: %v", err)
 	}
 }
+
+// TestMemoryHighFloorIsAllButItsReclaimableCache: with no swap, reclaim can take
+// only a pod's page cache, and not its shmem. A memory.high below the rest is
+// never met and the kernel throttles the pod on every allocation: run 2026-11-02
+// froze page-hog at 5600 MiB on 6144 MiB of anon, and run 2026-11-03, floored at
+// anon, held it 17-34 MiB over its cap in kernel memory. The floor is
+// memory.current less file, plus shmem.
+func TestMemoryHighFloorIsAllButItsReclaimableCache(t *testing.T) {
+	root := mhRoot(t)
+	// 6 GiB anon + 1 GiB file (16 MiB of it shmem) + 32 MiB kernel.
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7549747200")
+	mhWrite(t, filepath.Join(d, "memory.stat"), "anon 6442450944\nfile 1073741824\nkernel 33554432\nshmem 16777216")
+	a := mhNew(t, root)
+	for _, x := range []Actuator{a, DryRun(a)} {
+		f, ok := x.(Floorer)
+		if !ok {
+			t.Fatalf("%T has no Floor", x)
+		}
+		v, err := f.Floor(context.Background(), mhWL("burstable"))
+		if want := 7549747200.0 - 1073741824 + 16777216; err != nil || v != want {
+			t.Fatalf("%T: floor %v, %v; want %v bytes", x, v, err, want)
+		}
+	}
+}
+
+func TestMemoryHighFloorNeedsItsStat(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "7549747200")
+	a := mhNew(t, root).(Floorer)
+	if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
+		t.Fatal("no memory.stat: want an error")
+	}
+	for _, stat := range []string{"anon 6442450944\nshmem 0", "anon 6442450944\nfile 1073741824", "file lots\nshmem 0"} {
+		mhWrite(t, filepath.Join(d, "memory.stat"), stat)
+		if _, err := a.Floor(context.Background(), mhWL("burstable")); err == nil {
+			t.Fatalf("memory.stat %q: want an error", stat)
+		}
+	}
+}

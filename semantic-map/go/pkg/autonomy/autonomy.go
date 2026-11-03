@@ -361,12 +361,13 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 
 // outcome is what a review settled on.
 type outcome struct {
-	tier   int
-	by     string
-	model  string
-	action string // confirm, reject, defer, or undecided
-	from   string // the end an undirected confirmation runs from
-	why    string
+	association bool
+	tier        int
+	by          string
+	model       string
+	action      string // confirm, reject, defer, or undecided
+	from        string // the end an undirected confirmation runs from
+	why         string
 }
 
 // review takes one candidate up the tiers. It reports false when the candidate was
@@ -407,6 +408,9 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	answer := map[string]any{
 		"action": o.action, "applied": applied, "tier": o.tier, "by": o.by,
 		"level": r.cfg.Level.String(),
+	}
+	if o.association {
+		answer["association"] = true
 	}
 	if o.model != "" {
 		answer["model"] = o.model
@@ -551,7 +555,7 @@ func (r *Reviewer) apply(c *types.CandidateEdge, o outcome, id string) (bool, er
 
 func (r *Reviewer) reviewOf(o outcome, id string) types.CandidateReview {
 	return types.CandidateReview{By: o.by, Model: o.model, Tier: o.tier, Action: o.action,
-		DecisionID: id, At: r.cfg.Now()}
+		DecisionID: id, At: r.cfg.Now(), Association: o.association}
 }
 
 // decisionID names a review's decision record: the candidate's hash, so a reader can

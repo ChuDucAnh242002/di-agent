@@ -57,6 +57,7 @@ func edgeFromRelationship(r statemap.Relationship) *types.EdgeDescriptor {
 		direction = types.Negative
 	}
 	return &types.EdgeDescriptor{
+		Association:   r.Association,
 		FromID:        r.From,
 		ToID:          r.To,
 		PropositionID: r.Label,

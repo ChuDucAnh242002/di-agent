@@ -263,6 +263,12 @@ func Main() {
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", cfg.Profile.Name, err)
 	}
+	if note, err := sm.RestoreDiscovery(time.Now(), minimal.DiscoveryEvidenceMaxGap); err != nil {
+		log.Printf("ERROR: restoring discovery checkpoint: %v; discarded discovery evidence and starting fresh", err)
+		state.DiscardDiscoveryCheckpoint()
+	} else {
+		log.Printf("discovery: %s", note)
+	}
 	// Collectors are built after the map so a refused entry stops the daemon before it
 	// serves anything; a broken collector found later is isolated by the supervisor
 	// and reported at GET /collectors instead.

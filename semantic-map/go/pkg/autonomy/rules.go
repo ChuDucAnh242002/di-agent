@@ -1,6 +1,10 @@
 package autonomy
 
-import "github.com/DiyazY/di-agent/pkg/types"
+import (
+	"fmt"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
 
 // Rule is a tier 0 check: something that settles a candidate without a model. Apply
 // returns the action and why when the rule applies, and ok false when it does not.
@@ -12,6 +16,7 @@ type Rule interface {
 
 func init() {
 	RegisterRule("composition", func() Rule { return composition{} })
+	RegisterRule("persistent-correlation", func() Rule { return persistentCorrelation{} })
 }
 
 // composition confirms a directed composition candidate: a part against the whole
@@ -32,11 +37,30 @@ func (composition) Apply(ev Evidence) (string, string, bool) {
 	return "", "", false
 }
 
+type persistentCorrelation struct{}
+
+func (persistentCorrelation) Name() string { return "persistent-correlation" }
+
+func (persistentCorrelation) Apply(ev Evidence) (string, string, bool) {
+	c := ev.Candidate
+	if c.PersistentWindows < types.PersistentWindowsRequired || len(c.Caveats) != 0 {
+		return "", "", false
+	}
+	if c.Undirected {
+		return types.ReviewAssociate, fmt.Sprintf("persistent association: %d full qualifying windows; no orientation inferred and excluded from estimates and actuation", c.PersistentWindows), true
+	}
+	return types.ReviewAssociate, fmt.Sprintf("persistent association: %d full qualifying windows; correlation does not establish a causal direction and is excluded from estimates and actuation", c.PersistentWindows), true
+}
+
 // rules is tier 0: the first configured rule that applies.
 func (r *Reviewer) rules(ev Evidence) (outcome, bool) {
 	for _, rule := range r.cfg.Rules {
 		if action, why, ok := rule.Apply(ev); ok {
-			return outcome{tier: 0, by: types.ReviewerRules, model: rule.Name(), action: action, why: why}, true
+			association := action == types.ReviewAssociate
+			if association {
+				action = types.ReviewConfirm
+			}
+			return outcome{tier: 0, by: types.ReviewerRules, model: rule.Name(), action: action, why: why, association: association}, true
 		}
 	}
 	return outcome{}, false

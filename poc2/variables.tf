@@ -13,6 +13,16 @@ variable "vm_count" {
   default     = 4
 }
 
+variable "vm_disk_size_gib" {
+  description = "Root disk capacity per VM; leave room for images and persistent telemetry data"
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.vm_disk_size_gib >= 30
+    error_message = "PoC2 VM disks need at least 30 GiB for images and the dataset."
+  }
+}
+
 variable "pool_name" {
   description = "Name of the pool"
   default     = "pool_1"

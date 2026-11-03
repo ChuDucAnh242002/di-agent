@@ -71,6 +71,7 @@ func (s *CandidateStatus) UnmarshalJSON(b []byte) error {
 // as a second copy.
 
 type EdgeDescriptor struct {
+	Association   bool `json:",omitempty"`
 	FromID        string
 	ToID          string
 	PropositionID string
@@ -246,10 +247,12 @@ type OutcomeSimulation struct {
 //	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
 //	                     node's is the worst-off subject's (cgroup collector)
 //	MemoryContentionRatio node only: the worst PSI memory.some stall of a promised pod
-//	                     within its memory request and not limiting itself
+//	                     within its memory request and not limiting itself, or its
+//	                     io.some stall while it refaults its page cache
 //	MemoryEventsHigh     memory.events high: times over memory.high in the window (count)
 //	MemoryEventsMax      memory.events max: times at memory.max in the window (count)
 //	MemoryOOMKills       memory.events oom_kill: OOM kills in the window (count)
+//	MemoryRefaultRatio   memory.stat file pages refaulted per second over the page cache (1/s)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -277,9 +280,11 @@ const (
 	// MemoryContentionRatio is node-level, on [0,1].
 	MemoryContentionRatio MetricType = "memory_contention_ratio"
 	// The memory.events counts are per subject, per window, on [0, 1e9].
-	MemoryEventsHigh    MetricType = "memory_events_high"
-	MemoryEventsMax     MetricType = "memory_events_max"
-	MemoryOOMKills      MetricType = "memory_oom_kills"
+	MemoryEventsHigh MetricType = "memory_events_high"
+	MemoryEventsMax  MetricType = "memory_events_max"
+	MemoryOOMKills   MetricType = "memory_oom_kills"
+	// MemoryRefaultRatio is per subject, in 1/s on [0, 1000].
+	MemoryRefaultRatio  MetricType = "memory_refault_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
@@ -471,10 +476,16 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+	// PersistentWindows counts full, non-overlapping windows of fresh pairs that
+	// passed the proposer's evidence gates with the same sign and kind. It resets
+	// when evidence fails a gate or the pair stops being tested.
+	PersistentWindows     int
+	PersistencePairs      int
+	PersistenceWindowSize int
 	// Undirected is true when nothing says which end drives the other: both are
 	// node-level or both belong to subjects, and correlation is symmetric. FromID and ToID are then the pair in
-	// lexicographic order, not a claim, and confirming one requires the operator to
-	// name the end the relationship runs from.
+	// lexicographic order, not a causal claim. Directional confirmation requires
+	// an orientation; an association review can instead accept it without one.
 	Undirected bool
 	// Kind is "composition" when the source is a component of the target by
 	// definition (a subject's metric against the node's total of the same metric),
@@ -508,6 +519,8 @@ type CandidateEdge struct {
 	Review *CandidateReview
 }
 
+const PersistentWindowsRequired = 3
+
 // Who reviewed a candidate.
 const (
 	ReviewerOperator       = "operator"        // through the review endpoints
@@ -521,6 +534,7 @@ const (
 // candidate stays pending and the agent reviews it again when its evidence moves.
 const (
 	ReviewConfirm   = "confirm"
+	ReviewAssociate = "associate"
 	ReviewReject    = "reject"
 	ReviewDefer     = "defer"
 	ReviewUndecided = "undecided"
@@ -533,29 +547,43 @@ const (
 // review has none. The evidence fields are the candidate's numbers when it was
 // reviewed, so Outdated can tell when they have moved.
 type CandidateReview struct {
-	By            string
-	Model         string `json:",omitempty"`
-	Tier          int
-	Action        string
-	Applied       bool
-	DecisionID    string `json:",omitempty"`
-	At            time.Time
-	MIScore       float64
-	NObservations int
-	Direction     Direction
-	Kind          string
+	// Association accepts co-variation without claiming a causal orientation.
+	Association       bool `json:",omitempty"`
+	By                string
+	Model             string `json:",omitempty"`
+	Tier              int
+	Action            string
+	Applied           bool
+	DecisionID        string `json:",omitempty"`
+	At                time.Time
+	MIScore           float64
+	NObservations     int
+	Direction         Direction
+	Kind              string
+	PersistentWindows int
+}
+
+// IsPersistentCorrelationAssociation reports the one automatic rule allowed to
+// retain a directed candidate as a symmetric association rather than a causal edge.
+func (r CandidateReview) IsPersistentCorrelationAssociation() bool {
+	return r.Association && r.By == ReviewerRules && r.Model == "persistent-correlation" &&
+		r.Action == ReviewConfirm && r.DecisionID != ""
 }
 
 // Outdated reports whether c's evidence has moved materially since the review: its
 // sign or kind changed, or its |r| moved by more than two standard errors of
-// Fisher's z at the smaller of the two windows. A review that is outdated no
-// longer speaks for the candidate, so an agent's rejection or deferral reopens and
-// an undecided candidate is reviewed again.
+// Fisher's z at the smaller of the two windows, or persistence crosses its
+// approval threshold.
+// A review that is outdated no longer speaks for the candidate, so an agent's
+// rejection or deferral reopens and an undecided candidate is reviewed again.
 func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if r == nil {
 		return true
 	}
 	if c.Direction != r.Direction || c.Kind != r.Kind {
+		return true
+	}
+	if (c.PersistentWindows >= PersistentWindowsRequired) != (r.PersistentWindows >= PersistentWindowsRequired) {
 		return true
 	}
 	n := min(c.NObservations, r.NObservations)

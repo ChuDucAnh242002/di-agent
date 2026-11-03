@@ -190,7 +190,7 @@ semantic-map/
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
     │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
-    │   │   ├── rules.go        Tier 0: Rule, and the composition rule
+    │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
     │   │   ├── logprobs.go     Tier 1 openai-logprobs: a general model's letter probabilities
     │   │   ├── reasoner.go     Tier 2 openai-tools: a tool-calling model reading the map
@@ -554,6 +554,12 @@ actions created or promoted the relationship the candidate proposed), `Model`, `
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
+`Association: true` means an approval records symmetric co-variation, not a causal
+direction. The discovery fields are `PersistentWindows` (completed consecutive
+qualifying windows), `PersistencePairs` (fresh pairs in the current window), and
+`PersistenceWindowSize` (pairs per full window). Reviews are reconsidered when the
+evidence materially changes or persistence crosses its approval threshold, not after
+every additional qualifying window.
 
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
@@ -566,6 +572,12 @@ which often hold together by construction.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
+
+`GET /state` relationship entries and the edges returned by `GET /graph` and `GET /edges`
+include `association: true` for symmetric associations. Such an edge has no causal
+orientation or effective strength and is excluded from estimates, counterfactuals,
+intervention learning, and actuation. It is separate from the directional relationships
+listed under `influenced_by` and `influences` in model tools.
 
 How many pairs are being tested is in `GET /state`, not here: an empty list means only
 that no *tested* pair has cleared the threshold.
@@ -629,9 +641,9 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/actuators`                        | `?subject=pod:x` optional — each action the agent can take: `action`, `built: true`, `descriptor` (`action, kinds, resource, unit, capacity, min, relieves, usage, describe`) `held`, the ledger's entries this agent manages and gives back (this node's: `action, subject, decision_id, original, original_set, applied, expires, node_id`; `original_set` false: there was no setting to give back; an entry written ahead of its change and not yet settled also has `pending: true`, `set_at` (when it was written; its `settle` runs from then) and, for a further step, `prev_applied`, `prev_set`, `prev_decision_id`, `prev_expires`), and `unmanaged`, the ledger's entries of the action nothing in this agent gives back, each an entry with `why`: another node's (`recorded by node X; this agent is Y; not managed`), never adopted, and, on a dry run on a runtime that can change the system, a real run's changes still in force (`held by a real run and not given back while dry_run is on`). After them, one row per action the ledger holds changes of and no lever runs (relief off, or its lever removed): `action`, `built: false`, `held: []` and those changes under `unmanaged` (`no lever runs for this action`), no `descriptor` and no `can` (OPERATING.md §10). Start logs a warning for every unmanaged entry. With `subject`, `held` and `unmanaged` are that workload's and each built action adds `can` (`""` when it can apply); `404` when the runtime has no such workload | actuators |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
 | GET  | `/relief`                           | — `{"levers": [...]}`, one relief loop per lever in `loops.relief.levers` order, each with its `action`, `phase`, `paused`, `runtime`, `dry_run` (true when the lever decides and records and its actuator changes nothing: `loops.relief.dry_run`, or `runtime.kind: dry-run`), `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the actuator has refused, or whose setting it cannot read; absent when none), `unread` (the ledger's changes whose setting the actuator could not read at the latest reconcile, including the pending entry of a change in flight that has not read back, and a step that never took whose setting cannot be read again before it is settled (with `reconcile_error` set and nothing new applied to that workload until it reads; the lever goes on with the others), each `entry`, `error` and `attempts`: kept untouched, never stepped, retried every tick, and given back from the ledger's record once expired and closed once that reads back as the original, `given_back` true meanwhile; a given-back change that goes through and still does not read back as its original is set again at most 3 more times, waiting twice, four and eight times the loop's interval, then left for an operator, still listed, its `error` saying so (a Set refused outright backs off the same way without counting); one that reads back as another writer's value is closed as `gone`, saying so; absent when none), `reconcile_error` (why the latest reconcile failed — the listing failed or held no workload while this node holds changes, or the ledger could not be saved; while it lasts every change of the lever is listed under `unread` with it, nothing new is applied, and one past its expiry is still given back through its subject; or, with the reconcile otherwise done, why a step that never took could not be read again — only that workload is held; absent otherwise), `cooling` (workloads this lever will not act on before the time given, whichever lever's cooldown that is) | relief   |
-| GET  | `/relief/actions`                   | — every lever's actions, newest first by `acted_at` (at most 200 per lever; `entry.action` says which lever), each with its `plan` (`subject, from, to, unit, predicted, estimate_id, basis, rule, effect`: usage `from` and the setting `to`, in `unit`; `effect` the learned factor the prediction was scaled by), `entry` (the ledger's record, as in `/actuators`: `original` is the setting before the agent's first step), `verify_id` (the decision that judged it; absent until verified), observed drop, `outcome` (`kept`, `reverted`, `released`, `expired`, `gone`, `manual`, or `not_applied`: the change still read as before once `settle` had passed, never took, and its hourly action was given back), `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the actuator has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
+| GET  | `/relief/actions`                   | — every lever's actions, newest first by `acted_at` (at most 200 per lever; `entry.action` says which lever), each with its `plan` (`subject, from, to, unit, predicted, estimate_id, basis, rule, effect`: usage `from` and the setting `to`, in `unit`; `effect` the learned factor the prediction was scaled by), `entry` (the ledger's record, as in `/actuators`: `original` is the setting before the agent's first step), `verify_id` (the decision that judged it; absent until verified), observed drop, `outcome` (`kept`, `reverted`, `released`, `expired`, `floored` (the workload's floor rose above the cap, which was given back), `gone`, `manual`, or `not_applied`: the change still read as before once `settle` had passed, never took, and its hourly action was given back), `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the actuator has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force, on whichever lever holds it, and cool its workload down; outcome `manual`; `404` for an id no lever holds in force | relief   |
-| POST | `/relief/pause`                     | JSON content type — every lever stops making and releasing changes; verifying, reverting a failed action and expiry go on; answers as `GET /relief` | relief   |
+| POST | `/relief/pause`                     | JSON content type — every lever stops making changes; verifying, reverting a failed action and expiry go on; answers as `GET /relief` | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause, on every lever            | relief   |
 | GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
 | GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
@@ -749,10 +761,11 @@ loops:
     levers:
       - action: cpu.limit
         enter: 0.25     # CPU contention (stall less own throttling) that starts relief, held for enter_for
-        exit: 0.10      # contention below which caps are given back, held for exit_for
+        exit: 0.10      # contention below which stepping stops, held for exit_for; caps stay until expiry
       - action: memory.high
-        enter: 0.20     # memory stall of a pod within its request, not limiting itself
-        exit: 0.05
+        enter: 0.08     # memory stall of a pod within its request, not limiting itself
+        exit: 0.03
+        min_effect: 0.01
         step: 0.25      # each step lowers memory.high by a quarter of what the pod uses
 actuation:
   ledger: ""            # "": actions.json beside persist.file
@@ -1151,7 +1164,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.pair_window`   | `15s`   | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
-| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal, plus the proposer's discovery checkpoint. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
 | `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero. |
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
@@ -1184,7 +1197,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; `[]` for none. |
+| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
 | `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
@@ -1669,7 +1682,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | A `composition` candidate is confirmed: a part against the whole it is summed into is true by definition, and `without=` answers from it. |
+| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1683,9 +1696,74 @@ The level decides who may act:
 | `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
 | `full` (3), the default | yes | yes |
 
+### Rules-only persistent correlation
+
+Merge this into the agent configuration to approve unfamiliar metric pairs without
+an allowlist or model calls. The default rule list remains `composition` only.
+
+```yaml
+loops:
+  review:
+    level: rules
+    rules:
+      - composition
+      - persistent-correlation
+    decision:
+      backend: none
+    reasoning:
+      backend: none
+```
+
+`persistent-correlation` requires `PersistentWindows >= 3` and no evidence caveats.
+Each counted window contains a full proposer buffer of fresh pairs, not another review
+of the same observations. Windows do not overlap. The correlation must keep its sign
+and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
+gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
+correction is enabled. Missing declared ranges prevent persistence from accumulating
+on the property path. A failed gate, sign/kind change, forgotten property, or displaced
+pair resets the run. A closer-time replacement partner revises the last pair's evidence
+instead of counting as another observation.
+
+`GET /candidates?status=all` exposes `PersistentWindows`, `PersistencePairs`, and
+`PersistenceWindowSize`. The discovery drawer shows completed windows (for example
+`1/3`), fresh pairs toward the next window, and caveat blockers. Reviews and their
+decision records retain the count used. A review becomes outdated when evidence changes
+materially or the count crosses the three-window approval threshold; later increments
+do not continually reopen it.
+
+Persistent-correlation approvals become **association-only** relationships, with
+`association: true` and no claimed driver. They appear as dotted, arrowless graph edges.
+They never supply an effective causal strength, enter estimates/counterfactuals or
+actuation, or receive intervention updates. A later verified intervention may establish
+a separate directional relationship. Model- and operator-approved directional
+confirmations remain causal; operator confirmation of an undirected candidate requires
+choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
+
+When `persist.file` is set, the same atomic state snapshot also saves the discovery
+buffers, duplicate suppression, partial-window progress, candidates and completed
+windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+`map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
+Changed settings, expired evidence or a backwards clock produce an explicit cold-start
+log. A malformed discovery checkpoint is discarded with an error-level log while the
+restored map and journal remain available. Long observation gaps beyond 24 hours reset
+evidence. Pending reviews survive restart and are reconsidered only when their evidence
+becomes outdated. The map snapshot and proposer checkpoint are captured separately;
+restore reconciles candidate status against relationships already present in the map.
+A clean shutdown saves immediately; an unclean exit can lose up to `persist.interval`
+of progress. This checkpoint is separate from the state estimator's raw windows, which
+still restart cold. Snapshot format 5 is the only supported format; older versions are
+rejected, and older binaries cannot load format 5.
+
+This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
+confirmations still participate in estimates; associations do not. This feature does
+not add probation or automatic retirement of accepted edges. `level: suggest`
+records proposed approvals without applying them. `level: rules` alone does not disable
+model calls: set both model backends to `none` as above for rules-only operation.
+
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
-returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
-not reviewed again until then, so the models are not asked the same question every cycle.
+returns to pending, to be reviewed again, once its evidence moves materially or crosses
+the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
+until then, so the models are not asked the same question every cycle.
 A candidate whose end is stale waits. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
@@ -1701,4 +1779,3 @@ Bearer tokens for a backend are `loops.review.decision.api_key` and
 environment and keep them out of the file. The agent reads no variable on its own.
 
 The thresholds are uncalibrated defaults set by what each action costs to undo.
-

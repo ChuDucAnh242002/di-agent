@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
@@ -16,8 +15,9 @@ import (
 const (
 	OutcomeKept       = "kept"        // it helped; the cap stays until release or expiry
 	OutcomeReverted   = "reverted"    // it did not help and was undone
-	OutcomeReleased   = "released"    // pressure ended and the cap was given back
+	OutcomeReleased   = "released"    // the workload left and its cap was given back
 	OutcomeExpired    = "expired"     // it outlived its expiry and was given back
+	OutcomeFloored    = "floored"     // the workload's floor rose above it and it was given back
 	OutcomeGone       = "gone"        // the workload left; there was nothing to give back
 	OutcomeManual     = "manual"      // an operator undid it
 	OutcomeNotApplied = "not_applied" // it never took effect: still read as before once Settle had passed
@@ -31,11 +31,6 @@ const (
 	// help: the map was wrong about it, and acting on it again soon would
 	// repeat the mistake.
 	failedCooldown = 4
-	// backoffWindow is how soon after its release a workload must be capped
-	// again for the capping to count as a repeated cycle.
-	backoffWindow = time.Hour
-	// backoffCap bounds a repeatedly capped workload's cooldown.
-	backoffCap = 4 * time.Hour
 	// historySize is how many actions Actions keeps.
 	historySize = 200
 )
@@ -45,13 +40,20 @@ const (
 // must not outlive the time it was granted. One the actuator will not give back
 // stays in force and is tried again next tick, and so is every one when the
 // runtime cannot be listed: a change is given back through the workload the
-// runtime lists, which is what an actuator finds it by.
+// runtime lists, which is what an actuator finds it by. A change whose
+// workload's floor (actuators.Floorer) has risen past it, by more than
+// floorMargin, is given back too:
+// the plan kept it above the floor, and a cap under what reclaim cannot take
+// throttles the workload until expiry (run 2026-11-02). An unreadable floor
+// keeps the cap.
 func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	l.mu.Lock()
-	var due []*Action
+	var due, live []*Action
 	for _, a := range l.liveLocked() {
 		if !now.Before(a.Entry.Expires) {
 			due = append(due, a)
+		} else {
+			live = append(live, a)
 		}
 	}
 	l.mu.Unlock()
@@ -64,7 +66,47 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 			l.undoFailed(a, "expiring", err)
 		}
 	}
+	for _, a := range l.overFloor(ctx, live, workloads) {
+		err := l.giveBack(ctx, now, a, OutcomeFloored, "floored", "the workload's floor rose above the cap", a.cooldown, workloads)
+		switch {
+		case errors.Is(err, errNoListing):
+			return
+		case err != nil:
+			l.undoFailed(a, "giving back over its floor", err)
+		}
+	}
 	l.expireUnread(ctx, now, workloads)
+}
+
+// overFloor is the actions in as whose workload's floor now reads more than
+// floorMargin above the setting they applied. None when the actuator has no floor or the runtime
+// cannot be listed; an action whose workload is not listed, or whose floor
+// cannot be read, is left to its expiry.
+func (l *Loop) overFloor(ctx context.Context, as []*Action, workloads lister) []*Action {
+	f, ok := l.act.(actuators.Floorer)
+	if !ok || len(as) == 0 {
+		return nil
+	}
+	ws, ok := workloads()
+	if !ok {
+		return nil
+	}
+	var over []*Action
+	for _, a := range as {
+		w, ok := workload(ws, a.Subject)
+		if !ok {
+			continue
+		}
+		fl, err := f.Floor(ctx, w)
+		if err != nil {
+			l.cfg.Logf("relief: reading the %s floor of %s: %v; the cap stays", l.d.Action, a.Subject, err)
+			continue
+		}
+		if fl > a.Entry.Applied*(1+floorMargin) {
+			over = append(over, a)
+		}
+	}
+	return over
 }
 
 // maxReSets bounds how many more times a given-back change is set to its
@@ -158,6 +200,13 @@ func (l *Loop) expiredFromRecord(now time.Time, a *Action, u Unread) {
 type lister func() ([]runtime.Workload, bool)
 
 // errNoListing is why nothing is given back in a pass whose listing failed.
+// floorMargin is how far a held cap's floor may read above it before the cap is
+// given back, as a share of the cap. A soft cap at the floor is exceeded a little
+// while it works: 17–34 MiB on about 6.1 GiB (0.3–0.6%) stalled the pod about
+// 0.01 (run 2026-11-03), where 544 MiB on 5600 MiB (10%) froze it (run
+// 2026-11-02). The kernel throttles by the overage relative to memory.high.
+const floorMargin = 0.02
+
 var errNoListing = errors.New("the runtime's workloads could not be listed; the change stays in force until they can")
 
 // lister is a lister over the runtime under ctx: the first call lists, the rest
@@ -389,81 +438,14 @@ func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyI
 	l.end(now, a, OutcomeReverted, cooldown)
 }
 
-// release gives back the most recent kept change, one per Settle, whenever the
-// node is not relieving: after pressure has eased, and after a restart that
-// found caps on a calm node. One the actuator will not give back does not hold up
-// the rest: the next most recent is tried in the same tick, and the refused one
-// is tried again at the next release, a Settle later. A pass that cannot list
-// the workloads gives back nothing and tries again next tick. In Releasing, with
-// nothing left, it ends the phase. An action in flight is judged first, so it is
-// either kept and released in turn or reverted.
-func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase, workloads lister) {
-	l.mu.Lock()
-	if l.inFlight != nil {
-		l.mu.Unlock()
-		return
-	}
-	if len(l.kept) == 0 {
-		if phase == Releasing {
-			l.trigger.Released()
-			l.phase, l.since = l.trigger.Phase(), now
-		}
-		l.mu.Unlock()
-		return
-	}
-	if !l.lastRelease.IsZero() && now.Sub(l.lastRelease) < l.c.Settle {
-		l.mu.Unlock()
-		return
-	}
-	kept := make([]*Action, len(l.kept))
-	cooldowns := make([]time.Duration, len(l.kept))
-	for i, a := range l.kept {
-		kept[len(kept)-1-i] = a // newest first
-		cooldowns[len(kept)-1-i] = backoff(a.cooldown, l.cycles[a.Subject])
-	}
-	l.mu.Unlock()
-
-	var skipped []string
-	for i, a := range kept {
-		gone, why, err := l.undo(ctx, a, workloads)
-		switch {
-		case errors.Is(err, errNoListing):
-			return
-		case gone:
-			l.gone(now, a, why)
-			return
-		case err != nil:
-			l.undoFailed(a, "releasing", err)
-			skipped = append(skipped, a.ID)
-			continue
-		}
-		l.recordRelease(now, a, pressure, phase, cooldowns[i], skipped)
-		return
-	}
-}
-
-// recordRelease journals and records the release of a, whose revert went
-// through. skipped lists the newer actions the actuator would not give back first.
-func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
-	b := l.cfg.Map.Decide(l.id("release"), l.giveBackAsk(a.Subject, l.d.Relieves+" has eased"))
-	b.Property(l.d.Relieves)
-	b.Input("act", a.DecisionID)
-	b.Input("entry", a.Entry)
-	b.Input("pressure", pressure)
-	b.Input("phase", string(phase))
-	b.Note("released most recent first; cooling %s down for %s", a.Subject, cooldown)
-	if len(skipped) > 0 {
-		b.Input("skipped", skipped)
-		b.Note("newer changes the actuator would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
-	}
-	b.Commit(map[string]any{"released": a.Subject, "cooldown": cooldown.String()})
-	l.end(now, a, OutcomeReleased, cooldown)
-
+// release ends Releasing once no change is left. It gives nothing back: pressure
+// under exit is low because of the caps in force, and giving one back brought the
+// pressure straight back (run 2026-10-30c). A cap comes off when it expires, when
+// an operator reverts it; one whose workload left is dropped at its expiry.
+func (l *Loop) release(now time.Time, phase Phase) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lastRelease = now
-	l.released[a.Subject] = now
-	if len(l.kept) == 0 && l.inFlight == nil && l.trigger.Phase() == Releasing {
+	if phase == Releasing && l.inFlight == nil && len(l.kept) == 0 {
 		l.trigger.Released()
 		l.phase, l.since = l.trigger.Phase(), now
 	}
@@ -523,16 +505,6 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	if cooldown > 0 {
 		l.budget.Cool(a.Subject, now.Add(cooldown))
 	}
-}
-
-// backoff is a workload's cooldown after its k-th cap/release cycle within
-// backoffWindow: doubled each cycle, capped at backoffCap.
-func backoff(base time.Duration, k int) time.Duration {
-	d := base
-	for i := 0; i < k && d < backoffCap; i++ {
-		d *= 2
-	}
-	return min(d, backoffCap)
 }
 
 func hasSubject(ws []runtime.Workload, subject string) bool {
