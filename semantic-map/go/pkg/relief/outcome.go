@@ -41,7 +41,8 @@ const (
 // stays in force and is tried again next tick, and so is every one when the
 // runtime cannot be listed: a change is given back through the workload the
 // runtime lists, which is what an actuator finds it by. A change whose
-// workload's floor (actuators.Floorer) has risen above it is given back too:
+// workload's floor (actuators.Floorer) has risen past it, by more than
+// floorMargin, is given back too:
 // the plan kept it above the floor, and a cap under what reclaim cannot take
 // throttles the workload until expiry (run 2026-11-02). An unreadable floor
 // keeps the cap.
@@ -77,8 +78,8 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	l.expireUnread(ctx, now, workloads)
 }
 
-// overFloor is the actions in as whose workload's floor now reads above the
-// setting they applied. None when the actuator has no floor or the runtime
+// overFloor is the actions in as whose workload's floor now reads more than
+// floorMargin above the setting they applied. None when the actuator has no floor or the runtime
 // cannot be listed; an action whose workload is not listed, or whose floor
 // cannot be read, is left to its expiry.
 func (l *Loop) overFloor(ctx context.Context, as []*Action, workloads lister) []*Action {
@@ -101,7 +102,7 @@ func (l *Loop) overFloor(ctx context.Context, as []*Action, workloads lister) []
 			l.cfg.Logf("relief: reading the %s floor of %s: %v; the cap stays", l.d.Action, a.Subject, err)
 			continue
 		}
-		if fl > a.Entry.Applied {
+		if fl > a.Entry.Applied*(1+floorMargin) {
 			over = append(over, a)
 		}
 	}
@@ -199,6 +200,13 @@ func (l *Loop) expiredFromRecord(now time.Time, a *Action, u Unread) {
 type lister func() ([]runtime.Workload, bool)
 
 // errNoListing is why nothing is given back in a pass whose listing failed.
+// floorMargin is how far a held cap's floor may read above it before the cap is
+// given back, as a share of the cap. A soft cap at the floor is exceeded a little
+// while it works: 17–34 MiB on about 6.1 GiB (0.3–0.6%) stalled the pod about
+// 0.01 (run 2026-11-03), where 544 MiB on 5600 MiB (10%) froze it (run
+// 2026-11-02). The kernel throttles by the overage relative to memory.high.
+const floorMargin = 0.02
+
 var errNoListing = errors.New("the runtime's workloads could not be listed; the change stays in force until they can")
 
 // lister is a lister over the runtime under ctx: the first call lists, the rest

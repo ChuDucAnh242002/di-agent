@@ -473,6 +473,30 @@ func TestAHeldCapIsGivenBackWhenTheFloorRisesAboveIt(t *testing.T) {
 	h.givenBack(a.ID, OutcomeFloored)
 }
 
+// TestAHeldCapStaysWhenItsPodSitsJustOverIt: a cap at the floor is soft, and the
+// pod sits a few MiB over it with its cache near zero (run 2026-11-03c: 6174–6183
+// MiB on a 6175 MiB cap). That is the cap working, not the freeze, and it stays.
+func TestAHeldCapStaysWhenItsPodSitsJustOverIt(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	cap, err := strconv.ParseFloat(h.file(), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	over := strconv.FormatInt(int64(cap)+8<<20, 10)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(h.high), "memory.current"), []byte(over+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.stat("anon " + over + "\nfile 0\nshmem 0")
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q with the pod 8 MiB over its cap; want the cap held", o)
+	}
+	if got := h.file(); got == "max" || len(h.ledger.All()) != 1 {
+		t.Fatalf("memory.high %q, ledger %+v; want the cap and its entry in force", got, h.ledger.All())
+	}
+}
+
 // TestAHeldCapStaysWhenItsFloorCannotBeRead: an unreadable floor proves nothing
 // about the cap, which stays in force.
 func TestAHeldCapStaysWhenItsFloorCannotBeRead(t *testing.T) {
