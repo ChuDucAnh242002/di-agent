@@ -152,7 +152,10 @@ func influencedBy(res statemap.EstimateResult, source string) bool {
 // assuming its usage scaled to the new setting; a Basis "usage" candidate, which
 // the map cannot predict, by its share of the node's pressure per unit of
 // usage, times the fraction of its usage the step actually cuts. effect scales a prediction by what acting on the subject has done before
-// against predictions of the same basis; 1 means no history.
+// against predictions of the same basis; 1 means no history. For an actuator
+// with a floor of its own (actuators.Floorer) a usage-basis step is predicted
+// instead as the node's pressure times the part of what lies above that floor
+// the step takes.
 func MakePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.Lever, effect func(subject, basis string) float64) (p Plan, ok bool, why string) {
 	return makePlan(ctx, m, a, cands, ws, pol, c, effect, nil)
 }
@@ -204,6 +207,7 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 			// pod is promised its request, so it is not cut below it.
 			to = math.Max(to, *res.Request)
 		}
+		floor, floored := 0.0, false
 		if f, ok := a.(actuators.Floorer); ok {
 			fl, err := f.Floor(ctx, w)
 			if err != nil {
@@ -211,6 +215,7 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 				continue
 			}
 			to = math.Max(to, fl)
+			floor, floored = fl, fl < from
 		}
 		if to >= from {
 			reasons = append(reasons, fmt.Sprintf("%s: floor reached (%.3f %s in use, floor %.3f)", cand.Subject, from, d.Unit, to))
@@ -243,6 +248,15 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 			if !okP || !okU || usage.Value <= 0 {
 				reasons = append(reasons, fmt.Sprintf("%s: no node %s or %s to predict from", cand.Subject, d.Relieves, d.Usage))
 				continue
+			}
+			if floored {
+				// What lies above the actuator's floor is what the setting can take
+				// (memory.high: the pod's page cache), and taking it all is taken to
+				// relieve all the pressure: run 2026-11-03 took page-hog's cache to its
+				// floor and contention went from 0.107 to 0, where the share of usage
+				// below predicted 0.010.
+				plan.Predicted = pressure.Value * (from - to) / (from - floor) * plan.Effect
+				break
 			}
 			// The cut actually made, which a floor can hold short of Step.
 			plan.Predicted = cand.Share * (1 - to/from) * (pressure.Value / usage.Value) * plan.Effect
