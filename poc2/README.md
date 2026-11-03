@@ -246,12 +246,18 @@ deploying. Other service images do not need rebuilding if already available:
 cd poc2
 mise exec go@1.26.1 -- make images IMAGES=di-agent
 make agent
+# Required when reusing the same image tag (for example latest):
+kubectl rollout restart daemonset/di-agent
+kubectl rollout status daemonset/di-agent --timeout=5m
 make peers
 ```
 
 Use the same `REGISTRY` and `TAG` overrides for building and deploying if not using
-the defaults. `make agent` does not build images; it upgrades the whole chart and
-rolls the agents, which pull the updated image (`imagePullPolicy: Always`).
+the defaults. `make agent` does not build images; it upgrades the whole chart.
+Agent pods roll when their configuration or image reference changes, not on unrelated
+service upgrades. When reusing an unchanged tag, explicitly restart the DaemonSet as
+above to pull the rebuilt image (`imagePullPolicy: Always`); an immutable new `TAG`
+changes the pod template without an extra restart.
 Keep any existing deployment overrides, such as `DATASET_NODE_NAME`, on `make agent`.
 Changing only chart review settings requires a Helm upgrade, not another image build.
 
@@ -263,11 +269,23 @@ curl -s 'localhost:9090/candidates?status=all'
 ```
 
 Expect autonomy level `rules`, both rule names, and no model names. Candidates expose
-`PersistentWindows`; eligible directed pairs confirm after three qualifying full
-windows, not three review cycles. Undirected pairs (including engine-to-engine
-signals from the same subject) are not auto-oriented by this rule. Missing ranges
-also prevent persistence from accumulating. See the
+`PersistentWindows`, `PersistencePairs` and `PersistenceWindowSize`; the discovery
+drawer displays progress toward three qualifying full windows, not three review
+cycles. Eligible directed pairs confirm as before. Undirected pairs (including
+engine-to-engine signals from the same subject) automatically become association-only
+edges without inventing a driver; they are excluded from estimates and actuation.
+Missing ranges still prevent persistence from accumulating. See the
 [persistence requirements](../semantic-map/README.md#rules-only-persistent-correlation).
+
+The agent mounts `/var/lib/di-agent` from `agent.persistence.hostPath` (default:
+`/var/lib/di-agent`) on each worker. State and discovery checkpoints survive pod
+replacement on that worker; they are not shared across nodes and do not survive loss
+of the node's disk. Fresh evidence resumes only within `map.stale_after` and under
+matching discovery settings; stale checkpoints start a new evidence run. An unclean
+exit loses at most the last snapshot interval of progress. Existing state held only
+inside an old container is not automatically migrated by adding the host mount.
+Snapshot format 5 is readable by this version (and imports format 4), but not by older
+agent binaries; back up existing state before upgrading if rollback is required.
 
 To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090`. Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 

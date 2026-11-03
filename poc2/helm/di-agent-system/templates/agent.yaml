@@ -14,7 +14,6 @@ spec:
       labels:
         app: di-agent
         app.kubernetes.io/instance: {{ .Release.Name }}
-      {{- include "diagent.podAnnotations" (dict "root" .) | nindent 6 }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -99,6 +98,8 @@ spec:
             - name: http
               containerPort: {{ .Values.agent.port }}
           volumeMounts:
+            - name: agent-state
+              mountPath: /var/lib/di-agent
             - name: host-cgroup
               mountPath: /host/cgroup
               readOnly: true
@@ -121,6 +122,10 @@ spec:
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
       volumes:
+        - name: agent-state
+          hostPath:
+            path: {{ dig "persistence" "hostPath" "/var/lib/di-agent" .Values.agent | quote }}
+            type: DirectoryOrCreate
         - name: host-cgroup
           hostPath:
             path: /sys/fs/cgroup

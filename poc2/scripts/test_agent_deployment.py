@@ -271,6 +271,28 @@ sys.exit(1 if count == 1 else 0)
         self.assertIn("periodSeconds: 5", startup)
         self.assertIn("timeoutSeconds: 3", startup)
 
+    def test_agent_has_node_local_state_and_only_relevant_rollouts(self):
+        def render(*overrides):
+            result = subprocess.run(
+                ["helm", "template", "test", str(CHART),
+                 "--show-only", "templates/agent.yaml", *overrides],
+                capture_output=True, text=True, check=True,
+            )
+            return result.stdout
+
+        baseline = render()
+        self.assertIn("mountPath: /var/lib/di-agent", baseline)
+        self.assertIn('path: "/var/lib/di-agent"', baseline)
+        self.assertIn("type: DirectoryOrCreate", baseline)
+        self.assertNotIn("diagent.io/restartedAt:", baseline)
+        self.assertNotIn("diagent.io/config-checksum:", baseline)
+        self.assertEqual(baseline, render())
+        self.assertEqual(baseline, render("--set", "streamer.intervalMs=2000"))
+        changed = render("--set", "agent.review.level=suggest")
+        self.assertNotEqual(baseline, changed)
+        self.assertIn('- name: REVIEW_LEVEL\n              value: "suggest"', changed)
+        self.assertNotEqual(baseline, render("--set", "global.imageTag=test-build"))
+
     def test_entrypoint_rejects_malformed_rule_name(self):
         script = ENTRYPOINT.read_text().replace(
             'exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"', "exit 0",
