@@ -15,11 +15,15 @@ const CENTER = 0.012;     // pull toward the middle, so nothing drifts off-scree
 const GROUP = 0.045;      // pull toward a subject's own centroid
 const MIN_ALPHA = 0.004;
 const RESOLVE_ROUNDS = 12; // bound on the separation rounds per tick
+const PARKED_MAX = 2000;  // departed nodes whose place is remembered
 
 export class Force {
   constructor() {
     this.nodes = new Map();  // id → {id, x, y, vx, vy, r, group, pinned}
     this.links = [];         // {source, target, distance}
+    // Where a node that left was, and whether it was pinned: a workload folded and
+    // opened again gets its arrangement back rather than a fresh one.
+    this.parked = new Map(); // id → {x, y, pinned}
     this.alpha = 1;
     this.width = 800;
     this.height = 600;
@@ -35,14 +39,18 @@ export class Force {
    * their group's centre of mass — or near the middle — so they arrive where they
    * belong instead of flying in from a corner.
    *
-   * Returns which of the two changed. A new or departed property reheats the
-   * layout; a relationship confirmed or retired between properties already placed
-   * only nudges it — the springs settle the one edge, and a map whose
+   * Returns which changed: `nodes` admitted or departed, `fresh` when one of them
+   * arrived with no place to go back to, and `links`. A fresh node reheats the
+   * layout. A node returning to where it was parked or arriving `near` the one it
+   * replaces — a workload folding or opening — only settles it, as does a
+   * departure. A relationship confirmed or retired between properties already
+   * placed only nudges it — the springs settle the one edge, and a map whose
    * relationships change on most polls is not re-laid out on most polls.
    */
   sync(nodes, links) {
     const seen = new Set();
     let nodesChanged = false;
+    let fresh = false;
     let linksChanged = false;
 
     for (const n of nodes) {
@@ -56,14 +64,28 @@ export class Force {
         continue;
       }
       nodesChanged = true;
-      const seed = this.seedFor(n.group);
+      // Back where it was parked, or — `near` naming a node already placed that this
+      // one replaces, a workload folding into one glyph or opening from it — there.
+      const was = this.parked.get(n.id);
+      this.parked.delete(n.id);
+      const at = !was && n.near && this.nodes.get(n.near);
+      if (!was && !at) fresh = true;
+      const seed = was || (at ? { x: at.x + (Math.random() - 0.5) * 30, y: at.y + (Math.random() - 0.5) * 30 } : this.seedFor(n.group));
       this.nodes.set(n.id, {
         id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
-        x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: false,
+        x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: !!was?.pinned,
       });
     }
-    for (const id of [...this.nodes.keys()]) {
-      if (!seen.has(id)) { this.nodes.delete(id); nodesChanged = true; }
+    for (const [id, n] of [...this.nodes]) {
+      if (seen.has(id)) continue;
+      this.nodes.delete(id);
+      this.parked.set(id, { x: n.x, y: n.y, pinned: n.pinned });
+      nodesChanged = true;
+    }
+    // Bounded: a long-lived page sees subjects come and go for good.
+    for (const id of this.parked.keys()) {
+      if (this.parked.size <= PARKED_MAX) break;
+      this.parked.delete(id);
     }
 
     // Compared as sets, not counts. One relationship retiring while another is
@@ -81,9 +103,10 @@ export class Force {
     }
     this.links = next;
 
-    if (nodesChanged) this.reheat(0.75);
+    if (fresh) this.reheat(0.75);
+    else if (nodesChanged) this.reheat(0.2);
     else if (linksChanged) this.reheat(0.05);
-    return { nodes: nodesChanged, links: linksChanged };
+    return { nodes: nodesChanged, fresh, links: linksChanged };
   }
 
   seedFor(group) {
