@@ -563,12 +563,19 @@ type CandidateReview struct {
 	PersistentWindows int
 }
 
+// IsPersistentCorrelationAssociation reports the one automatic rule allowed to
+// retain a directed candidate as a symmetric association rather than a causal edge.
+func (r CandidateReview) IsPersistentCorrelationAssociation() bool {
+	return r.Association && r.By == ReviewerRules && r.Model == "persistent-correlation" &&
+		r.Action == ReviewConfirm && r.DecisionID != ""
+}
+
 // Outdated reports whether c's evidence has moved materially since the review: its
 // sign or kind changed, or its |r| moved by more than two standard errors of
-// Fisher's z at the smaller of the two windows, or the persistence count changed.
+// Fisher's z at the smaller of the two windows, or persistence crosses its
+// approval threshold.
 // A review that is outdated no longer speaks for the candidate, so an agent's
-// rejection or deferral reopens and
-// an undecided candidate is reviewed again.
+// rejection or deferral reopens and an undecided candidate is reviewed again.
 func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if r == nil {
 		return true
@@ -576,7 +583,7 @@ func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
 	if c.Direction != r.Direction || c.Kind != r.Kind {
 		return true
 	}
-	if c.PersistentWindows != r.PersistentWindows {
+	if (c.PersistentWindows >= PersistentWindowsRequired) != (r.PersistentWindows >= PersistentWindowsRequired) {
 		return true
 	}
 	n := min(c.NObservations, r.NObservations)

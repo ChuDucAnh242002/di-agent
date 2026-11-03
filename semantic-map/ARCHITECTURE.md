@@ -2142,7 +2142,7 @@ agent takes on its own authority. How much authority is an operator setting
 
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
-| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts directed pairs or undirected association-only edges after three full non-overlapping qualifying windows. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
+| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
 | 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
 | — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
@@ -2159,7 +2159,8 @@ operator's past reviews is a measurement round.
 **An agent's decision is provisional; an operator's is not.** An agent's rejection or
 deferral carries `Reason: "agent"`: the pair is still tested and the candidate returns to
 pending when its evidence moves past what the review saw (sign, kind, or `|r|` by more than
-two standard errors of Fisher's z). The same test decides when an undecided candidate is
+two standard errors of Fisher's z, or crossing the persistent-correlation approval
+threshold). The same test decides when an undecided candidate is
 reviewed again, which is what keeps the models from being asked the same question every
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
@@ -2171,17 +2172,22 @@ missing-range caveats, and pass both a Fisher p-value limit of 0.05 and the conf
 FDR bar. Failed evidence or a sign/kind change resets the run. Replacement partners
 revise the last update, including its persistence state, rather than adding evidence;
 forgetting or displacing a pair discards the run. `CandidateEdge.PersistentWindows`
-reports completed windows and is copied into reviews, whose `Outdated` check also
-detects a changed count. The rule is stateless and uses the existing confirmation and
-decision-journal paths. Undirected approvals retain `Review.Association` and declare a
-symmetric `association` relationship rather than choosing an orientation. The state
+reports completed windows and is copied into reviews. `Outdated` treats crossing the
+approval threshold as new evidence, not each later count increment, so accepted or
+rejected reviews do not reopen every window. The rule is stateless and uses the existing
+confirmation and decision-journal paths. Persistent-correlation approvals retain
+`Review.Association` and declare a symmetric `association` relationship rather than
+choosing an orientation, including for scoped-to-node pairs. The state
 snapshot also carries the proposer's bounded buffers, timestamps, replacement rollback
 state, grouping links and candidate history. Checkpoint capture runs outside the state
 mutex to avoid proposer/state lock inversion. Restore requires matching discovery
-settings and fresh checkpoint/pair timestamps within `map.stale_after`; expired or
-changed-policy evidence is explicitly discarded. Long live observation gaps reset
-buffers too. The state estimator's own raw windows remain cold after restart. There
-is no new probation or retirement policy. See the
+settings and checkpoint/pair timestamps within a separate 24-hour discovery age/gap
+limit. Expired or changed-policy evidence is explicitly discarded; a malformed
+discovery checkpoint is logged and discarded without preventing the restored map from
+starting. Pending reviews survive restart, and restore reconciles a candidate against
+an association already present in the map because the two are captured under separate
+locks. The state estimator's own raw windows remain cold after restart. There is no new
+probation or retirement policy. See the
 [rules-only configuration](README.md#rules-only-persistent-correlation).
 
 **Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule

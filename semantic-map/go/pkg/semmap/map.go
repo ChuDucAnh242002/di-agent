@@ -396,6 +396,9 @@ func (m *SemanticMap) RestoreDiscovery(now time.Time, maxGap time.Duration) (str
 // rv is the review that decided it: an operator's, or the agent's own.
 func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.CandidateReview) error {
 	if rv.Association {
+		if from != "" {
+			return fmt.Errorf("association %q cannot specify a direction", candidateID)
+		}
 		cs, err := m.proposer.GetCandidates()
 		if err != nil {
 			return err
@@ -403,7 +406,8 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		var found bool
 		for _, c := range cs {
 			if c.CandidateID == candidateID {
-				found = c.Undirected && m.state != nil
+				internalPersistentRule := rv.IsPersistentCorrelationAssociation()
+				found = (c.Undirected || internalPersistentRule) && m.state != nil
 				if found {
 					_, a := m.state.Property(c.FromID)
 					_, b := m.state.Property(c.ToID)
@@ -413,7 +417,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 			}
 		}
 		if !found {
-			return fmt.Errorf("association %q requires two state properties and an undirected pending candidate", candidateID)
+			return fmt.Errorf("association %q requires two state properties and an undirected candidate (directed associations are reserved for the persistent-correlation rule)", candidateID)
 		}
 	}
 	prop, err := m.proposer.Confirm(candidateID, from, rv)

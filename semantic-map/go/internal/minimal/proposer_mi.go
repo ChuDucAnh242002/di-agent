@@ -144,7 +144,7 @@ func (s *persistenceRun) check(valid bool, sign int, kind string, size int) {
 	}
 	s.sign, s.kind = sign, kind
 	if valid && s.pairs >= size {
-		s.windows++
+		s.windows = min(s.windows+1, types.PersistentWindowsRequired)
 		s.pairs = 0
 	}
 }
@@ -222,7 +222,7 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		bufSize:          bufSize,
 		pairWindow:       pairWindow,
 		maxPending:       64,
-		evidenceMaxGap:   2 * time.Minute,
+		evidenceMaxGap:   DiscoveryEvidenceMaxGap,
 	}
 }
 
@@ -1319,7 +1319,7 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
 	src, dst := c.FromID, c.ToID
-	if rv.Association && (!c.Undirected || from != "") {
+	if rv.Association && ((!c.Undirected && !rv.IsPersistentCorrelationAssociation()) || from != "") {
 		return nil, fmt.Errorf("%w: an association requires an undirected candidate and no orientation", contracts.ErrBadConfirmation)
 	}
 	switch {

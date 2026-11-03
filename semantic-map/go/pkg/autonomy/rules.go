@@ -49,7 +49,7 @@ func (persistentCorrelation) Apply(ev Evidence) (string, string, bool) {
 	if c.Undirected {
 		return types.ReviewAssociate, fmt.Sprintf("persistent association: %d full qualifying windows; no orientation inferred and excluded from estimates and actuation", c.PersistentWindows), true
 	}
-	return types.ReviewConfirm, fmt.Sprintf("persistent correlation: %d full non-overlapping windows passed the evidence gates with the same sign and kind; association is not proof of causation", c.PersistentWindows), true
+	return types.ReviewAssociate, fmt.Sprintf("persistent association: %d full qualifying windows; correlation does not establish a causal direction and is excluded from estimates and actuation", c.PersistentWindows), true
 }
 
 // rules is tier 0: the first configured rule that applies.

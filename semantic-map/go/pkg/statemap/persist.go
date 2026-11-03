@@ -39,7 +39,7 @@ import (
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
-// from directional relationships; older binaries must refuse these snapshots.
+// from directional relationships; other versions are refused rather than guessed at.
 const SnapshotVersion = 5
 
 // Snapshot is the persisted form of a map.
@@ -121,6 +121,9 @@ func (m *Map) Save(path string) error {
 	capture := m.discoveryCheckpoint
 	m.mu.RUnlock()
 	if capture != nil {
+		// The map and proposer have separate locks, so these captures are not a
+		// cross-component transaction. RestoreDiscovery reconciles candidates
+		// against persisted relationships before publishing the restored queue.
 		raw, err := capture()
 		if err != nil {
 			return fmt.Errorf("capturing discovery evidence: %w", err)
@@ -228,7 +231,7 @@ func (m *Map) Load(path string) (bool, error) {
 	if err := json.Unmarshal(blob, &snap); err != nil {
 		return false, fmt.Errorf("decoding snapshot: %w", err)
 	}
-	if snap.Version != SnapshotVersion && snap.Version != 4 {
+	if snap.Version != SnapshotVersion {
 		return false, fmt.Errorf(
 			"snapshot is version %d, this agent writes version %d: refusing to guess at "+
 				"the difference, since a misread field would become state the agent reasons from",
@@ -301,6 +304,14 @@ func (m *Map) DiscoveryPersistence(capture func() (json.RawMessage, error)) json
 	defer m.mu.Unlock()
 	m.discoveryCheckpoint = capture
 	return append(json.RawMessage(nil), m.savedDiscovery...)
+}
+
+// DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while
+// retaining the restored map, journal, and relationships.
+func (m *Map) DiscardDiscoveryCheckpoint() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.savedDiscovery = nil
 }
 
 // restore reinstates journal entries from a snapshot.

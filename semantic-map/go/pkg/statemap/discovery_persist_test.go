@@ -44,16 +44,13 @@ func TestDiscoveryCheckpointSharesAtomicStateSnapshot(t *testing.T) {
 	}
 }
 
-func TestVersionFourSnapshotLoadsWithoutDiscovery(t *testing.T) {
+func TestVersionFourSnapshotIsRejected(t *testing.T) {
 	m, _ := newTestMap(t, Config{})
 	path := filepath.Join(t.TempDir(), "v4.json")
 	if err := os.WriteFile(path, []byte(`{"version":4,"revision":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := m.Load(path); err != nil || !ok {
-		t.Fatalf("version 4 migration failed: %v %v", ok, err)
-	}
-	if len(m.DiscoveryPersistence(nil)) != 0 {
-		t.Fatal("version 4 invented discovery evidence")
+	if ok, err := m.Load(path); err == nil || ok {
+		t.Fatalf("version 4 should be rejected, got loaded=%v err=%v", ok, err)
 	}
 }

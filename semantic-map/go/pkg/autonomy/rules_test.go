@@ -26,7 +26,7 @@ func TestPersistentCorrelationRule(t *testing.T) {
 	}{
 		{"legacy candidate", 0, false, nil, autonomy.Rules, types.ReviewUndecided, false},
 		{"two windows", 2, false, nil, autonomy.Rules, types.ReviewUndecided, false},
-		{"three windows", 3, false, nil, autonomy.Rules, types.ReviewConfirm, true},
+		{"directed correlation is association-only", 3, false, nil, autonomy.Rules, types.ReviewConfirm, true},
 		{"undirected", 3, true, nil, autonomy.Rules, types.ReviewConfirm, true},
 		{"caveat", 3, false, []string{"missing range"}, autonomy.Rules, types.ReviewUndecided, false},
 		{"suggest only", 3, false, nil, autonomy.Suggest, types.ReviewConfirm, false},
@@ -45,7 +45,7 @@ func TestPersistentCorrelationRule(t *testing.T) {
 				t.Fatalf("review %+v; want %s applied=%v", c.Review, tc.wantAction, tc.applied)
 			}
 			if tc.wantAction == types.ReviewConfirm {
-				if c.Review.Association != tc.undirected {
+				if !c.Review.Association {
 					t.Fatalf("association flag does not match orientation: %+v", c.Review)
 				}
 				if c.Review.Model != "persistent-correlation" {
@@ -57,6 +57,33 @@ func TestPersistentCorrelationRule(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPersistenceProgressOutdatesOnlyAtApprovalThreshold(t *testing.T) {
+	review := &types.CandidateReview{
+		Direction: types.Positive, Kind: types.CandidateKindSameSubject,
+		MIScore: 0.9, NObservations: 36, PersistentWindows: 1,
+	}
+	candidate := &types.CandidateEdge{
+		Direction: types.Positive, Kind: types.CandidateKindSameSubject,
+		MIScore: 0.9, NObservations: 36, PersistentWindows: 2,
+	}
+	if review.Outdated(candidate) {
+		t.Fatal("ordinary persistence progress reopened the review")
+	}
+	candidate.PersistentWindows = types.PersistentWindowsRequired
+	if !review.Outdated(candidate) {
+		t.Fatal("crossing the persistence approval threshold did not reopen the review")
+	}
+	review.PersistentWindows = types.PersistentWindowsRequired
+	candidate.PersistentWindows++
+	if review.Outdated(candidate) {
+		t.Fatal("additional windows after approval threshold reopened the review")
+	}
+	candidate.PersistentWindows = 0
+	if !review.Outdated(candidate) {
+		t.Fatal("a persistence reset below the approval threshold did not reopen the review")
 	}
 }
 
@@ -80,12 +107,12 @@ func TestPersistentCorrelationIsReviewedWhenWindowsAdvance(t *testing.T) {
 	}
 	c.PersistentWindows = 2
 	r.Cycle(context.Background())
-	if c.Review.DecisionID == first || c.Status != types.Pending {
-		t.Fatal("second window was not reviewed or was approved too soon")
+	if c.Review.DecisionID != first || c.Status != types.Pending {
+		t.Fatal("ordinary persistence progress reopened the review or approved too soon")
 	}
 	c.PersistentWindows = 3
 	r.Cycle(context.Background())
-	if c.Status != types.Confirmed || c.Review.PersistentWindows != 3 {
+	if c.Status != types.Confirmed || c.Review.PersistentWindows != 3 || c.Review.DecisionID == first {
 		t.Fatalf("unchanged r with new windows was not confirmed: %+v", c)
 	}
 }
@@ -180,7 +207,7 @@ func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing
 	}
 }
 
-func TestPersistentCorrelationCreatesATracedRelationship(t *testing.T) {
+func TestPersistentCorrelationCreatesATracedAssociationForDirectedPairs(t *testing.T) {
 	const from, to = "cpu_utilization@pod:a", "cpu_pressure"
 	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
 	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
@@ -219,20 +246,31 @@ func TestPersistentCorrelationCreatesATracedRelationship(t *testing.T) {
 			t.Fatalf("confirmed after %d pairs, before three full windows", i+1)
 		}
 	}
-	rel, ok := state.Relationship(statemap.RelationshipID(from, to, "discovered"))
-	if !ok || rel.Provenance != statemap.Discovered || !strings.Contains(rel.Note, "persistent-correlation") {
-		t.Fatalf("missing traced discovered relationship: %+v", rel)
+	var rel statemap.Relationship
+	ok := false
+	for _, relationship := range state.Relationships("", "") {
+		if relationship.Association && relationship.Label == "association" {
+			rel, ok = relationship, true
+			break
+		}
+	}
+	if !ok || !rel.Association || rel.Provenance != statemap.Discovered ||
+		!strings.Contains(rel.Note, "persistent-correlation") || state.Covered(from, to, 1) ||
+		!state.Associated(from, to, 1) {
+		t.Fatalf("missing traced association-only relationship: %+v", rel)
 	}
 	h, err := m.CandidateHistory()
 	if err != nil || len(h) != 1 {
 		t.Fatalf("history %v: %v", h, err)
 	}
 	c := h[0]
-	if c.Status != types.Confirmed || c.Review == nil || c.Review.PersistentWindows != 3 {
+	if c.Status != types.Confirmed || c.Review == nil || c.Review.PersistentWindows != 3 ||
+		!c.Review.Association {
 		t.Fatalf("candidate not confirmed with persistence evidence: %+v", c)
 	}
 	d, ok := state.Journal().Decision(c.Review.DecisionID)
-	if !ok || d.Answer["model"] != "persistent-correlation" || d.Answer["applied"] != true {
+	if !ok || d.Answer["model"] != "persistent-correlation" || d.Answer["applied"] != true ||
+		d.Answer["association"] != true {
 		t.Fatalf("missing applied decision: %+v", d)
 	}
 }

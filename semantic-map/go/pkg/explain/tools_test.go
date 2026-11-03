@@ -55,6 +55,41 @@ func TestDispatch_GetEdges_FilteredByPair(t *testing.T) {
 	}
 }
 
+func TestDispatch_ExplainPropertySeparatesAssociationsFromInfluences(t *testing.T) {
+	r, sm := newTestMap(t)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	sm.AttachState(state)
+	now := time.Now()
+	for _, id := range []string{"tool-source", "tool-target"} {
+		if err := state.Record(statemap.Observation{ID: id, Value: 0.5, At: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, relationship := range []statemap.Relationship{
+		{From: "tool-source", To: "tool-target", Label: "causal", Sign: 1},
+		{From: "tool-source", To: "tool-target", Label: "association", Sign: -1, Association: true},
+	} {
+		if err := state.DeclareRelationship(relationship); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := explain.Dispatch(r, "explain_property", map[string]any{"property": "tool-target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		InfluencedBy []statemap.Relationship `json:"influenced_by"`
+		Associations []statemap.Relationship `json:"associations"`
+	}
+	if err := json.Unmarshal(result.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.InfluencedBy) != 1 || payload.InfluencedBy[0].Label != "causal" ||
+		len(payload.Associations) != 1 || !payload.Associations[0].Association {
+		t.Fatalf("relationships mixed across output categories: %+v", payload)
+	}
+}
+
 func TestDispatch_GetCost_ReturnsResourceCost(t *testing.T) {
 	r, _ := newTestMap(t)
 	res, err := explain.Dispatch(r, "get_cost", map[string]any{"node_id": "master", "task_type": "pod-scheduling"})

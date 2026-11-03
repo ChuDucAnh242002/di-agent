@@ -67,7 +67,7 @@ def test_new_split_file_is_loaded_without_reloading_existing_series(ingest):
     ])
     connection = MagicMock()
     connection.execute.return_value.fetchall.return_value = [
-        (original.name, original.stat().st_size),
+        (original.name, original.stat().st_size, ingest.file_sha256(original)),
     ]
     with patch("psycopg.connect") as connect, patch.object(ingest, "load_timeseries") as load:
         connect.return_value.__enter__.return_value = connection
@@ -77,10 +77,38 @@ def test_new_split_file_is_loaded_without_reloading_existing_series(ingest):
         )
         load.reset_mock()
         connection.execute.return_value.fetchall.return_value.append(
-            (added.name, added.stat().st_size),
+            (added.name, added.stat().st_size, ingest.file_sha256(added)),
         )
         ingest.main()
         load.assert_not_called()
+
+
+def test_same_size_changed_file_is_reloaded(ingest):
+    path = ingest.DATA_DIR / "925rpm_100kW_0001_timeseries_short_PowerCyl4.csv"
+    write_csv(path, [["Data1_PowerCyl4", "Data1_time_PowerCyl4"], ["32", "0"]])
+    size = path.stat().st_size
+    old_digest = "0" * 64
+    assert ingest.file_sha256(path) != old_digest
+    connection = MagicMock()
+    connection.execute.return_value.fetchall.return_value = [(path.name, size, old_digest)]
+    with patch("psycopg.connect") as connect, patch.object(ingest, "load_timeseries") as load:
+        connect.return_value.__enter__.return_value = connection
+        ingest.main()
+    load.assert_called_once_with(
+        connection.cursor.return_value.__enter__.return_value, "925rpm_100kW_0001", "short", path,
+    )
+
+
+def test_csv_without_paired_columns_warns_and_is_skipped(ingest, capsys):
+    source = ingest.DATA_DIR / "925rpm_100kW_0001_timeseries_short.csv"
+    write_csv(source, [["Data1_unpaired"], ["1"]])
+    assert ingest.split_file(source) == []
+    assert "no paired value/time columns" in capsys.readouterr().err
+
+    split = ingest.DATA_DIR / "925rpm_100kW_0001_timeseries_short_unpaired.csv"
+    write_csv(split, [["Data1_unpaired"], ["1"]])
+    ingest.load_timeseries(MagicMock(), "925rpm_100kW_0001", "short", split)
+    assert "no paired value/time columns" in capsys.readouterr().err
 
 
 def test_successful_ingestion_refreshes_streamer_without_changing_config(ingest, monkeypatch):

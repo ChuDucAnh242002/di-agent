@@ -263,8 +263,9 @@ func Main() {
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", cfg.Profile.Name, err)
 	}
-	if note, err := sm.RestoreDiscovery(time.Now(), cfg.Map.StaleAfter); err != nil {
-		log.Fatalf("restoring discovery: %v", err)
+	if note, err := sm.RestoreDiscovery(time.Now(), minimal.DiscoveryEvidenceMaxGap); err != nil {
+		log.Printf("ERROR: restoring discovery checkpoint: %v; discarded discovery evidence and starting fresh", err)
+		state.DiscardDiscoveryCheckpoint()
 	} else {
 		log.Printf("discovery: %s", note)
 	}

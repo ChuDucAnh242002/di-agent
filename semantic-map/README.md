@@ -554,6 +554,12 @@ actions created or promoted the relationship the candidate proposed), `Model`, `
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
+`Association: true` means an approval records symmetric co-variation, not a causal
+direction. The discovery fields are `PersistentWindows` (completed consecutive
+qualifying windows), `PersistencePairs` (fresh pairs in the current window), and
+`PersistenceWindowSize` (pairs per full window). Reviews are reconsidered when the
+evidence materially changes or persistence crosses its approval threshold, not after
+every additional qualifying window.
 
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in
@@ -566,6 +572,12 @@ which often hold together by construction.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
+
+`GET /state` relationship entries and the edges returned by `GET /graph` and `GET /edges`
+include `association: true` for symmetric associations. Such an edge has no causal
+orientation or effective strength and is excluded from estimates, counterfactuals,
+intervention learning, and actuation. It is separate from the directional relationships
+listed under `influenced_by` and `influences` in model tools.
 
 How many pairs are being tested is in `GET /state`, not here: an empty list means only
 that no *tested* pair has cleared the threshold.
@@ -1152,7 +1164,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.pair_window`   | `15s`   | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
-| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal, plus the proposer's discovery checkpoint. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
 | `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero. |
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
@@ -1670,7 +1682,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` confirms a directed candidate after three full qualifying windows of fresh paired observations. |
+| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1715,29 +1727,32 @@ instead of counting as another observation.
 `GET /candidates?status=all` exposes `PersistentWindows`, `PersistencePairs`, and
 `PersistenceWindowSize`. The discovery drawer shows completed windows (for example
 `1/3`), fresh pairs toward the next window, and caveat blockers. Reviews and their
-decision records retain the count used. An increase or reset makes a previous review
-outdated even if correlation strength stays unchanged.
+decision records retain the count used. A review becomes outdated when evidence changes
+materially or the count crosses the three-window approval threshold; later increments
+do not continually reopen it.
 
-Directed candidates become ordinary discovered relationships, as before. Undirected
-candidates become **association-only** relationships, with `association: true` and no
-claimed driver. They appear as dotted, arrowless graph edges. They never supply an
-effective causal strength, enter estimates/counterfactuals or actuation, or receive
-intervention updates. A later verified intervention may establish a separate
-directional relationship. Operator directional confirmation still requires choosing
-an endpoint; a strength assertion cannot turn an association into a causal edge.
+Persistent-correlation approvals become **association-only** relationships, with
+`association: true` and no claimed driver. They appear as dotted, arrowless graph edges.
+They never supply an effective causal strength, enter estimates/counterfactuals or
+actuation, or receive intervention updates. A later verified intervention may establish
+a separate directional relationship. Model- and operator-approved directional
+confirmations remain causal; operator confirmation of an undirected candidate requires
+choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
 
 When `persist.file` is set, the same atomic state snapshot also saves the discovery
 buffers, duplicate suppression, partial-window progress, candidates and completed
-windows. Startup resumes evidence only when discovery settings match and both the
-checkpoint and individual pairs are no older than `map.stale_after` (default `2m`).
+windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+`map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
 Changed settings, expired evidence or a backwards clock produce an explicit cold-start
-log; malformed checkpoints fail startup. Long observation gaps also reset evidence
-without requiring a process restart. Pending reviews are reconsidered under the new
-process's review policy. A clean shutdown saves immediately; an unclean exit can lose
-up to `persist.interval` of progress. This checkpoint is separate from the state
-estimator's raw windows, which still restart cold. Snapshot format 5 accepts old
-format-4 snapshots, but older binaries cannot load format 5; keep a pre-upgrade backup
-if you need to roll back.
+log. A malformed discovery checkpoint is discarded with an error-level log while the
+restored map and journal remain available. Long observation gaps beyond 24 hours reset
+evidence. Pending reviews survive restart and are reconsidered only when their evidence
+becomes outdated. The map snapshot and proposer checkpoint are captured separately;
+restore reconciles candidate status against relationships already present in the map.
+A clean shutdown saves immediately; an unclean exit can lose up to `persist.interval`
+of progress. This checkpoint is separate from the state estimator's raw windows, which
+still restart cold. Snapshot format 5 is the only supported format; older versions are
+rejected, and older binaries cannot load format 5.
 
 This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
 confirmations still participate in estimates; associations do not. This feature does
@@ -1746,8 +1761,9 @@ records proposed approvals without applying them. `level: rules` alone does not 
 model calls: set both model backends to `none` as above for rules-only operation.
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
-returns to pending, to be reviewed again, once its evidence moves. A reviewed candidate is
-not reviewed again until then, so the models are not asked the same question every cycle.
+returns to pending, to be reviewed again, once its evidence moves materially or crosses
+the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
+until then, so the models are not asked the same question every cycle.
 A candidate whose end is stale waits. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
