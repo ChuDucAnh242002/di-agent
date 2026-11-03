@@ -71,6 +71,7 @@ func (s *CandidateStatus) UnmarshalJSON(b []byte) error {
 // as a second copy.
 
 type EdgeDescriptor struct {
+	Association   bool `json:",omitempty"`
 	FromID        string
 	ToID          string
 	PropositionID string
@@ -478,11 +479,13 @@ type CandidateEdge struct {
 	// PersistentWindows counts full, non-overlapping windows of fresh pairs that
 	// passed the proposer's evidence gates with the same sign and kind. It resets
 	// when evidence fails a gate or the pair stops being tested.
-	PersistentWindows int
+	PersistentWindows     int
+	PersistencePairs      int
+	PersistenceWindowSize int
 	// Undirected is true when nothing says which end drives the other: both are
 	// node-level or both belong to subjects, and correlation is symmetric. FromID and ToID are then the pair in
-	// lexicographic order, not a claim, and confirming one requires the operator to
-	// name the end the relationship runs from.
+	// lexicographic order, not a causal claim. Directional confirmation requires
+	// an orientation; an association review can instead accept it without one.
 	Undirected bool
 	// Kind is "composition" when the source is a component of the target by
 	// definition (a subject's metric against the node's total of the same metric),
@@ -516,6 +519,8 @@ type CandidateEdge struct {
 	Review *CandidateReview
 }
 
+const PersistentWindowsRequired = 3
+
 // Who reviewed a candidate.
 const (
 	ReviewerOperator       = "operator"        // through the review endpoints
@@ -529,6 +534,7 @@ const (
 // candidate stays pending and the agent reviews it again when its evidence moves.
 const (
 	ReviewConfirm   = "confirm"
+	ReviewAssociate = "associate"
 	ReviewReject    = "reject"
 	ReviewDefer     = "defer"
 	ReviewUndecided = "undecided"
@@ -541,6 +547,8 @@ const (
 // review has none. The evidence fields are the candidate's numbers when it was
 // reviewed, so Outdated can tell when they have moved.
 type CandidateReview struct {
+	// Association accepts co-variation without claiming a causal orientation.
+	Association       bool `json:",omitempty"`
 	By                string
 	Model             string `json:",omitempty"`
 	Tier              int

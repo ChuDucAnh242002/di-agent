@@ -2,6 +2,7 @@ package autonomy_test
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestPersistentCorrelationRule(t *testing.T) {
 		{"legacy candidate", 0, false, nil, autonomy.Rules, types.ReviewUndecided, false},
 		{"two windows", 2, false, nil, autonomy.Rules, types.ReviewUndecided, false},
 		{"three windows", 3, false, nil, autonomy.Rules, types.ReviewConfirm, true},
-		{"undirected", 3, true, nil, autonomy.Rules, types.ReviewUndecided, false},
+		{"undirected", 3, true, nil, autonomy.Rules, types.ReviewConfirm, true},
 		{"caveat", 3, false, []string{"missing range"}, autonomy.Rules, types.ReviewUndecided, false},
 		{"suggest only", 3, false, nil, autonomy.Suggest, types.ReviewConfirm, false},
 	} {
@@ -44,6 +45,9 @@ func TestPersistentCorrelationRule(t *testing.T) {
 				t.Fatalf("review %+v; want %s applied=%v", c.Review, tc.wantAction, tc.applied)
 			}
 			if tc.wantAction == types.ReviewConfirm {
+				if c.Review.Association != tc.undirected {
+					t.Fatalf("association flag does not match orientation: %+v", c.Review)
+				}
 				if c.Review.Model != "persistent-correlation" {
 					t.Fatalf("wrong rule recorded: %+v", c.Review)
 				}
@@ -83,6 +87,96 @@ func TestPersistentCorrelationIsReviewedWhenWindowsAdvance(t *testing.T) {
 	r.Cycle(context.Background())
 	if c.Status != types.Confirmed || c.Review.PersistentWindows != 3 {
 		t.Fatalf("unchanged r with new windows was not confirmed: %+v", c)
+	}
+}
+
+func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing.T) {
+	const from, to = "load@engine:test", "speed@engine:test"
+	build := func(state *statemap.Map) (*semmap.SemanticMap, *minimal.MICorrelationProposer) {
+		p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
+		m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+		m.AttachState(state)
+		if _, err := m.RestoreDiscovery(time.Now(), 2*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		return m, p
+	}
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	m, p := build(state)
+	base := time.Now().Add(-time.Minute)
+	feed := func(i int) {
+		at := base.Add(time.Duration(i) * time.Second)
+		x := float64(i%12) / 12
+		for _, reading := range []types.PropertyReading{
+			{ID: from, Subject: "engine:test", At: at, Value: x, Range: &[2]float64{0, 1}},
+			{ID: to, Subject: "engine:test", At: at, Value: 0.1 + 0.8*x, Range: &[2]float64{0, 1}},
+		} {
+			if err := state.Record(statemap.Observation{ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ObserveProperty(reading); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i := 0; i < 29; i++ {
+		feed(i)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := state.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	if ok, err := state.Load(path); err != nil || !ok {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	m, p = build(state)
+	cs, err := m.PendingCandidates()
+	if err != nil || len(cs) != 1 || cs[0].PersistentWindows != 2 || cs[0].PersistencePairs != 5 {
+		t.Fatalf("progress not restored: %+v %v", cs, err)
+	}
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"persistent-correlation"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Rules, t.Logf
+	reviewer, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer.Cycle(context.Background())
+	for i := 29; i < 36; i++ {
+		if state.Associated(from, to, 1) {
+			t.Fatal("association accepted before three complete windows")
+		}
+		feed(i)
+		reviewer.Cycle(context.Background())
+	}
+	if !state.Associated(from, to, 1) || state.Covered(from, to, 1) || state.Covered(to, from, 1) {
+		t.Fatal("association was not accepted independently of direction")
+	}
+	cs, err = m.CandidateHistory()
+	if err != nil || len(cs) != 1 || cs[0].Status != types.Confirmed || cs[0].Review == nil || !cs[0].Review.Association {
+		t.Fatalf("missing association review: %+v %v", cs, err)
+	}
+	d, ok := state.Journal().Decision(cs[0].Review.DecisionID)
+	if !ok || d.Answer["association"] != true || d.Answer["applied"] != true {
+		t.Fatalf("association decision is not auditable: %+v", d)
+	}
+	res := state.Estimate(statemap.EstimateRequest{Target: to, Assume: map[string]float64{from: 1}})
+	if len(res.Influences) != 0 || res.Answer.Sensitivity != 0 {
+		t.Fatalf("association entered estimate: %+v", res)
+	}
+	if err := state.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	if ok, err := state.Load(path); err != nil || !ok {
+		t.Fatalf("load confirmed association: %v %v", ok, err)
+	}
+	m, p = build(state)
+	if cs, err := m.PendingCandidates(); err != nil || len(cs) != 0 || !state.Associated(from, to, 1) {
+		t.Fatalf("accepted association became pending on restart: %+v %v", cs, err)
 	}
 }
 

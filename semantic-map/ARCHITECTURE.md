@@ -2142,7 +2142,7 @@ agent takes on its own authority. How much authority is an operator setting
 
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
-| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts directed pairs after three full non-overlapping qualifying windows; this is a statistical policy, not a causal guarantee. Neither rule invents an orientation for `same-metric` or `same-subject` candidates. |
+| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts directed pairs or undirected association-only edges after three full non-overlapping qualifying windows. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
 | 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
 | — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
@@ -2173,8 +2173,16 @@ revise the last update, including its persistence state, rather than adding evid
 forgetting or displacing a pair discards the run. `CandidateEdge.PersistentWindows`
 reports completed windows and is copied into reviews, whose `Outdated` check also
 detects a changed count. The rule is stateless and uses the existing confirmation and
-decision-journal paths. Counts restart with the proposer and there is no new probation
-or retirement policy. See the [rules-only configuration](README.md#rules-only-persistent-correlation).
+decision-journal paths. Undirected approvals retain `Review.Association` and declare a
+symmetric `association` relationship rather than choosing an orientation. The state
+snapshot also carries the proposer's bounded buffers, timestamps, replacement rollback
+state, grouping links and candidate history. Checkpoint capture runs outside the state
+mutex to avoid proposer/state lock inversion. Restore requires matching discovery
+settings and fresh checkpoint/pair timestamps within `map.stale_after`; expired or
+changed-policy evidence is explicitly discarded. Long live observation gaps reset
+buffers too. The state estimator's own raw windows remain cold after restart. There
+is no new probation or retirement policy. See the
+[rules-only configuration](README.md#rules-only-persistent-correlation).
 
 **Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
 costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits

@@ -147,7 +147,9 @@ export function strengthLayers(rel) {
   const foot = document.createElement('p');
   foot.className = 'muted';
   foot.style.cssText = 'font-size:11px;margin:8px 0 0;line-height:1.5';
-  foot.textContent = eff.known
+  foot.textContent = rel.association
+    ? 'These are observational association statistics, not causal strengths. No layer is used in estimates or actuation.'
+    : eff.known
     ? `The agent reasons with ${fmt.num(eff.value, 3)}, taken from the ${eff.basis} layer.`
     : 'Nothing has been observed about this relationship, so it offers no strength to reason with — not a strength of zero.';
   wrap.append(foot);

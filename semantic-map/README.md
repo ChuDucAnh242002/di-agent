@@ -1686,7 +1686,7 @@ The level decides who may act:
 
 ### Rules-only persistent correlation
 
-Merge this into the agent configuration to approve unfamiliar directed pairs without
+Merge this into the agent configuration to approve unfamiliar metric pairs without
 an allowlist or model calls. The default rule list remains `composition` only.
 
 ```yaml
@@ -1712,15 +1712,36 @@ on the property path. A failed gate, sign/kind change, forgotten property, or di
 pair resets the run. A closer-time replacement partner revises the last pair's evidence
 instead of counting as another observation.
 
-`GET /candidates?status=all` exposes `PersistentWindows`; reviews and their decision
-records retain the count used. An increase or reset makes a previous review outdated
-even if correlation strength stays unchanged, so waiting candidates are reconsidered
-automatically. Persistence is in-memory and starts over after a restart. Unmatched and
-undirected candidates stay pending; the rule never invents an orientation.
+`GET /candidates?status=all` exposes `PersistentWindows`, `PersistencePairs`, and
+`PersistenceWindowSize`. The discovery drawer shows completed windows (for example
+`1/3`), fresh pairs toward the next window, and caveat blockers. Reviews and their
+decision records retain the count used. An increase or reset makes a previous review
+outdated even if correlation strength stays unchanged.
 
-This is an opt-in statistical acceptance policy, **not proof of causation**. A confirmed
-edge is an ordinary discovered relationship and participates in estimates; this feature
-does not add probation or automatic retirement of confirmed edges. `level: suggest`
+Directed candidates become ordinary discovered relationships, as before. Undirected
+candidates become **association-only** relationships, with `association: true` and no
+claimed driver. They appear as dotted, arrowless graph edges. They never supply an
+effective causal strength, enter estimates/counterfactuals or actuation, or receive
+intervention updates. A later verified intervention may establish a separate
+directional relationship. Operator directional confirmation still requires choosing
+an endpoint; a strength assertion cannot turn an association into a causal edge.
+
+When `persist.file` is set, the same atomic state snapshot also saves the discovery
+buffers, duplicate suppression, partial-window progress, candidates and completed
+windows. Startup resumes evidence only when discovery settings match and both the
+checkpoint and individual pairs are no older than `map.stale_after` (default `2m`).
+Changed settings, expired evidence or a backwards clock produce an explicit cold-start
+log; malformed checkpoints fail startup. Long observation gaps also reset evidence
+without requiring a process restart. Pending reviews are reconsidered under the new
+process's review policy. A clean shutdown saves immediately; an unclean exit can lose
+up to `persist.interval` of progress. This checkpoint is separate from the state
+estimator's raw windows, which still restart cold. Snapshot format 5 accepts old
+format-4 snapshots, but older binaries cannot load format 5; keep a pre-upgrade backup
+if you need to roll back.
+
+This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
+confirmations still participate in estimates; associations do not. This feature does
+not add probation or automatic retirement of accepted edges. `level: suggest`
 records proposed approvals without applying them. `level: rules` alone does not disable
 model calls: set both model backends to `none` as above for rules-only operation.
 

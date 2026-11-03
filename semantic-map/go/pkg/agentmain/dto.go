@@ -138,6 +138,7 @@ type PropositionDTO struct {
 // EdgeDTO mirrors types.EdgeDescriptor. Direction is rendered as "+"/"-";
 // Mu and Sigma encode as null when the Gaussian descriptor is unavailable.
 type EdgeDTO struct {
+	Association      bool     `json:"association,omitempty"`
 	FromID           string   `json:"from"`
 	ToID             string   `json:"to"`
 	PropositionID    string   `json:"proposition_id"`
@@ -276,6 +277,7 @@ func propositionToDTO(p *types.Proposition) PropositionDTO {
 
 func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 	return EdgeDTO{
+		Association:      e.Association,
 		FromID:           e.FromID,
 		ToID:             e.ToID,
 		PropositionID:    e.PropositionID,

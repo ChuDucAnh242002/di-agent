@@ -352,7 +352,7 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	// single slot per relationship silently kept whichever was checked last.
 	staleEnds := map[string][]string{}
 	for _, r := range b.m.relationships {
-		if r.To != propertyID || r.Status == Retired {
+		if r.To != propertyID || r.Status == Retired || r.Association {
 			continue
 		}
 		out = append(out, b.m.relationshipViewLocked(r))

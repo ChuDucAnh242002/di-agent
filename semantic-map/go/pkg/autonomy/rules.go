@@ -43,8 +43,11 @@ func (persistentCorrelation) Name() string { return "persistent-correlation" }
 
 func (persistentCorrelation) Apply(ev Evidence) (string, string, bool) {
 	c := ev.Candidate
-	if c.Undirected || c.PersistentWindows < 3 || len(c.Caveats) != 0 {
+	if c.PersistentWindows < types.PersistentWindowsRequired || len(c.Caveats) != 0 {
 		return "", "", false
+	}
+	if c.Undirected {
+		return types.ReviewAssociate, fmt.Sprintf("persistent association: %d full qualifying windows; no orientation inferred and excluded from estimates and actuation", c.PersistentWindows), true
 	}
 	return types.ReviewConfirm, fmt.Sprintf("persistent correlation: %d full non-overlapping windows passed the evidence gates with the same sign and kind; association is not proof of causation", c.PersistentWindows), true
 }
@@ -53,7 +56,11 @@ func (persistentCorrelation) Apply(ev Evidence) (string, string, bool) {
 func (r *Reviewer) rules(ev Evidence) (outcome, bool) {
 	for _, rule := range r.cfg.Rules {
 		if action, why, ok := rule.Apply(ev); ok {
-			return outcome{tier: 0, by: types.ReviewerRules, model: rule.Name(), action: action, why: why}, true
+			association := action == types.ReviewAssociate
+			if association {
+				action = types.ReviewConfirm
+			}
+			return outcome{tier: 0, by: types.ReviewerRules, model: rule.Name(), action: action, why: why, association: association}, true
 		}
 	}
 	return outcome{}, false

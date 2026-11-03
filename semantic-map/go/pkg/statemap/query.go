@@ -220,7 +220,20 @@ func (m *Map) Covered(from, to string, sign int) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, r := range m.relationships {
-		if r.From == from && r.To == to && r.Sign == sign && r.Status != Retired {
+		if !r.Association && r.From == from && r.To == to && r.Sign == sign && r.Status != Retired {
+			return true
+		}
+	}
+	return false
+}
+
+// Associated reports accepted symmetric evidence, not a directional influence.
+func (m *Map) Associated(a, b string, sign int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.relationships {
+		if r.Association && r.Sign == sign && r.Status != Retired &&
+			(r.From == a && r.To == b || r.From == b && r.To == a) {
 			return true
 		}
 	}
@@ -336,8 +349,14 @@ func (m *Map) Explain(id string) (string, error) {
 		}
 	}
 
-	var incoming, outgoing []Relationship
+	var incoming, outgoing, associations []Relationship
 	for _, r := range m.relationships {
+		if r.Association {
+			if r.From == id || r.To == id {
+				associations = append(associations, m.relationshipViewLocked(r))
+			}
+			continue
+		}
 		if r.To == id {
 			incoming = append(incoming, m.relationshipViewLocked(r))
 		}
@@ -347,6 +366,13 @@ func (m *Map) Explain(id string) (string, error) {
 	}
 	sortRelationships(incoming)
 	sortRelationships(outgoing)
+	sortRelationships(associations)
+	if len(associations) > 0 {
+		fmt.Fprintln(&b, "  associated with (not causal influences)")
+		for i := range associations {
+			fmt.Fprintf(&b, "                %s\n", associations[i].String())
+		}
+	}
 
 	if len(incoming) > 0 {
 		fmt.Fprintln(&b, "  influenced by")
@@ -360,7 +386,7 @@ func (m *Map) Explain(id string) (string, error) {
 			fmt.Fprintf(&b, "                %s\n", outgoing[i].String())
 		}
 	}
-	if len(incoming) == 0 && len(outgoing) == 0 {
+	if len(incoming) == 0 && len(outgoing) == 0 && len(associations) == 0 {
 		fmt.Fprintln(&b, "  isolated: no relationship touches this property, so nothing about "+
 			"it propagates to any other part of the model")
 	}

@@ -96,14 +96,15 @@ type MICorrelationProposer struct {
 	folds, barFolds uint64
 	barTests        int // the m the bar was last computed over
 
-	threshold  float64
-	minSpread  float64 // the variation gate: least spread, as a share of the declared range
-	minPairs   int
-	bufSize    int
-	pairWindow time.Duration
-	maxPending int
-	logf       func(format string, args ...any)
-	seq        uint64 // identity for pairs that carry no timestamps
+	threshold      float64
+	minSpread      float64 // the variation gate: least spread, as a share of the declared range
+	minPairs       int
+	bufSize        int
+	pairWindow     time.Duration
+	maxPending     int
+	logf           func(format string, args ...any)
+	seq            uint64 // identity for pairs that carry no timestamps
+	evidenceMaxGap time.Duration
 }
 
 // pairSlot is one tested pair of the property path. score is |r|·n at the last fold
@@ -221,6 +222,7 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		bufSize:          bufSize,
 		pairWindow:       pairWindow,
 		maxPending:       64,
+		evidenceMaxGap:   2 * time.Minute,
 	}
 }
 
@@ -418,6 +420,9 @@ func candidateID(from, to string, undirected bool) string {
 // barred by an arithmetic group, not settled by an operator, and not already a
 // relationship either sign or way round.
 func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected bool) bool {
+	if undirected && p.associated(from, to, 0) {
+		return false
+	}
 	if p.barredLocked(from, to) {
 		return false
 	}
@@ -433,6 +438,14 @@ func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected b
 		}
 	}
 	return true
+}
+
+func (p *MICorrelationProposer) associated(from, to string, sign int) bool {
+	l, ok := p.lookup.(interface {
+		Associated(string, string, int) bool
+	})
+	return ok && (sign == 0 && (l.Associated(from, to, 1) || l.Associated(from, to, -1)) ||
+		sign != 0 && l.Associated(from, to, sign))
 }
 
 // settled is a candidate evidence cannot change: confirmed, or rejected or deferred
@@ -518,7 +531,7 @@ func (p *MICorrelationProposer) dropLocked(key string) {
 	delete(p.buffers, key)
 	delete(p.persistence, key)
 	if c := p.candidates[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)]; c != nil && !settled(c) {
-		c.PersistentWindows = 0
+		c.PersistentWindows, c.PersistencePairs = 0, 0
 	}
 	delete(p.lastPair, key)
 	delete(p.pvals, key)
@@ -543,6 +556,23 @@ func (p *MICorrelationProposer) foldLocked(id, otherID string) {
 	fv, tv := p.latestProps[from], p.latestProps[to]
 	xAt, yAt := fv.at.UnixNano(), tv.at.UnixNano()
 	key := from + "→" + to
+	if lp, used := p.lastPair[key]; used && time.Duration(max(xAt, yAt)-max(lp[0], lp[1])) > p.evidenceMaxGap {
+		p.buffers[key] = stats.NewPairWindow(p.bufSize)
+		p.persistence[key] = &pairPersistence{}
+		delete(p.lastPair, key)
+		delete(p.pvals, key)
+		p.barValid = false
+		if sl := p.slots[key]; sl != nil {
+			sl.n, sl.r = 0, 0
+		}
+		if _, linked := p.links[key]; linked {
+			delete(p.links, key)
+			p.regroupLocked()
+		}
+		if c := p.candidates[candidateID(from, to, undirected)]; c != nil && !settled(c) {
+			c.PersistentWindows, c.PersistencePairs = 0, 0
+		}
+	}
 	replace := false
 	if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
 		if absNano(xAt-yAt) >= absNano(lp[0]-lp[1]) {
@@ -1006,7 +1036,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		// the link's p ≈ 0 stays out of the bar, where it would count as a discovery.
 		delete(p.pvals, key)
 		if c := p.candidates[candID]; c != nil && !settled(c) {
-			c.PersistentWindows = 0
+			c.PersistentWindows, c.PersistencePairs = 0, 0
 			if c.Status == types.Pending {
 				c.Status, c.Reason = types.Deferred, deferredGrouped
 			}
@@ -1027,6 +1057,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		(bar == 0 || pv <= bar) && moved && len(caveats) == 0, sign, meta.kind, p.bufSize)
 	if c := p.candidates[candID]; c != nil && !settled(c) {
 		c.PersistentWindows = run.windows
+		c.PersistencePairs, c.PersistenceWindowSize = run.pairs, p.bufSize
 		c.Caveats = caveats
 	}
 	if !ok || math.Abs(r) < p.threshold {
@@ -1055,7 +1086,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		return nil
 	}
 	if p.lookup != nil && (p.lookup.Covered(fromID, toID, sign) ||
-		(meta.undirected && p.lookup.Covered(toID, fromID, sign))) {
+		(meta.undirected && (p.lookup.Covered(toID, fromID, sign) || p.associated(fromID, toID, sign)))) {
 		return nil // an undirected pair is covered by a relationship either way round
 	}
 	if existing, ok := p.candidates[candID]; ok {
@@ -1105,6 +1136,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		NObservations: buf.Len(), Status: types.Pending,
 		Undirected: meta.undirected, Kind: meta.kind, Caveats: caveats,
 		PersistentWindows: run.windows,
+		PersistencePairs:  run.pairs, PersistenceWindowSize: p.bufSize,
 	}
 	p.order = append(p.order, candID)
 	p.enforceCapLocked()
@@ -1287,8 +1319,11 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
 	src, dst := c.FromID, c.ToID
+	if rv.Association && (!c.Undirected || from != "") {
+		return nil, fmt.Errorf("%w: an association requires an undirected candidate and no orientation", contracts.ErrBadConfirmation)
+	}
 	switch {
-	case c.Undirected && from == "":
+	case c.Undirected && from == "" && !rv.Association:
 		return nil, fmt.Errorf("%w: %s is undirected; name the end it runs from (%s or %s)",
 			contracts.ErrBadConfirmation, candidateID, c.FromID, c.ToID)
 	case c.Undirected && from == c.ToID:
@@ -1310,7 +1345,9 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 		Description:     fmt.Sprintf("Auto-proposed by MICorrelationProposer (|r|=%.3f, n=%d)", c.MIScore, c.NObservations),
 		EvidenceSources: []string{"proposer-mi"},
 	}
-	if c.Undirected {
+	if rv.Association {
+		prop.Description += "; association only: no causal direction claimed"
+	} else if c.Undirected {
 		prop.Description += "; direction chosen by the " + reviewerName(rv)
 	}
 	switch c.Kind {

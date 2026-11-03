@@ -55,7 +55,7 @@ func (m *Map) pairRelationshipLocked(from, to string, includeRetired bool) *Rela
 	pick := func(live bool) *Relationship {
 		var best *Relationship
 		for _, r := range m.relationships {
-			if r.From != from || r.To != to || r.Sign != 1 || (r.Status == Retired) == live {
+			if r.Association || r.From != from || r.To != to || r.Sign != 1 || (r.Status == Retired) == live {
 				continue
 			}
 			if r.ID == RelationshipID(from, to, "") {
