@@ -1,8 +1,6 @@
 package minimal
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -43,71 +41,12 @@ func (s runCheckpoint) restore(size int) (persistenceRun, error) {
 
 type discoveryPair struct {
 	From, To, Class string
-	Window          checkpointWindow
+	Window          stats.WindowSnapshot
 	LastPair        [2]int64
 	Run, BeforeLast runCheckpoint
 	PValue          *float64
 	N               int
 	R               float64
-}
-
-type checkpointWindow struct {
-	X        []float64 `json:"X,omitempty"`
-	Y        []float64 `json:"Y,omitempty"`
-	PackedX  string    `json:"PackedX,omitempty"`
-	PackedY  string    `json:"PackedY,omitempty"`
-	Next     int
-	Capacity int
-	Seen     []string `json:",omitempty"`
-}
-
-func packCheckpointWindow(s stats.WindowSnapshot) checkpointWindow {
-	x, y := make([]byte, len(s.X)*8), make([]byte, len(s.Y)*8)
-	for i, value := range s.X {
-		binary.LittleEndian.PutUint64(x[i*8:], math.Float64bits(value))
-	}
-	for i, value := range s.Y {
-		binary.LittleEndian.PutUint64(y[i*8:], math.Float64bits(value))
-	}
-	return checkpointWindow{
-		PackedX: base64.StdEncoding.EncodeToString(x),
-		PackedY: base64.StdEncoding.EncodeToString(y),
-		Next:    s.Next, Capacity: s.Capacity, Seen: s.Seen,
-	}
-}
-
-func (s checkpointWindow) restore() (stats.WindowSnapshot, error) {
-	x, y := s.X, s.Y
-	if s.PackedX != "" || s.PackedY != "" {
-		if s.PackedX == "" || s.PackedY == "" || s.X != nil || s.Y != nil {
-			return stats.WindowSnapshot{}, fmt.Errorf("invalid packed paired-observation window")
-		}
-		var err error
-		x, err = unpackCheckpointValues(s.PackedX)
-		if err != nil {
-			return stats.WindowSnapshot{}, fmt.Errorf("decoding packed x values: %w", err)
-		}
-		y, err = unpackCheckpointValues(s.PackedY)
-		if err != nil {
-			return stats.WindowSnapshot{}, fmt.Errorf("decoding packed y values: %w", err)
-		}
-	}
-	return stats.WindowSnapshot{X: x, Y: y, Next: s.Next, Capacity: s.Capacity, Seen: s.Seen}, nil
-}
-
-func unpackCheckpointValues(encoded string) ([]float64, error) {
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, err
-	}
-	if len(data)%8 != 0 {
-		return nil, fmt.Errorf("invalid packed float64 length %d", len(data))
-	}
-	values := make([]float64, len(data)/8)
-	for i := range values {
-		values[i] = math.Float64frombits(binary.LittleEndian.Uint64(data[i*8:]))
-	}
-	return values, nil
 }
 
 type discoveryRecent struct {
@@ -132,10 +71,17 @@ func (p *MICorrelationProposer) policy() discoveryPolicy {
 
 // Checkpoint keeps raw paired evidence and its persistence counters in one record.
 // Explicit Observe pairs have no timestamps and cannot be safely resumed.
+//
+// Only the windows something rests on are kept: a pair with a candidate, whose
+// persistence run and review would otherwise start over, and a pair linking an
+// arithmetic group. A pair with neither holds nothing but readings, which refill
+// within one window after a restart. Keeping every tested pair's window made each
+// save hold the whole pair budget's evidence: over a gigabyte allocated per save at
+// a 16 GiB machine's budget.
 func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := discoveryCheckpoint{Version: 2, SavedAt: time.Now(), Policy: p.policy(),
+	s := discoveryCheckpoint{Version: 1, SavedAt: time.Now(), Policy: p.policy(),
 		Recent: map[string]discoveryRecent{}}
 	for id, v := range p.latestProps {
 		s.Properties = append(s.Properties, types.PropertyReading{ID: id, Value: v.value, At: v.at,
@@ -144,9 +90,16 @@ func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 	for id, r := range p.recent {
 		s.Recent[id] = discoveryRecent{slices.Clone(r.vs), r.next}
 	}
+	keep := make(map[string]bool, len(p.candidates)+len(p.links))
+	for _, c := range p.candidates {
+		keep[c.FromID+"→"+c.ToID] = true
+	}
+	for key := range p.links {
+		keep[key] = true
+	}
 	for key, sl := range p.slots {
 		w, ok := p.buffers[key]
-		if !ok {
+		if !ok || !keep[key] {
 			continue
 		}
 		pr := p.persistence[key]
@@ -155,7 +108,7 @@ func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 			pv = &value
 		}
 		s.Pairs = append(s.Pairs, discoveryPair{From: sl.from, To: sl.to, Class: sl.class,
-			Window: packCheckpointWindow(w.Snapshot()), LastPair: p.lastPair[key], Run: checkpointRun(pr.run),
+			Window: w.Snapshot(), LastPair: p.lastPair[key], Run: checkpointRun(pr.run),
 			BeforeLast: checkpointRun(pr.beforeLast), PValue: pv, N: sl.n, R: sl.r})
 	}
 	for _, id := range p.order {
@@ -189,14 +142,11 @@ func (p *MICorrelationProposer) RestoreCheckpoint(raw json.RawMessage, now time.
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return "", fmt.Errorf("decoding discovery checkpoint: %w", err)
 	}
-	if s.Version != 1 && s.Version != 2 {
+	if s.Version != 1 {
 		return "", fmt.Errorf("unsupported discovery checkpoint version %d", s.Version)
 	}
 	if s.Policy != p.policy() {
 		return "discovery policy changed; discarded saved discovery evidence", nil
-	}
-	if p.maxPairs > 0 && len(s.Pairs) > p.maxPairs {
-		return "", fmt.Errorf("discovery checkpoint exceeds pair budget")
 	}
 	if s.SavedAt.IsZero() || s.SavedAt.After(now) || now.Sub(s.SavedAt) > maxGap {
 		return "discovery checkpoint expired or clock moved backwards; discarded saved evidence", nil
@@ -229,8 +179,7 @@ func (p *MICorrelationProposer) RestoreCheckpoint(raw json.RawMessage, now time.
 	}
 	restoreStarted = true
 	for _, v := range s.Properties {
-		p.latestProps[v.ID] = latestValue{value: v.Value, at: v.At,
-			subject: v.Subject, chart: v.Chart, partOf: v.PartOf, rng: v.Range}
+		p.latestProps[v.ID] = latestValue{value: v.Value, at: v.At, subject: v.Subject, chart: v.Chart, partOf: v.PartOf, rng: v.Range}
 		p.latestAt = maxTime(p.latestAt, v.At)
 		if now.Sub(v.At) > maxGap {
 			continue
@@ -263,16 +212,12 @@ func (p *MICorrelationProposer) RestoreCheckpoint(raw json.RawMessage, now time.
 		if first.After(now) || second.After(now) || now.Sub(last) > maxGap {
 			continue
 		}
-		window, err := pair.Window.restore()
+		w, err := stats.RestoreWindow(pair.Window)
 		if err != nil {
 			return "", fmt.Errorf("invalid discovery window %q: %w", key, err)
 		}
-		w, err := stats.RestoreWindow(window)
-		if err != nil {
-			return "", fmt.Errorf("invalid discovery window %q: %w", key, err)
-		}
-		if window.Capacity != p.bufSize {
-			return "", fmt.Errorf("discovery window %q has capacity %d, want %d", key, window.Capacity, p.bufSize)
+		if pair.Window.Capacity != p.bufSize {
+			return "", fmt.Errorf("discovery window %q has capacity %d, want %d", key, pair.Window.Capacity, p.bufSize)
 		}
 		if w.Len() != pair.N && !(pair.N == 0 && w.Len() < p.minPairs) {
 			return "", fmt.Errorf("discovery window %q has %d pairs, checkpoint says %d", key, w.Len(), pair.N)

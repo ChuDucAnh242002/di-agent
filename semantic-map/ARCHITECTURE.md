@@ -1273,7 +1273,7 @@ Readings further apart than the pair window do not form a pair, and a reading no
 
 ### The pair budget
 
-The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. One budget, `map.proposer.max_pairs`, is shared by all three classes. It limits active tested pairs, not the number of cached properties or candidate-history entries. Discovery checkpoints preserve that history; snapshot size therefore depends on both the active pair budget and accumulated candidate history.
+The pair count grows with the square of the properties: about 20 node ↔ node pairs for the cgroup collector's node metrics, about 2 million for a source with 2 000. Recording has no limit; testing pairs does. One budget, `map.proposer.max_pairs`, is shared by all three classes.
 
 - **Default from the machine.** `0` (the default) derives it at start from 1% of the agent's memory (`MemTotal`, or its own cgroup's `memory.max` when lower) at ~2.6 KB per tested pair, and 1% of each collection tick across its CPUs (`cpu.max` when lower) at 5 µs per pair per tick — ten times what an Apple M-series core measured, so a Raspberry Pi-class core is not overcommitted — whichever allows fewer. A 2 GiB VM gets about 8 000 pairs; an 8 GiB, 4-core Raspberry Pi about 32 000. Fixed at start rather than adapting while the agent runs, so a run's budget is one number in its log and in `/state`. When the memory cannot be read (not Linux), 4 096. An explicit value always wins.
 - **While there is room** every pair a reading can form is tested, so a node within its budget behaves as if there were none.
@@ -1286,7 +1286,7 @@ The pair count grows with the square of the properties: about 20 node ↔ node p
   - a pending candidate whose pair is displaced is deferred with `Reason: "untested"`: nothing updates its numbers, so it should not ask for confirmation or hold a place under the pending cap. It re-enters if the pair is tested again and still clears the threshold.
 - **Visible.** `GET /state` carries a `discovery` block — `budget`, `properties`, `eligible_pairs`, `tested_pairs`, `idle_pairs` (tested, with an end gone quiet), `tested_by_class`, `displaced`, the arithmetic `groups`, and the corrected bar (`fdr`, `p_bar`, `p_values_tested`) — and the console's Discovery pane says how many of the eligible pairs are being tested.
 
-The property path refuses a reading no newer than its property's last instead of retaining pair identities, so its pair windows do not accumulate replay IDs. Checkpoints encode window values as base64-encoded little-endian float64 data rather than decimal JSON arrays, preserving exact values while avoiding the substantial expansion from pretty-printing every sample.
+The per-pair cost is what made the budget affordable: each pair window used to keep a set of up to four windows' worth of pair identities against replays, ~23 KB of a pair's ~26 KB. The property path now refuses a reading no newer than its property's last instead, one timestamp per property, and its windows keep no identities.
 
 Four gates shape what is proposed:
 
@@ -2185,8 +2185,14 @@ rejected reviews do not reopen every window. The rule is stateless and uses the 
 confirmation and decision-journal paths. Persistent-correlation approvals retain
 `Review.Association` and declare a symmetric `association` relationship rather than
 choosing an orientation, including for scoped-to-node pairs. The state
-snapshot also carries the proposer's bounded buffers, timestamps, replacement rollback
-state, grouping links and candidate history. Checkpoint capture runs outside the state
+snapshot also carries the proposer's timestamps, replacement rollback state, grouping
+links, candidate history, and the buffers of the pairs something rests on: a pair with a
+candidate, whose persistence run would otherwise start over, and a pair linking a group.
+Every other tested pair holds only readings and refills within one window after a
+restart. Saving all of them made each save hold the whole pair budget's evidence, about
+115 MB of checkpoint and over a gigabyte allocated per save at a 16 GiB machine's
+64 000 pairs, so the snapshot and the agent's memory grew as the budget filled (#56).
+Checkpoint capture runs outside the state
 mutex to avoid proposer/state lock inversion. Restore requires matching discovery
 settings and checkpoint/pair timestamps within a separate 24-hour discovery age/gap
 limit. Expired or changed-policy evidence is explicitly discarded; a malformed

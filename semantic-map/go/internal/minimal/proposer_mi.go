@@ -64,7 +64,7 @@ type MICorrelationProposer struct {
 	// step from then on.
 	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
-	order      []string                        // insertion order of CandidateIDs, for stable history iteration
+	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
 
 	latestConstructs map[string]float64     // explicit construct path: id → last value
 	latestProps      map[string]latestValue // property path: id → last value, time, scope
@@ -265,9 +265,8 @@ const groupR = 0.99
 
 // SetMaxPairs sets the pair budget: how many pairs the property path tests at once,
 // across every pair class. 0 or less removes the limit, and every eligible pair is
-// tested. A positive budget also bounds retained property and candidate history to
-// max(4, 2*n) entries each. Lowering it below the pairs already tested takes effect
-// as pairs are displaced or settle; nothing is dropped here.
+// tested. Lowering it below the pairs already tested takes effect as pairs are
+// displaced or settle; nothing is dropped here.
 func (p *MICorrelationProposer) SetMaxPairs(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -363,8 +362,7 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	// Unlike the chart, a reading without part_of withdraws it: a producer states
 	// part_of on every reading it applies to, so its absence is how a wrong
 	// declaration, or a device that stopped counting into the node, is corrected.
-	p.latestProps[id] = latestValue{value: r.Value, at: at,
-		subject: r.Subject, chart: chart, partOf: r.PartOf, rng: r.Range}
+	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, partOf: r.PartOf, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -947,11 +945,6 @@ func metricOf(id string) string {
 func (p *MICorrelationProposer) Forget(propertyID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.forgetLocked(propertyID)
-	return nil
-}
-
-func (p *MICorrelationProposer) forgetLocked(propertyID string) {
 	delete(p.latestProps, propertyID)
 	delete(p.latestConstructs, propertyID)
 	delete(p.recent, propertyID)
@@ -993,8 +986,8 @@ func (p *MICorrelationProposer) forgetLocked(propertyID string) {
 		}
 		kept = append(kept, cid)
 	}
-	clear(p.order[len(kept):])
 	p.order = kept
+	return nil
 }
 
 func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string, meta pairMeta) error {
