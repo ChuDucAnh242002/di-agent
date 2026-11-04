@@ -93,8 +93,10 @@ func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 		if value, ok := p.pvals[key]; ok {
 			pv = &value
 		}
+		window := w.Snapshot()
+		window.Seen = nil
 		s.Pairs = append(s.Pairs, discoveryPair{From: sl.from, To: sl.to, Class: sl.class,
-			Window: w.Snapshot(), LastPair: p.lastPair[key], Run: checkpointRun(pr.run),
+			Window: window, LastPair: p.lastPair[key], Run: checkpointRun(pr.run),
 			BeforeLast: checkpointRun(pr.beforeLast), PValue: pv, N: sl.n, R: sl.r})
 	}
 	for _, id := range p.order {
@@ -134,6 +136,14 @@ func (p *MICorrelationProposer) RestoreCheckpoint(raw json.RawMessage, now time.
 	if s.Policy != p.policy() {
 		return "discovery policy changed; discarded saved discovery evidence", nil
 	}
+	if p.maxPairs > 0 && len(s.Pairs) > p.maxPairs {
+		return "", fmt.Errorf("discovery checkpoint exceeds pair budget")
+	}
+	retainedLimit := retentionLimit(p.maxPairs)
+	if retainedLimit > 0 && (len(s.Properties) > retainedLimit ||
+		len(s.Recent) > retainedLimit || len(s.Candidates) > retainedLimit) {
+		return "", fmt.Errorf("discovery checkpoint exceeds retention limit")
+	}
 	if s.SavedAt.IsZero() || s.SavedAt.After(now) || now.Sub(s.SavedAt) > maxGap {
 		return "discovery checkpoint expired or clock moved backwards; discarded saved evidence", nil
 	}
@@ -165,7 +175,9 @@ func (p *MICorrelationProposer) RestoreCheckpoint(raw json.RawMessage, now time.
 	}
 	restoreStarted = true
 	for _, v := range s.Properties {
-		p.latestProps[v.ID] = latestValue{value: v.Value, at: v.At, subject: v.Subject, chart: v.Chart, partOf: v.PartOf, rng: v.Range}
+		p.observeSeq++
+		p.latestProps[v.ID] = latestValue{value: v.Value, at: v.At, observeSeq: p.observeSeq,
+			subject: v.Subject, chart: v.Chart, partOf: v.PartOf, rng: v.Range}
 		p.latestAt = maxTime(p.latestAt, v.At)
 		if now.Sub(v.At) > maxGap {
 			continue

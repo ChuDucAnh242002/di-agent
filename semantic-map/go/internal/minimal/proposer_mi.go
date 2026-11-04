@@ -73,12 +73,13 @@ type MICorrelationProposer struct {
 	// The pair budget. slots holds every pair the property path tests, keyed like
 	// buffers; partners indexes them by property, so a reading folds into its own
 	// pairs without walking every other property.
-	maxPairs  int // 0 = no limit
-	slots     map[string]*pairSlot
-	partners  map[string]map[string]struct{}
-	displaced uint64
-	lastPass  time.Time // reading time of the last rationing pass
-	latestAt  time.Time // the latest reading time seen
+	maxPairs   int // 0 = no limit
+	slots      map[string]*pairSlot
+	partners   map[string]map[string]struct{}
+	displaced  uint64
+	lastPass   time.Time // reading time of the last rationing pass
+	latestAt   time.Time // the latest reading time seen
+	observeSeq uint64
 
 	// Arithmetic groups. links holds, by pair key, the tested pairs of one chart and
 	// one subject at |r| >= groupR; repOf maps each member of a group to its
@@ -165,12 +166,13 @@ func (v *valueRing) push(x float64, capacity int) {
 }
 
 type latestValue struct {
-	value   float64
-	at      time.Time
-	subject string
-	chart   string
-	partOf  string      // the node-level property the latest reading said this is a part of
-	rng     *[2]float64 // declared range; nil when the producer declared none
+	value      float64
+	at         time.Time
+	observeSeq uint64
+	subject    string
+	chart      string
+	partOf     string      // the node-level property the latest reading said this is a part of
+	rng        *[2]float64 // declared range; nil when the producer declared none
 }
 
 func (v latestValue) scoped() bool { return v.subject != "" }
@@ -265,8 +267,9 @@ const groupR = 0.99
 
 // SetMaxPairs sets the pair budget: how many pairs the property path tests at once,
 // across every pair class. 0 or less removes the limit, and every eligible pair is
-// tested. Lowering it below the pairs already tested takes effect as pairs are
-// displaced or settle; nothing is dropped here.
+// tested. A positive budget also bounds retained property and candidate history to
+// max(4, 2*n) entries each. Lowering it below the pairs already tested takes effect
+// as pairs are displaced or settle; nothing is dropped here.
 func (p *MICorrelationProposer) SetMaxPairs(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -362,7 +365,9 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	// Unlike the chart, a reading without part_of withdraws it: a producer states
 	// part_of on every reading it applies to, so its absence is how a wrong
 	// declaration, or a device that stopped counting into the node, is corrected.
-	p.latestProps[id] = latestValue{value: r.Value, at: at, subject: r.Subject, chart: chart, partOf: r.PartOf, rng: r.Range}
+	p.observeSeq++
+	p.latestProps[id] = latestValue{value: r.Value, at: at, observeSeq: p.observeSeq,
+		subject: r.Subject, chart: chart, partOf: r.PartOf, rng: r.Range}
 	ring := p.recent[id]
 	if ring == nil {
 		ring = &valueRing{}
@@ -372,6 +377,7 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 	if at.After(p.latestAt) {
 		p.latestAt = at
 	}
+	p.enforcePropertyLimitLocked(id)
 	for otherID := range p.partners[id] {
 		p.foldLocked(id, otherID)
 	}
@@ -386,6 +392,39 @@ func (p *MICorrelationProposer) ObserveProperty(r types.PropertyReading) error {
 
 func (p *MICorrelationProposer) roomLocked() bool {
 	return p.maxPairs <= 0 || len(p.slots) < p.maxPairs
+}
+
+func retentionLimit(pairBudget int) int {
+	if pairBudget <= 0 {
+		return 0
+	}
+	// Keep several competitors even when a caller budgets only one tested pair.
+	maxInt := int(^uint(0) >> 1)
+	if pairBudget > maxInt/2 {
+		return maxInt
+	}
+	return max(4, pairBudget*2)
+}
+
+func (p *MICorrelationProposer) enforcePropertyLimitLocked(keep string) {
+	limit := retentionLimit(p.maxPairs)
+	for limit > 0 && len(p.latestProps) > limit {
+		var oldest string
+		found := false
+		for id, value := range p.latestProps {
+			if id == keep {
+				continue
+			}
+			if !found || value.observeSeq < p.latestProps[oldest].observeSeq ||
+				value.observeSeq == p.latestProps[oldest].observeSeq && id < oldest {
+				oldest, found = id, true
+			}
+		}
+		if !found {
+			return
+		}
+		p.forgetLocked(oldest)
+	}
 }
 
 // orient puts a pair the way its buffer and candidate are keyed: the scoped end
@@ -945,6 +984,11 @@ func metricOf(id string) string {
 func (p *MICorrelationProposer) Forget(propertyID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.forgetLocked(propertyID)
+	return nil
+}
+
+func (p *MICorrelationProposer) forgetLocked(propertyID string) {
 	delete(p.latestProps, propertyID)
 	delete(p.latestConstructs, propertyID)
 	delete(p.recent, propertyID)
@@ -986,8 +1030,33 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 		}
 		kept = append(kept, cid)
 	}
+	clear(p.order[len(kept):])
 	p.order = kept
-	return nil
+}
+
+func (p *MICorrelationProposer) enforceCandidateHistoryLimitLocked() {
+	limit := retentionLimit(p.maxPairs)
+	if limit == 0 || len(p.order) <= limit {
+		return
+	}
+	active := make(map[string]struct{}, len(p.slots))
+	for _, sl := range p.slots {
+		active[candidateID(sl.from, sl.to, sl.class != types.PairSubjectNode)] = struct{}{}
+	}
+	for len(p.order) > limit {
+		oldestInactive := -1
+		for i, id := range p.order {
+			if _, ok := active[id]; !ok {
+				oldestInactive = i
+				break
+			}
+		}
+		if oldestInactive < 0 {
+			return
+		}
+		delete(p.candidates, p.order[oldestInactive])
+		p.order = slices.Delete(p.order, oldestInactive, oldestInactive+1)
+	}
 }
 
 func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string, meta pairMeta) error {
@@ -1140,6 +1209,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	p.order = append(p.order, candID)
 	p.enforceCapLocked()
+	p.enforceCandidateHistoryLimitLocked()
 	return nil
 }
 
