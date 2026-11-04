@@ -3,11 +3,13 @@ package minimal
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/stats"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -32,90 +34,6 @@ func checkpointFeed(t *testing.T, p *MICorrelationProposer, at time.Time, i int)
 		if err := p.ObserveProperty(v); err != nil {
 			t.Fatal(err)
 		}
-	}
-}
-
-func TestDiscoveryRetentionIsBoundedByPairBudget(t *testing.T) {
-	p := NewMICorrelationProposer(nil, 0.9, 3, 3, time.Second)
-	p.SetMaxPairs(2)
-	base := time.Now()
-	for i := 0; i < 20; i++ {
-		if err := p.ObserveProperty(types.PropertyReading{
-			ID: fmt.Sprintf("property-%04d", i), Value: float64(i%10) / 10,
-			At: base.Add(time.Duration(i) * time.Second),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	early, err := p.Checkpoint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 20; i < 2000; i++ {
-		if err := p.ObserveProperty(types.PropertyReading{
-			ID: fmt.Sprintf("property-%04d", i), Value: float64(i%10) / 10,
-			At: base.Add(time.Duration(i) * time.Second),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(p.latestProps) > 4 || len(p.recent) > 4 || len(p.slots) > 2 || len(p.buffers) > 2 {
-		t.Fatalf("discovery cache exceeded pair-budget retention: properties=%d recent=%d slots=%d buffers=%d",
-			len(p.latestProps), len(p.recent), len(p.slots), len(p.buffers))
-	}
-	if _, ok := p.latestProps["property-1999"]; !ok {
-		t.Fatal("most recently observed property was evicted")
-	}
-
-	history := NewMICorrelationProposer(nil, 0.8, 3, 3, 0)
-	history.SetMaxPairs(1)
-	for pair := 0; pair < 20; pair++ {
-		for i := 0; i < 4; i++ {
-			if err := history.Observe(fmt.Sprintf("from-%d", pair), fmt.Sprintf("to-%d", pair),
-				float64(i), float64(i)); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if len(history.order) > 2 || len(history.candidates) > 2 {
-		t.Fatalf("explicit candidate history exceeded retention: order=%d candidates=%d",
-			len(history.order), len(history.candidates))
-	}
-
-	equalTimestamp := NewMICorrelationProposer(nil, 0.9, 3, 3, time.Second)
-	equalTimestamp.SetMaxPairs(1)
-	for _, id := range []string{"z-node", "a-node", "pod-1", "pod-2", "pod-3", "z-node", "a-node", "pod-4"} {
-		if err := equalTimestamp.ObserveProperty(types.PropertyReading{ID: id, Value: 0.5, At: base}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if equalTimestamp.latestProps["z-node"].observeSeq == 0 || equalTimestamp.latestProps["a-node"].observeSeq == 0 ||
-		equalTimestamp.latestProps["pod-1"].observeSeq != 0 {
-		t.Fatal("equal telemetry timestamps evicted recently refreshed properties")
-	}
-	late, err := p.Checkpoint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(late) > len(early)+128 {
-		t.Fatalf("checkpoint grew with elapsed property identities: early=%d bytes late=%d bytes", len(early), len(late))
-	}
-
-	activeID := candidateID("a", "b", true)
-	p.slots["a→b"] = &pairSlot{from: "a", to: "b", class: types.PairNodeNode}
-	p.order = append(p.order, activeID)
-	p.candidates[activeID] = &types.CandidateEdge{CandidateID: activeID}
-	for i := 0; i < 5; i++ {
-		id := fmt.Sprintf("old-candidate-%d", i)
-		p.order = append(p.order, id)
-		p.candidates[id] = &types.CandidateEdge{CandidateID: id}
-	}
-	p.enforceCandidateHistoryLimitLocked()
-	if len(p.order) != 4 {
-		t.Fatalf("candidate history has %d entries, want 4", len(p.order))
-	}
-	if p.candidates[activeID] == nil || p.candidates["old-candidate-0"] != nil {
-		t.Fatal("candidate retention did not protect active evidence and evict oldest inactive history")
 	}
 }
 
@@ -202,49 +120,115 @@ func TestDiscoveryCheckpointRejectsBrokenWindow(t *testing.T) {
 	}
 }
 
-func TestDiscoveryCheckpointOmitsSeenIdentitiesAndRejectsOversizedState(t *testing.T) {
-	p, _ := checkpointFixture(t, 29)
-	p.mu.Lock()
-	window := p.buffers["x→y"]
-	for i := 0; i < 1000; i++ {
-		window.Fold(fmt.Sprintf("observation-%d", i), 0.2, 0.3)
+func TestDiscoveryRetentionDoesNotEvictPropertiesOrCandidateHistory(t *testing.T) {
+	p := NewMICorrelationProposer(nil, 0.9, 3, 12, time.Minute)
+	p.SetMaxPairs(1)
+	base := time.Now().Add(-time.Minute)
+	for i := 0; i < 10; i++ {
+		if err := p.ObserveProperty(types.PropertyReading{
+			ID: fmt.Sprintf("property-%02d", i), Value: float64(i) / 10,
+			At: base.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	p.mu.Unlock()
-
+	if len(p.latestProps) != 10 || len(p.recent) != 10 {
+		t.Fatalf("pair budget evicted property state: properties=%d recent=%d", len(p.latestProps), len(p.recent))
+	}
+	for i := 0; i < 5; i++ {
+		from := fmt.Sprintf("property-%02d", i*2)
+		to := fmt.Sprintf("property-%02d", i*2+1)
+		id := candidateID(from, to, true)
+		p.order = append(p.order, id)
+		p.candidates[id] = &types.CandidateEdge{
+			CandidateID: id, FromID: from, ToID: to, Direction: types.Positive,
+			Status: types.Pending, Undirected: true,
+		}
+	}
 	raw, err := p.Checkpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var snapshot discoveryCheckpoint
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Pairs) != 1 || len(snapshot.Pairs[0].Window.Seen) != 0 {
-		t.Fatalf("checkpoint persisted replay identities: %+v", snapshot.Pairs)
-	}
-
-	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	q := NewMICorrelationProposer(nil, 0.9, 3, 12, time.Minute)
 	q.SetMaxPairs(1)
-	p.SetMaxPairs(1)
-	raw, err = p.Checkpoint()
+	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
+		t.Fatalf("restore candidate history larger than pair budget: %v", err)
+	}
+	if len(q.candidates) != 5 {
+		t.Fatalf("restored %d candidates, want 5", len(q.candidates))
+	}
+}
+
+func TestDiscoveryCheckpointPackedWindowsStayWithinSizeBudget(t *testing.T) {
+	const pairCount, windowSize, propertyCount = 8000, 120, 128
+	now := time.Now()
+	s := discoveryCheckpoint{
+		Version: 2, SavedAt: now, Properties: make([]types.PropertyReading, propertyCount),
+		Recent: make(map[string]discoveryRecent, propertyCount), Pairs: make([]discoveryPair, pairCount),
+	}
+	for i := 0; i < propertyCount; i++ {
+		id := fmt.Sprintf("property-%03d", i)
+		s.Properties[i] = types.PropertyReading{ID: id, Value: 0.5, At: now}
+		values := make([]float64, windowSize)
+		for j := range values {
+			values[j] = math.Sin(float64(i*windowSize+j) * 0.01)
+		}
+		s.Recent[id] = discoveryRecent{Values: values}
+	}
+	for i := range s.Pairs {
+		x, y := make([]float64, windowSize), make([]float64, windowSize)
+		for j := range x {
+			x[j] = math.Sin(float64(i*windowSize+j) * 0.01)
+			y[j] = math.Sin(float64(i*windowSize+j)*0.01 + 0.3)
+		}
+		s.Pairs[i] = discoveryPair{
+			From: "property-000", To: "property-001", Class: types.PairNodeNode,
+			Window:   packCheckpointWindow(stats.WindowSnapshot{X: x, Y: y, Capacity: windowSize}),
+			LastPair: [2]int64{now.UnixNano(), now.UnixNano()},
+		}
+	}
+	raw, err := json.Marshal(s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ {
-		snapshot.Properties = append(snapshot.Properties, types.PropertyReading{
-			ID: fmt.Sprintf("over-budget-%d", i), Value: 0.5, At: time.Now(),
-		})
-	}
-	raw, err = json.Marshal(snapshot)
+	persisted, err := json.MarshalIndent(statemap.Snapshot{Discovery: raw}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err == nil ||
-		!strings.Contains(err.Error(), "retention limit") {
-		t.Fatalf("oversized checkpoint was accepted: %v", err)
+	if len(persisted) > 27<<20 {
+		t.Fatalf("8,000 pairs with 120 samples persisted to %d bytes; want <= 27 MiB", len(persisted))
+	}
+	t.Logf("8k-pair raw discovery=%d bytes persisted-indented=%d bytes", len(raw), len(persisted))
+}
+
+func TestDiscoveryCheckpointRestoresVersionOneWindows(t *testing.T) {
+	p, _ := checkpointFixture(t, 29)
+	raw, err := p.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s discoveryCheckpoint
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Version = 1
+	for i := range s.Pairs {
+		window, err := s.Pairs[i].Window.restore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Pairs[i].Window = checkpointWindow{
+			X: window.X, Y: window.Y, Next: window.Next, Capacity: window.Capacity, Seen: window.Seen,
+		}
+	}
+	raw, err = json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	if note, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil ||
+		!strings.Contains(note, "restored") {
+		t.Fatalf("legacy restore: %q %v", note, err)
 	}
 }
 
