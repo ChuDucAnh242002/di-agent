@@ -274,3 +274,79 @@ func TestPersistentCorrelationCreatesATracedAssociationForDirectedPairs(t *testi
 		t.Fatalf("missing applied decision: %+v", d)
 	}
 }
+
+// A composition candidate the proposer withdrew before any review cycle reached it —
+// its |r| weakened within the 30 s it was pending, as the mem-squeeze pair's did in
+// the case study — is still a part against its whole, and the rule settles it at the
+// next cycle.
+func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T) {
+	const from, to = "memory_pressure_ratio@pod:squeeze", "memory_pressure_ratio"
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
+	m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+	m.AttachState(state)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Hour)
+	feed := func(i int, x, y float64) {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		for _, reading := range []types.PropertyReading{
+			{ID: from, Subject: "pod:squeeze", At: at, Value: x, Range: rng},
+			{ID: to, At: at, Value: y, Range: rng},
+		} {
+			if err := state.Record(statemap.Observation{ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ObserveProperty(reading); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	i := 0
+	for ; i < 12; i++ {
+		x := float64(i) / 12
+		feed(i, x, 0.8*x+0.1)
+	}
+	if cs, _ := m.PendingCandidates(); len(cs) != 1 || cs[0].Kind != types.CandidateKindComposition {
+		t.Fatalf("want one pending composition candidate, got %+v", cs)
+	}
+	// The pair stops holding before the reviewer's next cycle: the node total now moves
+	// with something else.
+	for ; ; i++ {
+		feed(i, float64(i%12)/12, float64((i*7)%12)/12)
+		if h, _ := m.CandidateHistory(); h[0].Status == types.Deferred {
+			if h[0].Reason != "weakened" {
+				t.Fatalf("deferred for %q; want weakened", h[0].Reason)
+			}
+			break
+		}
+		if i > 200 {
+			t.Fatal("the candidate never weakened")
+		}
+	}
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Suggest, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
+		t.Fatalf("at suggest a withdrawn candidate has no queue to suggest on; reviewed %d, errors %d", s.Reviewed, s.Errors)
+	}
+	cfg.Level = autonomy.Full
+	if r, err = autonomy.New(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	h, err := m.CandidateHistory()
+	if err != nil || len(h) != 1 || h[0].Status != types.Confirmed || h[0].Review == nil ||
+		h[0].Review.By != types.ReviewerRules {
+		t.Fatalf("withdrawn composition candidate was not settled by the rule: %+v %v", h[0], err)
+	}
+	if !state.Covered(from, to, 1) {
+		t.Fatal("the confirmation declared no relationship")
+	}
+}

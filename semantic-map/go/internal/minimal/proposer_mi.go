@@ -1205,8 +1205,8 @@ const (
 	deferredByCap = "cap"
 	// byOperator and byAgent say who rejected or deferred a candidate. Only an
 	// operator's decision is final for the session.
-	byOperator = "operator"
-	byAgent    = "agent"
+	byOperator = types.ReasonOperator
+	byAgent    = types.ReasonAgent
 	// deferredUntested is a pending candidate whose pair was displaced from the
 	// budget: its numbers stopped being updated.
 	deferredUntested = "untested"
@@ -1290,7 +1290,8 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 	return out, nil
 }
 
-// Confirm marks a Pending candidate accepted and returns the proposition it represents.
+// Confirm marks an open candidate (types.CandidateEdge.Open: pending, or deferred by
+// the proposer itself) accepted and returns the proposition it represents.
 // from orients it: "" or the candidate's FromID for a directed candidate; either end
 // for an undirected one, which has no orientation until an operator gives it.
 // The synthesized PropositionID is
@@ -1315,8 +1316,8 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 	if !ok {
 		return nil, fmt.Errorf("candidate %q not found", candidateID)
 	}
-	if c.Status != types.Pending {
-		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+	if !c.Open() {
+		return nil, fmt.Errorf("candidate %q is not open (status=%v, reason=%q)", candidateID, c.Status, c.Reason)
 	}
 	src, dst := c.FromID, c.ToID
 	if rv.Association && ((!c.Undirected && !rv.IsPersistentCorrelationAssociation()) || from != "") {

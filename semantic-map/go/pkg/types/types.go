@@ -519,6 +519,23 @@ type CandidateEdge struct {
 	Review *CandidateReview
 }
 
+// Who rejected or deferred a candidate, as its Reason names them. Every other
+// deferral reason is the proposer's own.
+const (
+	ReasonOperator = "operator"
+	ReasonAgent    = "agent"
+)
+
+// Open reports whether a review may still settle c: it is pending, or the proposer
+// deferred it. The proposer's deferrals (cap, untested, grouped, bar, weakened) are
+// choices about the queue, not judgements on the pair, so a rule that holds by
+// definition settles such a candidate whatever its |r| is now. A candidate the
+// operator or the agent deferred or rejected is not open.
+func (c *CandidateEdge) Open() bool {
+	return c.Status == Pending ||
+		c.Status == Deferred && c.Reason != ReasonOperator && c.Reason != ReasonAgent
+}
+
 const PersistentWindowsRequired = 3
 
 // Who reviewed a candidate.

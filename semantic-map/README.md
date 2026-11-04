@@ -607,6 +607,10 @@ candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}
 that is not an end, the answer is `400` and the candidate stays pending. A confirmation whose
 declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
 a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
+`confirm` takes a pending candidate or one the proposer deferred (`cap`, `untested`,
+`grouped`, `bar`, `weakened`); one the operator or the agent deferred or rejected answers
+an error. The review loop's rules read the same set, so a composition candidate withdrawn
+before a cycle reached it is still confirmed by rule.
 
 ### Full endpoint table
 

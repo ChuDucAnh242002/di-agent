@@ -399,7 +399,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		if from != "" {
 			return fmt.Errorf("association %q cannot specify a direction", candidateID)
 		}
-		cs, err := m.proposer.GetCandidates()
+		cs, err := m.proposer.GetHistory()
 		if err != nil {
 			return err
 		}

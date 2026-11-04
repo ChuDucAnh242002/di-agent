@@ -47,7 +47,14 @@ func (m *fakeMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return out, nil
 }
 
-func (m *fakeMap) CandidateHistory() ([]*types.CandidateEdge, error) { return m.PendingCandidates() }
+func (m *fakeMap) CandidateHistory() ([]*types.CandidateEdge, error) {
+	var out []*types.CandidateEdge
+	for _, c := range m.cands {
+		cp := *c
+		out = append(out, &cp)
+	}
+	return out, nil
+}
 
 func (m *fakeMap) settle(id string, s types.CandidateStatus, rv types.CandidateReview) error {
 	c := m.cands[id]

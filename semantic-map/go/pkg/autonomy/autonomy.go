@@ -316,16 +316,32 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	})
 	reviewed, waiting := 0, 0
 	r.down.decider, r.down.reasoner = false, false
-	// Tier 0 first, over every due candidate: a rule costs nothing and a model call a
-	// minute or more on a node, so what a rule settles never waits behind the models'
-	// queue, and does not count against their cap.
+	// Tier 0 first, over every open candidate that is due — pending, or deferred by the
+	// proposer: a rule costs nothing and a model call a minute or more on a node, so
+	// what a rule settles never waits behind the models' queue, and does not count
+	// against their cap. The proposer's deferrals are included because a cycle runs
+	// as long as its model calls take, and a candidate can be raised and withdrawn
+	// (its |r| weakened, the cap took it) between two cycles; a rule that holds by
+	// definition still holds.
+	history, err := r.m.CandidateHistory()
+	if err != nil {
+		r.failed(err)
+		return
+	}
 	settled := map[string]bool{}
-	for _, c := range due {
+	for _, c := range history {
 		if ctx.Err() != nil {
 			break
 		}
-		if _, ok := r.rules(Evidence{Candidate: *c}); !ok || !r.endsActive(c) {
+		if !c.Open() || !c.Review.Outdated(c) {
 			continue
+		}
+		o, ok := r.rules(Evidence{Candidate: *c})
+		if !ok || !r.endsActive(c) {
+			continue
+		}
+		if c.Status != types.Pending && !r.cfg.Level.permits(o.tier, o.action) {
+			continue // a suggestion is recorded on the queue, and a withdrawn candidate is not in it
 		}
 		if ok, err := r.review(ctx, c, pending); err == nil && ok {
 			settled[c.CandidateID] = true

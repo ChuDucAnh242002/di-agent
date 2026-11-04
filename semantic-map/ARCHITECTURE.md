@@ -2201,6 +2201,15 @@ probation or retirement policy. See the
 costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits
 behind the models' queue (on the case-study node a composition candidate waited an hour behind
 reasoning-tier reviews), and it does not count against `per_cycle`, which caps the models' work.
+Tier 0 reads the whole candidate history, not only the queue: a candidate the proposer itself
+deferred (`cap`, `untested`, `grouped`, `bar`, `weakened`) is still open to a rule, and only
+an operator's or the agent's deferral or rejection closes it. A cycle lasts as long as its model
+calls, two to three minutes on the case-study node, and a candidate can be raised and withdrawn
+inside one: in run-2026-10-21 the mem-squeeze composition pair was pending for 30 s, deferred as
+`weakened` (|r| 0.841 → 0.817) before the next cycle began, and never reviewed. The proposer's
+deferrals are choices about the queue, not judgements on the pair, and a part is a part of its
+whole whatever its `|r|` is now. At `suggest` a withdrawn candidate is left alone: a suggestion
+is a note on the queue, and it is not in the queue.
 
 **An outage is not a review.** A model that cannot answer — the server still loading, the
 network down, a request it refuses — leaves the candidate untouched: no decision, no
