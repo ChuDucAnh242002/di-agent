@@ -516,6 +516,32 @@ func TestAWorkloadThatLeftConfounds(t *testing.T) {
 	}
 }
 
+// A workload already silent at act took no part in the state the action was
+// priced from, so its retirement inside the settle window is not a departure —
+// even when the sweep has not yet marked it stale and the map still calls it
+// active.
+func TestAWorkloadStaleAtActDoesNotConfound(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1, "pod:c": 0.1}, evidence: true})
+	h.advance(h.m.StaleAfter() + time.Minute)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.4, h.now)
+	record(t, h.m, usage("pod:b"), "pod:b", 0.1, h.now)
+	h.act("pod:a")
+	if at := h.l.Status().InFlight.SharesAtAct; !near(at["pod:a"], 0.4) || !near(at["pod:b"], 0.1) {
+		t.Fatalf("shares at act %v; want the live workloads snapshotted", at)
+	}
+	if _, ok := h.l.Status().InFlight.SharesAtAct["pod:c"]; ok {
+		t.Fatalf("shares at act %v; pod:c was silent at act", h.l.Status().InFlight.SharesAtAct)
+	}
+	if err := h.m.RetireProperty(usage("pod:c"), "the pod was deleted", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h.run(2*time.Minute, 0.44)
+	c, _ := h.lastVerify().Inputs["confounded"].(map[string]any)
+	if c == nil || c["confounded"] != false {
+		t.Fatalf("confounded input %v; pod:c was stale at act, so its going is not a departure", h.lastVerify().Inputs["confounded"])
+	}
+}
+
 func TestAUsageEffectDoesNotScaleAMapPrediction(t *testing.T) {
 	var e effects
 	for range 10 {

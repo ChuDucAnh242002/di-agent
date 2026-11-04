@@ -99,12 +99,29 @@ func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 	return out
 }
 
+// sharesAtAct is the snapshot an action's outcome is later checked against:
+// workloadShares less every workload silent for longer than the map's StaleAfter
+// at now. The sweep marks a silent property stale only when it next runs, so a
+// share can still read active after its source has gone quiet; a workload already
+// silent at act took no part in the state the action was priced from, and its
+// retirement during the settle window is not a departure.
+func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float64 {
+	out := workloadShares(m, usage)
+	for s := range out {
+		if p, _ := m.Property(usage + "@" + s); now.Sub(p.LastObserved) > m.StaleAfter() {
+			delete(out, s)
+		}
+	}
+	return out
+}
+
 // movedSince lists, sorted, the workloads other than throttled whose share of
 // the node's usage (the descriptor's Usage) has moved since at was taken by more than step relative to their
 // share then and by more than 0.02 absolute. A workload live now and absent from
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
-// them.
+// them. at holds only the workloads live at act (sharesAtAct), so one already
+// silent then cannot leave.
 //
 // Rises are the exception. Capping a workload frees CPU, and the contended
 // workloads beside it take it up: that is the relief working, not something else
