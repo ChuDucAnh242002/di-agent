@@ -182,10 +182,66 @@ func Pearson(xs, ys []float64) (float64, bool) {
 	return sxy / math.Sqrt(sxx*syy), true
 }
 
+// EffectiveN is the window's effective sample size for its Pearson r, walking the
+// ring in arrival order (see EffectiveN).
+func (w *PairWindow) EffectiveN() float64 {
+	if w.capacity <= 0 || len(w.xs) < w.capacity || w.next == 0 {
+		return EffectiveN(w.xs, w.ys)
+	}
+	xs := append(slices.Clone(w.xs[w.next:]), w.xs[:w.next]...)
+	ys := append(slices.Clone(w.ys[w.next:]), w.ys[:w.next]...)
+	return EffectiveN(xs, ys)
+}
+
+// EffectiveN is how many independent pairs the correlation of two time-ordered series
+// rests on. Telemetry is autocorrelated: a reading mostly repeats the one before, so
+// n readings carry far less than n readings' evidence, and a p-value computed on n
+// calls chance co-movement significant (two independent AR(1) series at φ = 0.9 pass
+// p ≤ 0.05 about half the time over 120 readings). The lag-1 correction of Bartlett,
+// as used by Bretherton et al. (1999, J. Climate 12:1990), is
+//
+//	n_eff = n · (1 − r1x·r1y) / (1 + r1x·r1y)
+//
+// with r1 each series' lag-1 autocorrelation. It is exact for two AR(1) series and
+// the standard first approximation otherwise. The result is clamped to [3, n]: n
+// because a negative product (one series alternating) would otherwise claim more
+// evidence than there are readings, and 3 because Fisher's z needs n − 3 > 0 to say
+// anything — at the floor the p-value is 1. A window shorter than 3 keeps its length.
+func EffectiveN(xs, ys []float64) float64 {
+	n := float64(len(xs))
+	if len(xs) < 3 || len(xs) != len(ys) {
+		return n
+	}
+	rr := lag1(xs) * lag1(ys)
+	return math.Min(n, math.Max(3, n*(1-rr)/(1+rr)))
+}
+
+// lag1 is the sample lag-1 autocorrelation Σ(x_t−m)(x_{t+1}−m) / Σ(x_t−m)², 0 for a
+// constant series.
+func lag1(v []float64) float64 {
+	var m float64
+	for _, x := range v {
+		m += x
+	}
+	m /= float64(len(v))
+	var num, den float64
+	for i, x := range v {
+		den += (x - m) * (x - m)
+		if i > 0 {
+			num += (v[i-1] - m) * (x - m)
+		}
+	}
+	if den <= 1e-12 {
+		return 0
+	}
+	return num / den
+}
+
 // FisherPValue is the two-tailed p-value for Pearson r using the Fisher z-transform:
-// z = atanh(r)·sqrt(n−3), P = erfc(|z|/sqrt 2). Returns 1.0 when n < 4.
-func FisherPValue(r float64, n int) float64 {
-	if n < 4 {
+// z = atanh(r)·sqrt(n−3), P = erfc(|z|/sqrt 2). n is a float so an effective sample
+// size can be passed as it is (see EffectiveN). Returns 1.0 when n ≤ 3.
+func FisherPValue(r float64, n float64) float64 {
+	if n <= 3 {
 		return 1.0
 	}
 	if r >= 1 {
@@ -194,6 +250,6 @@ func FisherPValue(r float64, n int) float64 {
 	if r <= -1 {
 		r = -1 + 1e-12
 	}
-	z := math.Atanh(r) * math.Sqrt(float64(n-3))
+	z := math.Atanh(r) * math.Sqrt(n-3)
 	return math.Erfc(math.Abs(z) / math.Sqrt2)
 }

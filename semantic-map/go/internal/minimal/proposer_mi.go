@@ -1026,7 +1026,10 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	pv := 1.0 // a pair whose r is undefined was tested and showed nothing
 	if ok {
-		pv = stats.FisherPValue(r, buf.Len())
+		// On the window's effective sample size, not its length: consecutive readings
+		// of telemetry mostly repeat each other, and a p-value on the raw count is
+		// optimistic enough that the Benjamini–Hochberg bar stops being a rate.
+		pv = stats.FisherPValue(r, buf.EffectiveN())
 	}
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)

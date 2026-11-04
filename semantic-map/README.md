@@ -151,9 +151,10 @@ semantic-map/
     │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
     │   ├── stats/              Shared estimator primitives (concrete, NOT a contract)
-    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + FisherPValue —
+    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + EffectiveN + FisherPValue —
     │   │   │                   the one estimator statemap and the MI proposer both use
-    │   │   └── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   ├── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   └── effective_n_test.go  Lag-1 effective sample size: AR(1) false-positive share, white noise, ring order
     │   ├── ingest/client/      Wire face of the sample boundary for applications
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
@@ -250,7 +251,7 @@ semantic-map/
     │       │                                           state model)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
-    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via map.proposer.enabled)
+    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values on the effective sample size; default via map.proposer.enabled)
     │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via map.tuner: true)
