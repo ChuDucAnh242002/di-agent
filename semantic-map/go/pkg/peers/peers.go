@@ -250,25 +250,27 @@ type ActionCost struct {
 	GraphPathUsed   []string `json:"GraphPathUsed"`
 }
 
-// OffloadRequest is the body sent to a peer's /offload endpoint.
+// OffloadRequest is the body sent to a peer's /offload endpoint: would the peer take
+// this workload. Workload optionally names the subject; CPUCores and MemoryBytes are
+// the declared demand, which the peer uses when its own map has not seen it.
 type OffloadRequest struct {
-	TaskType           string   `json:"task_type"`
-	SourceNodeID       string   `json:"source_node_id"`
-	DataSizeBytes      int64    `json:"data_size_bytes"`
-	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
-	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
+	SourceNodeID string  `json:"source_node_id"`
+	Workload     string  `json:"workload,omitempty"`
+	CPUCores     float64 `json:"cpu_cores"`
+	MemoryBytes  float64 `json:"memory_bytes"`
 }
 
-// OffloadResponse is the body returned by a peer's /offload endpoint.
-// Accepted indicates the peer believes it can execute within the requested
-// budgets. ExpectedLatency / ExpectedResourceCost report the peer's own cost
-// estimate so the source agent can record the outcome (and adjust trust).
+// OffloadResponse is the peer's answer, from its own map. Basis says whether the
+// demand was measured there or declared; DecisionID reproduces the answer through
+// the peer's GET /state/decisions/{id}; CPUAfter and MemoryAfter are the node shares
+// the peer projected.
 type OffloadResponse struct {
-	Accepted             bool    `json:"accepted"`
-	Reason               string  `json:"reason,omitempty"`
-	ExpectedLatency      float64 `json:"expected_latency"`
-	ExpectedResourceCost float64 `json:"expected_resource_cost"`
-	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
+	Accepted    bool    `json:"accepted"`
+	Reason      string  `json:"reason"`
+	Basis       string  `json:"basis,omitempty"`
+	DecisionID  string  `json:"decision_id"`
+	CPUAfter    float64 `json:"cpu_after"`
+	MemoryAfter float64 `json:"memory_after"`
 }
 
 // Cost asks the peer at peerURL what it would cost to run taskType for
@@ -359,8 +361,8 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 
 // Offload posts an OffloadRequest to the peer and returns its response.
 // Used by the trust-update path: a 2xx with Accepted=true is the signal to
-// nudge the peer's trust upward; a 2xx with Accepted=false (peer's own
-// budget-violation reason) is informational and leaves trust unchanged.
+// nudge the peer's trust upward; a 2xx with Accepted=false (the peer's own
+// reason for declining) is informational and leaves trust unchanged.
 func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadRequest) (*OffloadResponse, error) {
 	if req == nil {
 		return nil, errors.New("peers.Client.Offload: nil request")

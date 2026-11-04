@@ -298,25 +298,25 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req.TaskType != "pod-scheduling" {
-			t.Errorf("decoded TaskType=%q", req.TaskType)
+		if req.CPUCores != 0.5 || req.SourceNodeID != "node_B" {
+			t.Errorf("decoded %+v", req)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(OffloadResponse{
-			Accepted:             true,
-			Reason:               "ok",
-			ExpectedLatency:      9.0,
-			ExpectedResourceCost: 0.3,
+			Accepted:   true,
+			Reason:     "ok",
+			Basis:      "declared",
+			DecisionID: "adm-1-abc",
+			CPUAfter:   0.6,
 		})
 	}))
 	defer srv.Close()
 
 	c := NewClient(2 * time.Second)
 	resp, err := c.Offload(context.Background(), srv.URL, &OffloadRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_B",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: 5000,
+		SourceNodeID: "node_B",
+		CPUCores:     0.5,
+		MemoryBytes:  1 << 28,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -324,8 +324,8 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 	if !resp.Accepted {
 		t.Error("Accepted: got false, want true")
 	}
-	if resp.ExpectedLatency != 9.0 {
-		t.Errorf("ExpectedLatency: got %.3f, want 9.0", resp.ExpectedLatency)
+	if resp.DecisionID != "adm-1-abc" || resp.CPUAfter != 0.6 {
+		t.Errorf("decoded %+v", resp)
 	}
 }
 

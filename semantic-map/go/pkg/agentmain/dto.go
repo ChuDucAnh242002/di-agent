@@ -208,25 +208,27 @@ type SetTrustRequest struct {
 	Value float64 `json:"value"`
 }
 
-// OffloadHTTPRequest is the body of POST /offload — the peer-side receiver of
-// an offload proposal. Named with the HTTP prefix so it does not collide with
+// OffloadHTTPRequest is the body of POST /offload: another node asking whether this
+// one would take a workload. Named with the HTTP prefix so it does not collide with
 // pkg/peers.OffloadRequest (this is the server-side DTO; that is the
-// outbound-client DTO).
+// outbound-client DTO). Workload optionally names the subject; CPUCores and
+// MemoryBytes are the declared demand, used when this node's map has not seen it.
 type OffloadHTTPRequest struct {
-	TaskType           string   `json:"task_type"`
-	SourceNodeID       string   `json:"source_node_id"`
-	DataSizeBytes      int64    `json:"data_size_bytes"`
-	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
-	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
+	SourceNodeID string  `json:"source_node_id"`
+	Workload     string  `json:"workload,omitempty"`
+	CPUCores     float64 `json:"cpu_cores"`
+	MemoryBytes  float64 `json:"memory_bytes"`
 }
 
-// OffloadHTTPResponse is the body of POST /offload — the peer's decision.
+// OffloadHTTPResponse is the body of POST /offload: this node's answer, from its
+// own map. DecisionID reproduces it through GET /state/decisions/{id}.
 type OffloadHTTPResponse struct {
-	Accepted             bool    `json:"accepted"`
-	Reason               string  `json:"reason,omitempty"`
-	ExpectedLatency      float64 `json:"expected_latency"`
-	ExpectedResourceCost float64 `json:"expected_resource_cost"`
-	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
+	Accepted    bool    `json:"accepted"`
+	Reason      string  `json:"reason"`
+	Basis       string  `json:"basis,omitempty"`
+	DecisionID  string  `json:"decision_id"`
+	CPUAfter    float64 `json:"cpu_after"`
+	MemoryAfter float64 `json:"memory_after"`
 }
 
 // ── Mappers ───────────────────────────────────────────────────────────────────

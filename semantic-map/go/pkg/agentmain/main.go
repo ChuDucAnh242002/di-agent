@@ -353,6 +353,9 @@ func Main() {
 		log.Fatalf("autonomy: %v", err)
 	}
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
+	// The levers' enter levels are where relief would act, whether or not relief runs
+	// here: admission answers by the same bar either way.
+	registerOffloadRoute(mux, state, cfg.Loops.Relief.Levers)
 	registerAutonomyRoutes(mux, reviewer)
 	// CgroupRoot does not re-check the entries: collectors.Build above has already
 	// refused a list whose cgroup config does not decode.

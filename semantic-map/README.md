@@ -652,7 +652,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
 | POST | `/peers/{id}/trust`                 | `{value}`                                                | Step 4.9 |
-| POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
+| POST | `/offload`                          | `{source_node_id, workload?, cpu_cores, memory_bytes}` — would this node take the workload, answered from its own map: `{accepted, reason, basis, decision_id, cpu_after, memory_after}`. `basis` is `measured` when the map holds `workload` (its observed `cpu_utilization@` and `memory_utilization@` are the demand; still active here answers "already running") and `declared` otherwise (cores over `cpu_cores`, bytes over `memory_total`). Declined when the node is past a relief lever's `enter`, or when CPU or memory would pass 0.90 of the node. `GET /state/decisions/{decision_id}` reproduces it; `400` when a demand is negative or not finite | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
 | GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
@@ -1417,9 +1417,9 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 | `POST` | `/peers` | `{url,note?}` | `200 PeerDTO` (idempotent on URL) |
 | `DELETE` | `/peers/{id}` | — | `204` |
 | `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
-| `POST` | `/offload` | `{task_type,source_node_id,data_size_bytes,latency_budget_ms,energy_budget_joules?}` | `200 {accepted,reason,expected_latency,expected_energy}` |
+| `POST` | `/offload` | `{source_node_id,workload?,cpu_cores,memory_bytes}` | `200 {accepted,reason,basis,decision_id,cpu_after,memory_after}` |
 
-`/offload` is the peer side of the protocol: it runs `CostOfAction` on the local graph and accepts when the result fits the requested budgets. It does not actually schedule any work — that is a P7 (execution) concern. The expected latency/energy in the response let the source agent record an outcome and adjust trust.
+`/offload` is the peer side of the protocol: the node answers from its own state map (`statemap.Map.Admit`) whether it would take the workload, and journals the answer as a decision. The requester only relays; it never decides. It does not schedule any work — that is a P7 (execution) concern. See [the endpoint table](#full-endpoint-table) for the criterion.
 
 These three endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 

@@ -483,7 +483,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
-| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and the offload accept/reject path end to end |
+| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and the map-grounded admission path end to end |
 
 A separate verification (`pkg/profiles/build_priors_test.go::TestBuildSeedsStructureAndNoMagnitude`)
 asserts the inverse of what its predecessor did: for every KD in `prior_weights.json`
@@ -1640,7 +1640,7 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
 3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
 
-Outcome-driven trust updates (boost on successful offload accept, penalty on energy/latency overrun) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but the daemon itself does not yet call it automatically on `/offload` responses. Promoting that to an automatic pipeline is the obvious P7 next step.
+Outcome-driven trust updates (boost on an accepted offload, penalty on a declined one) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but the daemon itself does not yet call it automatically on `/offload` responses. Promoting that to an automatic pipeline is the obvious P7 next step.
 
 ### Why `RecommendPeer` uses trust-weighted savings
 
@@ -1653,14 +1653,41 @@ Two candidate ranking functions:
 
 We chose the latter. The product collapses two dimensions into a single ordering, which is good enough for v1 routing decisions. A future profile that needs finer control (e.g. Pareto frontiers when latency and energy both matter) can build a richer ranker without changing the contract.
 
-### `/offload` is the decision interface, not a scheduler
+### Admission: `/offload` answers from the map
 
-The `POST /offload` handler computes `CostOfAction` locally and answers *would I accept this task within these budgets?* It does not run anything. Two reasons:
+A node decides whether it would take a workload from its own state map
+(`statemap.Map.Admit`, `pkg/statemap/admit.go`); the requester relays the question and
+never decides. The answer is a decision: accepted or declined, a reason, and a
+decision id that `GET /state/decisions/{id}` reproduces with the facts, properties and
+thresholds it read. Nothing is scheduled. Execution needs a workload runtime the map
+does not own, and keeping the answer pure lets a requester ask several nodes before
+anything moves. Peers negotiating with these answers is P7.
 
-1. Execution requires a workload runtime (container manager, function-as-a-service, etc.) that the Semantic Map deliberately does not own. The map is the *brain*, not the *body*.
-2. Keeping the decision interface pure makes it cheap and idempotent. The source agent can poll multiple peers in parallel, pick a winner, and only then commit to actually moving work — entirely outside the Semantic Map's surface.
+**Demand: measured, else declared.** If the request names a subject the map holds
+(active or stale), its demand is what the map observed of it here:
+`cpu_utilization@<subject>` and `memory_utilization@<subject>`, already node shares.
+A subject still active is already counted in the node's own shares, so it is answered
+"already running" with no projection. Otherwise the demand is what the requester
+declares, cores over the `cpu_cores` fact and bytes over `memory_total`, and the
+decision says it was declared, not observed.
 
-The response carries `expected_latency` and `expected_energy` so the source agent can record an outcome, regardless of whether the actual offload executor ever exists.
+**Criterion: relief-based.** Accept only if taking the workload would not put the
+node where relief has to act. A node whose `cpu_contention_ratio` or
+`memory_contention_ratio` is already at its lever's `enter` declines outright. Then the
+node's `cpu_utilization` and `memory_utilization` plus the demand must stay at or below
+`1 - admitHeadroom` (a constant, 0.10): past it, a pod owed CPU or memory waits on what
+others hold, which is what relief relieves. A lever the spec does not have is a check
+skipped, with a caveat. A missing fact or an unobserved node share declines, naming it.
+
+**Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
+workload's own throttling, or the worst protected pod's memory stall), not a function
+of demand, so it cannot be projected for a workload that does not exist yet; and
+`assume` substitutes the value of a property already in the map, which a newcomer does
+not have. Admission therefore reads capacity headroom from the map's node shares and
+the machine's facts, through the same `DecisionBuilder`, so it is traceable the same way.
+
+The old answer, `CostOfAction` against latency and energy budgets, is gone: energy was
+never measured on this system. `/cost`, `/recommend` and `/simulate` remain as they were.
 
 ### Proof: the headline scenario
 
@@ -1668,7 +1695,7 @@ The response carries `expected_latency` and `expected_energy` so the source agen
 
 1. Pre-flight: print self-cost for A, B, C — assert `A < C < B`.
 2. `B.RecommendPeer` → must return A (highest trust-weighted savings).
-3. `B → A POST /offload` via `peers.Client` → A accepts within the budget.
+3. `B → A POST /offload` via `peers.Client`, declaring one core and 1 GiB → A admits it from its own map.
 4. B updates `Registry.UpdateTrust(A.ID, +0.10)` and prints the before/after table.
 
 The verbose output narrates each step. If the scenario passes with A chosen and trust incremented, the coordination claim is proven end-to-end. The HTTP routes, the CLI subcommand, and the operator-facing surface are plumbing around this core demo.
