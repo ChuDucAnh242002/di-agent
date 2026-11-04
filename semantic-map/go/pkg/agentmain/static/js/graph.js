@@ -27,13 +27,29 @@
 //
 // A highlight is what the drawer points at — a candidate's two ends, the properties a
 // decision read — drawn over the rest, which is dimmed.
+//
+// A workload's box can be FOLDED into one pill, and by default every workload's is:
+// a demo map of a few workloads, every property's relationships drawn one by one, is
+// a tangle. The pill carries the workload's name, how many properties it holds and
+// what the agent has done to it. Its relationships are BUNDLED, one edge per thing
+// they now run between — another folded workload, a property of an open one, or the
+// machine's box as a whole, whose border the bundle ends on. A bundle has its own
+// channels: the count at the midpoint in place of the provenance dot, colour the
+// sign that dominates by strength, width the strongest member, opacity the most
+// confident — known, signed members only — and no arrow, since it can run both ways.
+// A box holding what is selected or pointed at is never folded, nor is any while a
+// search narrows the canvas. Folding is drawing only: the inspector and the drawer
+// still carry every relationship.
 
 import { effective, subjectOf, subjectName, shortLabel, fmt, escapeHTML, machineSummary } from './model.js';
 import { Force, footprint, HULL_PAD, HULL_LABEL } from './force.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 
-/** The enclosure of node-level properties. Not a subject id: those are kind:identity. */
+/**
+ * The enclosure of node-level properties, and the end a bundle runs to when it joins
+ * a folded workload to them. Not a subject id: those are kind:identity.
+ */
 export const MACHINE = '@machine';
 const el = (name, attrs = {}) => {
   const n = document.createElementNS(NS, name);
@@ -52,6 +68,114 @@ const LABEL_BELOW = 30;
 // "unobserved".
 const GLYPH = 6.6;
 const labelHalfWidth = (p, r) => Math.max(r, (Math.max(shortLabel(p.id).length, 10) * GLYPH) / 2 + 3);
+
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)');
+
+// A folded workload box is a node of the layout with this prefix on its box id.
+const BOX = 'box:';
+const boxNode = (box) => BOX + box;
+// Half the height of a folded box's pill.
+const R_BOX = 20;
+// What a folded workload's pill says: its name, and how many properties it holds
+// with what the agent has done to it.
+function boxLabel(model, box, count) {
+  const badges = [model.throttled(box) && 'throttled', model.frozen(box) && 'frozen'].filter(Boolean);
+  const sub = `${count} ${count === 1 ? 'property' : 'properties'}${badges.length ? ` · ${badges.join(' · ')}` : ''}`;
+  return { name: model.nameOf(box), sub, badged: badges.length > 0 };
+}
+// The pill's half-width: room for the wider of its two lines (the name in 11px
+// monospace, the subtitle in 10px proportional at ~5.6px a glyph).
+const boxHalfWidth = ({ name, sub }) => Math.max(48, (name.length * GLYPH) / 2 + 16, (sub.length * 5.6) / 2 + 16);
+
+/** A folded workload's glyph: a pill with its name and what it holds. */
+function makeBox(box) {
+  const g = el('g', { 'data-box': box, class: 'node folded', style: 'cursor:pointer' });
+  const rect = el('rect', {
+    y: -R_BOX, height: 2 * R_BOX, rx: R_BOX, fill: 'var(--surface-2)',
+    stroke: 'var(--border-strong)', 'stroke-width': 1.2, 'stroke-dasharray': '4 3',
+  });
+  const name = el('text', {
+    y: -3, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 600,
+    fill: 'var(--ink-secondary)', 'font-family': 'ui-monospace, monospace',
+  });
+  const sub = el('text', { y: 11, 'text-anchor': 'middle', 'font-size': 10, fill: 'var(--ink-muted)' });
+  g.append(rect, name, sub);
+  return { g, rect, name, sub, count: 0 };
+}
+// Above this many properties moving, or edges learning, on one poll, none is
+// marked: a cue that marks most of the canvas points at nothing, and still
+// repaints all of it.
+const CUE_MAX = 40;
+
+// Sets attributes, removing those given as null, and leaves alone any already at
+// that value: repainting a few hundred kept elements every poll should cost what
+// changed, not a style invalidation for each one.
+function set(n, attrs) {
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined) {
+      if (n.hasAttribute(k)) n.removeAttribute(k);
+    } else if (n.getAttribute(k) !== String(v)) {
+      n.setAttribute(k, v);
+    }
+  }
+}
+function text(n, s) { if (n.textContent !== s) n.textContent = s; }
+
+/** A property's glyph, without anything that changes from poll to poll. */
+function makeNode(p) {
+  const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
+  const g = el('g', { 'data-node': p.id, class: 'node', style: 'cursor:pointer' });
+  const halo = el('circle', { r: r + 6, fill: 'none', stroke: 'var(--sign-pos)', 'stroke-width': 2, opacity: 0 });
+  const ring = el('circle', { r: r + 5, fill: 'none', stroke: 'var(--prov-discovered)', 'stroke-width': 3, display: 'none' });
+  const disc = el('circle', { r, class: 'disc', fill: 'var(--surface-1)' });
+  g.append(halo, ring, disc);
+  let inner;
+  if (p.kind === 'derived') {
+    // Ring plus core: a summary of other properties, never stored on its own.
+    inner = el('circle', { r: r - 6, fill: 'none', 'stroke-width': 1, opacity: 0.5 });
+    g.append(inner, el('circle', { r: 3.5, fill: 'var(--ink-secondary)' }));
+  } else {
+    inner = el('circle', { r: 4.5, fill: 'var(--ink-secondary)' });
+    g.append(inner);
+  }
+  const arc = el('path', {
+    fill: 'none', stroke: 'var(--ink-primary)', 'stroke-width': 3,
+    'stroke-linecap': 'round', opacity: 0.85,
+  });
+  // Outlined in the surface colour and painted stroke-first, so a label that
+  // lands over an edge or another label stays legible instead of blending.
+  const label = el('text', {
+    y: r + 14, 'text-anchor': 'middle', 'font-size': 11,
+    fill: 'var(--ink-secondary)', 'font-family': 'ui-monospace, monospace',
+    stroke: 'var(--page)', 'stroke-width': 3.5, 'paint-order': 'stroke',
+    'stroke-linejoin': 'round',
+  });
+  const value = el('text', {
+    y: r + 26, 'text-anchor': 'middle', 'font-size': 10.5,
+    fill: 'var(--ink-muted)', 'font-variant-numeric': 'tabular-nums',
+    stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke',
+    'stroke-linejoin': 'round',
+  });
+  const pin = el('circle', { r: 2.5, cx: r - 3, cy: -(r - 3), fill: 'var(--ink-muted)', display: 'none' });
+  g.append(arc, label, value, pin);
+  return { kind: p.kind, r, g, halo, ring, disc, inner, arc, label, value, pin };
+}
+
+/** A relationship's edge, without anything that changes from poll to poll. */
+function makeEdge(id) {
+  const g = el('g', { 'data-edge': id, class: 'edge', style: 'cursor:pointer' });
+  // A transparent fat path under the visible one: a 2px line is not a hit target.
+  const hit = el('path', { fill: 'none', stroke: 'transparent', 'stroke-width': 14 });
+  const path = el('path', { fill: 'none', 'stroke-linecap': 'round' });
+  const dot = el('circle', { r: 4, stroke: 'var(--surface-1)', 'stroke-width': 2 });
+  const alarm = el('text', {
+    'font-size': 13, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+    fill: 'var(--status-critical)', 'font-weight': '700', display: 'none',
+  });
+  alarm.textContent = '!';
+  g.append(hit, path, dot, alarm);
+  return { kind: 'rel', g, hit, path, dot, alarm };
+}
 
 export class GraphView {
   constructor(svg, { onSelect, onHighlightCleared, tooltip }) {
@@ -73,6 +197,18 @@ export class GraphView {
     // otherwise left the remaining graph wherever the old frame put it.
     this.viewTouched = false;
     this.pendingFit = false;
+    // What is drawn, kept between polls: property id → glyph, relationship id → edge.
+    this.nodeEls = new Map();
+    this.relEls = new Map();
+    this.ghostEls = [];
+    this.edgeEls = [];
+    this.hullEls = [];
+    // Folded workload boxes: each drawn as one glyph, its relationships to the rest
+    // bundled. Every workload is folded unless `fold` is off or the operator opened it.
+    this.fold = true;
+    this.unfolded = new Set();   // box ids opened by hand
+    this.boxEls = new Map();     // box id → folded glyph
+    this.bundleEls = [];
 
     this.defs = el('defs');
     this.gRoot = el('g');
@@ -124,6 +260,12 @@ export class GraphView {
     const hitAt = (target) => {
       const nodeEl = target.closest?.('[data-node]');
       if (nodeEl) return { type: 'property', id: nodeEl.dataset.node };
+      const boxEl = target.closest?.('[data-box]');
+      if (boxEl) return { type: 'box', id: boxEl.dataset.box };
+      const foldEl = target.closest?.('[data-fold]');
+      if (foldEl) return { type: 'fold', id: foldEl.dataset.fold };
+      const bundleEl = target.closest?.('[data-bundle]');
+      if (bundleEl) return { type: 'bundle', ends: bundleEl.dataset.bundle.split('\u0001') };
       const edgeEl = target.closest?.('[data-edge]');
       if (edgeEl) return { type: 'relationship', id: edgeEl.dataset.edge };
       const hullEl = target.closest?.('[data-hull]');
@@ -136,8 +278,8 @@ export class GraphView {
       const hit = hitAt(e.target);
       press = { x: e.clientX, y: e.clientY, hit, moved: false };
 
-      if (hit?.type === 'property') {
-        const n = this.force.at(hit.id);
+      if (hit?.type === 'property' || hit?.type === 'box') {
+        const n = this.force.at(hit.type === 'box' ? boxNode(hit.id) : hit.id);
         if (n) {
           dragging = { n, wasPinned: n.pinned };
           n.pinned = true;
@@ -208,7 +350,26 @@ export class GraphView {
         const hit = press.hit;
         // A click on empty canvas lets go of what the drawer pointed at, too.
         if (!hit && this.highlighted) this.highlight(null);
-        this.select(hit?.type === 'hull' ? (hit.id === MACHINE ? { type: 'machine', id: MACHINE } : null) : hit);
+        if (hit?.type === 'box' || hit?.type === 'bundle') {
+          // A folded workload opens; a bundle opens whichever of its ends is folded.
+          for (const id of hit.type === 'box' ? [hit.id] : hit.ends) {
+            if (id.startsWith(BOX)) this.unfolded.add(id.slice(BOX.length));
+            else if (hit.type === 'box') this.unfolded.add(id);
+          }
+          this.render(this.lastModel);
+        } else if (hit?.type === 'fold') {
+          // An open workload's fold control. A box held open by what is selected or
+          // pointed at folds only once that is let go of, so this lets go of it.
+          this.unfolded.delete(hit.id);
+          if (!this.folded(this.lastModel, this.visible(this.lastModel)).has(hit.id)) {
+            if (this.highlighted) this.highlight(null);
+            this.select(null);
+          } else {
+            this.render(this.lastModel);
+          }
+        } else {
+          this.select(hit?.type === 'hull' ? (hit.id === MACHINE ? { type: 'machine', id: MACHINE } : null) : hit);
+        }
       }
       press = null;
       panning = null;
@@ -334,6 +495,13 @@ export class GraphView {
     this.applyTransform();
   }
 
+  /** Fold every workload box, or open them all. */
+  setFold(on) {
+    this.fold = on;
+    this.unfolded.clear();
+    if (this.lastModel) this.render(this.lastModel);
+  }
+
   setFilter(patch) {
     Object.assign(this.filter, patch);
     if (this.lastModel) this.render(this.lastModel);
@@ -356,6 +524,36 @@ export class GraphView {
       || (p.unit || '').toLowerCase().includes(needle));
   }
 
+  /**
+   * The workload boxes drawn folded. Not the machine's — it is what the map is of —
+   * and none while a search narrows the canvas, since what it found is the point.
+   * A box holding what is selected or pointed at is open, so nothing the operator
+   * is looking at is ever inside a glyph.
+   */
+  folded(model, props) {
+    const out = new Set();
+    if (!this.fold || this.filter.text.trim()) return out;
+    for (const p of props) {
+      const box = model.boxOf(p);
+      if (box && !this.unfolded.has(box)) out.add(box);
+    }
+    const open = (id) => {
+      const p = id && model.property(id);
+      if (p) out.delete(model.boxOf(p));
+    };
+    if (this.selected?.type === 'property') open(this.selected.id);
+    if (this.selected?.type === 'relationship') {
+      const r = model.relationship(this.selected.id);
+      open(r?.from); open(r?.to);
+    }
+    for (const id of this.highlighted?.nodes || []) open(id);
+    for (const id of this.highlighted?.edges || []) {
+      const r = model.relationship(id);
+      open(r?.from); open(r?.to);
+    }
+    return out;
+  }
+
   // -- render ---------------------------------------------------------------
 
   render(model, { refit = false } = {}) {
@@ -363,18 +561,73 @@ export class GraphView {
     const props = this.visible(model);
     const ids = new Set(props.map((p) => p.id));
 
-    for (const id of model.changed) this.pulses.set(id, Date.now());
+    if (model.changed.size <= CUE_MAX) for (const id of model.changed) this.pulses.set(id, Date.now());
 
-    const nodes = props.map((p) => {
-      const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
-      return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: model.boxOf(p) || MACHINE };
-    });
+    // Which boxes are folded, and what stands in for each property: itself, or its
+    // folded box's glyph.
+    const folded = this.folded(model, props);
+    const boxOf = new Map(props.map((p) => [p.id, model.boxOf(p)]));   // null: the machine's
+    const rep = new Map(props.map((p) => [p.id, folded.has(boxOf.get(p.id)) ? BOX + boxOf.get(p.id) : p.id]));
+    const shown = props.filter((p) => rep.get(p.id) === p.id);
+    const boxes = new Map();   // box id → its properties
+    for (const p of props) {
+      if (rep.get(p.id) === p.id) continue;
+      const box = boxOf.get(p.id);
+      if (!boxes.has(box)) boxes.set(box, []);
+      boxes.get(box).push(p);
+    }
+    const near = (id) => (this.force.at(id) ? id : undefined);
 
-    const rels = model.relationships.filter((r) => ids.has(r.from) && ids.has(r.to));
-    const members = model.memberships().filter((m) => ids.has(m.from) && ids.has(m.to));
+    const nodes = [
+      ...shown.map((p) => {
+        const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
+        const box = boxOf.get(p.id);
+        return { id: p.id, r, hw: labelHalfWidth(p, r), below: LABEL_BELOW, group: box || MACHINE,
+          near: box ? near(BOX + box) : undefined };
+      }),
+      ...[...boxes].map(([box, members]) => ({
+        id: BOX + box, r: R_BOX, hw: boxHalfWidth(boxLabel(model, box, members.length)), below: 0,
+        near: members.map((p) => near(p.id)).find(Boolean),
+      })),
+    ];
+
+    // A relationship between two properties on screen is drawn as itself; one that
+    // reaches into a folded box joins the bundle between the two things it now runs
+    // between, and one inside a folded box is not drawn. Between a folded workload
+    // and the machine's own properties that is ONE bundle, to the machine's box:
+    // a line to each machine property it touches redrew the tangle folding removes.
+    // The layout still pulls the glyph toward each of those properties.
+    const rels = [];
+    const bundles = new Map();
+    const pulls = new Set();
+    const machineOwn = (id) => id === rep.get(id) && !boxOf.get(id);
+    for (const r of model.relationships) {
+      if (!ids.has(r.from) || !ids.has(r.to)) continue;
+      let a = rep.get(r.from), b = rep.get(r.to);
+      if (a === r.from && b === r.to) { rels.push(r); continue; }
+      if (a === b) continue;
+      if (a.startsWith(BOX) && machineOwn(b)) { pulls.add(a + '\u0001' + b); b = MACHINE; }
+      else if (b.startsWith(BOX) && machineOwn(a)) { pulls.add(b + '\u0001' + a); a = MACHINE; }
+      const [from, to] = [a, b].sort();
+      const key = from + '\u0001' + to;
+      if (!bundles.has(key)) bundles.set(key, { key, from, to, rels: [] });
+      bundles.get(key).rels.push(r);
+    }
+    const memberKeys = new Set();
+    const members = [];
+    for (const m of model.memberships()) {
+      if (!ids.has(m.from) || !ids.has(m.to)) continue;
+      const from = rep.get(m.from), to = rep.get(m.to);
+      if (from === to || memberKeys.has(from + '\u0001' + to)) continue;
+      memberKeys.add(from + '\u0001' + to);
+      members.push({ from, to });
+    }
 
     const links = [
       ...rels.map((r) => ({ source: r.from, target: r.to, distance: 210 })),
+      ...[...bundles.values()].filter((b) => b.from !== MACHINE && b.to !== MACHINE)
+        .map((b) => ({ source: b.from, target: b.to, distance: 210 })),
+      ...[...pulls].map((k) => { const [source, target] = k.split('\u0001'); return { source, target, distance: 260 }; }),
       ...members.map((m) => ({ source: m.from, target: m.to, distance: 155 })),
     ];
 
@@ -386,14 +639,24 @@ export class GraphView {
       const box = this.svg.getBoundingClientRect();
       if (box.width && box.height) this.force.size(box.width, box.height);
     }
-    const topologyChanged = this.force.sync(nodes, links);
-    if (topologyChanged) {
+    const changed = this.force.sync(nodes, links);
+    // Whether the properties themselves came or went, as against a workload folding
+    // or opening: that only moves what is drawn, and the operator who clicked it
+    // should not have the canvas re-laid out and re-framed under them.
+    const propKeys = [...ids].sort().join('\u0001');
+    const mapChanged = propKeys !== this.propKeys;
+    this.propKeys = propKeys;
+    const topologyChanged = mapChanged || changed.fresh || (changed.links && !changed.nodes);
+    if (mapChanged || changed.fresh) {
       // Settle synchronously. The first layout is run to completion so the first
       // painted frame is the real structure; later admissions get a short warm so
-      // the newcomer finds its place without rearranging everything around it.
+      // the newcomer finds its place without rearranging everything around it. A
+      // change of relationships alone is left to the animation: the properties are
+      // already placed, and warming every poll's edge changes stalled the page.
+      this.force.reheat(0.75);
       this.force.prewarm(this.fittedOnce ? 40 : 300);
     }
-    this.draw(model, props, rels, members);
+    this.draw(model, shown, rels, members, boxes, [...bundles.values()]);
     this.position();
     if ((refit || (topologyChanged && !this.fittedOnce)) && props.length && this.fit()) {
       this.fittedOnce = true;
@@ -408,12 +671,18 @@ export class GraphView {
     this.start();
   }
 
+  /**
+   * The animation loop. Geometry is recomputed only while the layout moves; a
+   * settled layout with properties still pulsing touches their halos and nothing
+   * else, since every value moves on every poll and re-laying every edge for each
+   * pulse kept the page busy between polls.
+   */
   start() {
     if (this.raf) return;
     const step = () => {
       const moving = this.force.tick();
-      this.position();
-      const pulsing = [...this.pulses.values()].some((t) => Date.now() - t < 1400);
+      if (moving) this.position();
+      const pulsing = this.pulse();
       if (!moving && this.pendingFit) {
         this.pendingFit = false;
         if (!this.viewTouched) this.fit();
@@ -427,15 +696,22 @@ export class GraphView {
     this.raf = requestAnimationFrame(step);
   }
 
-  /** Rebuild the DOM for the current data. Positions are applied separately. */
-  draw(model, props, rels, members) {
+  /**
+   * Bring the DOM up to date with the current data. Positions are applied separately.
+   *
+   * Properties, relationships and folded workloads' pills are kept by id between
+   * polls and repainted in place. Rebuilt from scratch, a map of a few hundred
+   * relationships created and discarded thousands of elements on every poll.
+   * Enclosures, membership lines, bundles and would-be edges are few, and are rebuilt.
+   */
+  draw(model, props, rels, members, boxes, bundles) {
     const ids = new Set(props.map((p) => p.id));
     this.gHulls.replaceChildren();
     this.gMembers.replaceChildren();
-    this.gEdges.replaceChildren();
-    this.gNodes.replaceChildren();
-    this.nodeEls = new Map();
-    this.edgeEls = [];
+    for (const e of this.ghostEls) e.path.remove();
+    for (const e of this.bundleEls) e.g.remove();
+    this.ghostEls = [];
+    this.bundleEls = [];
     this.hullEls = [];
 
     const hl = this.highlighted;
@@ -453,6 +729,7 @@ export class GraphView {
       if (!bySubject.has(s)) bySubject.set(s, []);
       bySubject.get(s).push(p.id);
     }
+    const pinnedBoxes = new Set();
     for (const [subject, memberIDs] of bySubject) {
       const machine = subject === MACHINE;
       const g = el('g', { class: 'hull', 'data-hull': subject, style: 'cursor:grab' });
@@ -496,18 +773,37 @@ export class GraphView {
         }
       }
       g.append(rect, label);
+      // An open workload folds from its own control, top right, so that a click
+      // on the box still means what it always has and a double-click releases it.
+      let fold = null;
+      if (!machine && this.fold) {
+        fold = el('g', { 'data-fold': subject, class: 'hull-fold', style: 'cursor:pointer' });
+        const t = el('text', {
+          'text-anchor': 'end', 'font-size': 10.5, fill: 'var(--ink-muted)',
+          'font-family': 'ui-monospace, monospace',
+        });
+        t.textContent = 'fold −';
+        // Text takes no pointer events on this canvas; the rect is what is clicked.
+        fold.append(el('rect', { x: -46, y: -11, width: 50, height: 16, fill: 'transparent' }), t);
+        const tip = el('title');
+        tip.textContent = 'fold this workload into one glyph';
+        fold.append(tip);
+        g.append(fold);
+      }
       // Pinned when the operator put the box somewhere: every member stays.
       let pin = null;
       if (memberIDs.every((id) => this.force.at(id)?.pinned)) {
         pin = el('circle', { r: 3, fill: 'var(--ink-muted)' });
         g.append(pin);
+        pinnedBoxes.add(subject);
       }
       this.gHulls.append(g);
-      this.hullEls.push({ subject, memberIDs, rect, label, pin });
+      this.hullEls.push({ subject, memberIDs, rect, label, pin, fold });
     }
 
     // Membership: a derived property is recomputed from these. Hairline and
     // arrowless, so it cannot be mistaken for an influence.
+    const memberEls = [];
     for (const m of members) {
       const path = el('path', {
         fill: 'none', stroke: 'var(--grid)', 'stroke-width': 1.5,
@@ -515,7 +811,7 @@ export class GraphView {
         opacity: hl && (dimmed(m.from) || dimmed(m.to)) ? 0.25 : null,
       });
       this.gMembers.append(path);
-      this.edgeEls.push({ kind: 'member', from: m.from, to: m.to, path, curve: 0 });
+      memberEls.push({ kind: 'member', from: m.from, to: m.to, path, curve: 0 });
     }
 
     // Relationships. Edges between the same two nodes are bowed apart so each is
@@ -524,64 +820,63 @@ export class GraphView {
     // edge running the other way — otherwise A→B at +b and B→A at −b would land
     // on one control point and draw the same curve.
     const pairIndex = new Map();
+    const live = new Set();
     for (const r of rels) {
       const pair = [r.from, r.to].sort();
       const key = pair.join('||');
       const n = pairIndex.get(key) || 0;
       pairIndex.set(key, n + 1);
       const bend = n === 0 ? 0.16 : -0.16 * n;
-      const curve = r.from === pair[0] ? bend : -bend;
 
-      const eff = effective(r);
-      const sign = r.sign < 0 ? 'neg' : 'pos';
-      const color = !eff.known ? 'var(--baseline)' : r.sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)';
-      const width = 1.5 + eff.value * 5.5;
-      // A floor on opacity: an edge that exists must remain visible even at the
-      // confidence it starts with, or the graph would appear to lose structure.
-      const opacity = eff.known ? 0.35 + Math.min(0.65, r.confidence * 0.65) : 0.4;
+      live.add(r.id);
+      let e = this.relEls.get(r.id);
+      if (!e) {
+        e = makeEdge(r.id);
+        this.gEdges.append(e.g);
+        this.relEls.set(r.id, e);
+      }
+      Object.assign(e, { rel: r, from: r.from, to: r.to, curve: r.from === pair[0] ? bend : -bend });
+      this.paintEdge(e, r, model, hl, dimmed);
+    }
+    for (const [id, e] of this.relEls) {
+      if (!live.has(id)) { e.g.remove(); this.relEls.delete(id); }
+    }
 
-      const g = el('g', { 'data-edge': r.id, class: 'edge', style: 'cursor:pointer' });
-      // Pointed at by id, or joining two highlighted properties; anything else dims.
-      if (hl && !hl.edges.has(r.id) && (dimmed(r.from) || dimmed(r.to))) g.setAttribute('opacity', 0.15);
-      // A transparent fat path under the visible one: a 2px line is not a hit target.
-      const hit = el('path', { fill: 'none', stroke: 'transparent', 'stroke-width': 14 });
+    // Bundles: the relationships between a folded workload and one counterpart, as
+    // one edge, the count riding at the midpoint. Colour, width and opacity come from
+    // the members with a known, signed strength only: colour the sign that dominates
+    // by strength, width the strongest, opacity the most confident. With none, the
+    // bundle is dashed as an unobserved edge is — or dotted, as an association is,
+    // when its members are associations. No arrow: a bundle can run both ways.
+    for (const b of bundles) {
+      let net = 0, strongest = 0, confidence = 0, known = false, assoc = false;
+      for (const r of b.rels) {
+        const eff = effective(r);
+        assoc ||= !!r.association;
+        if (!eff.known || r.association) continue;
+        known = true;
+        net += (r.sign < 0 ? -1 : 1) * eff.value;
+        strongest = Math.max(strongest, eff.value);
+        confidence = Math.max(confidence, r.confidence);
+      }
+      const g = el('g', { 'data-bundle': b.key, class: 'edge bundle', style: 'cursor:pointer' });
+      const hit = el('path', { fill: 'none', stroke: 'transparent', 'stroke-width': 16 });
       const path = el('path', {
-        fill: 'none', stroke: color, 'stroke-width': width,
-        'stroke-opacity': opacity, 'stroke-linecap': 'round',
-        'marker-end': r.association ? null : `url(#arrow-${eff.known ? sign : 'none'})`,
-        'stroke-dasharray': r.association ? '2 5' : eff.known ? null : '5 5',
+        fill: 'none', 'stroke-linecap': 'round',
+        stroke: !known ? 'var(--baseline)' : net < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)',
+        'stroke-width': 1.5 + strongest * 5.5,
+        'stroke-opacity': known ? 0.35 + Math.min(0.65, confidence * 0.65) : 0.4,
+        'stroke-dasharray': known ? null : assoc ? '2 5' : '5 5',
       });
-      if (model.relChanged.has(r.id)) {
-        path.setAttribute('class', 'flowing');
-        path.setAttribute('stroke-dasharray', '7 7');
-      }
-      if ((this.selected?.type === 'relationship' && this.selected.id === r.id) || hl?.edges.has(r.id)) {
-        path.setAttribute('stroke-width', width + 2.5);
-        path.setAttribute('stroke-opacity', 1);
-      }
-      g.append(hit, path);
-
-      // Provenance rides at the midpoint, with a ring so it reads on any backdrop.
-      const dot = el('circle', {
-        r: 4, fill: `var(--prov-${r.provenance})`,
-        stroke: 'var(--surface-1)', 'stroke-width': 2,
+      const count = el('text', {
+        'font-size': 10.5, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+        fill: 'var(--ink-secondary)', 'font-variant-numeric': 'tabular-nums',
+        stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke', 'stroke-linejoin': 'round',
       });
-      g.append(dot);
-
-      // A relationship the machine keeps contradicting is an alarm, not a weak
-      // edge: it reports zero strength, which otherwise reads as a quiet system.
-      let alarm = null;
-      if (r.sign_suspect) {
-        alarm = el('text', {
-          'font-size': 13, 'text-anchor': 'middle', 'dominant-baseline': 'central',
-          fill: 'var(--status-critical)', 'font-weight': '700',
-        });
-        alarm.textContent = '!';
-        g.append(alarm);
-      }
-
+      count.textContent = String(b.rels.length);
+      g.append(hit, path, count);
       this.gEdges.append(g);
-      this.edgeEls.push({ kind: 'rel', rel: r, from: r.from, to: r.to, path, hit, dot, alarm, curve });
+      this.bundleEls.push({ kind: 'bundle', bundle: b, from: b.from, to: b.to, g, path, hit, count, curve: 0 });
     }
 
     // A would-be edge — a candidate not yet confirmed — in the colour a discovered
@@ -595,132 +890,140 @@ export class GraphView {
         'marker-end': 'url(#arrow-hl)', 'marker-start': pr.undirected ? 'url(#arrow-hl)' : null,
       });
       this.gEdges.append(path);
-      this.edgeEls.push({ kind: 'ghost', from: pr.from, to: pr.to, path, curve: -0.22, both: pr.undirected });
+      this.ghostEls.push({ kind: 'ghost', from: pr.from, to: pr.to, path, curve: -0.22, both: pr.undirected });
     }
 
     // Properties.
     for (const p of props) {
-      const r = p.kind === 'derived' ? R_DERIVED : R_OBSERVED;
-      const g = el('g', { 'data-node': p.id, class: 'node', style: 'cursor:pointer' });
-      if (dimmed(p.id)) g.setAttribute('opacity', 0.22);
-
-      const statusStroke = p.status === 'stale' ? 'var(--status-serious)'
-        : p.status === 'retired' ? 'var(--ink-muted)' : 'var(--baseline)';
-
-      const halo = el('circle', {
-        r: r + 6, fill: 'none', stroke: 'var(--sign-pos)', 'stroke-width': 2, opacity: 0,
-      });
-      g.append(halo);
-
-      const disc = el('circle', {
-        r, fill: 'var(--surface-1)', stroke: statusStroke,
-        'stroke-width': p.status === 'retired' ? 1.2 : 1.6,
-        'stroke-dasharray': p.status === 'retired' ? '3 3' : null,
-        opacity: p.status === 'retired' ? 0.55 : 1,
-      });
-      g.append(disc);
-
-      if (p.kind === 'derived') {
-        // Ring plus core: a summary of other properties, never stored on its own.
-        g.append(el('circle', { r: r - 6, fill: 'none', stroke: statusStroke, 'stroke-width': 1, opacity: 0.5 }));
-        g.append(el('circle', { r: 3.5, fill: 'var(--ink-secondary)' }));
-      } else {
-        g.append(el('circle', { r: 4.5, fill: 'var(--ink-secondary)', opacity: p.n_observations ? 1 : 0.3 }));
+      let nd = this.nodeEls.get(p.id);
+      // The kind decides the glyph, so a property that changed kind is redrawn whole.
+      if (nd && nd.kind !== p.kind) { nd.g.remove(); nd = null; }
+      if (!nd) {
+        nd = makeNode(p);
+        this.gNodes.append(nd.g);
+        this.nodeEls.set(p.id, nd);
       }
-
-      // Value arc — only when a range was declared, and only once observed.
-      const arc = el('path', {
-        fill: 'none', stroke: 'var(--ink-primary)', 'stroke-width': 3,
-        'stroke-linecap': 'round', opacity: 0.85,
-      });
-      g.append(arc);
-
-      // Outlined in the surface colour and painted stroke-first, so a label that
-      // lands over an edge or another label stays legible instead of blending.
-      const label = el('text', {
-        y: r + 14, 'text-anchor': 'middle', 'font-size': 11,
-        fill: 'var(--ink-secondary)', 'font-family': 'ui-monospace, monospace',
-        stroke: 'var(--page)', 'stroke-width': 3.5, 'paint-order': 'stroke',
-        'stroke-linejoin': 'round',
-      });
-      label.textContent = shortLabel(p.id);
-      g.append(label);
-
-      const valueText = el('text', {
-        y: r + 26, 'text-anchor': 'middle', 'font-size': 10.5,
-        fill: 'var(--ink-muted)', 'font-variant-numeric': 'tabular-nums',
-        stroke: 'var(--page)', 'stroke-width': 3, 'paint-order': 'stroke',
-        'stroke-linejoin': 'round',
-      });
-      valueText.textContent = p.n_observations ? fmt.num(p.value, 3) : 'unobserved';
-      g.append(valueText);
-
+      nd.p = p;
       const box = model.boxOf(p) || MACHINE;
-      const boxPinned = props.every((q) => (model.boxOf(q) || MACHINE) !== box || this.force.at(q.id)?.pinned);
-      if (this.force.at(p.id)?.pinned && !boxPinned) {
-        g.append(el('circle', { r: 2.5, cx: r - 3, cy: -(r - 3), fill: 'var(--ink-muted)' }));
-      }
-
-      this.gNodes.append(g);
-      // A highlighted property wears a ring in the highlight's colour.
-      if (hl?.nodes.has(p.id)) {
-        g.insertBefore(el('circle', { r: r + 5, fill: 'none', stroke: 'var(--prov-discovered)', 'stroke-width': 3 }), disc);
-      }
-
-      this.nodeEls.set(p.id, { g, disc, arc, halo, p, r });
+      this.paintNode(nd, p, {
+        dimmed: dimmed(p.id),
+        highlighted: !!hl?.nodes.has(p.id),
+        // A box pinned whole wears one pin on the box, not one per member.
+        pinned: !!this.force.at(p.id)?.pinned && !pinnedBoxes.has(box),
+      });
+    }
+    for (const [id, nd] of this.nodeEls) {
+      if (!ids.has(id)) { nd.g.remove(); this.nodeEls.delete(id); }
     }
 
+    // Folded workloads: one glyph each, with the workload's name, how many of its
+    // properties it holds, and what the agent has done to it.
+    for (const [box, inside] of boxes) {
+      let bx = this.boxEls.get(box);
+      if (!bx) {
+        bx = makeBox(box);
+        this.gNodes.append(bx.g);
+        this.boxEls.set(box, bx);
+      }
+      const label = boxLabel(model, box, inside.length);
+      const hw = boxHalfWidth(label);
+      set(bx.rect, { x: -hw, width: 2 * hw });
+      set(bx.g, { opacity: hl ? 0.22 : null });
+      text(bx.name, label.name);
+      text(bx.sub, label.sub);
+      set(bx.sub, { fill: label.badged ? 'var(--status-serious)' : 'var(--ink-muted)' });
+      bx.count = inside.length;
+    }
+    for (const [box, bx] of this.boxEls) {
+      if (!boxes.has(box)) { bx.g.remove(); this.boxEls.delete(box); }
+    }
+
+    this.edgeEls = [...memberEls, ...this.relEls.values(), ...this.bundleEls, ...this.ghostEls];
     this.applyTransform();
+  }
+
+  /** Everything about a relationship's edge that is not where it is. */
+  paintEdge(e, r, model, hl, dimmed) {
+    const eff = effective(r);
+    const sign = r.sign < 0 ? 'neg' : 'pos';
+    const color = !eff.known ? 'var(--baseline)' : r.sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)';
+    const width = 1.5 + eff.value * 5.5;
+    // A floor on opacity: an edge that exists must remain visible even at the
+    // confidence it starts with, or the graph would appear to lose structure.
+    const opacity = eff.known ? 0.35 + Math.min(0.65, r.confidence * 0.65) : 0.4;
+    const selected = (this.selected?.type === 'relationship' && this.selected.id === r.id) || !!hl?.edges.has(r.id);
+
+    // Pointed at by id, or joining two highlighted properties; anything else dims.
+    set(e.g, { opacity: hl && !hl.edges.has(r.id) && (dimmed(r.from) || dimmed(r.to)) ? 0.15 : null });
+    set(e.path, {
+      stroke: color,
+      'stroke-width': selected ? width + 2.5 : width,
+      'stroke-opacity': selected ? 1 : opacity,
+      // An association has no direction to point and no strength the agent uses.
+      'marker-end': r.association ? null : `url(#arrow-${eff.known ? sign : 'none'})`,
+      'stroke-dasharray': r.association ? '2 5' : eff.known ? null : '5 5',
+    });
+    // Provenance rides at the midpoint, with a ring so it reads on any backdrop.
+    set(e.dot, { fill: `var(--prov-${r.provenance})` });
+    // A relationship the machine keeps contradicting is an alarm, not a weak
+    // edge: it reports zero strength, which otherwise reads as a quiet system.
+    set(e.alarm, { display: r.sign_suspect ? null : 'none' });
+
+    // An edge that gained paired observations since the last poll runs its dashes
+    // once, so learning is visible as it happens rather than only in a number. Once,
+    // not until the next poll: most edges gain pairs on most polls, and a canvas of
+    // edges running their dashes for good was repainted on every frame.
+    if (model.relChanged.has(r.id) && model.relChanged.size <= CUE_MAX && !REDUCED_MOTION.matches) {
+      e.path.animate(
+        [{ strokeDasharray: '7 7', strokeDashoffset: 0 }, { strokeDasharray: '7 7', strokeDashoffset: -28 }],
+        { duration: 1100 },
+      );
+    }
+  }
+
+  /** Everything about a property's glyph that is not where it is. */
+  paintNode(nd, p, { dimmed, highlighted, pinned }) {
+    const statusStroke = p.status === 'stale' ? 'var(--status-serious)'
+      : p.status === 'retired' ? 'var(--ink-muted)' : 'var(--baseline)';
+    const retired = p.status === 'retired';
+    const isSel = this.selected?.type === 'property' && this.selected.id === p.id;
+
+    set(nd.g, { opacity: dimmed ? 0.22 : null });
+    // A highlighted property wears a ring in the highlight's colour.
+    set(nd.ring, { display: highlighted ? null : 'none' });
+    set(nd.disc, {
+      stroke: isSel ? 'var(--sign-pos)' : statusStroke,
+      'stroke-width': isSel ? 3 : retired ? 1.2 : 1.6,
+      'stroke-dasharray': retired ? '3 3' : null,
+      opacity: retired ? 0.55 : 1,
+    });
+    if (nd.kind === 'derived') set(nd.inner, { stroke: statusStroke });
+    else set(nd.inner, { opacity: p.n_observations ? 1 : 0.3 });
+
+    // Value arc — only when a range was declared, and only once observed.
+    let arc = '';
+    if (p.range_declared && p.n_observations > 0) {
+      const [lo, hi] = p.range || [0, 1];
+      const span = hi - lo;
+      arc = arcPath(nd.r - 4, span > 0 ? Math.min(1, Math.max(0, (p.value - lo) / span)) : 0);
+    }
+    set(nd.arc, { d: arc });
+
+    text(nd.label, shortLabel(p.id));
+    text(nd.value, p.n_observations ? fmt.num(p.value, 3) : 'unobserved');
+    set(nd.pin, { display: pinned ? null : 'none' });
   }
 
   /** Move the existing DOM to wherever the simulation currently has it. */
   position() {
-    if (!this.nodeEls) return;
-    const now = Date.now();
-
     for (const [id, nd] of this.nodeEls) {
       const n = this.force.at(id);
       if (!n) continue;
       nd.g.setAttribute('transform', `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
-
-      const p = nd.p;
-      if (p.range_declared && p.n_observations > 0) {
-        const [lo, hi] = p.range || [0, 1];
-        const span = hi - lo;
-        const frac = span > 0 ? Math.min(1, Math.max(0, (p.value - lo) / span)) : 0;
-        nd.arc.setAttribute('d', arcPath(nd.r - 4, frac));
-      } else {
-        nd.arc.setAttribute('d', '');
-      }
-
-      const pulsed = this.pulses.get(id);
-      if (pulsed !== undefined) {
-        const age = now - pulsed;
-        if (age < 1400) {
-          const t = age / 1400;
-          nd.halo.setAttribute('opacity', (1 - t) * 0.7);
-          nd.halo.setAttribute('r', nd.r + 6 + t * 14);
-        } else {
-          nd.halo.setAttribute('opacity', 0);
-          this.pulses.delete(id);
-        }
-      }
-
-      const isSel = this.selected?.type === 'property' && this.selected.id === id;
-      nd.disc.setAttribute('stroke-width', isSel ? 3 : (p.status === 'retired' ? 1.2 : 1.6));
-      if (isSel) nd.disc.setAttribute('stroke', 'var(--sign-pos)');
     }
-
-    for (const e of this.edgeEls) {
-      const a = this.force.at(e.from);
-      const b = this.force.at(e.to);
-      if (!a || !b) continue;
-      const geom = curvePath(a, b, e.curve, nodeRadius(this.nodeEls, e.from) + (e.kind === 'ghost' ? 6 : 0),
-        nodeRadius(this.nodeEls, e.to) + (e.kind === 'ghost' ? 6 : 0), e.both);
-      e.path.setAttribute('d', geom.d);
-      if (e.hit) e.hit.setAttribute('d', geom.d);
-      if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
-      if (e.alarm) { e.alarm.setAttribute('x', geom.px); e.alarm.setAttribute('y', geom.py - 12); }
+    for (const [box, bx] of this.boxEls) {
+      const n = this.force.at(BOX + box);
+      if (n) bx.g.setAttribute('transform', `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
     }
 
     for (const h of this.hullEls) {
@@ -736,14 +1039,62 @@ export class GraphView {
       }
       if (!Number.isFinite(x0)) continue;
       const pad = HULL_PAD;
+      h.bounds = { x0: x0 - pad, y0: y0 - pad - HULL_LABEL, x1: x1 + pad, y1: y1 + pad };
       h.rect.setAttribute('x', x0 - pad);
       h.rect.setAttribute('y', y0 - pad - HULL_LABEL);
       h.rect.setAttribute('width', x1 - x0 + pad * 2);
       h.rect.setAttribute('height', y1 - y0 + pad * 2 + HULL_LABEL);
       h.label.setAttribute('x', x0 - pad + 10);
       h.label.setAttribute('y', y0 - pad + 4);
-      if (h.pin) { h.pin.setAttribute('cx', x1 + pad - 10); h.pin.setAttribute('cy', y0 - pad - HULL_LABEL + 10); }
+      if (h.fold) h.fold.setAttribute('transform', `translate(${x1 + pad - 10},${y0 - pad + 4})`);
+      // Left of the fold control when there is one.
+      if (h.pin) { h.pin.setAttribute('cx', x1 + pad - (h.fold ? 64 : 10)); h.pin.setAttribute('cy', y0 - pad - HULL_LABEL + 10); }
     }
+
+    // A bundle to the machine ends on its box's border, on the line to its middle.
+    const machine = this.hullEls.find((h) => h.subject === MACHINE)?.bounds;
+    const end = (id, other) => (id === MACHINE ? machine && borderPoint(machine, this.force.at(other)) : this.force.at(id));
+    // How far from its centre an edge leaves a node. curvePath leaves 2px before a
+    // line's start and 11 (an arrowhead) before its end; at the machine's border
+    // these cancel that. A folded pill is wider than tall, so its reach is where the
+    // line to the other end crosses its border (bundles and memberships run straight).
+    const trim = (id, last, a, b) => {
+      if (id === MACHINE) return last ? -11 : -2;
+      if (!id.startsWith(BOX)) return nodeRadius(this.nodeEls, id);
+      const n = this.force.at(id);
+      const dx = Math.abs(b.x - a.x), dy = Math.abs(b.y - a.y);
+      return Math.min(dx ? (n?.hw ?? R_BOX) * Math.hypot(dx, dy) / dx : Infinity, dy ? R_BOX * Math.hypot(dx, dy) / dy : Infinity);
+    };
+    for (const e of this.edgeEls) {
+      const a = end(e.from, e.to);
+      const b = end(e.to, e.from);
+      if (!a || !b) continue;
+      const geom = curvePath(a, b, e.curve, trim(e.from, false, a, b) + (e.kind === 'ghost' ? 6 : 0),
+        trim(e.to, true, a, b) + (e.kind === 'ghost' ? 6 : 0), e.both);
+      e.path.setAttribute('d', geom.d);
+      if (e.hit) e.hit.setAttribute('d', geom.d);
+      if (e.dot) { e.dot.setAttribute('cx', geom.px); e.dot.setAttribute('cy', geom.py); }
+      if (e.count) { e.count.setAttribute('x', geom.px); e.count.setAttribute('y', geom.py); }
+      if (e.alarm) { e.alarm.setAttribute('x', geom.px); e.alarm.setAttribute('y', geom.py - 12); }
+    }
+  }
+
+  /** Advance the ping on properties whose value just moved; true while any runs. */
+  pulse() {
+    const now = Date.now();
+    for (const [id, t] of this.pulses) {
+      const nd = this.nodeEls.get(id);
+      const age = now - t;
+      if (!nd || age >= 1400) {
+        if (nd) nd.halo.setAttribute('opacity', 0);
+        this.pulses.delete(id);
+        continue;
+      }
+      const f = age / 1400;
+      nd.halo.setAttribute('opacity', (1 - f) * 0.7);
+      nd.halo.setAttribute('r', nd.r + 6 + f * 14);
+    }
+    return this.pulses.size > 0;
   }
 
   hover(e) {
@@ -757,6 +1108,18 @@ export class GraphView {
       const r = this.lastModel?.relationship(edgeEl.dataset.edge);
       if (r) return this.tooltip.show(e, relationshipTip(r));
     }
+    const boxEl = e.target.closest('[data-box]');
+    if (boxEl && this.lastModel) {
+      const box = boxEl.dataset.box;
+      return this.tooltip.show(e, {
+        title: this.lastModel.nameOf(box),
+        kind: 'workload, folded · click to open',
+        rows: [['subject', box], ['properties', this.boxEls.get(box)?.count ?? 0]],
+      });
+    }
+    const bundleEl = e.target.closest('[data-bundle]');
+    const b = bundleEl && this.bundleEls.find((x) => x.bundle.key === bundleEl.dataset.bundle)?.bundle;
+    if (b && this.lastModel) return this.tooltip.show(e, bundleTip(b, this.lastModel));
     this.tooltip.hide();
   }
 
@@ -801,6 +1164,7 @@ export class GraphView {
   }
 
   relayout() {
+    this.force.parked.clear();
     for (const n of this.force.nodes.values()) {
       n.pinned = false;
       n.x = this.force.width / 2 + (Math.random() - 0.5) * 240;
@@ -813,6 +1177,19 @@ export class GraphView {
     this.fit();
     this.start();
   }
+}
+
+/**
+ * Where the line from p to the middle of box b crosses b's border. b's middle when
+ * there is no p, or when p is inside b — the layout keeps a folded glyph out of the
+ * machine's box, so that is a moment mid-settle, not a resting place.
+ */
+function borderPoint(b, p) {
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+  if (!p) return { x: cx, y: cy };
+  const dx = p.x - cx, dy = p.y - cy;
+  const t = Math.min(Math.abs((b.x1 - cx) / (dx || 1e-9)), Math.abs((b.y1 - cy) / (dy || 1e-9)));
+  return t >= 1 ? { x: cx, y: cy } : { x: cx + dx * t, y: cy + dy * t };
 }
 
 const nodeRadius = (map, id) => map.get(id)?.r ?? R_OBSERVED;
@@ -875,6 +1252,23 @@ function relationshipTip(r) {
       ...(r.sign_suspect ? [['sign status', 'contradicted by observation']] : []),
     ],
   };
+}
+
+function bundleTip(b, model) {
+  const end = (id) => (id === MACHINE ? 'the machine'
+    : id.startsWith(BOX) ? model.nameOf(id.slice(BOX.length)) : model.display(id));
+  let pos = 0, neg = 0, unknown = 0, assoc = 0, strongest = 0;
+  for (const r of b.rels) {
+    const eff = effective(r);
+    if (r.association) assoc++;
+    else if (!eff.known) unknown++;
+    else { if (r.sign < 0) neg++; else pos++; strongest = Math.max(strongest, eff.value); }
+  }
+  const rows = [['relationships', b.rels.length], ['raising', pos], ['lowering', neg]];
+  if (unknown) rows.push(['nothing observed yet', unknown]);
+  if (assoc) rows.push(['association only', assoc]);
+  if (pos + neg) rows.push(['strongest', fmt.num(strongest, 3)]);
+  return { title: `${end(b.from)} ↔ ${end(b.to)}`, kind: 'bundle · click to open', rows };
 }
 
 export function tooltipHTML({ title, kind, rows }) {

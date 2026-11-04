@@ -133,7 +133,16 @@ time.
 2. Apply the `cycler` pod above.
 3. Build and copy the agent: `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o agent ./cmd/agent`
    from `semantic-map/go`, plus `semantic-map/domain_spec.json` next to it.
-4. Run `sudo ./agent -addr 0.0.0.0:9090 -collect-interval 5s` and open
-   `http://<vm>:9090/ui/`.
+4. Write a spec beside it and run `sudo ./agent -config agent.yaml`, then open
+   `http://<vm>:9090/ui/` (`node.ui` serves the console; the agent is headless without it):
+
+   ```yaml
+   node: { addr: "0.0.0.0:9090", ui: true }
+   domain: { path: domain_spec.json }
+   sources:
+     interval: 5s
+     collectors:
+       - { name: cgroup, type: cgroup }
+   ```
 5. After a few minutes, confirm the `cpu_utilization@pod:… → cpu_utilization`
    candidate in the Discovery tab.

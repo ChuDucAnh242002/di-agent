@@ -558,13 +558,9 @@ dialog .hint { font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; }
 /* ── Canvas internals ─────────────────────────────────────────────────────── */
 
 #graph text { user-select: none; pointer-events: none; }
-#graph .node:hover circle:nth-of-type(2) { stroke: var(--sign-pos); }
+#graph .node:hover .disc, #graph .folded:hover rect { stroke: var(--sign-pos); }
+#graph .hull-fold:hover text { fill: var(--sign-pos); }
 #graph .edge:hover path:nth-of-type(2) { stroke-opacity: 1; }
-
-/* An edge that gained paired observations since the last poll runs its dashes,
- * so learning is visible as it happens rather than only in a number. */
-#graph path.flowing { animation: flow 1.1s linear infinite; }
-@keyframes flow { to { stroke-dashoffset: -28; } }
 
 /* A drawer row whose part of the map is highlighted on the canvas, in the
    highlight's colour: a candidate is a relationship that would be discovered. */

@@ -2,6 +2,7 @@ package relief
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -408,5 +409,80 @@ func TestTheDefaultMemoryLeverCanPlanAtEnter(t *testing.T) {
 		if !c.plan && !strings.Contains(why, "min_effect") {
 			t.Errorf("share/usage %.1f: refused %q; want min_effect", c.ratio, why)
 		}
+	}
+}
+
+// floored is an actuator with a Floor: the least setting it can hold a workload
+// to, as memory.high's anonymous memory.
+type floored struct {
+	actuators.Actuator
+	floor float64
+	err   error
+}
+
+func (f floored) Floor(context.Context, runtime.Workload) (float64, error) { return f.floor, f.err }
+
+func TestTheStepNeverGoesBelowTheActuatorsFloor(t *testing.T) {
+	m := planFixture(t, 1)
+	ws := []runtime.Workload{limited(pod("pod:a"), 2)}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	c.MinEffect = 0.001
+	a := floored{Actuator: limiter, floor: 1.5}
+	p, ok, why := MakePlan(ctx, m, a, Attribute(m, a, ws, pol, c), ws, pol, c, one)
+	if !ok {
+		t.Fatalf("no plan: %s", why)
+	}
+	// 0.4 of 4 cores = 1.6; the step alone would reach 1.2, the floor is 1.5.
+	if !near(p.From, 1.6) || !near(p.To, 1.5) {
+		t.Fatalf("plan %+v; want 1.6 → 1.5", p)
+	}
+}
+
+func TestAnActuatorFloorAtUsageRefusesTheStep(t *testing.T) {
+	m := planFixture(t, 1)
+	ws := []runtime.Workload{limited(pod("pod:a"), 2)}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	a := floored{Actuator: limiter, floor: 1.7}
+	if _, ok, why := MakePlan(ctx, m, a, Attribute(m, a, ws, pol, c), ws, pol, c, one); ok || !strings.Contains(why, "floor reached") {
+		t.Fatalf("ok=%v why=%q; want refused, floor reached", ok, why)
+	}
+}
+
+func TestAnUnreadableFloorRefusesTheStep(t *testing.T) {
+	m := planFixture(t, 1)
+	ws := []runtime.Workload{limited(pod("pod:a"), 2)}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	a := floored{Actuator: limiter, err: errors.New("no memory.stat")}
+	if _, ok, why := MakePlan(ctx, m, a, Attribute(m, a, ws, pol, c), ws, pol, c, one); ok || !strings.Contains(why, "no memory.stat") {
+		t.Fatalf("ok=%v why=%q; want refused, naming the error", ok, why)
+	}
+}
+
+// TestAFlooredUsagePredictionIsTheShareOfWhatCanBeTaken: with an actuator floor,
+// a usage-basis step is predicted to relieve pressure in the proportion it takes
+// of what lies above the floor: taking all of it, all the pressure. Run
+// 2026-11-03 took page-hog's cache down to its floor and contention fell from
+// 0.107 to 0; the share-of-usage prediction said 0.010, and run 2026-11-03b
+// refused every floored step under min_effect on it.
+func TestAFlooredUsagePredictionIsTheShareOfWhatCanBeTaken(t *testing.T) {
+	m := planFixture(t, 1)
+	record(t, m, usage("pod:b"), "pod:b", 0.6, t0)
+	ws := []runtime.Workload{limited(pod("pod:b"), 3)}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	a := floored{Actuator: limiter, floor: 1.6}
+	p, ok, why := MakePlan(ctx, m, a, Attribute(m, a, ws, pol, c), ws, pol, c, one)
+	if !ok {
+		t.Fatalf("no plan: %s", why)
+	}
+	// 0.6 of 4 cores = 2.4, the step reaches 1.8: 0.6 of the 0.8 above the floor.
+	if p.Basis != BasisUsage || !near(p.To, 1.8) {
+		t.Fatalf("plan %+v; want a usage plan to 1.8", p)
+	}
+	if want := 0.5 * (2.4 - 1.8) / (2.4 - 1.6); !near(p.Predicted, want) {
+		t.Fatalf("predicted %v; want %v", p.Predicted, want)
 	}
 }

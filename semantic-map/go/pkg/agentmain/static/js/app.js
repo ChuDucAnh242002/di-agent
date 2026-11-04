@@ -417,6 +417,11 @@ document.getElementById('status-filter').addEventListener('change', (e) => {
   statusFilter = e.target.value;
   tick();            // the choice changes what is fetched, not just what is drawn
 });
+document.getElementById('fold-btn').addEventListener('click', (e) => {
+  const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+  e.currentTarget.setAttribute('aria-pressed', String(on));
+  graph.setFold(on);
+});
 document.getElementById('relayout-btn').addEventListener('click', () => graph.relayout());
 document.getElementById('fit-btn').addEventListener('click', () => graph.fit());
 document.getElementById('legend-btn').addEventListener('click', (e) => {

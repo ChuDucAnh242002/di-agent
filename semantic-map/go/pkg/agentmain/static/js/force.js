@@ -15,11 +15,15 @@ const CENTER = 0.012;     // pull toward the middle, so nothing drifts off-scree
 const GROUP = 0.045;      // pull toward a subject's own centroid
 const MIN_ALPHA = 0.004;
 const RESOLVE_ROUNDS = 12; // bound on the separation rounds per tick
+const PARKED_MAX = 2000;  // departed nodes whose place is remembered
 
 export class Force {
   constructor() {
     this.nodes = new Map();  // id → {id, x, y, vx, vy, r, group, pinned}
     this.links = [];         // {source, target, distance}
+    // Where a node that left was, and whether it was pinned: a workload folded and
+    // opened again gets its arrangement back rather than a fresh one.
+    this.parked = new Map(); // id → {x, y, pinned}
     this.alpha = 1;
     this.width = 800;
     this.height = 600;
@@ -34,10 +38,20 @@ export class Force {
    * nudge the picture, not redraw it somewhere else. New nodes are seeded near
    * their group's centre of mass — or near the middle — so they arrive where they
    * belong instead of flying in from a corner.
+   *
+   * Returns which changed: `nodes` admitted or departed, `fresh` when one of them
+   * arrived with no place to go back to, and `links`. A fresh node reheats the
+   * layout. A node returning to where it was parked or arriving `near` the one it
+   * replaces — a workload folding or opening — only settles it, as does a
+   * departure. A relationship confirmed or retired between properties already
+   * placed only nudges it — the springs settle the one edge, and a map whose
+   * relationships change on most polls is not re-laid out on most polls.
    */
   sync(nodes, links) {
     const seen = new Set();
-    let topologyChanged = false;
+    let nodesChanged = false;
+    let fresh = false;
+    let linksChanged = false;
 
     for (const n of nodes) {
       seen.add(n.id);
@@ -49,30 +63,50 @@ export class Force {
         existing.group = n.group;
         continue;
       }
-      topologyChanged = true;
-      const seed = this.seedFor(n.group);
+      nodesChanged = true;
+      // Back where it was parked, or — `near` naming a node already placed that this
+      // one replaces, a workload folding into one glyph or opening from it — there.
+      const was = this.parked.get(n.id);
+      this.parked.delete(n.id);
+      const at = !was && n.near && this.nodes.get(n.near);
+      if (!was && !at) fresh = true;
+      const seed = was || (at ? { x: at.x + (Math.random() - 0.5) * 30, y: at.y + (Math.random() - 0.5) * 30 } : this.seedFor(n.group));
       this.nodes.set(n.id, {
         id: n.id, r: n.r, hw: n.hw ?? n.r, below: n.below ?? 0, group: n.group,
-        x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: false,
+        x: seed.x, y: seed.y, vx: 0, vy: 0, pinned: !!was?.pinned,
       });
     }
-    for (const id of [...this.nodes.keys()]) {
-      if (!seen.has(id)) { this.nodes.delete(id); topologyChanged = true; }
+    for (const [id, n] of [...this.nodes]) {
+      if (seen.has(id)) continue;
+      this.nodes.delete(id);
+      this.parked.set(id, { x: n.x, y: n.y, pinned: n.pinned });
+      nodesChanged = true;
+    }
+    // Bounded: a long-lived page sees subjects come and go for good.
+    for (const id of this.parked.keys()) {
+      if (this.parked.size <= PARKED_MAX) break;
+      this.parked.delete(id);
     }
 
-    // Compared as a SET, not a count. One relationship retiring while another is
+    // Compared as sets, not counts. One relationship retiring while another is
     // confirmed in the same poll leaves the count unchanged, and a layout that
     // never reheats draws the new edge across positions arranged for the old one.
+    // And two links can join one pair (two relationships, or a relationship beside
+    // a membership): a link count against a key-set size then differed on every
+    // poll, and reheated a layout nothing had changed.
     const next = links.filter((l) => this.nodes.has(l.source) && this.nodes.has(l.target));
     const key = (l) => `${l.source}\u0001${l.target}`;
     const before = new Set(this.links.map(key));
-    if (next.length !== before.size || next.some((l) => !before.has(key(l)))) {
-      topologyChanged = true;
+    const after = new Set(next.map(key));
+    if (after.size !== before.size || [...after].some((k) => !before.has(k))) {
+      linksChanged = true;
     }
     this.links = next;
 
-    if (topologyChanged) this.reheat(0.75);
-    return topologyChanged;
+    if (fresh) this.reheat(0.75);
+    else if (nodesChanged) this.reheat(0.2);
+    else if (linksChanged) this.reheat(0.05);
+    return { nodes: nodesChanged, fresh, links: linksChanged };
   }
 
   seedFor(group) {

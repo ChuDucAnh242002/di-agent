@@ -16,9 +16,6 @@ var staticFS embed.FS
 // staticHandler returns an http.Handler that serves the embedded static
 // directory under /ui/. It strips the /ui/ prefix and chroots to the static
 // subdirectory so /ui/index.html resolves to static/index.html.
-//
-// Phase 1 ships a placeholder.html stub here so the embed.FS build succeeds
-// before Phase 2B writes the real index.html / app.js / style.css.
 func staticHandler() http.Handler {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {

@@ -71,7 +71,7 @@ func newMemHarness(t *testing.T) *memHarness {
 		t.Fatal(err)
 	}
 	h.high = filepath.Join(dir, "memory.high")
-	for f, v := range map[string]string{"memory.high": "max", "memory.current": "5153960755"} {
+	for f, v := range map[string]string{"memory.high": "max", "memory.current": "5153960755", "memory.stat": "anon 1073741824\nfile 4080218931\nshmem 0"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte(v+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -208,16 +208,6 @@ func outcomeOf(l *Loop, id string) string {
 		}
 	}
 	return ""
-}
-
-func TestMemoryHighIsGivenBackOnRelease(t *testing.T) {
-	h := newMemHarness(t)
-	a := h.act()
-	h.until(30*time.Minute, 0, "a release", func() bool {
-		o := outcomeOf(h.l, a.ID)
-		return o != "" && o != OutcomeKept
-	})
-	h.givenBack(a.ID, OutcomeReleased)
 }
 
 func TestMemoryHighIsGivenBackOnExpiry(t *testing.T) {
@@ -457,5 +447,67 @@ func TestAnEmptyListingAtStartStillExpires(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("actions %+v; want one expired", h.l.Actions())
+	}
+}
+
+// stat rewrites the pod's memory.stat.
+func (h *memHarness) stat(s string) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(h.high), "memory.stat"), []byte(s+"\n"), 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestAHeldCapIsGivenBackWhenTheFloorRisesAboveIt: a cap planned above the pod's
+// floor is given back on the next tick once what reclaim cannot take grows past
+// it, rather than throttling the pod until expiry.
+func TestAHeldCapIsGivenBackWhenTheFloorRisesAboveIt(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q before the floor rose", o)
+	}
+	h.stat("anon 5153960755\nfile 0\nshmem 0")
+	h.step(0.3)
+	h.givenBack(a.ID, OutcomeFloored)
+}
+
+// TestAHeldCapStaysWhenItsPodSitsJustOverIt: a cap at the floor is soft, and the
+// pod sits a few MiB over it with its cache near zero (run 2026-11-03c: 6174–6183
+// MiB on a 6175 MiB cap). That is the cap working, not the freeze, and it stays.
+func TestAHeldCapStaysWhenItsPodSitsJustOverIt(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	cap, err := strconv.ParseFloat(h.file(), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	over := strconv.FormatInt(int64(cap)+8<<20, 10)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(h.high), "memory.current"), []byte(over+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.stat("anon " + over + "\nfile 0\nshmem 0")
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q with the pod 8 MiB over its cap; want the cap held", o)
+	}
+	if got := h.file(); got == "max" || len(h.ledger.All()) != 1 {
+		t.Fatalf("memory.high %q, ledger %+v; want the cap and its entry in force", got, h.ledger.All())
+	}
+}
+
+// TestAHeldCapStaysWhenItsFloorCannotBeRead: an unreadable floor proves nothing
+// about the cap, which stays in force.
+func TestAHeldCapStaysWhenItsFloorCannotBeRead(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.stat("anon 5153960755")
+	h.step(0.3)
+	if o := outcomeOf(h.l, a.ID); o != "" && o != OutcomeKept {
+		t.Fatalf("outcome %q with an unreadable floor; want the cap held", o)
+	}
+	if got := h.file(); got == "max" || len(h.ledger.All()) != 1 {
+		t.Fatalf("memory.high %q, ledger %+v; want the cap and its entry in force", got, h.ledger.All())
 	}
 }
