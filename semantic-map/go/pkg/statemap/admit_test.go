@@ -140,6 +140,26 @@ func TestAdmitAnActiveSubjectIsAlreadyRunning(t *testing.T) {
 	}
 }
 
+// TestAdmitAlreadyRunningIsNotDeclinedForContention: a workload already here has
+// nothing to admit, so the node's contention cannot decline it.
+func TestAdmitAlreadyRunningIsNotDeclinedForContention(t *testing.T) {
+	m, c := admitFixture(t)
+	unit := [2]float64{0, 1}
+	_ = m.Record(Observation{ID: "cpu_utilization@pod:w", Value: 0.3, At: c.now(), Subject: "pod:w", Range: &unit})
+	_ = m.Record(Observation{ID: "memory_utilization@pod:w", Value: 0.1, At: c.now(), Subject: "pod:w", Range: &unit})
+	for range 5 {
+		c.advance(time.Second)
+		_ = m.Record(Observation{ID: "cpu_contention_ratio", Value: 0.9, At: c.now()})
+	}
+	if p, _ := m.Property("cpu_contention_ratio"); p.Value < 0.25 {
+		t.Fatalf("fixture: contention %.3f did not reach enter", p.Value)
+	}
+	res := m.Admit(AdmitRequest{Workload: "pod:w", CPUEnter: 0.25, MemoryEnter: 0.08})
+	if !res.Accepted || !strings.Contains(res.Reason, "already running") {
+		t.Errorf("%+v; want accepted as already running on a contended node", res)
+	}
+}
+
 func TestAdmitDeclinesOnWhatTheMapLacks(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	res := m.Admit(admitReq(1, 0))

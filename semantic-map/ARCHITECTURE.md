@@ -1667,7 +1667,8 @@ anything moves. Peers negotiating with these answers is P7.
 (active or stale), its demand is what the map observed of it here:
 `cpu_utilization@<subject>` and `memory_utilization@<subject>`, already node shares.
 A subject still active is already counted in the node's own shares, so it is answered
-"already running" with no projection. Otherwise the demand is what the requester
+"already running" with no projection, first, before any check could decline it: it
+has nothing to admit, so a contended node does not turn it away. Otherwise the demand is what the requester
 declares, cores over the `cpu_cores` fact and bytes over `memory_total`, and the
 decision says it was declared, not observed.
 

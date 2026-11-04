@@ -107,7 +107,46 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		return res
 	}
 
-	// 1. The machine: how much of it there is turns a declared demand into shares.
+	// 1. The workload: what the map saw of it here, if anything. One still active is
+	// already counted in the node's own shares and has nothing to admit, so it is
+	// answered before anything could decline it; projecting it would price it twice.
+	res.Basis = BasisDeclared
+	var measured [2]float64
+	if req.Workload != "" {
+		cpuID, memID := "cpu_utilization@"+req.Workload, "memory_utilization@"+req.Workload
+		cp, cok := m.Property(cpuID)
+		mp, mok := m.Property(memID)
+		if cok && mok && cp.Status != Retired && mp.Status != Retired {
+			cp, _ = b.Property(cpuID)
+			mp, _ = b.Property(memID)
+			res.Basis = BasisMeasured
+			if cp.Status == Active || mp.Status == Active {
+				// The node's shares as they stand, for the record; nothing turns on them.
+				if p, ok := b.Property("cpu_utilization"); ok {
+					res.CPUAfter = p.Value
+				}
+				if p, ok := b.Property("memory_utilization"); ok {
+					res.MemoryAfter = p.Value
+				}
+				return answer(true, req.Workload+" is already running here")
+			}
+			measured = [2]float64{cp.Value, mp.Value}
+			last := cp.LastObserved
+			if mp.LastObserved.After(last) {
+				last = mp.LastObserved
+			}
+			if !last.IsZero() {
+				b.Caveat("demand of %s was measured when it last ran here, %s ago", req.Workload, b.at.Sub(last).Round(time.Second))
+			} else {
+				b.Caveat("demand of %s was measured when it last ran here", req.Workload)
+			}
+		}
+	}
+	if res.Basis == BasisDeclared && req.CPUCores == 0 && req.MemoryBytes == 0 {
+		return answer(false, "nothing to price: the map has not seen the workload here and no demand was declared")
+	}
+
+	// 2. The machine: how much of it there is turns a declared demand into shares.
 	capacity := map[string]float64{}
 	for _, f := range b.Facts() {
 		if f.Number != nil && *f.Number > 0 {
@@ -120,7 +159,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		}
 	}
 
-	// 2. What the node uses now. A property seeded from the specification and never
+	// 3. What the node uses now. A property seeded from the specification and never
 	// observed holds an assumption, not a reading.
 	node := map[string]float64{}
 	for _, k := range []string{"cpu_utilization", "memory_utilization"} {
@@ -131,7 +170,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		node[k] = p.Value
 	}
 
-	// 3. A node already contended is where relief would be acting.
+	// 4. A node already contended is where relief would be acting.
 	for _, c := range []struct {
 		id, kind string
 		enter    float64
@@ -146,40 +185,10 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		}
 	}
 
-	// 4. The demand: what the map saw of the workload here, or what was declared.
-	cpuDemand := req.CPUCores / capacity["cpu_cores"]
-	memDemand := req.MemoryBytes / capacity["memory_total"]
-	res.Basis = BasisDeclared
-	if req.Workload != "" {
-		cpuID, memID := "cpu_utilization@"+req.Workload, "memory_utilization@"+req.Workload
-		cp, cok := m.Property(cpuID)
-		mp, mok := m.Property(memID)
-		if cok && mok && cp.Status != Retired && mp.Status != Retired {
-			cp, _ = b.Property(cpuID)
-			mp, _ = b.Property(memID)
-			res.Basis = BasisMeasured
-			if cp.Status == Active || mp.Status == Active {
-				// Already counted in the node's own shares: projecting it again would
-				// price it twice.
-				res.CPUAfter, res.MemoryAfter = node["cpu_utilization"], node["memory_utilization"]
-				return answer(true, req.Workload+" is already running here")
-			}
-			cpuDemand, memDemand = cp.Value, mp.Value
-			last := cp.LastObserved
-			if mp.LastObserved.After(last) {
-				last = mp.LastObserved
-			}
-			if !last.IsZero() {
-				b.Caveat("demand of %s was measured when it last ran here, %s ago", req.Workload, b.at.Sub(last).Round(time.Second))
-			} else {
-				b.Caveat("demand of %s was measured when it last ran here", req.Workload)
-			}
-		}
-	}
+	cpuDemand, memDemand := measured[0], measured[1]
 	if res.Basis == BasisDeclared {
-		if req.CPUCores == 0 && req.MemoryBytes == 0 {
-			return answer(false, "nothing to price: the map has not seen the workload here and no demand was declared")
-		}
+		cpuDemand = req.CPUCores / capacity["cpu_cores"]
+		memDemand = req.MemoryBytes / capacity["memory_total"]
 		b.Caveat("demand was declared by the requester, not observed")
 	}
 	b.Note("%s demand: %.4f of the node's CPU and %.4f of its memory", res.Basis, cpuDemand, memDemand)
