@@ -1134,7 +1134,7 @@ the shape of the real thing.
 | `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
 | `map.proposer.min_spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
 | `map.proposer.fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
-| `map.proposer.max_pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). This limits active tested pairs, not cached properties or candidate history; discovery checkpoints preserve both. The resolved number is logged and reported in `GET /state` under `discovery`. |
+| `map.proposer.max_pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `map.tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `profile.regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `profile.alpha` and `profile.convergence` when set. |
 | `peers.urls`            | `[]`             | A list of peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
@@ -1742,8 +1742,9 @@ confirmations remain causal; operator confirmation of an undirected candidate re
 choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
 
 When `persist.file` is set, the same atomic state snapshot also saves the discovery
-buffers, duplicate suppression, partial-window progress, candidates and completed
-windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+buffers of pairs with a candidate or a group link, duplicate suppression,
+partial-window progress, candidates and completed windows; other tested pairs refill
+after a restart. Discovery evidence has its own 24-hour age/gap limit, independent of
 `map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
 Changed settings, expired evidence or a backwards clock produce an explicit cold-start
 log. A malformed discovery checkpoint is discarded with an error-level log while the

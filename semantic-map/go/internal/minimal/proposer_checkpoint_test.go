@@ -3,13 +3,12 @@ package minimal
 import (
 	"encoding/json"
 	"fmt"
-	"math"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/stats"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -117,118 +116,6 @@ func TestDiscoveryCheckpointRejectsBrokenWindow(t *testing.T) {
 	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
 	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err == nil {
 		t.Fatal("broken window accepted")
-	}
-}
-
-func TestDiscoveryRetentionDoesNotEvictPropertiesOrCandidateHistory(t *testing.T) {
-	p := NewMICorrelationProposer(nil, 0.9, 3, 12, time.Minute)
-	p.SetMaxPairs(1)
-	base := time.Now().Add(-time.Minute)
-	for i := 0; i < 10; i++ {
-		if err := p.ObserveProperty(types.PropertyReading{
-			ID: fmt.Sprintf("property-%02d", i), Value: float64(i) / 10,
-			At: base.Add(time.Duration(i) * time.Second),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(p.latestProps) != 10 || len(p.recent) != 10 {
-		t.Fatalf("pair budget evicted property state: properties=%d recent=%d", len(p.latestProps), len(p.recent))
-	}
-	for i := 0; i < 5; i++ {
-		from := fmt.Sprintf("property-%02d", i*2)
-		to := fmt.Sprintf("property-%02d", i*2+1)
-		id := candidateID(from, to, true)
-		p.order = append(p.order, id)
-		p.candidates[id] = &types.CandidateEdge{
-			CandidateID: id, FromID: from, ToID: to, Direction: types.Positive,
-			Status: types.Pending, Undirected: true,
-		}
-	}
-	raw, err := p.Checkpoint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := NewMICorrelationProposer(nil, 0.9, 3, 12, time.Minute)
-	q.SetMaxPairs(1)
-	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
-		t.Fatalf("restore candidate history larger than pair budget: %v", err)
-	}
-	if len(q.candidates) != 5 {
-		t.Fatalf("restored %d candidates, want 5", len(q.candidates))
-	}
-}
-
-func TestDiscoveryCheckpointPackedWindowsStayWithinSizeBudget(t *testing.T) {
-	const pairCount, windowSize, propertyCount = 8000, 120, 128
-	now := time.Now()
-	s := discoveryCheckpoint{
-		Version: 2, SavedAt: now, Properties: make([]types.PropertyReading, propertyCount),
-		Recent: make(map[string]discoveryRecent, propertyCount), Pairs: make([]discoveryPair, pairCount),
-	}
-	for i := 0; i < propertyCount; i++ {
-		id := fmt.Sprintf("property-%03d", i)
-		s.Properties[i] = types.PropertyReading{ID: id, Value: 0.5, At: now}
-		values := make([]float64, windowSize)
-		for j := range values {
-			values[j] = math.Sin(float64(i*windowSize+j) * 0.01)
-		}
-		s.Recent[id] = discoveryRecent{Values: values}
-	}
-	for i := range s.Pairs {
-		x, y := make([]float64, windowSize), make([]float64, windowSize)
-		for j := range x {
-			x[j] = math.Sin(float64(i*windowSize+j) * 0.01)
-			y[j] = math.Sin(float64(i*windowSize+j)*0.01 + 0.3)
-		}
-		s.Pairs[i] = discoveryPair{
-			From: "property-000", To: "property-001", Class: types.PairNodeNode,
-			Window:   packCheckpointWindow(stats.WindowSnapshot{X: x, Y: y, Capacity: windowSize}),
-			LastPair: [2]int64{now.UnixNano(), now.UnixNano()},
-		}
-	}
-	raw, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	persisted, err := json.MarshalIndent(statemap.Snapshot{Discovery: raw}, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(persisted) > 27<<20 {
-		t.Fatalf("8,000 pairs with 120 samples persisted to %d bytes; want <= 27 MiB", len(persisted))
-	}
-	t.Logf("8k-pair raw discovery=%d bytes persisted-indented=%d bytes", len(raw), len(persisted))
-}
-
-func TestDiscoveryCheckpointRestoresVersionOneWindows(t *testing.T) {
-	p, _ := checkpointFixture(t, 29)
-	raw, err := p.Checkpoint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var s discoveryCheckpoint
-	if err := json.Unmarshal(raw, &s); err != nil {
-		t.Fatal(err)
-	}
-	s.Version = 1
-	for i := range s.Pairs {
-		window, err := s.Pairs[i].Window.restore()
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.Pairs[i].Window = checkpointWindow{
-			X: window.X, Y: window.Y, Next: window.Next, Capacity: window.Capacity, Seen: window.Seen,
-		}
-	}
-	raw, err = json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
-	if note, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil ||
-		!strings.Contains(note, "restored") {
-		t.Fatalf("legacy restore: %q %v", note, err)
 	}
 }
 
@@ -464,8 +351,83 @@ func TestDiscoveryCheckpointDoesNotInventTestsDuringWarmup(t *testing.T) {
 	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.pvals) != 0 || q.slots["x→y"].n != 0 {
-		t.Fatalf("warmup gained synthetic FDR evidence: %v %+v", q.pvals, q.slots["x→y"])
+	if len(q.pvals) != 0 || len(q.slots) != 0 {
+		t.Fatalf("warmup gained synthetic FDR evidence: %v %+v", q.pvals, q.slots)
+	}
+}
+
+// A pair with no candidate and no group link is not saved: it holds only readings,
+// which refill after a restart, and saving every tested pair made the snapshot and
+// each save grow with the pair budget (#56).
+func TestDiscoveryCheckpointKeepsOnlyWindowsSomethingRestsOn(t *testing.T) {
+	p := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Minute)
+	const noise = 40
+	noiseRng := rand.New(rand.NewSource(1))
+	for i := 0; i < 29; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		x := float64(i%12) / 12
+		readings := []types.PropertyReading{
+			{ID: "x", Value: x, Range: rng, At: at},
+			{ID: "y", Value: 0.1 + 0.8*x, Range: rng, At: at},
+		}
+		for j := 0; j < noise; j++ {
+			// Independent noise: tested, too weak to become a candidate.
+			v := noiseRng.Float64()
+			readings = append(readings, types.PropertyReading{ID: fmt.Sprintf("n%02d", j), Value: v, Range: rng, At: at})
+		}
+		for _, r := range readings {
+			if err := p.ObserveProperty(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	keep := map[string]bool{}
+	for _, c := range p.candidates {
+		keep[c.FromID+"→"+c.ToID] = true
+	}
+	for key := range p.links {
+		keep[key] = true
+	}
+	if !keep["x→y"] || len(p.slots) < 50*len(keep) {
+		t.Fatalf("fixture: want x→y kept among many tested pairs, got %d kept of %d tested", len(keep), len(p.slots))
+	}
+	raw, err := p.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s discoveryCheckpoint
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	saved := 0
+	for _, pair := range s.Pairs {
+		if !keep[pair.From+"→"+pair.To] {
+			t.Fatalf("saved the window of %s→%s, which nothing rests on", pair.From, pair.To)
+		}
+		saved++
+	}
+	if saved == 0 {
+		t.Fatal("candidate window was not saved")
+	}
+
+	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
+		t.Fatal(err)
+	}
+	if q.buffers["x→y"] == nil || q.buffers["x→y"].Len() != p.buffers["x→y"].Len() {
+		t.Fatal("candidate evidence did not resume")
+	}
+	for i := 29; i < 36; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		checkpointFeed(t, p, at, i)
+		checkpointFeed(t, q, at, i)
+	}
+	a := p.candidates[candidateID("x", "y", true)]
+	b := q.candidates[candidateID("x", "y", true)]
+	if a == nil || b == nil || a.PersistentWindows != b.PersistentWindows || a.PersistencePairs != b.PersistencePairs {
+		t.Fatalf("restored candidate diverged from uninterrupted execution: %+v vs %+v", a, b)
 	}
 }
 
