@@ -701,6 +701,44 @@ func TestCapDeferralIsRecordedAndReentersWhenItOutranksThePending(t *testing.T) 
 	}
 }
 
+// TestReopenKeepsThePendingCap: a candidate whose confirmation the facade could not
+// declare returns to the queue it left, and the cap holds over it: another candidate
+// may have taken its place meanwhile.
+func TestReopenKeepsThePendingCap(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(subjectPairsKnown{}, 0.5, 5, 60, 15*time.Second)
+	p.SetMaxPending(1)
+	p.SetLogger(t.Logf)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tick := func(i int, pods ...string) {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		for _, pod := range pods {
+			_ = p.ObserveProperty(types.PropertyReading{ID: "m@" + pod, Subject: pod, Value: x, At: at})
+		}
+		_ = p.ObserveProperty(types.PropertyReading{ID: "node", Subject: "", Value: x, At: at})
+	}
+	for i := 0; i < 6; i++ {
+		tick(i, "pod:a", "pod:b")
+	}
+	cs := mustCandidates(t, p)
+	if len(cs) != 1 {
+		t.Fatalf("%d pending; want the cap's 1", len(cs))
+	}
+	if _, err := p.Confirm(cs[0].CandidateID, "", types.CandidateReview{}); err != nil {
+		t.Fatal(err)
+	}
+	tick(6, "pod:a", "pod:b") // the queue has room: the cap-deferred candidate re-enters
+	if left := mustCandidates(t, p); len(left) != 1 || left[0].CandidateID == cs[0].CandidateID {
+		t.Fatalf("pending after the confirmation: %+v; want the other candidate", left)
+	}
+	if err := p.Reopen(cs[0].CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	if after := mustCandidates(t, p); len(after) != 1 {
+		t.Errorf("%d pending after the reopen; the cap is 1", len(after))
+	}
+}
+
 // TestOperatorDeferralDoesNotReenter: an operator's Defer is a decision the proposer
 // does not overturn, however the evidence grows.
 func TestOperatorDeferralDoesNotReenter(t *testing.T) {

@@ -466,7 +466,7 @@ Subjects and discovery added guarantees to two of the five `pkg/contracts` contr
 - **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
 - **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
 - **Proposer** — the pairing rule: `ObserveProperty` pairs any two properties inside a time tolerance — a scoped property (non-empty subject) with an unscoped one directed scoped → unscoped, two unscoped or two scoped properties as an undirected candidate — except that series of one chart and one subject that stay perfectly correlated are an arithmetic group, represented outside it by one member. A candidate with a non-zero `PBar` had a p-value at or under it. How many pairs are tested at once is the implementation's budget; `Discovery()` reports the budget, the pairs eligible, tested and displaced, so a short candidate list cannot be mistaken for nothing to find.
-- **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate pending.
+- **Proposer** — orientation: `Confirm(id, "")` accepts a directed candidate as proposed; an undirected one needs `from`, one of its ends. Anything else is `ErrBadConfirmation` and leaves the candidate as it was. `Confirm` takes an open candidate — pending, or deferred by the proposer — and answers `ErrNotOpen` for one an operator or the agent rejected or deferred, or one already confirmed.
 - **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
 
 Compliance suites exist for the five `pkg/contracts` contracts; Runtime and Actuator, the sixth and seventh, are tested through their registries, the `dry-run` runtime and the `Static`, `cpu.limit` and `memory.high` actuators (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
@@ -1255,7 +1255,7 @@ standard errors of Fisher's z at the smaller window — the band in which a seco
 would see the same candidate. An operator's rejection or deferral is final for the session,
 because a person who has looked at the pair is the last tier there is.
 
-The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a pair of state-map properties becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
+The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a pair of state-map properties becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — returns the candidate to what it was before the confirmation (pending, or deferred by the proposer) rather than leaving history saying Confirmed about a relationship that does not exist.
 
 The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (`map.proposer.enabled: true` in `agent.yaml`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `map.proposer.min_pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, or rejected or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `map.proposer.enabled: false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
 
@@ -2203,13 +2203,17 @@ behind the models' queue (on the case-study node a composition candidate waited 
 reasoning-tier reviews), and it does not count against `per_cycle`, which caps the models' work.
 Tier 0 reads the whole candidate history, not only the queue: a candidate the proposer itself
 deferred (`cap`, `untested`, `grouped`, `bar`, `weakened`) is still open to a rule, and only
-an operator's or the agent's deferral or rejection closes it. A cycle lasts as long as its model
+a confirmation, or an operator's or the agent's deferral or rejection, closes it. A cycle lasts as long as its model
 calls, two to three minutes on the case-study node, and a candidate can be raised and withdrawn
 inside one: in run-2026-10-21 the mem-squeeze composition pair was pending for 30 s, deferred as
 `weakened` (|r| 0.841 → 0.817) before the next cycle began, and never reviewed. The proposer's
 deferrals are choices about the queue, not judgements on the pair, and a part is a part of its
-whole whatever its `|r|` is now. At `suggest` a withdrawn candidate is left alone: a suggestion
-is a note on the queue, and it is not in the queue.
+whole whatever its `|r|` is now. A rule that reads evidence reads it as it is now: every
+proposer deferral but `cap` comes from a fold that failed and resets the pair's persistence
+windows, so `persistent-correlation` can still associate a cap-deferred pair and no other. A
+confirmation the map then refuses puts the candidate back as it was, deferred for the
+proposer's reason, not into the queue. At `suggest` a withdrawn candidate is left alone: a
+suggestion is a note on the queue, and it is not in the queue.
 
 **An outage is not a review.** A model that cannot answer — the server still loading, the
 network down, a request it refuses — leaves the candidate untouched: no decision, no
@@ -2268,7 +2272,7 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 | `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass is undecided; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
 | `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
 | `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
-| `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
+| `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending; a reopened candidate is held to the pending cap |
 
 All run against fake models. No test requires Ollama.
 

@@ -639,8 +639,11 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		if err := sm.ConfirmCandidate(id, req.From, operatorReview()); err != nil {
 			code := http.StatusInternalServerError
-			if errors.Is(err, contracts.ErrBadConfirmation) {
+			switch {
+			case errors.Is(err, contracts.ErrBadConfirmation):
 				code = http.StatusBadRequest
+			case errors.Is(err, contracts.ErrNotOpen):
+				code = http.StatusConflict
 			}
 			writeError(w, code, err.Error())
 			return

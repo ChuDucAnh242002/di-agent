@@ -84,6 +84,9 @@ func TestNodePairDiscoveredAndConfirmedWithADirection(t *testing.T) {
 	if code := confirm(`{"from":"cpu_utilization"}`); code != http.StatusNoContent {
 		t.Fatalf("confirm from cpu_utilization: %d; want 204", code)
 	}
+	if code := confirm(`{"from":"cpu_utilization"}`); code != http.StatusConflict {
+		t.Errorf("confirm of a candidate no longer open: %d; want 409", code)
+	}
 
 	// The confirmed candidate leaves the pending list and stays in the history.
 	list := func(query string) (int, []types.CandidateEdge) {

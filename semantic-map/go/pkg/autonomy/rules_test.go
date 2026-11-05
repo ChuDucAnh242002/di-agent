@@ -336,6 +336,12 @@ func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T
 	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
 		t.Fatalf("at suggest a withdrawn candidate has no queue to suggest on; reviewed %d, errors %d", s.Reviewed, s.Errors)
 	}
+	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
+		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
+	}
+	if ds := state.Journal().Decisions(0); len(ds) != 0 {
+		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
+	}
 	cfg.Level = autonomy.Full
 	if r, err = autonomy.New(m, cfg); err != nil {
 		t.Fatal(err)
@@ -348,5 +354,69 @@ func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T
 	}
 	if !state.Covered(from, to, 1) {
 		t.Fatal("the confirmation declared no relationship")
+	}
+}
+
+// The persistent-correlation rule reads a cap-deferred candidate's evidence as it is:
+// the cap is a choice about the queue, the pair's windows still count, and the map
+// finds the candidate for the association in history, not only in the queue.
+func TestPersistentCorrelationAssociatesACapDeferredCandidate(t *testing.T) {
+	const node = "cpu_pressure"
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
+	p.SetMaxPending(1)
+	p.SetLogger(t.Logf)
+	m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+	m.AttachState(state)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 36; i++ {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%12) / 12
+		for _, reading := range []types.PropertyReading{
+			{ID: "cpu_utilization@pod:a", Subject: "pod:a", At: at, Value: x, Range: rng},
+			{ID: "cpu_utilization@pod:b", Subject: "pod:b", At: at, Value: 0.5*x + 0.2, Range: rng},
+			{ID: node, At: at, Value: 0.8*x + 0.1, Range: rng},
+		} {
+			if err := state.Record(statemap.Observation{ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ObserveProperty(reading); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	h, _ := m.CandidateHistory()
+	var capped *types.CandidateEdge
+	for _, c := range h {
+		if c.Status == types.Deferred && c.Reason == "cap" && c.PersistentWindows >= types.PersistentWindowsRequired && len(c.Caveats) == 0 {
+			capped = c
+			break
+		}
+	}
+	if capped == nil {
+		t.Fatalf("setup: no persistent cap-deferred candidate in %+v", h)
+	}
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"persistent-correlation"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Rules, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Errors != 0 {
+		t.Fatalf("errors %d: %s", s.Errors, s.LastError)
+	}
+	h, _ = m.CandidateHistory()
+	for _, c := range h {
+		if c.CandidateID == capped.CandidateID && (c.Status != types.Confirmed || c.Review == nil || !c.Review.Association) {
+			t.Fatalf("cap-deferred persistent candidate was not associated: %v/%q review %+v", c.Status, c.Reason, c.Review)
+		}
+	}
+	if !state.Associated(capped.FromID, capped.ToID, 1) {
+		t.Fatal("no association declared for the cap-deferred candidate")
 	}
 }

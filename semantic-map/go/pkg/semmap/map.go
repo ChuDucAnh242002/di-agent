@@ -450,13 +450,13 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		if err != nil {
 			// The proposer marked the candidate Confirmed on the way out; with no
 			// relationship behind it that would be a phantom nobody can retry or
-			// reject. Put it back.
+			// reject. Put it back as it was: pending, or deferred by the proposer.
 			if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
 				if rerr := r.Reopen(candidateID); rerr != nil {
 					return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
 				}
 			}
-			return fmt.Errorf("%w; candidate %s is pending again", err, candidateID)
+			return fmt.Errorf("%w; candidate %s is back to its status before the confirmation", err, candidateID)
 		}
 		return nil
 	}

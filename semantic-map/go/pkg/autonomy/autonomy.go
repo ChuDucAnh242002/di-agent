@@ -294,9 +294,11 @@ func (r *Reviewer) Run(ctx context.Context) {
 	}
 }
 
-// Cycle reviews up to MaxPer candidates that are due: pending, and never reviewed or
-// with evidence that has moved since their last review. Strongest first, so a full
-// queue spends the models on the candidates most likely to matter.
+// Cycle reviews the candidates that are due: never reviewed, or with evidence that
+// has moved since their last review. Tier 0 runs over every open candidate
+// (types.CandidateEdge.Open), pending or withdrawn by the proposer; the models then
+// take up to MaxPer pending ones, strongest first, so a full queue spends them on
+// the candidates most likely to matter.
 func (r *Reviewer) Cycle(ctx context.Context) {
 	r.cycle.Lock()
 	defer r.cycle.Unlock()
@@ -322,7 +324,7 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	// against their cap. The proposer's deferrals are included because a cycle runs
 	// as long as its model calls take, and a candidate can be raised and withdrawn
 	// (its |r| weakened, the cap took it) between two cycles; a rule that holds by
-	// definition still holds.
+	// definition still holds, and one that reads evidence reads it as it is now.
 	history, err := r.m.CandidateHistory()
 	if err != nil {
 		r.failed(err)
@@ -418,7 +420,12 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	if err != nil {
 		b.Caveat("applying %s failed: %v; the candidate was left undecided instead", o.action, err)
 		o.action, applied = types.ReviewUndecided, false
-		_ = r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id))
+		if err := r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id)); err != nil {
+			// Only a pending candidate takes an annotation: one the proposer withdrew
+			// keeps its review as it was, and is due again next cycle.
+			b.Caveat("recording the undecided review failed: %v", err)
+			r.failed(fmt.Errorf("recording the review of %s: %w", c.CandidateID, err))
+		}
 	}
 	b.Note("tier %d (%s): %s", o.tier, o.by, o.why)
 	answer := map[string]any{

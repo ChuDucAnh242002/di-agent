@@ -479,6 +479,57 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 	}
 }
 
+// TestConfirmCandidate_FailedDeclarationRestoresAProposerDeferral: a candidate the
+// proposer deferred is open to confirmation, and a refused declaration puts it back
+// as it was — deferred, for the proposer's reason — not into the pending queue the
+// proposer took it out of.
+func TestConfirmCandidate_FailedDeclarationRestoresAProposerDeferral(t *testing.T) {
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	proposer.SetMaxPending(1)
+	proposer.SetLogger(t.Logf)
+	sm := semmap.New(minimal.NewOntologyFromSpec(nil), nil, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		for _, pod := range []string{"pod:a", "pod:b"} {
+			_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+				EventID: pod + strconv.Itoa(i), Subject: pod})
+		}
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	h, _ := proposer.GetHistory()
+	var capped *types.CandidateEdge
+	for _, c := range h {
+		if c.Status == types.Deferred && c.Reason == "cap" && !c.Undirected {
+			capped = c
+		}
+	}
+	if capped == nil {
+		t.Fatalf("setup: no cap-deferred directed candidate in %+v", h)
+	}
+	if err := state.DeclareRelationship(statemap.Relationship{From: capped.FromID, To: capped.ToID,
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.ConfirmCandidate(capped.CandidateID, "", types.CandidateReview{}); err == nil {
+		t.Fatal("confirming against an opposite-sign edge succeeded")
+	}
+	h, _ = proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == capped.CandidateID && (c.Status != types.Deferred || c.Reason != "cap" || c.Review != nil) {
+			t.Errorf("after the refused declaration the candidate is %v/%q (review %+v); want it deferred by the cap again",
+				c.Status, c.Reason, c.Review)
+		}
+	}
+	if pending, _ := sm.PendingCandidates(); len(pending) != 1 {
+		t.Errorf("%d pending after the refusal; want the cap's 1", len(pending))
+	}
+}
+
 func TestAssociationConfirmationGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
