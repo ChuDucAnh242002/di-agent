@@ -2,6 +2,8 @@ module github.com/DiyazY/di-agent
 
 go 1.26.0
 
+toolchain go1.26.5
+
 require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/parquet-go/parquet-go v0.25.1
