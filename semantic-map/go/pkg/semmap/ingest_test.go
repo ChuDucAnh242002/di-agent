@@ -548,6 +548,62 @@ func TestConfirmCandidate_FailedDeclarationRestoresAProposerDeferral(t *testing.
 	}
 }
 
+// TestConfirmCandidate_RefusedConstructDeclarationLeavesTheCandidatePending: the
+// construct path refuses too — the ontology rejects a proposition that contradicts one
+// already in the backbone — and that refusal must put the candidate back as the
+// property-pair path does, with nothing declared.
+func TestConfirmCandidate_RefusedConstructDeclarationLeavesTheCandidatePending(t *testing.T) {
+	proposer := minimal.NewMICorrelationProposer(nil, 0.8, 10, 60, 15*time.Second)
+	sm := semmap.New(minimal.NewOntologyFromSpec(mustSpec()), nil, proposer, minimal.NewDisabledTuner())
+	before, _ := sm.Propositions()
+	var existing *types.Proposition
+	for _, p := range before {
+		if p.FromConstruct != p.ToConstruct {
+			existing = p
+			break
+		}
+	}
+	if existing == nil {
+		t.Fatal("setup: the spec has no proposition between two constructs")
+	}
+
+	// Feed the pair moving against the backbone's claim.
+	sign := 1.0
+	if existing.Direction == types.Positive {
+		sign = -1
+	}
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		if err := proposer.Observe(existing.FromConstruct, existing.ToConstruct, x, 0.5+sign*0.4*x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Direction == existing.Direction {
+		t.Fatalf("setup: want one candidate contradicting %s, got %+v", existing.PropositionID, cs)
+	}
+	from := ""
+	if cs[0].Undirected {
+		from = existing.FromConstruct
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, from, types.CandidateReview{}); err == nil {
+		t.Fatal("confirming a proposition that contradicts the backbone succeeded")
+	}
+	if after, _ := sm.Propositions(); len(after) != len(before) {
+		t.Errorf("propositions %d -> %d; a refused declaration adds none", len(before), len(after))
+	}
+	after, _ := sm.PendingCandidates()
+	if len(after) != 1 || after[0].CandidateID != cs[0].CandidateID {
+		t.Errorf("after the refused declaration pending is %v; want the candidate back, retryable", after)
+	}
+	h, _ := proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == cs[0].CandidateID && c.Status == types.Confirmed {
+			t.Error("history calls the candidate Confirmed although nothing was declared")
+		}
+	}
+}
+
 func TestAssociationConfirmationGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
