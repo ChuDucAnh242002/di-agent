@@ -483,7 +483,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
-| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and the map-grounded admission path end to end |
+| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and one accepted admission on a declared demand over the wire (the daemon's route and its declines are covered in `pkg/agentmain` and `pkg/statemap`) |
 
 A separate verification (`pkg/profiles/build_priors_test.go::TestBuildSeedsStructureAndNoMagnitude`)
 asserts the inverse of what its predecessor did: for every KD in `prior_weights.json`
@@ -1640,7 +1640,7 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
 3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
 
-Outcome-driven trust updates (boost on an accepted offload, penalty on a declined one) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but the daemon itself does not yet call it automatically on `/offload` responses. Promoting that to an automatic pipeline is the obvious P7 next step.
+Outcome-driven trust updates (boost on an accepted offload, penalty on a declined one) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but nothing in the daemon calls `peers.Client.Offload`, and the client itself never touches trust: an answer moves trust only when its caller applies `UpdateTrust`. Promoting that to an automatic pipeline is the obvious P7 next step.
 
 ### Why `RecommendPeer` uses trust-weighted savings
 
@@ -1663,22 +1663,31 @@ thresholds it read. Nothing is scheduled. Execution needs a workload runtime the
 does not own, and keeping the answer pure lets a requester ask several nodes before
 anything moves. Peers negotiating with these answers is P7.
 
-**Demand: measured, else declared.** If the request names a subject the map holds
-(active or stale), its demand is what the map observed of it here:
-`cpu_utilization@<subject>` and `memory_utilization@<subject>`, already node shares.
-A subject still active is already counted in the node's own shares, so it is answered
-"already running" with no projection, first, before any check could decline it: it
-has nothing to admit, so a contended node does not turn it away. Otherwise the demand is what the requester
-declares, cores over the `cpu_cores` fact and bytes over `memory_total`, and the
-decision says it was declared, not observed.
+**Demand: measured for a pod, else declared.** Only a pod is looked up: its uid is
+the cluster's, so `pod:<uid>` in this map is that workload. A unit or a group
+(`group:<name>` comes from cluster-wide labels, and every node has `group:system`)
+names something each node has its own of, so what this map holds under that name is
+not the requester's workload; it is priced on the declared demand, and the decision
+says why. A pod with either share, `cpu_utilization@<pod>` or
+`memory_utilization@<pod>`, still active is already counted in the node's own shares,
+so it is answered "already running" with no projection, first, before any capacity or
+contention check: it has nothing to admit, so a contended node does not turn it away.
+A stale pod with both shares is priced on them (already node shares). One with only
+one (the cgroup collector reports memory from its first tick, CPU from its second)
+is priced on the declared demand, with a caveat naming the missing share. Otherwise
+the demand is what the requester declares, cores over the `cpu_cores` fact and bytes
+over `memory_total`, and the decision says it was declared, not observed, and why.
 
 **Criterion: relief-based.** Accept only if taking the workload would not put the
 node where relief has to act. A node whose `cpu_contention_ratio` or
-`memory_contention_ratio` is already at its lever's `enter` declines outright. Then the
-node's `cpu_utilization` and `memory_utilization` plus the demand must stay at or below
-`1 - admitHeadroom` (a constant, 0.10): past it, a pod owed CPU or memory waits on what
-others hold, which is what relief relieves. A lever the spec does not have is a check
-skipped, with a caveat. A missing fact or an unobserved node share declines, naming it.
+`memory_contention_ratio` is at or above its lever's `enter` declines outright. Then
+the node's `cpu_utilization` and `memory_utilization` plus the demand must stay at or
+below `1 - admitHeadroom` (a constant, 0.10): past it, a pod owed CPU or memory waits
+on what others hold, which is what relief relieves. A lever the spec does not have is
+a check skipped, with a caveat; so is a contention property the map does not hold or
+has never observed. A missing or non-positive fact, an unobserved node share, or a
+stale node share or contention reading declines, naming it. `cpu_after` and
+`memory_after` are present only when the projection was made.
 
 **Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
 workload's own throttling, or the worst protected pod's memory stall), not a function

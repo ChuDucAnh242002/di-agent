@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -989,8 +990,11 @@ func TestOffload_AnswersFromTheMap(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Accepted || out.Basis != "declared" || out.CPUAfter != 0.65 || out.MemoryAfter != 0.625 {
+	if !out.Accepted || out.Basis != "declared" || !nearPtr(out.CPUAfter, 0.65) || !nearPtr(out.MemoryAfter, 0.625) {
 		t.Errorf("%+v; want accepted on the declared demand at 0.65/0.625", out)
+	}
+	if len(out.Caveats) == 0 {
+		t.Errorf("%+v; want the decision's caveats on the wire", out)
 	}
 	d, ok := state.Journal().Decision(out.DecisionID)
 	if !ok {
@@ -1003,6 +1007,74 @@ func TestOffload_AnswersFromTheMap(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 400 {
 		t.Errorf("negative demand: got %d, want 400", resp2.StatusCode)
+	}
+}
+
+func near(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+
+func nearPtr(got *float64, want float64) bool { return got != nil && near(*got, want) }
+
+// TestOffload_DeclinesWhenContended: through the real route, a node whose
+// cpu_contention_ratio, and separately memory_contention_ratio, is at or above its
+// default lever's enter declines, with no projection, and journals the thresholds.
+func TestOffload_DeclinesWhenContended(t *testing.T) {
+	enter := map[string]float64{}
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		enter[l.Action] = l.Enter
+	}
+	for id, lever := range map[string]string{"cpu_contention_ratio": "cpu.limit", "memory_contention_ratio": "memory.high"} {
+		if enter[lever] <= 0 {
+			t.Fatalf("spec default has no %s lever", lever)
+		}
+		for _, v := range []float64{enter[lever], enter[lever] + 0.1} {
+			base, state, cleanup := newOffloadServer(t)
+			if err := state.Record(statemap.Observation{ID: id, Value: v, At: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			resp := postJSON(t, base+"/offload", OffloadHTTPRequest{CPUCores: 0.1})
+			var out OffloadHTTPResponse
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != 200 {
+				t.Fatalf("%s=%.2f: status %d, %v", id, v, resp.StatusCode, err)
+			}
+			resp.Body.Close()
+			cleanup()
+			if out.Accepted || !strings.Contains(out.Reason, "contended") || !strings.Contains(out.Reason, id) {
+				t.Errorf("%s=%.2f: %+v; want declined as contended", id, v, out)
+			}
+			if out.CPUAfter != nil || out.MemoryAfter != nil {
+				t.Errorf("%s=%.2f: %+v; a contention decline makes no projection", id, v, out)
+			}
+			d, ok := state.Journal().Decision(out.DecisionID)
+			if !ok {
+				t.Fatalf("decision %q is not in the journal", out.DecisionID)
+			}
+			th, _ := d.Inputs["thresholds"].(map[string]float64)
+			if !near(th["cpu_enter"], enter["cpu.limit"]) || !near(th["memory_enter"], enter["memory.high"]) || !near(th["headroom"], 0.10) {
+				t.Errorf("thresholds %v; want the default levers' enter levels and the headroom", d.Inputs["thresholds"])
+			}
+			if d.Answer["reason"] != out.Reason {
+				t.Errorf("journalled reason %v; want %q", d.Answer["reason"], out.Reason)
+			}
+		}
+	}
+}
+
+// TestOffload_RefusesABadDemand: a demand that is not a finite number >= 0 is a 400,
+// whether negative or out of float64's range.
+func TestOffload_RefusesABadDemand(t *testing.T) {
+	base, _, cleanup := newOffloadServer(t)
+	defer cleanup()
+	for _, b := range []string{`{"memory_bytes":-1}`, `{"cpu_cores":-0.5}`, `{"cpu_cores":1e999}`} {
+		req, _ := http.NewRequest("POST", base+"/offload", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("%s: got %d, want 400", b, resp.StatusCode)
+		}
 	}
 }
 

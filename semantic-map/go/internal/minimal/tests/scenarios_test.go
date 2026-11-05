@@ -34,6 +34,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -542,6 +543,10 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 // requires. The wire shapes match the daemon exactly so peers.Client works
 // against either implementation.
 func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	enter := map[string]float64{}
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		enter[l.Action] = l.Enter
+	}
 	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
 		task := r.URL.Query().Get("task")
 		node := r.URL.Query().Get("node")
@@ -566,14 +571,15 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		// The daemon's answer: admission from the node's own map, under the
 		// default relief levers' enter levels.
 		res := sm.State().Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
-			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes, CPUEnter: 0.25, MemoryEnter: 0.08})
+			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
+			CPUEnter: enter["cpu.limit"], MemoryEnter: enter["memory.high"]})
 		if res.Err != "" {
 			http.Error(w, res.Err, 400)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		writeJSONBody(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
-			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter})
+			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
 	})
 }
 
@@ -753,11 +759,11 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Offload call: %v", err)
 	}
-	t.Logf("  → A.Accepted=%t reason=%q basis=%s cpu_after=%.3f memory_after=%.3f decision=%s",
-		resp.Accepted, resp.Reason, resp.Basis, resp.CPUAfter, resp.MemoryAfter, resp.DecisionID)
-	if !resp.Accepted {
-		t.Fatalf("expected A to accept; got rejection reason=%q", resp.Reason)
+	if !resp.Accepted || resp.CPUAfter == nil || resp.MemoryAfter == nil {
+		t.Fatalf("expected A to accept with a projection; got %+v", resp)
 	}
+	t.Logf("  → A.Accepted=%t reason=%q basis=%s cpu_after=%.3f memory_after=%.3f decision=%s",
+		resp.Accepted, resp.Reason, resp.Basis, *resp.CPUAfter, *resp.MemoryAfter, resp.DecisionID)
 
 	// Trust update on a successful offload: nudge upward.
 	const acceptDelta = 0.10

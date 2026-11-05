@@ -820,7 +820,7 @@ func registerOffloadRoute(mux *http.ServeMux, state *statemap.Map, levers []spec
 			return
 		}
 		writeJSON(w, OffloadHTTPResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
-			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter})
+			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
 	})
 }
 

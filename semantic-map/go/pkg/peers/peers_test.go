@@ -287,6 +287,7 @@ func TestClient_HealthRespectsStatus(t *testing.T) {
 }
 
 func TestClient_OffloadAcceptResponse(t *testing.T) {
+	cpuAfter := 0.6
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/offload" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -307,7 +308,8 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 			Reason:     "ok",
 			Basis:      "declared",
 			DecisionID: "adm-1-abc",
-			CPUAfter:   0.6,
+			CPUAfter:   &cpuAfter,
+			Caveats:    []string{"demand was declared by the requester, not observed"},
 		})
 	}))
 	defer srv.Close()
@@ -324,7 +326,7 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 	if !resp.Accepted {
 		t.Error("Accepted: got false, want true")
 	}
-	if resp.DecisionID != "adm-1-abc" || resp.CPUAfter != 0.6 {
+	if resp.DecisionID != "adm-1-abc" || resp.CPUAfter == nil || *resp.CPUAfter != 0.6 || resp.MemoryAfter != nil || len(resp.Caveats) != 1 {
 		t.Errorf("decoded %+v", resp)
 	}
 }

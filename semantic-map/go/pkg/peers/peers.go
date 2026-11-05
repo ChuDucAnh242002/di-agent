@@ -252,7 +252,8 @@ type ActionCost struct {
 
 // OffloadRequest is the body sent to a peer's /offload endpoint: would the peer take
 // this workload. Workload optionally names the subject; CPUCores and MemoryBytes are
-// the declared demand, which the peer uses when its own map has not seen it.
+// the declared demand, which the peer uses unless Workload is a pod its own map has
+// seen with both its CPU and memory shares.
 type OffloadRequest struct {
 	SourceNodeID string  `json:"source_node_id"`
 	Workload     string  `json:"workload,omitempty"`
@@ -263,14 +264,16 @@ type OffloadRequest struct {
 // OffloadResponse is the peer's answer, from its own map. Basis says whether the
 // demand was measured there or declared; DecisionID reproduces the answer through
 // the peer's GET /state/decisions/{id}; CPUAfter and MemoryAfter are the node shares
-// the peer projected.
+// the peer projected, nil when it answered before projecting; Caveats are what the
+// answer rests on that is weaker than a current reading.
 type OffloadResponse struct {
-	Accepted    bool    `json:"accepted"`
-	Reason      string  `json:"reason"`
-	Basis       string  `json:"basis,omitempty"`
-	DecisionID  string  `json:"decision_id"`
-	CPUAfter    float64 `json:"cpu_after"`
-	MemoryAfter float64 `json:"memory_after"`
+	Accepted    bool     `json:"accepted"`
+	Reason      string   `json:"reason"`
+	Basis       string   `json:"basis,omitempty"`
+	DecisionID  string   `json:"decision_id"`
+	CPUAfter    *float64 `json:"cpu_after,omitempty"`
+	MemoryAfter *float64 `json:"memory_after,omitempty"`
+	Caveats     []string `json:"caveats,omitempty"`
 }
 
 // Cost asks the peer at peerURL what it would cost to run taskType for
@@ -359,10 +362,10 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// Offload posts an OffloadRequest to the peer and returns its response.
-// Used by the trust-update path: a 2xx with Accepted=true is the signal to
-// nudge the peer's trust upward; a 2xx with Accepted=false (the peer's own
-// reason for declining) is informational and leaves trust unchanged.
+// Offload posts an OffloadRequest to the peer and returns its response. It does not
+// touch trust, and nothing in the daemon calls it: moving trust on an answer is the
+// caller's, through Registry.UpdateTrust (the coordination scenario adds 0.10 on an
+// accept). A non-2xx (a refused request) is an error.
 func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadRequest) (*OffloadResponse, error) {
 	if req == nil {
 		return nil, errors.New("peers.Client.Offload: nil request")
