@@ -285,6 +285,75 @@ func TestReporterWithoutPressureUnpredictable(t *testing.T) {
 	}
 }
 
+// TestMemoryReporterWithoutPressureUnpredictable: memory's per-pod reporter is
+// memory_pressure_ratio@pod, as in Admit, so an active one with no node
+// memory_contention_ratio reading is a gap, not a calm node.
+func TestMemoryReporterWithoutPressureUnpredictable(t *testing.T) {
+	m, _ := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	record(t, m, "cpu_utilization", "", 0.4)
+	record(t, m, "memory_utilization", "", 0.2)
+	record(t, m, "cpu_contention_ratio", "", 0.02)
+	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Decline, "no memory_contention_ratio reading")
+	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
+// staleNode is node(t, 0.4, 0.02) whose memory_contention_ratio was last read
+// before the staleness window and has been swept stale; every other reading is
+// fresh.
+func staleNode(t *testing.T) *statemap.Map {
+	t.Helper()
+	m, _ := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	old := t0.Add(-2 * m.StaleAfter())
+	if err := m.Record(statemap.Observation{ID: "memory_contention_ratio", Value: 0.04, At: old, Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+	m.Sweep()
+	record(t, m, "cpu_utilization", "", 0.4)
+	record(t, m, "memory_utilization", "", 0.2)
+	record(t, m, "cpu_contention_ratio", "", 0.02)
+	if p, _ := m.Property("memory_contention_ratio"); p.Status != statemap.Stale {
+		t.Fatalf("memory_contention_ratio %s; want stale", p.Status)
+	}
+	return m
+}
+
+// TestStaleWithoutReporterReadsZero: a stale node reading with no reporter is an
+// emptied node, read as 0, as Admit reads it.
+func TestStaleWithoutReporterReadsZero(t *testing.T) {
+	m := staleNode(t)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "memory_contention_ratio")
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "memory_contention_ratio is stale and no subject reports it") {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
+// TestStaleWithReporterUnpredictable: a stale node reading while a pod still
+// reports is a gap. Admit's gate declines it first, so the lever's enter is 0 here
+// to show the prediction step judges it the same way.
+func TestStaleWithReporterUnpredictable(t *testing.T) {
+	m := staleNode(t)
+	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
+	want(t, Decide(m, offer(1), both, self, nextID()), Decline, "the map's reading of memory_contention_ratio is stale")
+
+	mem := memDom
+	mem.Enter = 0
+	d := Decide(m, offer(1), []Domain{cpuDom, mem}, self, nextID())
+	want(t, d, Decline, "memory_contention_ratio is stale while memory_pressure_ratio@pod:x still reports it")
+	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
 // TestMissingCapacity: a domain whose capacity fact the gate does not read is
 // unpredictable; the gate reads only cpu_cores and memory_total.
 func TestMissingCapacity(t *testing.T) {

@@ -79,6 +79,13 @@ var contentionReporters = map[string]string{
 	"memory_contention_ratio": "memory_pressure_ratio@pod:",
 }
 
+// ContentionReporter is the prefix of the per-pod property a node contention reading
+// is the worst of, as Admit reads it; ok is false for a reading with no entry.
+func ContentionReporter(relieves string) (prefix string, ok bool) {
+	prefix, ok = contentionReporters[relieves]
+	return prefix, ok
+}
+
 // Admit answers whether this node can take a workload, from its own map, and records
 // the answer with what it read. It decides; nothing is scheduled.
 //
@@ -248,7 +255,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		if p.Status == Stale || p.Status == Retired {
 			// The builder does not wrap a query by metric, so the reporters found are
 			// recorded as an input.
-			reporters := m.activeWithPrefix(contentionReporters[c.id])
+			reporters := m.ActiveWithPrefix(contentionReporters[c.id])
 			b.Input(c.id+"_reporters", reporters)
 			if len(reporters) > 0 {
 				return answer(false, fmt.Sprintf("the map's reading of %s is %s while %s still reports it, so the node's contention is unknown",
@@ -310,8 +317,8 @@ func (m *Map) admitID(rev uint64, req AdmitRequest) string {
 	}
 }
 
-// activeWithPrefix lists the active properties whose id starts with prefix, sorted.
-func (m *Map) activeWithPrefix(prefix string) []string {
+// ActiveWithPrefix lists the active properties whose id starts with prefix, sorted.
+func (m *Map) ActiveWithPrefix(prefix string) []string {
 	var out []string
 	for _, p := range m.State(Query{Statuses: []Status{Active}}).Properties {
 		if strings.HasPrefix(p.ID, prefix) {

@@ -130,21 +130,32 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		return l
 	}
 
-	pressure, hasPressure := reading(b, d.Relieves)
 	usage, _ := reading(b, d.Usage)
 	l.Usage = usage
 	if capacity.Number == nil || *capacity.Number <= 0 {
 		return fail("no " + d.Capacity + " fact")
 	}
 	l.Share = demand / *capacity.Number
-	if !hasPressure {
-		// Node contention is the worst of the subjects' own, so it is absent when no
-		// subject reports one: an idle node, or one running only units and BestEffort
-		// pods, is calm. Absent while a subject reports one, the gap is a gap.
-		if reporter(b, m, d.Relieves) {
+	// Node contention is the worst of the subjects' own, so it is absent when no
+	// subject reports one: an idle node, or one running only units and BestEffort
+	// pods, is calm. A stale or retired reading is read the same way, as Admit reads
+	// it: with no reporter the node has been emptied. While a subject reports one,
+	// an absent or silent node reading is a gap.
+	var pressure float64
+	p, ok := b.Property(d.Relieves)
+	switch {
+	case ok && p.NObservations > 0 && p.Status == statemap.Active:
+		pressure = p.Value
+	case !ok || p.NObservations == 0:
+		if r := reporters(b, m, d.Relieves); len(r) > 0 {
 			return fail("no " + d.Relieves + " reading")
 		}
 		notes = append(notes, "no subject reports "+d.Relieves)
+	default:
+		if r := reporters(b, m, d.Relieves); len(r) > 0 {
+			return fail(fmt.Sprintf("%s is %s while %s still reports it", d.Relieves, p.Status, r[0]))
+		}
+		notes = append(notes, fmt.Sprintf("%s is %s and no subject reports it", d.Relieves, p.Status))
 	}
 	l.Pressure = pressure
 
@@ -198,17 +209,17 @@ func reading(b *statemap.DecisionBuilder, id string) (float64, bool) {
 	return p.Value, true
 }
 
-// reporter says whether any subject holds an active <relieves>@<subject>, and
-// records the first one found as an input.
-func reporter(b *statemap.DecisionBuilder, m *statemap.Map, relieves string) bool {
-	for _, s := range m.Subjects() {
-		id := relieves + "@" + s
-		if p, ok := m.Property(id); ok && p.Status == statemap.Active {
-			b.Property(id)
-			return true
-		}
+// reporters lists the active properties relieves is the worst of, from Admit's
+// reporter table (memory_contention_ratio is the worst pod's memory_pressure_ratio),
+// or <relieves>@<subject> for a reading the table does not name, and records them.
+func reporters(b *statemap.DecisionBuilder, m *statemap.Map, relieves string) []string {
+	prefix, ok := statemap.ContentionReporter(relieves)
+	if !ok {
+		prefix = relieves + "@"
 	}
-	return false
+	r := m.ActiveWithPrefix(prefix)
+	b.Input(relieves+"_reporters", r)
+	return r
 }
 
 // cloneOffer copies an offer for the record, which must not change if the caller
