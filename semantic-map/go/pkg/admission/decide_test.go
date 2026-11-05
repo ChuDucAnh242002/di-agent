@@ -254,13 +254,30 @@ func TestNoSubjectsReadsZero(t *testing.T) {
 	d := Decide(m, offer(1), both, self, nextID())
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
-	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subjects") || !ptrNear(l.UsagePred, 0) {
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !ptrNear(l.UsagePred, 0) {
 		t.Fatalf("cpu line %+v", l)
 	}
 }
 
-func TestSubjectsWithoutPressureUnpredictable(t *testing.T) {
+// TestSubjectsWithoutContentionReadZero: subjects that report no contention of
+// their own (units, groups, BestEffort pods) leave node pressure absent, and the
+// node is calm, not unpredictable.
+func TestSubjectsWithoutContentionReadZero(t *testing.T) {
+	m, _ := node(t, 0.4, -1) // pod:a reports usage only
+	record(t, m, "cpu_utilization@unit:x", "unit:x", 0.05)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "cpu_contention_ratio")
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !l.Pass {
+		t.Fatalf("cpu line %+v", l)
+	}
+}
+
+// TestReporterWithoutPressureUnpredictable: a subject reports contention but the
+// node has no reading, so the node's worst is unknown.
+func TestReporterWithoutPressureUnpredictable(t *testing.T) {
 	m, _ := node(t, 0.4, -1)
+	record(t, m, "cpu_contention_ratio@pod:a", "pod:a", 0.01)
 	d := Decide(m, offer(1), both, self, nextID())
 	want(t, d, Decline, "no cpu_contention_ratio reading")
 	if l := line(t, d, "cpu_contention_ratio"); l.Pass || l.MapPred != nil || l.UsagePred != nil {

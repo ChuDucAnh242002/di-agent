@@ -107,10 +107,9 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	for _, f := range b.Facts() {
 		facts[f.Key] = f
 	}
-	subjects := m.Census().Subjects
 	reason := ""
 	for i, d := range domains {
-		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity], subjects)
+		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity])
 		if !lines[i].Pass && reason == "" {
 			reason = lines[i].Reason
 		}
@@ -123,7 +122,7 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 
 // predict evaluates one domain. Both predictions are made whenever their inputs
 // exist, so the record shows what the basis that did not decide would have said.
-func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand float64, capacity statemap.Fact, subjects int) Line {
+func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand float64, capacity statemap.Fact) Line {
 	l := Line{Domain: d.Relieves, Phase: d.Phase, Exit: d.Exit}
 	var notes []string
 	fail := func(why string) Line {
@@ -139,12 +138,13 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	}
 	l.Share = demand / *capacity.Number
 	if !hasPressure {
-		// Node contention is the worst of the subjects', so a node running none has
-		// no reading; with subjects present the gap is a gap.
-		if subjects > 0 {
+		// Node contention is the worst of the subjects' own, so it is absent when no
+		// subject reports one: an idle node, or one running only units and BestEffort
+		// pods, is calm. Absent while a subject reports one, the gap is a gap.
+		if reporter(b, m, d.Relieves) {
 			return fail("no " + d.Relieves + " reading")
 		}
-		notes = append(notes, "no subjects")
+		notes = append(notes, "no subject reports "+d.Relieves)
 	}
 	l.Pressure = pressure
 
@@ -196,6 +196,19 @@ func reading(b *statemap.DecisionBuilder, id string) (float64, bool) {
 		return 0, false
 	}
 	return p.Value, true
+}
+
+// reporter says whether any subject holds an active <relieves>@<subject>, and
+// records the first one found as an input.
+func reporter(b *statemap.DecisionBuilder, m *statemap.Map, relieves string) bool {
+	for _, s := range m.Subjects() {
+		id := relieves + "@" + s
+		if p, ok := m.Property(id); ok && p.Status == statemap.Active {
+			b.Property(id)
+			return true
+		}
+	}
+	return false
 }
 
 // cloneOffer copies an offer for the record, which must not change if the caller
