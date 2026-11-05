@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/admission"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
@@ -492,7 +493,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 //
 // Wires three in-process agents (A, B, C), each behind its own httptest
 // server with the minimum HTTP surface RecommendPeer needs (/cost, /healthz,
-// /offload). Each agent is biased so its CostOfAction returns a different
+// /offers). Each agent is biased so its CostOfAction returns a different
 // ResourceCost: A low (attractive offload target), B high (the agent that
 // wants to offload), C medium. Cross-registers A, B, and C in every other
 // agent's peer registry.
@@ -500,7 +501,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 // The scenario walks through:
 //  1. Pre-flight: each agent's local CostOfAction.
 //  2. B.RecommendPeer — must pick A (the lowest-cost peer, highest savings).
-//  3. B → A: POST /offload through peers.Client, declaring the demand; A answers from its map.
+//  3. B → A: POST /offers through peers.Client, declaring the demand; A answers from its map.
 //  4. A accepts; B updates A's trust by +0.1.
 //  5. Final summary table: per-agent self-cost, B's trust scores for A/C,
 //     and the final decision narrative.
@@ -537,7 +538,7 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 }
 
 // registerScenarioHTTP wires the minimum HTTP surface RecommendPeer needs to
-// talk to a remote peer: GET /cost, GET /healthz, POST /offload. The agent
+// talk to a remote peer: GET /cost, GET /healthz, POST /offers. The agent
 // daemon's full route set lives in pkg/agentmain and cannot be
 // imported by tests in this package — so we re-wire just what the scenario
 // requires. The wire shapes match the daemon exactly so peers.Client works
@@ -562,24 +563,26 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
-		var req peers.OffloadRequest
-		if err := decodeJSON(r, &req); err != nil {
+	// A stand-in for the daemon's /offers: the gate is the node's own map under
+	// the default relief levers' enter levels, answered as a hop.
+	mux.HandleFunc("POST /offers", func(w http.ResponseWriter, r *http.Request) {
+		var offer admission.Offer
+		if err := decodeJSON(r, &offer); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		// The daemon's answer: admission from the node's own map, under the
-		// default relief levers' enter levels.
-		res := sm.State().Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
-			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
-			CPUEnter: enter["cpu.limit"], MemoryEnter: enter["memory.high"]})
+		res := sm.State().Admit(statemap.AdmitRequest{CPUCores: offer.Demand["cpu"].Value,
+			MemoryBytes: offer.Demand["memory"].Value, CPUEnter: enter[spec.LeverCPULimit], MemoryEnter: enter[spec.LeverMemoryHigh]})
 		if res.Err != "" {
 			http.Error(w, res.Err, 400)
 			return
 		}
+		verdict := admission.Decline
+		if res.Accepted {
+			verdict = admission.Accept
+		}
 		w.Header().Set("Content-Type", "application/json")
-		writeJSONBody(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
-			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
+		writeJSONBody(w, admission.Hop{Verdict: verdict, Reason: res.Reason, DecisionID: res.DecisionID})
 	})
 }
 
@@ -651,13 +654,13 @@ func writeJSONBody(w http.ResponseWriter, v any) {
 }
 
 func TestScenario_CoordinationOffload(t *testing.T) {
-	t.Log("Scenario 7: three in-process agents coordinate via /peers + /offload.")
+	t.Log("Scenario 7: three in-process agents coordinate via /peers + /offers.")
 	t.Log("")
 	t.Log("Setup:")
 	t.Log("  Agent A — idle (low energy cost, attractive offload destination)")
 	t.Log("  Agent B — loaded (high energy cost, wants to offload)")
 	t.Log("  Agent C — medium (in the middle)")
-	t.Log("  Each agent runs its own httptest server with /cost, /healthz, /offload.")
+	t.Log("  Each agent runs its own httptest server with /cost, /healthz, /offers.")
 	t.Log("")
 
 	// ── Wire each agent (peers are populated in a second pass so we have URLs) ──
@@ -749,21 +752,22 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Log("Phase 2: B → A POST /offload declaring 1 CPU core and 1 GiB.")
+	t.Log("Phase 2: B → A POST /offers declaring 1 CPU core and 1 GiB.")
 	preTrustForA := peerByURL(t, b.sm, a.srv.URL).Trust
-	resp, err := b.sm.PeerClient().Offload(context.Background(), a.srv.URL, &peers.OffloadRequest{
-		SourceNodeID: "node_B",
-		CPUCores:     1,
-		MemoryBytes:  1 << 30,
+	hop, err := b.sm.PeerClient().Offer(context.Background(), a.srv.URL, admission.Offer{
+		Name: "web",
+		Demand: map[string]admission.Demand{
+			"cpu":    {Value: 1, Source: "declared"},
+			"memory": {Value: 1 << 30, Source: "declared"},
+		},
 	})
 	if err != nil {
-		t.Fatalf("Offload call: %v", err)
+		t.Fatalf("Offer call: %v", err)
 	}
-	if !resp.Accepted || resp.CPUAfter == nil || resp.MemoryAfter == nil {
-		t.Fatalf("expected A to accept with a projection; got %+v", resp)
+	if hop.Verdict != admission.Accept || hop.DecisionID == "" {
+		t.Fatalf("expected A to accept with a decision id; got %+v", hop)
 	}
-	t.Logf("  → A.Accepted=%t reason=%q basis=%s cpu_after=%.3f memory_after=%.3f decision=%s",
-		resp.Accepted, resp.Reason, resp.Basis, *resp.CPUAfter, *resp.MemoryAfter, resp.DecisionID)
+	t.Logf("  → A.Verdict=%s reason=%q decision=%s", hop.Verdict, hop.Reason, hop.DecisionID)
 
 	// Trust update on a successful offload: nudge upward.
 	const acceptDelta = 0.10
