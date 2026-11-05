@@ -35,7 +35,7 @@ package agentmain
 // /peers                            POST    AddPeerRequest                 200 PeerDTO
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
-// /offload                          POST    OffloadHTTPRequest             200 OffloadHTTPResponse
+// /offload                          POST    peers.OffloadRequest           200 peers.OffloadResponse
 //                                                                          400 (demand not a finite number >= 0)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
 //                                                                          422 {error,response} (failed a gate)
@@ -795,33 +795,54 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 // protocol: another node asks whether this one would take a workload, and this node
 // answers from its own map (statemap.Map.Admit). The answer is a journalled decision;
 // nothing is scheduled. The contention bars are the relief levers' enter levels, so
-// "accepted" means taking the workload would not put the node where relief acts; a
-// lever the spec does not have is a check skipped, and the decision says so.
+// "accepted" means taking the workload would not put the node where relief acts. A
+// lever the spec does not have is a check skipped: logged here once, and said in
+// every decision. The wire is strict: an unknown field or trailing data is a 400,
+// since a field this node does not read is a demand it would silently ignore.
 func registerOffloadRoute(mux *http.ServeMux, state *statemap.Map, levers []spec.Lever) {
-	enter := map[string]float64{}
-	for _, l := range levers {
-		enter[l.Action] = l.Enter
+	enter := leverEnters(levers)
+	for _, l := range []struct{ action, id string }{
+		{spec.LeverCPULimit, "cpu_contention_ratio"}, {spec.LeverMemoryHigh, "memory_contention_ratio"},
+	} {
+		if enter[l.action] <= 0 {
+			log.Printf("offload: no %s lever, so admission will not check %s", l.action, l.id)
+		}
 	}
 	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
 		if err := requireJSON(r); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		var req OffloadHTTPRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var req peers.OffloadRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			writeError(w, http.StatusBadRequest, "trailing data after the request")
 			return
 		}
 		res := state.Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
 			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
-			CPUEnter: enter["cpu.limit"], MemoryEnter: enter["memory.high"]})
+			CPUEnter: enter[spec.LeverCPULimit], MemoryEnter: enter[spec.LeverMemoryHigh]})
 		if res.Err != "" {
 			writeError(w, http.StatusBadRequest, res.Err)
 			return
 		}
-		writeJSON(w, OffloadHTTPResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
+		writeJSON(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
 			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
 	})
+}
+
+// leverEnters is each lever's enter level, by action.
+func leverEnters(levers []spec.Lever) map[string]float64 {
+	enter := map[string]float64{}
+	for _, l := range levers {
+		enter[l.Action] = l.Enter
+	}
+	return enter
 }
 
 // registerExplainRoute wires POST /explain. The endpoint is always registered

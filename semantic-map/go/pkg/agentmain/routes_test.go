@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
@@ -981,12 +982,12 @@ func newOffloadServer(t *testing.T) (baseURL string, state *statemap.Map, cleanu
 func TestOffload_AnswersFromTheMap(t *testing.T) {
 	base, state, cleanup := newOffloadServer(t)
 	defer cleanup()
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{SourceNodeID: "node_b", CPUCores: 1, MemoryBytes: 1 << 30})
+	resp := postJSON(t, base+"/offload", peers.OffloadRequest{SourceNodeID: "node_b", CPUCores: 1, MemoryBytes: 1 << 30})
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("/offload: %s", body(resp))
 	}
-	var out OffloadHTTPResponse
+	var out peers.OffloadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
@@ -1003,7 +1004,7 @@ func TestOffload_AnswersFromTheMap(t *testing.T) {
 	if !strings.Contains(d.Question, "node_b") {
 		t.Errorf("question %q; want the source node named", d.Question)
 	}
-	resp2 := postJSON(t, base+"/offload", OffloadHTTPRequest{CPUCores: -1})
+	resp2 := postJSON(t, base+"/offload", peers.OffloadRequest{CPUCores: -1})
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 400 {
 		t.Errorf("negative demand: got %d, want 400", resp2.StatusCode)
@@ -1018,11 +1019,8 @@ func nearPtr(got *float64, want float64) bool { return got != nil && near(*got, 
 // cpu_contention_ratio, and separately memory_contention_ratio, is at or above its
 // default lever's enter declines, with no projection, and journals the thresholds.
 func TestOffload_DeclinesWhenContended(t *testing.T) {
-	enter := map[string]float64{}
-	for _, l := range spec.Default().Loops.Relief.Levers {
-		enter[l.Action] = l.Enter
-	}
-	for id, lever := range map[string]string{"cpu_contention_ratio": "cpu.limit", "memory_contention_ratio": "memory.high"} {
+	enter := leverEnters(spec.Default().Loops.Relief.Levers)
+	for id, lever := range map[string]string{"cpu_contention_ratio": spec.LeverCPULimit, "memory_contention_ratio": spec.LeverMemoryHigh} {
 		if enter[lever] <= 0 {
 			t.Fatalf("spec default has no %s lever", lever)
 		}
@@ -1031,8 +1029,8 @@ func TestOffload_DeclinesWhenContended(t *testing.T) {
 			if err := state.Record(statemap.Observation{ID: id, Value: v, At: time.Now()}); err != nil {
 				t.Fatal(err)
 			}
-			resp := postJSON(t, base+"/offload", OffloadHTTPRequest{CPUCores: 0.1})
-			var out OffloadHTTPResponse
+			resp := postJSON(t, base+"/offload", peers.OffloadRequest{CPUCores: 0.1})
+			var out peers.OffloadResponse
 			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != 200 {
 				t.Fatalf("%s=%.2f: status %d, %v", id, v, resp.StatusCode, err)
 			}
@@ -1049,7 +1047,7 @@ func TestOffload_DeclinesWhenContended(t *testing.T) {
 				t.Fatalf("decision %q is not in the journal", out.DecisionID)
 			}
 			th, _ := d.Inputs["thresholds"].(map[string]float64)
-			if !near(th["cpu_enter"], enter["cpu.limit"]) || !near(th["memory_enter"], enter["memory.high"]) || !near(th["headroom"], 0.10) {
+			if !near(th["cpu_enter"], enter[spec.LeverCPULimit]) || !near(th["memory_enter"], enter[spec.LeverMemoryHigh]) || !near(th["headroom"], 0.10) {
 				t.Errorf("thresholds %v; want the default levers' enter levels and the headroom", d.Inputs["thresholds"])
 			}
 			if d.Answer["reason"] != out.Reason {
@@ -1074,6 +1072,43 @@ func TestOffload_RefusesABadDemand(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != 400 {
 			t.Errorf("%s: got %d, want 400", b, resp.StatusCode)
+		}
+	}
+}
+
+// TestOffload_IsStrict: a field the node does not read, or anything after the
+// request, is a 400, not a demand silently ignored.
+func TestOffload_IsStrict(t *testing.T) {
+	base, state, cleanup := newOffloadServer(t)
+	defer cleanup()
+	before := len(state.Journal().Decisions(0))
+	for _, b := range []string{`{"cpu_cores":1,"latency_budget_ms":5}`, `{"cpu_cores":1} {"cpu_cores":2}`} {
+		req, _ := http.NewRequest("POST", base+"/offload", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("%s: got %d, want 400", b, resp.StatusCode)
+		}
+	}
+	if after := len(state.Journal().Decisions(0)); after != before {
+		t.Errorf("journal holds %d decisions, was %d; a refused request records nothing", after, before)
+	}
+}
+
+// TestOffload_EveryLeverHasAnEnter: under the default spec, every lever action
+// resolves to a non-zero enter, and is one admission checks.
+func TestOffload_EveryLeverHasAnEnter(t *testing.T) {
+	enter := leverEnters(spec.Default().Loops.Relief.Levers)
+	for _, a := range spec.LeverActions() {
+		if enter[a] <= 0 {
+			t.Errorf("lever %s: enter %v; want non-zero", a, enter[a])
+		}
+		if a != spec.LeverCPULimit && a != spec.LeverMemoryHigh {
+			t.Errorf("lever %s is not one admission checks", a)
 		}
 	}
 }

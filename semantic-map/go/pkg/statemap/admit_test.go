@@ -1,6 +1,8 @@
 package statemap
 
 import (
+	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -95,16 +97,16 @@ func TestAdmitAcceptsWithHeadroom(t *testing.T) {
 func TestAdmitDeclinesOnCPUHeadroom(t *testing.T) {
 	m, _ := admitFixture(t)
 	res := m.Admit(admitReq(2.5, 0)) // 0.4 + 0.625 > 0.9
-	if res.Accepted || !strings.Contains(res.Reason, "cpu") {
-		t.Errorf("%+v; want declined on cpu", res)
+	if res.Accepted || !strings.Contains(res.Reason, "cpu") || res.CPUAfter == nil || *res.CPUAfter <= 0.9 {
+		t.Errorf("%+v; want declined on cpu with cpu_after past 0.9", res)
 	}
 }
 
 func TestAdmitDeclinesOnMemoryHeadroom(t *testing.T) {
 	m, _ := admitFixture(t)
 	res := m.Admit(admitReq(0, 4<<30)) // 0.5 + 0.5 > 0.9
-	if res.Accepted || !strings.Contains(res.Reason, "memory") {
-		t.Errorf("%+v; want declined on memory", res)
+	if res.Accepted || !strings.Contains(res.Reason, "memory") || res.MemoryAfter == nil || *res.MemoryAfter <= 0.9 {
+		t.Errorf("%+v; want declined on memory with memory_after past 0.9", res)
 	}
 }
 
@@ -144,11 +146,14 @@ func TestAdmitMeasuresAStaleSubject(t *testing.T) {
 	if p, _ := m.Property("cpu_utilization@pod:w"); p.Status != Stale {
 		t.Fatalf("fixture: pod:w is %s, want stale", p.Status)
 	}
-	req := admitReq(3, 0) // declared would decline; measured must be used
+	req := admitReq(0.1, 0) // declared below what was measured: the measured shares are priced
 	req.Workload = "pod:w"
 	res := m.Admit(req)
 	if !res.Accepted || res.Basis != BasisMeasured || !nearPtr(res.CPUAfter, 0.7) || !nearPtr(res.MemoryAfter, 0.6) {
 		t.Fatalf("%+v; want accepted on the measured 0.3/0.1", res)
+	}
+	if hasCaveat(res.Caveats, "exceeded the measured") {
+		t.Errorf("caveats %v; the declared demand did not exceed the measured one", res.Caveats)
 	}
 	if !hasCaveat(res.Caveats, "measured when it last ran here, 5m0s ago") {
 		t.Errorf("caveats %v; want the age of the measurement", res.Caveats)
@@ -163,18 +168,56 @@ func TestAdmitMeasuresAStaleSubject(t *testing.T) {
 	}
 }
 
+// TestAdmitAnActiveSubjectIsAlreadyRunning: a pod still active here is already in the
+// node's shares, so there is nothing to admit; it is declined, with no basis, since
+// no demand was priced.
 func TestAdmitAnActiveSubjectIsAlreadyRunning(t *testing.T) {
 	m, c := admitFixture(t)
 	recordPod(t, m, c.now(), ptr(0.3), ptr(0.1))
 	res := m.Admit(AdmitRequest{Workload: "pod:w", CPUEnter: 0.25, MemoryEnter: 0.08})
-	if !res.Accepted || !strings.Contains(res.Reason, "already running") || res.CPUAfter != nil || res.MemoryAfter != nil {
-		t.Errorf("%+v; want accepted as already running, with no projection", res)
+	if res.Accepted || res.Reason != "pod:w is already running here (cpu_utilization@pod:w is active); nothing to admit" ||
+		res.Basis != "" || res.CPUAfter != nil || res.MemoryAfter != nil {
+		t.Errorf("%+v; want declined as already running, with no basis and no projection", res)
 	}
-	// A declared demand does not change that: the workload is already in the node's shares.
+	// A declared demand does not change that.
 	req := admitReq(3, 4<<30)
 	req.Workload = "pod:w"
-	if res := m.Admit(req); !res.Accepted || !strings.Contains(res.Reason, "already running") || res.Basis != BasisDeclared {
+	if res := m.Admit(req); res.Accepted || !strings.Contains(res.Reason, "already running") || res.Basis != "" {
 		t.Errorf("%+v; want already running whatever was declared", res)
+	}
+}
+
+// TestAdmitAStaleMeasuredPodCanDeclineOnHeadroom: the measured demand is priced like
+// any other, and can be too much.
+func TestAdmitAStaleMeasuredPodCanDeclineOnHeadroom(t *testing.T) {
+	m, c := admitFixture(t)
+	recordPod(t, m, c.now(), ptr(0.6), ptr(0.1))
+	ageOut(t, m, c)
+	res := m.Admit(AdmitRequest{Workload: "pod:w", CPUEnter: 0.25, MemoryEnter: 0.08})
+	if res.Accepted || res.Basis != BasisMeasured || res.CPUAfter == nil || *res.CPUAfter <= 0.9 {
+		t.Errorf("%+v; want declined on the measured 0.6 of CPU", res)
+	}
+}
+
+// TestAdmitPricesTheLargerOfMeasuredAndDeclared: a requester declaring more than was
+// measured may know the workload has grown; the larger is priced, and both recorded.
+func TestAdmitPricesTheLargerOfMeasuredAndDeclared(t *testing.T) {
+	m, c := admitFixture(t)
+	recordPod(t, m, c.now(), ptr(0.1), ptr(0.1))
+	ageOut(t, m, c)
+	req := admitReq(1, 0) // 1/4 = 0.25 of CPU > the measured 0.1; memory 0 < 0.1
+	req.Workload = "pod:w"
+	res := m.Admit(req)
+	if !res.Accepted || res.Basis != BasisMeasured || !nearPtr(res.CPUAfter, 0.65) || !nearPtr(res.MemoryAfter, 0.6) {
+		t.Fatalf("%+v; want cpu priced on the declared 0.25, memory on the measured 0.1", res)
+	}
+	if !hasCaveat(res.Caveats, "declared cpu demand 0.2500 exceeded the measured 0.1000") ||
+		hasCaveat(res.Caveats, "declared memory demand") {
+		t.Errorf("caveats %v; want only the cpu override caveated", res.Caveats)
+	}
+	d, _ := m.Journal().Decision(res.DecisionID)
+	if _, ok := d.Inputs["demand"]; !ok {
+		t.Errorf("inputs %v; want both demands recorded", d.Inputs)
 	}
 }
 
@@ -185,8 +228,8 @@ func TestAdmitAPartlyMeasuredPod(t *testing.T) {
 	recordPod(t, m, c.now(), nil, ptr(0.1))
 	req := admitReq(3, 0)
 	req.Workload = "pod:w"
-	// Active, one share: already in the node's totals, not priced again.
-	if res := m.Admit(req); !res.Accepted || !strings.Contains(res.Reason, "already running") {
+	// Active, one share: already in the node's totals, nothing to admit.
+	if res := m.Admit(req); res.Accepted || !strings.Contains(res.Reason, "already running") {
 		t.Fatalf("%+v; want already running on the active memory share alone", res)
 	}
 	// Stale, one share: priced on the declared demand, naming the missing share.
@@ -231,9 +274,9 @@ func TestAdmitAGroupIsPricedOnItsDeclaredDemand(t *testing.T) {
 	}
 }
 
-// TestAdmitAlreadyRunningIsNotDeclinedForContention: a workload already here has
-// nothing to admit, so the node's contention cannot decline it.
-func TestAdmitAlreadyRunningIsNotDeclinedForContention(t *testing.T) {
+// TestAdmitAlreadyRunningIsAnsweredBeforeContention: a workload already here has
+// nothing to admit, and that is the answer, not the node's contention.
+func TestAdmitAlreadyRunningIsAnsweredBeforeContention(t *testing.T) {
 	m, c := admitFixture(t)
 	recordPod(t, m, c.now(), ptr(0.3), ptr(0.1))
 	for range 5 {
@@ -244,8 +287,8 @@ func TestAdmitAlreadyRunningIsNotDeclinedForContention(t *testing.T) {
 		t.Fatalf("fixture: contention %.3f did not reach enter", p.Value)
 	}
 	res := m.Admit(AdmitRequest{Workload: "pod:w", CPUEnter: 0.25, MemoryEnter: 0.08})
-	if !res.Accepted || !strings.Contains(res.Reason, "already running") {
-		t.Errorf("%+v; want accepted as already running on a contended node", res)
+	if res.Accepted || !strings.Contains(res.Reason, "already running") || strings.Contains(res.Reason, "contended") {
+		t.Errorf("%+v; want declined as already running, not as contended", res)
 	}
 }
 
@@ -313,8 +356,96 @@ func TestAdmitRefusesAReusedID(t *testing.T) {
 
 func TestAdmitRefusesABadDemand(t *testing.T) {
 	m, _ := admitFixture(t)
-	if res := m.Admit(admitReq(-1, 0)); res.Err == "" {
-		t.Errorf("%+v; want a negative demand refused", res)
+	before := len(m.Journal().Decisions(0))
+	for _, req := range []AdmitRequest{admitReq(-1, 0), admitReq(math.NaN(), 0), admitReq(0, math.Inf(1))} {
+		if res := m.Admit(req); res.Err == "" || res.DecisionID != "" {
+			t.Errorf("%+v; want the demand refused before a decision", res)
+		}
+	}
+	if after := len(m.Journal().Decisions(0)); after != before {
+		t.Errorf("journal holds %d decisions, was %d; a refused request must record nothing", after, before)
+	}
+}
+
+// TestAdmitAReusedExplicitIDRecordsNothing: an explicit id already used is refused,
+// and the refusal does not touch the journal.
+func TestAdmitAReusedExplicitIDRecordsNothing(t *testing.T) {
+	m, _ := admitFixture(t)
+	req := admitReq(1, 0)
+	req.ID = "est-1-gate"
+	if res := m.Admit(req); res.Err != "" || res.DecisionID != "est-1-gate" {
+		t.Fatalf("%+v; want the explicit id kept", res)
+	}
+	before := len(m.Journal().Decisions(0))
+	if res := m.Admit(req); !strings.Contains(res.Err, "already used") {
+		t.Errorf("%+v; want the reused id refused", res)
+	}
+	if after := len(m.Journal().Decisions(0)); after != before {
+		t.Errorf("journal holds %d decisions, was %d", after, before)
+	}
+}
+
+// TestAdmitIDsAreUnambiguousAndNeverOverwrite: two requests whose fields would join
+// to the same text get different ids, and an identical retry at the same revision
+// gets a suffixed one, so both records stay.
+func TestAdmitIDsAreUnambiguousAndNeverOverwrite(t *testing.T) {
+	m, _ := admitFixture(t)
+	a := m.Admit(AdmitRequest{From: "n|pod:a", Workload: "b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
+	b := m.Admit(AdmitRequest{From: "n", Workload: "pod:a|b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
+	if a.DecisionID == b.DecisionID || strings.TrimSuffix(b.DecisionID, "-2") == a.DecisionID {
+		t.Errorf("ids %s and %s; want two different digests", a.DecisionID, b.DecisionID)
+	}
+	first, retry := m.Admit(admitReq(1, 0)), m.Admit(admitReq(1, 0))
+	if first.Revision != retry.Revision || retry.DecisionID != first.DecisionID+"-2" {
+		t.Fatalf("ids %s and %s at revisions %d/%d; want the retry suffixed -2", first.DecisionID, retry.DecisionID, first.Revision, retry.Revision)
+	}
+	if third := m.Admit(admitReq(1, 0)); third.DecisionID != first.DecisionID+"-3" {
+		t.Errorf("third id %s; want -3", third.DecisionID)
+	}
+	for _, id := range []string{first.DecisionID, retry.DecisionID} {
+		if _, ok := m.Journal().Decision(id); !ok {
+			t.Errorf("decision %s was overwritten", id)
+		}
+	}
+}
+
+// TestAdmitSaysWhichDemandWasNotDeclared: a declared demand of one resource only is
+// priced as zero of the other, and the decision says so.
+func TestAdmitSaysWhichDemandWasNotDeclared(t *testing.T) {
+	m, _ := admitFixture(t)
+	if res := m.Admit(admitReq(1, 0)); !hasCaveat(res.Caveats, "no memory demand was declared") || hasCaveat(res.Caveats, "no cpu demand") {
+		t.Errorf("caveats %v; want memory named", res.Caveats)
+	}
+	if res := m.Admit(admitReq(0, 1<<30)); !hasCaveat(res.Caveats, "no cpu demand was declared") {
+		t.Errorf("caveats %v; want cpu named", res.Caveats)
+	}
+}
+
+// TestAdmitDeclinesOnARetiredNodeShare: a retired reading is a reading of the past.
+func TestAdmitDeclinesOnARetiredNodeShare(t *testing.T) {
+	m, _ := admitFixture(t)
+	if err := m.RetireProperty("memory_utilization", "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if res := m.Admit(admitReq(1, 0)); res.Accepted || res.Reason != "the map's reading of node memory_utilization is retired" {
+		t.Errorf("%+v; want declined naming the retired share", res)
+	}
+}
+
+// TestAdmitARetiredPodShareFallsBackToDeclared: a pod share retired is not a
+// measurement, so the declared demand is priced, and the caveat says why.
+func TestAdmitARetiredPodShareFallsBackToDeclared(t *testing.T) {
+	m, c := admitFixture(t)
+	recordPod(t, m, c.now(), ptr(0.3), ptr(0.1))
+	ageOut(t, m, c)
+	if err := m.RetireProperty("cpu_utilization@pod:w", "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	req := admitReq(1, 0)
+	req.Workload = "pod:w"
+	res := m.Admit(req)
+	if !res.Accepted || res.Basis != BasisDeclared || !hasCaveat(res.Caveats, "cpu_utilization@pod:w is retired") {
+		t.Errorf("%+v; want priced on the declared demand, naming the retired share", res)
 	}
 }
 
@@ -338,6 +469,10 @@ func TestAdmitDeclinesWhenMemoryContended(t *testing.T) {
 // TestAdmitBoundaries: headroom is "at or below", contention "at or above".
 func TestAdmitBoundaries(t *testing.T) {
 	m, _ := admitFixture(t)
+	// Exact, not near: the fixture's readings were each recorded once, so the map holds
+	// 0.4 and 0.5 as given; 2/4 is 0.5 and 3.2·2^30/2^33 is 0.4 in float64, and
+	// 0.4 + 0.5 == 0.9 == 1 - admitHeadroom there. So these land on the limit itself,
+	// which "at or below" must accept.
 	if res := m.Admit(admitReq(2, 0)); !res.Accepted || !nearPtr(res.CPUAfter, 0.9) { // 0.4 + 2/4 = 0.9
 		t.Errorf("%+v; want exactly 0.90 accepted", res)
 	}
@@ -407,8 +542,8 @@ func TestAdmitDeclinesOnASeededNodeShare(t *testing.T) {
 	}
 }
 
-func TestAdmitDeclinesOnAStaleReading(t *testing.T) {
-	for _, id := range []string{"cpu_utilization", "memory_utilization", "cpu_contention_ratio", "memory_contention_ratio"} {
+func TestAdmitDeclinesOnAStaleNodeShare(t *testing.T) {
+	for _, id := range []string{"cpu_utilization", "memory_utilization"} {
 		m, c := admitFixture(t)
 		ageOut(t, m, c, id)
 		if p, _ := m.Property(id); p.Status != Stale {
@@ -418,6 +553,65 @@ func TestAdmitDeclinesOnAStaleReading(t *testing.T) {
 		if res.Accepted || !strings.Contains(res.Reason, id) || !strings.Contains(res.Reason, "stale") {
 			t.Errorf("stale %s: %+v; want declined naming it", id, res)
 		}
+	}
+}
+
+// TestAdmitAQuietContentionReading: a node contention reading that is stale or
+// retired declines only while a pod still reports what it is the worst of. With none,
+// the node has been emptied (the collector stops the CPU reading when no pod is
+// promised), which is the best target, not a contended one.
+func TestAdmitAQuietContentionReading(t *testing.T) {
+	reporter := map[string]string{
+		"cpu_contention_ratio":    "cpu_contention_ratio@pod:r",
+		"memory_contention_ratio": "memory_pressure_ratio@pod:r",
+	}
+	for _, id := range []string{"cpu_contention_ratio", "memory_contention_ratio"} {
+		for _, status := range []Status{Stale, Retired} {
+			for _, reported := range []bool{false, true} {
+				m, c := admitFixture(t)
+				ageOut(t, m, c, id)
+				if status == Retired {
+					if err := m.RetireProperty(id, "test", "test"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if reported {
+					unit := [2]float64{0, 1}
+					if err := m.Record(Observation{ID: reporter[id], Value: 0.01, At: c.now(), Subject: "pod:r", Range: &unit}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if p, _ := m.Property(id); p.Status != status {
+					t.Fatalf("fixture: %s is %s, want %s", id, p.Status, status)
+				}
+				res := m.Admit(admitReq(0.1, 0))
+				name := fmt.Sprintf("%s %s reported=%v", status, id, reported)
+				if reported {
+					if res.Accepted || !strings.Contains(res.Reason, id) || !strings.Contains(res.Reason, string(status)) ||
+						!strings.Contains(res.Reason, reporter[id]) {
+						t.Errorf("%s: %+v; want declined naming the reading, its status and the reporter", name, res)
+					}
+					continue
+				}
+				if !res.Accepted || !hasCaveat(res.Caveats, id+" is "+string(status)+" and no workload reports it, so the node is taken as not contended") {
+					t.Errorf("%s: %+v; want accepted with the quiet reading caveated", name, res)
+				}
+			}
+		}
+	}
+}
+
+// TestAdmitSaysAContentionReadingIsMissing: no reading at all is a check not made,
+// and the decision says so in its own words.
+func TestAdmitSaysAContentionReadingIsMissing(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores"), NumberFact("memory_total", 8<<30, "bytes")})
+	_ = m.Record(Observation{ID: "cpu_utilization", Value: 0.4, At: c.now()})
+	_ = m.Record(Observation{ID: "memory_utilization", Value: 0.5, At: c.now()})
+	res := m.Admit(admitReq(1, 0))
+	if !res.Accepted || !hasCaveat(res.Caveats, "cpu_contention_ratio has no reading, so cpu contention was not checked") ||
+		!hasCaveat(res.Caveats, "memory_contention_ratio has no reading, so memory contention was not checked") {
+		t.Errorf("%+v; want both missing readings caveated", res)
 	}
 }
 

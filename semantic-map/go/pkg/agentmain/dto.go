@@ -208,34 +208,6 @@ type SetTrustRequest struct {
 	Value float64 `json:"value"`
 }
 
-// OffloadHTTPRequest is the body of POST /offload: another node asking whether this
-// one would take a workload. Named with the HTTP prefix so it does not collide with
-// pkg/peers.OffloadRequest (this is the server-side DTO; that is the
-// outbound-client DTO). Workload optionally names the subject; CPUCores and
-// MemoryBytes are the declared demand, used unless Workload is a pod this node's map
-// has seen with both its CPU and memory shares.
-type OffloadHTTPRequest struct {
-	SourceNodeID string  `json:"source_node_id"`
-	Workload     string  `json:"workload,omitempty"`
-	CPUCores     float64 `json:"cpu_cores"`
-	MemoryBytes  float64 `json:"memory_bytes"`
-}
-
-// OffloadHTTPResponse is the body of POST /offload: this node's answer, from its
-// own map. DecisionID reproduces it through GET /state/decisions/{id}. CPUAfter and
-// MemoryAfter are the projected node shares, absent when the answer came before a
-// projection (already running, a missing fact or reading, contention). Caveats are
-// the decision's: what the answer rests on that is weaker than a current reading.
-type OffloadHTTPResponse struct {
-	Accepted    bool     `json:"accepted"`
-	Reason      string   `json:"reason"`
-	Basis       string   `json:"basis,omitempty"`
-	DecisionID  string   `json:"decision_id"`
-	CPUAfter    *float64 `json:"cpu_after,omitempty"`
-	MemoryAfter *float64 `json:"memory_after,omitempty"`
-	Caveats     []string `json:"caveats,omitempty"`
-}
-
 // ── Mappers ───────────────────────────────────────────────────────────────────
 
 // directionToString converts the internal Direction enum to its wire form.

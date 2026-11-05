@@ -252,8 +252,9 @@ type ActionCost struct {
 
 // OffloadRequest is the body sent to a peer's /offload endpoint: would the peer take
 // this workload. Workload optionally names the subject; CPUCores and MemoryBytes are
-// the declared demand, which the peer uses unless Workload is a pod its own map has
-// seen with both its CPU and memory shares.
+// the declared demand: the peer prices them unless Workload is a pod its own map has
+// seen with both its CPU and memory shares, and then prices the larger of each. The
+// peer refuses a field it does not read.
 type OffloadRequest struct {
 	SourceNodeID string  `json:"source_node_id"`
 	Workload     string  `json:"workload,omitempty"`
@@ -261,8 +262,10 @@ type OffloadRequest struct {
 	MemoryBytes  float64 `json:"memory_bytes"`
 }
 
-// OffloadResponse is the peer's answer, from its own map. Basis says whether the
-// demand was measured there or declared; DecisionID reproduces the answer through
+// OffloadResponse is the peer's answer, from its own map, and the body the daemon's
+// POST /offload writes. Basis says whether the demand was measured there or declared,
+// empty when the peer answered before pricing any (the pod is already running there,
+// or there was nothing to price); DecisionID reproduces the answer through
 // the peer's GET /state/decisions/{id}; CPUAfter and MemoryAfter are the node shares
 // the peer projected, nil when it answered before projecting; Caveats are what the
 // answer rests on that is weaker than a current reading.
@@ -365,7 +368,8 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 // Offload posts an OffloadRequest to the peer and returns its response. It does not
 // touch trust, and nothing in the daemon calls it: moving trust on an answer is the
 // caller's, through Registry.UpdateTrust (the coordination scenario adds 0.10 on an
-// accept). A non-2xx (a refused request) is an error.
+// accept). A non-2xx (a refused request) is an error, and so is a 2xx without a
+// decision id: an answer the peer cannot reproduce is not a map-grounded admission.
 func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadRequest) (*OffloadResponse, error) {
 	if req == nil {
 		return nil, errors.New("peers.Client.Offload: nil request")
@@ -392,6 +396,9 @@ func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadReques
 	var out OffloadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("peers.Client.Offload: decode: %w", err)
+	}
+	if out.DecisionID == "" {
+		return nil, fmt.Errorf("peers.Client.Offload: peer %s answered without a decision; not a map-grounded admission", peerURL)
 	}
 	return &out, nil
 }

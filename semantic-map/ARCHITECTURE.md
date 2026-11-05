@@ -235,8 +235,8 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ╔════════════════════════▼══════════════════════════╗
    PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
    GET /cost                ║                                                   ║
-   POST /offload            ║   SemanticMap facade                              ║
-                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
+   POST /offload → Admit    ║   SemanticMap facade                              ║
+   (state map, not here)    ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
                             ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
                             ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
                             ║   └──────────┴───────────┴──────────┴──────────┘  ║
@@ -281,7 +281,7 @@ What each piece is for, when it runs, and whether it is required.
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
 | **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
-| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
+| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for a peer's `/cost` and `/offload`, and the `/offload` wire types (the answer itself is the state map's `Admit`) | `/recommend`, `/peers` | Optional |
 | **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup (not collectors: those are `sources.collectors`) | Once, at boot | Yes |
 
@@ -1663,31 +1663,54 @@ thresholds it read. Nothing is scheduled. Execution needs a workload runtime the
 does not own, and keeping the answer pure lets a requester ask several nodes before
 anything moves. Peers negotiating with these answers is P7.
 
+**Order.** The checks run in this order, and the first to fail answers: the workload,
+whether there is anything to price, the facts, the node's shares, contention, the
+projection.
+
 **Demand: measured for a pod, else declared.** Only a pod is looked up: its uid is
 the cluster's, so `pod:<uid>` in this map is that workload. A unit or a group
-(`group:<name>` comes from cluster-wide labels, and every node has `group:system`)
+(`group:<name>` comes from cluster-wide labels, and `group:system` exists by default)
 names something each node has its own of, so what this map holds under that name is
 not the requester's workload; it is priced on the declared demand, and the decision
 says why. A pod with either share, `cpu_utilization@<pod>` or
-`memory_utilization@<pod>`, still active is already counted in the node's own shares,
-so it is answered "already running" with no projection, first, before any capacity or
-contention check: it has nothing to admit, so a contended node does not turn it away.
-A stale pod with both shares is priced on them (already node shares). One with only
-one (the cgroup collector reports memory from its first tick, CPU from its second)
-is priced on the declared demand, with a caveat naming the missing share. Otherwise
-the demand is what the requester declares, cores over the `cpu_cores` fact and bytes
-over `memory_total`, and the decision says it was declared, not observed, and why.
+`memory_utilization@<pod>`, still active is already counted in the node's own shares:
+there is nothing to admit, and it is declined as "already running", first, with no
+basis and no projection. A stale pod with both shares is priced on them (already node
+shares), or on the declared demand per resource where that is larger, with a caveat
+and both values in the decision. A pod with one share only (the cgroup collector
+reports memory from its first tick, CPU from its second), or with a retired one, is
+priced on the declared demand, with a caveat naming the missing or retired share.
+Otherwise the demand is what the requester declares, cores over the `cpu_cores` fact
+and bytes over `memory_total`; the decision says it was declared, not observed, and
+why, and names a resource declared as zero. With nothing measured and nothing
+declared, there is nothing to price, and it declines.
+
+**Limitation.** Measured demand is keyed on the pod's UID, which matches only a pod
+that ran here and returns. An offloaded pod has a UID this node has never seen, so
+declared is the normal path; keying on owner or controller identity is future work.
 
 **Criterion: relief-based.** Accept only if taking the workload would not put the
 node where relief has to act. A node whose `cpu_contention_ratio` or
-`memory_contention_ratio` is at or above its lever's `enter` declines outright. Then
-the node's `cpu_utilization` and `memory_utilization` plus the demand must stay at or
-below `1 - admitHeadroom` (a constant, 0.10): past it, a pod owed CPU or memory waits
-on what others hold, which is what relief relieves. A lever the spec does not have is
-a check skipped, with a caveat; so is a contention property the map does not hold or
-has never observed. A missing or non-positive fact, an unobserved node share, or a
-stale node share or contention reading declines, naming it. `cpu_after` and
-`memory_after` are present only when the projection was made.
+`memory_contention_ratio` is at or above its lever's `enter` declines outright. A
+stale or retired contention reading declines only while a pod still reports what it
+is the worst of (an active `cpu_contention_ratio@pod:*`, or `memory_pressure_ratio@pod:*`
+for memory); with none, the node has been emptied (the collector stops the node's CPU
+reading when no pod is promised CPU), which is the best target, so it is taken as not
+contended, with a caveat. A contention property the map does not hold or has never
+observed is a check skipped, with a caveat; so is a lever the spec does not have,
+which the agent also logs once at startup. Then the node's `cpu_utilization` and
+`memory_utilization` plus the demand must stay at or below `1 - admitHeadroom` (a
+constant, 0.10): past it, a pod owed CPU or memory waits on what others hold, which is
+what relief relieves. A missing or non-positive fact, or a node share never observed,
+declines naming it; a stale node share declines, and a retired one declines like a
+stale one. `cpu_after` and `memory_after` are present only when the projection was
+made.
+
+**Decision ids.** `adm-<revision>-<digest>`, the digest a SHA-256 of the request's
+fields as JSON, at the revision the decision is pinned to. An identical request asked
+again at the same revision takes `-2`, `-3`, …, so no record is overwritten; an
+explicit id already used is refused. A refused request (a bad demand, a reused id, an
+unknown field or trailing data on the wire, which is a `400`) records nothing.
 
 **Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
 workload's own throttling, or the worst protected pod's memory stall), not a function
