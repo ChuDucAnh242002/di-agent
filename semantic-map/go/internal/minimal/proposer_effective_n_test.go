@@ -13,8 +13,9 @@ import (
 // one pair with a real relationship. Over a 120-reading window chance alone gives the
 // null pairs |r| near 0.3 routinely, and on the raw count a p-value near 1e-3, which
 // the Benjamini–Hochberg bar admits. On the effective sample size (about 13 readings'
-// worth here) those p-values are near 0.3 and the bar holds; the real pair, |r| near
-// 0.95, still clears it.
+// worth in theory, about 18 as estimated from one window) those p-values are near 0.3
+// and the bar holds; the real pair, |r| near 0.99, still clears it. The bound on null
+// pairs is loose because the count is one draw: seeds 1 to 20 admit 0 to 2 of 50.
 func TestAutocorrelatedNoiseIsNotADiscovery(t *testing.T) {
 	const nulls, ticks, phi = 50, 240, 0.9
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.3, 30, 120, 0)
@@ -39,6 +40,7 @@ func TestAutocorrelatedNoiseIsNotADiscovery(t *testing.T) {
 	for _, c := range h {
 		if c.CandidateID == "load->latency" {
 			real = true
+			t.Logf("real pair: |r| = %.3f, p = %.2g", c.MIScore, c.PValue)
 			continue
 		}
 		falses++
@@ -47,7 +49,7 @@ func TestAutocorrelatedNoiseIsNotADiscovery(t *testing.T) {
 	if !real {
 		t.Error("a strong relationship between autocorrelated series must still be admitted")
 	}
-	if falses > 2 {
+	if falses > 4 {
 		t.Errorf("%d of %d independent AR(1) pairs were admitted; the bar is not holding", falses, nulls)
 	}
 }

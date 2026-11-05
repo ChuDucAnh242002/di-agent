@@ -2,6 +2,8 @@ package minimal
 
 import (
 	"fmt"
+	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -143,6 +145,45 @@ func TestPersistenceResetsWhenTheSignificanceBarTightens(t *testing.T) {
 	}
 	if c := persistenceCandidate(t, p); c == nil || c.PersistentWindows != 0 || c.Reason != deferredByBar {
 		t.Fatalf("tightened bar did not reset persistence: %+v", c)
+	}
+}
+
+// The persistence gate's p ≤ 0.05 is on the effective sample size too. With the
+// corrected bar off, that limit is the only p-value gate: a pair driven by an AR(1)
+// series that moves tick to tick still builds its windows, and a slow shared wave —
+// |r| near 1, but one cycle per window, lag-1 near 0.998 on each side, so n_eff sits at
+// the floor — builds none, where on the raw count it would build all three.
+func TestPersistenceGateUsesTheEffectiveSampleSize(t *testing.T) {
+	const size, ticks = 120, 4 * 120
+	for _, tc := range []struct {
+		name    string
+		drive   func(i int, prev float64, rng *rand.Rand) float64
+		noise   float64
+		windows int
+	}{
+		{"AR(1) driver", func(_ int, prev float64, rng *rand.Rand) float64 { return 0.9*prev + rng.NormFloat64() }, 0.3, 3},
+		{"slow shared wave", func(i int, _ float64, _ *rand.Rand) float64 { return math.Sin(2 * math.Pi * float64(i) / size) }, 0.01, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewMICorrelationProposer(nil, 0.85, 30, size, 0)
+			p.SetFDR(0)
+			rng := rand.New(rand.NewSource(1))
+			x := 0.0
+			for i := 0; i < ticks; i++ {
+				x = tc.drive(i, x, rng)
+				if err := p.Observe("x", "y", x, x+tc.noise*rng.NormFloat64()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := persistenceCandidate(t, p)
+			if c == nil || c.MIScore < 0.85 {
+				t.Fatalf("fixture: the pair must clear the threshold on |r|; %+v", c)
+			}
+			if c.PersistentWindows != tc.windows {
+				t.Errorf("|r| = %.3f, p = %.2g: %d persistent windows, want %d",
+					c.MIScore, c.PValue, c.PersistentWindows, tc.windows)
+			}
+		})
 	}
 }
 

@@ -154,7 +154,8 @@ semantic-map/
     │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + EffectiveN + FisherPValue —
     │   │   │                   the one estimator statemap and the MI proposer both use
     │   │   ├── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
-    │   │   └── effective_n_test.go  Lag-1 effective sample size: AR(1) false-positive share, white noise, ring order
+    │   │   └── effective_n_test.go  Lag-1 effective sample size: AR(1) false-positive share, clamps, ring order,
+    │   │                            BenchmarkFoldWithPValue
     │   ├── ingest/client/      Wire face of the sample boundary for applications
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
@@ -571,6 +572,9 @@ subjects' readings of one metric, where a shared driver is the likelier explanat
 `same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
 which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
+`PValue` is the Fisher p-value of `MIScore` on the window's effective sample size, which
+is smaller than `NObservations` when the readings are autocorrelated, so it cannot be
+recomputed from `NObservations` alone.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
@@ -1721,8 +1725,9 @@ loops:
 Each counted window contains a full proposer buffer of fresh pairs, not another review
 of the same observations. Windows do not overlap. The correlation must keep its sign
 and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
-gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
-correction is enabled. Missing declared ranges prevent persistence from accumulating
+gates, have a Fisher p-value at most 0.05 — on the window's effective sample size, so
+autocorrelated readings are not counted as independent — and clear the multiple-testing
+bar when FDR correction is enabled. Missing declared ranges prevent persistence from accumulating
 on the property path. A failed gate, sign/kind change, forgotten property, or displaced
 pair resets the run. A closer-time replacement partner revises the last pair's evidence
 instead of counting as another observation.
