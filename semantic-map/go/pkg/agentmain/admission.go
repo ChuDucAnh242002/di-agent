@@ -32,8 +32,10 @@ type admitter struct {
 	ids     *admission.IDs
 	tracker *admission.Tracker
 	domains func() []admission.Domain // one per relief loop
-	peers   func() ([]*peers.Descriptor, error)
-	client  *peers.Client
+	// workloads maps each workload running here by Name to its subject.
+	workloads func(ctx context.Context) (map[string]string, error)
+	peers     func() ([]*peers.Descriptor, error)
+	client    *peers.Client
 
 	mu     sync.Mutex   // guards recent and answered
 	recent []submission // newest first, at most submissionCap
@@ -63,20 +65,21 @@ type acceptor struct {
 // acting in an outcome window.
 func buildAdmission(cfg spec.Spec, m *statemap.Map, rt runtime.Runtime, loops []*relief.Loop, reg *peers.Registry) *admitter {
 	ids := admission.NewIDs(time.Now())
+	workloads := func(ctx context.Context) (map[string]string, error) {
+		ws, err := rt.Workloads(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]string, len(ws))
+		for _, w := range ws {
+			out[w.Name] = w.Subject
+		}
+		return out, nil
+	}
 	tr := admission.NewTracker(admission.TrackerConfig{
-		Map: m,
-		Workloads: func(ctx context.Context) (map[string]string, error) {
-			ws, err := rt.Workloads(ctx)
-			if err != nil {
-				return nil, err
-			}
-			out := make(map[string]string, len(ws))
-			for _, w := range ws {
-				out[w.Name] = w.Subject
-			}
-			return out, nil
-		},
-		Shares: func(usage string) map[string]float64 { return relief.Shares(m, usage) },
+		Map:       m,
+		Workloads: workloads,
+		Shares:    func(usage string) map[string]float64 { return relief.Shares(m, usage) },
 		// 0.25 is the default levers' step, the move relief itself counts as a change.
 		Moved: func(usage string, at map[string]float64, except string) []string {
 			return relief.Moved(m, usage, at, except, 0.25)
@@ -87,7 +90,7 @@ func buildAdmission(cfg spec.Spec, m *statemap.Map, rt runtime.Runtime, loops []
 		Logf:  log.Printf,
 	})
 	return &admitter{m: m, self: admission.Self{NodeID: cfg.Node.ID, Arch: goruntime.GOARCH}, ids: ids, tracker: tr,
-		domains: reliefDomains(loops), peers: reg.List, client: peers.NewClient(5 * time.Second)}
+		domains: reliefDomains(loops), workloads: workloads, peers: reg.List, client: peers.NewClient(5 * time.Second)}
 }
 
 // startAdmissionLoop checks pending accepts on relief's interval, so an outcome
@@ -159,7 +162,7 @@ func registerAdmissionRoutes(mux *http.ServeMux, a *admitter) {
 		if !ok {
 			return
 		}
-		writeJSON(w, a.answer(o))
+		writeJSON(w, a.answer(r.Context(), o))
 	})
 	mux.HandleFunc("GET /tasks", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -199,7 +202,7 @@ func readOffer(w http.ResponseWriter, r *http.Request) (admission.Offer, bool) {
 func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 	o.Chain = nil
 	s := submission{At: time.Now(), Name: o.Name}
-	hop := a.answer(o)
+	hop := a.answer(ctx, o)
 	o.Chain = append(o.Chain, hop)
 	if hop.Verdict != admission.Accept {
 		list, err := a.peers()
@@ -239,8 +242,8 @@ func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 }
 
 // answer is this node's hop for an offer, counted by verdict.
-func (a *admitter) answer(o admission.Offer) admission.Hop {
-	h := a.decide(o)
+func (a *admitter) answer(ctx context.Context, o admission.Offer) admission.Hop {
+	h := a.decide(ctx, o)
 	a.mu.Lock()
 	if a.answered == nil {
 		a.answered = map[string]int{}
@@ -251,14 +254,22 @@ func (a *admitter) answer(o admission.Offer) admission.Hop {
 }
 
 // decide is the hop, the same for a local submission and a peer's: a node already
-// in the chain is not asked again, and a name awaiting its outcome is not accepted
-// twice.
-func (a *admitter) decide(o admission.Offer) admission.Hop {
+// in the chain is not asked again, a name awaiting its outcome is not accepted
+// twice, and a name already running here is not accepted, since its outcome would
+// be judged on nothing it changed.
+func (a *admitter) decide(ctx context.Context, o admission.Offer) admission.Hop {
 	if o.Asked(a.self.NodeID, "") {
 		return admission.Hop{Node: a.self.NodeID, Verdict: admission.AlreadyAsked, Reason: "already in the chain"}
 	}
 	if a.tracker.Pending(o.Name) {
-		return a.declinePending(o, "")
+		return a.decline(o, admission.ErrAlreadyPending.Error(), "")
+	}
+	running, err := a.workloads(ctx)
+	if err != nil {
+		return a.decline(o, "workload list unavailable: "+err.Error(), "")
+	}
+	if _, ok := running[o.Name]; ok {
+		return a.decline(o, "already running here", "")
 	}
 	doms := a.domains()
 	d := admission.Decide(a.m, o, doms, a.self, a.ids.Next())
@@ -267,22 +278,21 @@ func (a *admitter) decide(o admission.Offer) admission.Hop {
 			// Another offer for the name was registered between the check and
 			// here. The accept stays in the journal; the answer is a decline of
 			// its own, so the hop's decision says what the hop says.
-			return a.declinePending(o, d.ID)
+			return a.decline(o, admission.ErrAlreadyPending.Error(), d.ID)
 		}
 	}
 	return admission.Hop{Node: a.self.NodeID, DecisionID: d.ID, Verdict: d.Verdict, Reason: d.Reason}
 }
 
-// declinePending records a decline for a name already pending; superseded is the
-// accept it replaces when it lost a race, empty otherwise.
-func (a *admitter) declinePending(o admission.Offer, superseded string) admission.Hop {
+// decline records a decline made before Decide; superseded is the accept it
+// replaces when a name already pending lost a race, empty otherwise.
+func (a *admitter) decline(o admission.Offer, reason, superseded string) admission.Hop {
 	id := a.ids.Next()
 	b := a.m.Decide(id, "admit "+o.Name+"?")
 	b.Input("offer", o)
 	if superseded != "" {
 		b.Input("superseded", superseded)
 	}
-	reason := admission.ErrAlreadyPending.Error()
 	b.Commit(map[string]any{"verdict": admission.Decline, "reason": reason})
 	return admission.Hop{Node: a.self.NodeID, DecisionID: id, Verdict: admission.Decline, Reason: reason}
 }

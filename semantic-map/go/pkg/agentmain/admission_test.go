@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,9 @@ type testAgent struct {
 	j     *statemap.Journal
 	srv   *httptest.Server
 	peers []*peers.Descriptor
+	// running is the workload listing, set before a request; listErr fails it.
+	running map[string]string
+	listErr error
 }
 
 // newAdmitNode is a 4-core, 8 GiB node at cpu usage 0.4 and cpu pressure p, with
@@ -71,8 +75,11 @@ func newAdmitNode(t *testing.T, id string, p float64) *testAgent {
 			Shares: func(usage string) map[string]float64 { return relief.Shares(m, usage) },
 			Acted:  func(string, time.Time) (float64, bool) { return 0, false }}),
 		domains: func() []admission.Domain { return testDomains },
-		peers:   func() ([]*peers.Descriptor, error) { return ta.peers, nil },
-		client:  peers.NewClient(5 * time.Second),
+		workloads: func(context.Context) (map[string]string, error) {
+			return ta.running, ta.listErr
+		},
+		peers:  func() ([]*peers.Descriptor, error) { return ta.peers, nil },
+		client: peers.NewClient(5 * time.Second),
 	}
 	mux := http.NewServeMux()
 	registerAdmissionRoutes(mux, ta.a)
@@ -335,6 +342,35 @@ func TestPeerOrderDeterministic(t *testing.T) {
 	submit(t, a, smallOffer("web"))
 	if got := strings.Join(asked, ","); got != "x,y,z" {
 		t.Fatalf("asked %s; want x,y,z", got)
+	}
+}
+
+// TestAlreadyRunningHere: a name already running on the node is declined with a
+// recorded decision, before Decide, as is any offer when the listing fails.
+func TestAlreadyRunningHere(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	a.running = map[string]string{"web": "pod:web"}
+	s := submit(t, a, smallOffer("web"))
+	h := s.Chain[0]
+	if h.Verdict != admission.Decline || h.Reason != "already running here" || s.AcceptedBy != nil {
+		t.Fatalf("hop %+v; want decline already running here", h)
+	}
+	if d, ok := a.j.Decision(h.DecisionID); !ok || d.Answer["reason"] != "already running here" {
+		t.Fatalf("decline %s: recorded %v %+v", h.DecisionID, ok, d)
+	}
+	if a.a.tracker.Pending("web") {
+		t.Fatal("a running name registered for an outcome")
+	}
+
+	b := newAdmitNode(t, "B", 0.02)
+	b.listErr = errors.New("boom")
+	resp := postOffer(t, b.srv.URL+"/offers", smallOffer("web"))
+	var hop admission.Hop
+	if err := json.NewDecoder(resp.Body).Decode(&hop); err != nil {
+		t.Fatal(err)
+	}
+	if hop.Verdict != admission.Decline || hop.Reason != "workload list unavailable: boom" || hop.DecisionID == "" {
+		t.Fatalf("hop %+v; want decline on the listing error", hop)
 	}
 }
 
