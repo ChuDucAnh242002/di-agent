@@ -1709,7 +1709,11 @@ made.
 **Decision ids.** `adm-<revision>-<digest>`, the digest a SHA-256 of the request's
 fields as JSON, at the revision the decision is pinned to. An identical request asked
 again at the same revision takes `-2`, `-3`, …, so no record is overwritten; an
-explicit id already used is refused. A refused request (a bad demand, a reused id, an
+explicit id already used is refused. The id is reserved in the journal as it is
+chosen, in one step under the journal's lock, and released when the decision is
+recorded: requests are served in parallel and do not advance the revision, so
+concurrent identical requests take distinct ids, and of concurrent requests under one
+explicit id exactly one gets it. A refused request (a bad demand, a reused id, an
 unknown field or trailing data on the wire, which is a `400`) records nothing.
 
 **Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
