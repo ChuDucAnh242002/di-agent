@@ -104,10 +104,13 @@ func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 // at now. The sweep marks a silent property stale only when it next runs, so a
 // share can still read active after its source has gone quiet; a workload already
 // silent at act took no part in the state the action was priced from, and its
-// retirement during the settle window is not a departure.
+// retirement during the settle window is not a departure. movedSince reads the
+// shares at verify through it too, so the one rule holds at both ends: a workload
+// silent at act and still unswept at verify did not arrive.
 func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float64 {
 	out := workloadShares(m, usage)
 	for s := range out {
+		// workloadShares returns only subjects whose property the map holds.
 		if p, _ := m.Property(usage + "@" + s); now.Sub(p.LastObserved) > m.StaleAfter() {
 			delete(out, s)
 		}
@@ -120,8 +123,8 @@ func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float6
 // share then and by more than 0.02 absolute. A workload live now and absent from
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
-// them. at holds only the workloads live at act (sharesAtAct), so one already
-// silent then cannot leave.
+// them. Both at and the shares now are read through sharesAtAct, so a workload
+// silent at act cannot leave and one still silent at now cannot arrive.
 //
 // Rises are the exception. Capping a workload frees CPU, and the contended
 // workloads beside it take it up: that is the relief working, not something else
@@ -131,29 +134,29 @@ func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float6
 // What throttled gave up is known only while the map holds its share: without
 // one nothing counts as freed. Whether an absorbed rise is innocent depends on the
 // verdict, which confoundedBy decides.
-func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64) (moved, left, absorbed []string) {
-	live := workloadShares(m, usage)
+func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64, now time.Time) (moved, left, absorbed []string) {
+	live := sharesAtAct(m, usage, now)
 	var risen []string
 	rise := 0.0
-	for s, now := range live {
+	for s, v := range live {
 		if s == throttled {
 			continue
 		}
 		then, was := at[s]
-		d := math.Abs(now - then)
+		d := math.Abs(v - then)
 		if d <= step*then || d <= confoundAbs {
 			continue
 		}
-		if was && now > then {
+		if was && v > then {
 			risen = append(risen, s)
-			rise += now - then
+			rise += v - then
 			continue
 		}
 		moved = append(moved, s)
 	}
 	freed := 0.0
-	if now, ok := live[throttled]; ok {
-		freed = math.Max(at[throttled]-now, 0)
+	if v, ok := live[throttled]; ok {
+		freed = math.Max(at[throttled]-v, 0)
 	}
 	if rise > freed+confoundAbs {
 		moved = append(moved, risen...)
@@ -203,8 +206,8 @@ func confoundedBy(moved, left, absorbed []string, agreed bool) []string {
 // confounded reports whether another workload moved, arrived or left while the
 // throttled one's outcome was being observed, so the change in node pressure
 // cannot be put down to the action alone.
-func confounded(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64, agreed bool) bool {
-	moved, left, absorbed := movedSince(m, usage, at, throttled, step)
+func confounded(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64, agreed bool, now time.Time) bool {
+	moved, left, absorbed := movedSince(m, usage, at, throttled, step, now)
 	return len(confoundedBy(moved, left, absorbed, agreed)) > 0
 }
 
@@ -221,7 +224,7 @@ func confounded(m *statemap.Map, usage string, at map[string]float64, throttled 
 // is no prediction, or when the cap did not bind: a workload using well under its
 // new limit at verify asked for less on its own, so the drop is not the cap's.
 func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, agreed bool, observed float64, now time.Time) {
-	moved, left, absorbed := movedSince(l.cfg.Map, l.d.Usage, a.SharesAtAct, a.Subject, l.c.Step)
+	moved, left, absorbed := movedSince(l.cfg.Map, l.d.Usage, a.SharesAtAct, a.Subject, l.c.Step, now)
 	by := confoundedBy(moved, left, absorbed, agreed)
 	conf := len(by) > 0
 	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved, "left": left, "absorbed": absorbed})
