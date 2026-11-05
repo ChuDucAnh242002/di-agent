@@ -35,7 +35,8 @@ package agentmain
 // /peers                            POST    AddPeerRequest                 200 PeerDTO
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
-// /offload                          POST    OffloadHTTPRequest             200 OffloadHTTPResponse
+// /offload                          POST    peers.OffloadRequest           200 peers.OffloadResponse
+//                                                                          400 (demand not a finite number >= 0)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
 //                                                                          422 {error,response} (failed a gate)
 //                                                                          501 (provider disabled)
@@ -64,6 +65,8 @@ import (
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -710,14 +713,9 @@ func requireJSON(r *http.Request) error {
 //	POST   /peers           register a new peer (idempotent on URL)
 //	DELETE /peers/{id}      unregister a peer
 //	POST   /peers/{id}/trust override a peer's trust (test + operator path)
-//	POST   /offload         the peer-side receiver of an offload proposal
 //
-// /offload is the *server* side of the protocol: an inbound request from
-// another agent that wants to know if this agent can run their task within
-// the requested latency/energy budgets. The handler computes its own
-// CostOfAction, compares against the budgets, and returns accept/reject
-// with the expected latency/energy so the source agent can update trust.
-// It does NOT execute any task — execution is a future (P7) concern.
+// POST /offload, the receiving side, answers from the state map and is wired by
+// registerOffloadRoute.
 func registerPeerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	mux.HandleFunc("GET /peers", func(w http.ResponseWriter, r *http.Request) {
 		list, err := sm.Peers().List()
@@ -782,20 +780,6 @@ func registerPeerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
-		if err := requireJSON(r); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		var req OffloadHTTPRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		resp := decideOffload(sm, &req)
-		writeJSON(w, resp)
-	})
 }
 
 // peerToDTO converts an internal peers.Descriptor to its wire form.
@@ -810,47 +794,58 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 	}
 }
 
-// decideOffload is the peer-side accept/reject logic. It calls CostOfAction
-// once to estimate the cost of this task on the local agent, then compares
-// against the requested budgets:
-//
-//   - If LatencyBudgetMs > 0 and the local LatencyEstimate exceeds it → reject.
-//   - If EnergyBudgetJoules is set and the local ResourceCost exceeds it → reject.
-//   - Otherwise → accept.
-//
-// The decision is informational only — we do not schedule anything. Execution
-// is a P7 concern; this handler exists so the source agent can record an
-// outcome and adjust trust accordingly.
-func decideOffload(sm *semmap.SemanticMap, req *OffloadHTTPRequest) OffloadHTTPResponse {
-	cost, err := sm.CostOfAction(req.TaskType, req.SourceNodeID)
-	if err != nil {
-		return OffloadHTTPResponse{
-			Accepted: false,
-			Reason:   "cost evaluation failed: " + err.Error(),
+// registerOffloadRoute wires POST /offload, the receiving side of the peer
+// protocol: another node asks whether this one would take a workload, and this node
+// answers from its own map (statemap.Map.Admit). The answer is a journalled decision;
+// nothing is scheduled. The contention bars are the relief levers' enter levels, so
+// "accepted" means taking the workload would not put the node where relief acts. A
+// lever the spec does not have is a check skipped: logged here once, and said in
+// every decision. The wire is strict: an unknown field or trailing data is a 400,
+// since a field this node does not read is a demand it would silently ignore.
+func registerOffloadRoute(mux *http.ServeMux, state *statemap.Map, levers []spec.Lever) {
+	enter := leverEnters(levers)
+	for _, l := range []struct{ action, id string }{
+		{spec.LeverCPULimit, "cpu_contention_ratio"}, {spec.LeverMemoryHigh, "memory_contention_ratio"},
+	} {
+		if enter[l.action] <= 0 {
+			log.Printf("offload: no %s lever, so admission will not check %s", l.action, l.id)
 		}
 	}
-	if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
-		return OffloadHTTPResponse{
-			Accepted:             false,
-			Reason:               fmt.Sprintf("latency %.2fms exceeds budget %.2fms", cost.LatencyEstimate, req.LatencyBudgetMs),
-			ExpectedLatency:      cost.LatencyEstimate,
-			ExpectedResourceCost: cost.ResourceCost,
+	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-	}
-	if req.EnergyBudgetJoules != nil && cost.ResourceCost > *req.EnergyBudgetJoules {
-		return OffloadHTTPResponse{
-			Accepted:             false,
-			Reason:               fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", cost.ResourceCost, *req.EnergyBudgetJoules),
-			ExpectedLatency:      cost.LatencyEstimate,
-			ExpectedResourceCost: cost.ResourceCost,
+		var req peers.OffloadRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
+		if _, err := dec.Token(); err != io.EOF {
+			writeError(w, http.StatusBadRequest, "trailing data after the request")
+			return
+		}
+		res := state.Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
+			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
+			CPUEnter: enter[spec.LeverCPULimit], MemoryEnter: enter[spec.LeverMemoryHigh]})
+		if res.Err != "" {
+			writeError(w, http.StatusBadRequest, res.Err)
+			return
+		}
+		writeJSON(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
+			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
+	})
+}
+
+// leverEnters is each lever's enter level, by action.
+func leverEnters(levers []spec.Lever) map[string]float64 {
+	enter := map[string]float64{}
+	for _, l := range levers {
+		enter[l.Action] = l.Enter
 	}
-	return OffloadHTTPResponse{
-		Accepted:             true,
-		Reason:               "within budget",
-		ExpectedLatency:      cost.LatencyEstimate,
-		ExpectedResourceCost: cost.ResourceCost,
-	}
+	return enter
 }
 
 // registerExplainRoute wires POST /explain. The endpoint is always registered

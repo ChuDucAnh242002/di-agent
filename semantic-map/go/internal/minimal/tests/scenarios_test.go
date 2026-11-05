@@ -34,6 +34,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -499,7 +500,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 // The scenario walks through:
 //  1. Pre-flight: each agent's local CostOfAction.
 //  2. B.RecommendPeer — must pick A (the lowest-cost peer, highest savings).
-//  3. B → A: POST /offload through peers.Client with realistic budgets.
+//  3. B → A: POST /offload through peers.Client, declaring the demand; A answers from its map.
 //  4. A accepts; B updates A's trust by +0.1.
 //  5. Final summary table: per-agent self-cost, B's trust scores for A/C,
 //     and the final decision narrative.
@@ -542,6 +543,10 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 // requires. The wire shapes match the daemon exactly so peers.Client works
 // against either implementation.
 func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	enter := map[string]float64{}
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		enter[l.Action] = l.Enter
+	}
 	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
 		task := r.URL.Query().Get("task")
 		node := r.URL.Query().Get("node")
@@ -563,26 +568,18 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		cost, err := sm.CostOfAction(req.TaskType, req.SourceNodeID)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
+		// The daemon's answer: admission from the node's own map, under the
+		// default relief levers' enter levels.
+		res := sm.State().Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
+			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
+			CPUEnter: enter["cpu.limit"], MemoryEnter: enter["memory.high"]})
+		if res.Err != "" {
+			http.Error(w, res.Err, 400)
 			return
 		}
-		resp := peers.OffloadResponse{
-			Accepted:             true,
-			Reason:               "within budget",
-			ExpectedLatency:      cost.LatencyEstimate,
-			ExpectedResourceCost: cost.ResourceCost,
-		}
-		if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
-			resp.Accepted = false
-			resp.Reason = fmt.Sprintf("latency %.2f > budget %.2f", cost.LatencyEstimate, req.LatencyBudgetMs)
-		} else if req.EnergyBudgetJoules != nil && cost.ResourceCost > *req.EnergyBudgetJoules {
-			resp.Accepted = false
-			resp.Reason = fmt.Sprintf("resource cost %.2f > energy budget %.2f", cost.ResourceCost, *req.EnergyBudgetJoules)
-		}
 		w.Header().Set("Content-Type", "application/json")
-		writeJSONBody(w, resp)
+		writeJSONBody(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
+			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
 	})
 }
 
@@ -740,22 +737,33 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 
 	// ── Phase 2: B actually offloads to A via the wire ─────────────────────────
 
-	t.Log("Phase 2: B → A POST /offload with budgets {latency=5000ms, energy=∞}.")
+	// A answers from its own map, so it needs the machine it is (facts) and what it
+	// uses of it now; the bias above gave it CPU, this gives it memory.
+	if err := a.sm.State().RecordFacts("scenario", []statemap.Fact{
+		statemap.NumberFact("cpu_cores", 4, "cores"), statemap.NumberFact("memory_total", 8<<30, "bytes"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.sm.IngestSample(&types.MetricSample{NodeID: "A", MetricType: types.MemoryUtilization,
+		Value: 0.2, TimestampUnix: 1700000400, EventID: "A-mem"}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Phase 2: B → A POST /offload declaring 1 CPU core and 1 GiB.")
 	preTrustForA := peerByURL(t, b.sm, a.srv.URL).Trust
 	resp, err := b.sm.PeerClient().Offload(context.Background(), a.srv.URL, &peers.OffloadRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_B",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: 5000,
+		SourceNodeID: "node_B",
+		CPUCores:     1,
+		MemoryBytes:  1 << 30,
 	})
 	if err != nil {
 		t.Fatalf("Offload call: %v", err)
 	}
-	t.Logf("  → A.Accepted=%t reason=%q expected_latency=%.3f expected_resource_cost=%.3f",
-		resp.Accepted, resp.Reason, resp.ExpectedLatency, resp.ExpectedResourceCost)
-	if !resp.Accepted {
-		t.Fatalf("expected A to accept; got rejection reason=%q", resp.Reason)
+	if !resp.Accepted || resp.CPUAfter == nil || resp.MemoryAfter == nil {
+		t.Fatalf("expected A to accept with a projection; got %+v", resp)
 	}
+	t.Logf("  → A.Accepted=%t reason=%q basis=%s cpu_after=%.3f memory_after=%.3f decision=%s",
+		resp.Accepted, resp.Reason, resp.Basis, *resp.CPUAfter, *resp.MemoryAfter, resp.DecisionID)
 
 	// Trust update on a successful offload: nudge upward.
 	const acceptDelta = 0.10

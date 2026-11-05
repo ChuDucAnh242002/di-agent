@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -461,5 +462,48 @@ func TestInfluenceJSONKeepsAZeroStrength(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("%s lacks %s", b, want)
 		}
+	}
+}
+
+func TestEstimateIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
+	m, _ := estimateFixture(t)
+	const n = 16
+	results := make([]EstimateResult, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() { defer wg.Done(); results[i] = m.Estimate(EstimateRequest{Target: "pressure"}) }()
+	}
+	wg.Wait()
+	ids := map[string]bool{}
+	for _, r := range results {
+		if r.Err != "" || ids[r.DecisionID] {
+			t.Fatalf("%+v; want a fresh id per request (have %v)", r, ids)
+		}
+		ids[r.DecisionID] = true
+		if d, ok := m.Journal().Decision(r.DecisionID); !ok || d.ID != r.DecisionID || d.Revision != r.Revision {
+			t.Errorf("decision %s: record %+v does not match what the caller got", r.DecisionID, d)
+		}
+	}
+
+	won := 0
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = m.Estimate(EstimateRequest{Target: "pressure", ID: "shared"})
+		}()
+	}
+	wg.Wait()
+	for _, r := range results {
+		switch {
+		case r.Err == "":
+			won++
+		case !strings.Contains(r.Err, "already used") || r.DecisionID != "":
+			t.Errorf("%+v; want the id refused before a decision", r)
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d requests got the explicit id; want exactly one", won)
 	}
 }

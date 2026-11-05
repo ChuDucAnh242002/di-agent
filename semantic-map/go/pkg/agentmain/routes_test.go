@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,11 +13,11 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
@@ -955,183 +956,167 @@ func TestPeers_DeleteUnknownReturns404(t *testing.T) {
 	}
 }
 
-func TestOffload_AcceptWithinBudget(t *testing.T) {
-	base, sm, cleanup := newTestAgent(t)
-	defer cleanup()
-
-	// Probe local cost to size budgets above its actual values.
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
+// newOffloadServer serves /offload over a map holding a 4-core, 8 GiB node at 40%
+// CPU and 50% memory, under the default relief levers.
+func newOffloadServer(t *testing.T) (baseURL string, state *statemap.Map, cleanup func()) {
+	t.Helper()
+	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	if err := state.RecordFacts("test", []statemap.Fact{
+		statemap.NumberFact("cpu_cores", 4, "cores"), statemap.NumberFact("memory_total", 8<<30, "bytes"),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_self",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: cost.LatencyEstimate*2 + 100, // generous
-	})
+	for id, v := range map[string]float64{"cpu_utilization": 0.4, "memory_utilization": 0.5} {
+		if err := state.Record(statemap.Observation{ID: id, Value: v, At: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := http.NewServeMux()
+	registerOffloadRoute(mux, state, spec.Default().Loops.Relief.Levers)
+	srv := httptest.NewServer(mux)
+	return srv.URL, state, srv.Close
+}
+
+// TestOffload_AnswersFromTheMap: one round trip, accepted on the declared demand, with
+// a decision id the journal reproduces.
+func TestOffload_AnswersFromTheMap(t *testing.T) {
+	base, state, cleanup := newOffloadServer(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/offload", peers.OffloadRequest{SourceNodeID: "node_b", CPUCores: 1, MemoryBytes: 1 << 30})
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("/offload: %s", body(resp))
 	}
-	var out OffloadHTTPResponse
+	var out peers.OffloadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if !out.Accepted {
-		t.Errorf("Accepted: got false, want true (reason=%s; latency=%.3f budget=%.3f)",
-			out.Reason, out.ExpectedLatency, cost.LatencyEstimate*2+100)
+	if !out.Accepted || out.Basis != "declared" || !nearPtr(out.CPUAfter, 0.65) || !nearPtr(out.MemoryAfter, 0.625) {
+		t.Errorf("%+v; want accepted on the declared demand at 0.65/0.625", out)
 	}
-	if out.ExpectedLatency != cost.LatencyEstimate {
-		t.Errorf("ExpectedLatency: got %.3f, want %.3f", out.ExpectedLatency, cost.LatencyEstimate)
+	if len(out.Caveats) == 0 {
+		t.Errorf("%+v; want the decision's caveats on the wire", out)
+	}
+	d, ok := state.Journal().Decision(out.DecisionID)
+	if !ok {
+		t.Fatalf("decision %q is not in the journal", out.DecisionID)
+	}
+	if !strings.Contains(d.Question, "node_b") {
+		t.Errorf("question %q; want the source node named", d.Question)
+	}
+	resp2 := postJSON(t, base+"/offload", peers.OffloadRequest{CPUCores: -1})
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 400 {
+		t.Errorf("negative demand: got %d, want 400", resp2.StatusCode)
 	}
 }
 
-// drivePositiveCost biases EMAs so that both ResourceCost (sum over edges
-// into RC) and LatencyEstimate (sum over edges into PS) come out > 0.
-//
-// Without biasing, the bootstrap propositions sum to ≤0 (positives cancel
-// negatives) and both costs clamp to zero — making budget rejections
-// untestable. We push the dominant positive-target edges high and the
-// negative-target edges low, plus drive CO→PS into negative territory so
-// its (-1)*(-effective) = +effective contribution lifts the latency
-// estimate over zero. RC→PS is a conflict pair (P2−/P3+) sharing one
-// (from, to); Ingest updates both EMAs identically, so the pair always
-// contributes net zero regardless of bias direction — useful here, since
-// it means LatencyEstimate is driven entirely by CO→PS once the third edge
-// is biased.
-//
-// alpha/convergence are tuned in newOffloadTestAgent to make the EMA reach
-// usable values within ~200 ticks.
-func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
-	t.Helper()
-	// Cost is the observed level of the cost constructs, read from the state model, so
-	// making it positive means giving those constructs telemetry. The previous version
-	// drove edge observations, which moved the construct graph and — once cost came
-	// from the state model — stopped affecting the answer at all.
-	spec := mustSpec(t)
-	targets := map[string]bool{
-		spec.CostModel.ResourceConstruct: true,
-		spec.CostModel.PressureConstruct: true,
-	}
-	var metrics []string
-	for _, r := range spec.MetricRouting {
-		if targets[r.ConstructID] {
-			metrics = append(metrics, r.MetricType)
+func near(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+
+func nearPtr(got *float64, want float64) bool { return got != nil && near(*got, want) }
+
+// TestOffload_DeclinesWhenContended: through the real route, a node whose
+// cpu_contention_ratio, and separately memory_contention_ratio, is at or above its
+// default lever's enter declines, with no projection, and journals the thresholds.
+func TestOffload_DeclinesWhenContended(t *testing.T) {
+	enter := leverEnters(spec.Default().Loops.Relief.Levers)
+	for id, lever := range map[string]string{"cpu_contention_ratio": spec.LeverCPULimit, "memory_contention_ratio": spec.LeverMemoryHigh} {
+		if enter[lever] <= 0 {
+			t.Fatalf("spec default has no %s lever", lever)
 		}
-	}
-	if len(metrics) == 0 {
-		t.Fatal("no metric routes to either cost construct")
-	}
-	for i := 0; i < 200; i++ {
-		for _, m := range metrics {
-			if err := sm.IngestSample(&types.MetricSample{
-				NodeID:        "node_self",
-				MetricType:    types.MetricType(m),
-				Value:         0.8,
-				TimestampUnix: int64(1700000000 + i),
-				EventID:       fmt.Sprintf("bias-%s-%d", m, i),
-			}); err != nil {
-				t.Fatalf("ingesting %s: %v", m, err)
+		for _, v := range []float64{enter[lever], enter[lever] + 0.1} {
+			base, state, cleanup := newOffloadServer(t)
+			if err := state.Record(statemap.Observation{ID: id, Value: v, At: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			resp := postJSON(t, base+"/offload", peers.OffloadRequest{CPUCores: 0.1})
+			var out peers.OffloadResponse
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != 200 {
+				t.Fatalf("%s=%.2f: status %d, %v", id, v, resp.StatusCode, err)
+			}
+			resp.Body.Close()
+			cleanup()
+			if out.Accepted || !strings.Contains(out.Reason, "contended") || !strings.Contains(out.Reason, id) {
+				t.Errorf("%s=%.2f: %+v; want declined as contended", id, v, out)
+			}
+			if out.CPUAfter != nil || out.MemoryAfter != nil {
+				t.Errorf("%s=%.2f: %+v; a contention decline makes no projection", id, v, out)
+			}
+			d, ok := state.Journal().Decision(out.DecisionID)
+			if !ok {
+				t.Fatalf("decision %q is not in the journal", out.DecisionID)
+			}
+			th, _ := d.Inputs["thresholds"].(map[string]float64)
+			if !near(th["cpu_enter"], enter[spec.LeverCPULimit]) || !near(th["memory_enter"], enter[spec.LeverMemoryHigh]) || !near(th["headroom"], 0.10) {
+				t.Errorf("thresholds %v; want the default levers' enter levels and the headroom", d.Inputs["thresholds"])
+			}
+			if d.Answer["reason"] != out.Reason {
+				t.Errorf("journalled reason %v; want %q", d.Answer["reason"], out.Reason)
 			}
 		}
 	}
 }
 
-func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
-	t.Helper()
-	sm, err := profiles.Build("edge-minimal", profiles.Config{
-		StateMap:             newTestState(t),
-		DomainSpec:           mustSpec(t),
-		EMAAlpha:             0.5,
-		ConvergenceThreshold: 100,
-		MinTrustScore:        0.5,
-	})
-	if err != nil {
-		t.Fatalf("profiles.Build: %v", err)
-	}
-	mux := http.NewServeMux()
-	registerRoutes(mux, sm, explain.NewDisabled())
-	srv := httptest.NewServer(mux)
-	return srv.URL, sm, srv.Close
-}
-
-func TestOffload_RejectExceedsLatencyBudget(t *testing.T) {
-	base, sm, cleanup := newOffloadTestAgent(t)
+// TestOffload_RefusesABadDemand: a demand that is not a finite number >= 0 is a 400,
+// whether negative or out of float64's range.
+func TestOffload_RefusesABadDemand(t *testing.T) {
+	base, _, cleanup := newOffloadServer(t)
 	defer cleanup()
-	drivePositiveCost(t, sm)
-
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost.LatencyEstimate <= 0 {
-		t.Fatalf("test precondition: latency=%.3f must be > 0 after biasing", cost.LatencyEstimate)
-	}
-
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_self",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: cost.LatencyEstimate / 10, // tight
-	})
-	if resp.StatusCode != 200 {
-		t.Fatalf("/offload: %s", body(resp))
-	}
-	var out OffloadHTTPResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if out.Accepted {
-		t.Errorf("expected reject; got Accepted=true reason=%q (latency=%.3f budget=%.3f)",
-			out.Reason, out.ExpectedLatency, cost.LatencyEstimate/10)
-	}
-	if !strings.Contains(out.Reason, "latency") {
-		t.Errorf("reject reason should mention latency; got %q", out.Reason)
+	for _, b := range []string{`{"memory_bytes":-1}`, `{"cpu_cores":-0.5}`, `{"cpu_cores":1e999}`} {
+		req, _ := http.NewRequest("POST", base+"/offload", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("%s: got %d, want 400", b, resp.StatusCode)
+		}
 	}
 }
 
-func TestOffload_RejectExceedsEnergyBudget(t *testing.T) {
-	base, sm, cleanup := newOffloadTestAgent(t)
+// TestOffload_IsStrict: a field the node does not read, or anything after the
+// request, is a 400, not a demand silently ignored.
+func TestOffload_IsStrict(t *testing.T) {
+	base, state, cleanup := newOffloadServer(t)
 	defer cleanup()
-	drivePositiveCost(t, sm)
+	before := len(state.Journal().Decisions(0))
+	for _, b := range []string{`{"cpu_cores":1,"latency_budget_ms":5}`, `{"cpu_cores":1} {"cpu_cores":2}`} {
+		req, _ := http.NewRequest("POST", base+"/offload", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("%s: got %d, want 400", b, resp.StatusCode)
+		}
+	}
+	if after := len(state.Journal().Decisions(0)); after != before {
+		t.Errorf("journal holds %d decisions, was %d; a refused request records nothing", after, before)
+	}
+}
 
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost.ResourceCost <= 0 {
-		t.Fatalf("test precondition: resource cost=%.3f must be > 0 after biasing", cost.ResourceCost)
-	}
-	tight := cost.ResourceCost / 10
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:           "pod-scheduling",
-		SourceNodeID:       "node_self",
-		DataSizeBytes:      1024,
-		LatencyBudgetMs:    1e9, // unbounded latency
-		EnergyBudgetJoules: &tight,
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("/offload: %s", body(resp))
-	}
-	var out OffloadHTTPResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Accepted {
-		t.Errorf("expected reject on energy budget; got Accepted=true reason=%q", out.Reason)
-	}
-	if !strings.Contains(out.Reason, "energy") {
-		t.Errorf("reject reason should mention energy; got %q", out.Reason)
+// TestOffload_EveryLeverHasAnEnter: under the default spec, every lever action
+// resolves to a non-zero enter, and is one admission checks.
+func TestOffload_EveryLeverHasAnEnter(t *testing.T) {
+	enter := leverEnters(spec.Default().Loops.Relief.Levers)
+	for _, a := range spec.LeverActions() {
+		if enter[a] <= 0 {
+			t.Errorf("lever %s: enter %v; want non-zero", a, enter[a])
+		}
+		if a != spec.LeverCPULimit && a != spec.LeverMemoryHigh {
+			t.Errorf("lever %s is not one admission checks", a)
+		}
 	}
 }
 
 func TestOffload_RequiresJSON(t *testing.T) {
-	base, _, cleanup := newTestAgent(t)
+	base, _, cleanup := newOffloadServer(t)
 	defer cleanup()
-	resp := postRaw(t, base+"/offload", `{"task_type":"x"}`)
+	resp := postRaw(t, base+"/offload", `{"cpu_cores":1}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)

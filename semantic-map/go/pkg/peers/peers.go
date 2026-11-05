@@ -250,25 +250,33 @@ type ActionCost struct {
 	GraphPathUsed   []string `json:"GraphPathUsed"`
 }
 
-// OffloadRequest is the body sent to a peer's /offload endpoint.
+// OffloadRequest is the body sent to a peer's /offload endpoint: would the peer take
+// this workload. Workload optionally names the subject; CPUCores and MemoryBytes are
+// the declared demand: the peer prices them unless Workload is a pod its own map has
+// seen with both its CPU and memory shares, and then prices the larger of each. The
+// peer refuses a field it does not read.
 type OffloadRequest struct {
-	TaskType           string   `json:"task_type"`
-	SourceNodeID       string   `json:"source_node_id"`
-	DataSizeBytes      int64    `json:"data_size_bytes"`
-	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
-	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
+	SourceNodeID string  `json:"source_node_id"`
+	Workload     string  `json:"workload,omitempty"`
+	CPUCores     float64 `json:"cpu_cores"`
+	MemoryBytes  float64 `json:"memory_bytes"`
 }
 
-// OffloadResponse is the body returned by a peer's /offload endpoint.
-// Accepted indicates the peer believes it can execute within the requested
-// budgets. ExpectedLatency / ExpectedResourceCost report the peer's own cost
-// estimate so the source agent can record the outcome (and adjust trust).
+// OffloadResponse is the peer's answer, from its own map, and the body the daemon's
+// POST /offload writes. Basis says whether the demand was measured there or declared,
+// empty when the peer answered before pricing any (the pod is already running there,
+// or there was nothing to price); DecisionID reproduces the answer through
+// the peer's GET /state/decisions/{id}; CPUAfter and MemoryAfter are the node shares
+// the peer projected, nil when it answered before projecting; Caveats are what the
+// answer rests on that is weaker than a current reading.
 type OffloadResponse struct {
-	Accepted             bool    `json:"accepted"`
-	Reason               string  `json:"reason,omitempty"`
-	ExpectedLatency      float64 `json:"expected_latency"`
-	ExpectedResourceCost float64 `json:"expected_resource_cost"`
-	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
+	Accepted    bool     `json:"accepted"`
+	Reason      string   `json:"reason"`
+	Basis       string   `json:"basis,omitempty"`
+	DecisionID  string   `json:"decision_id"`
+	CPUAfter    *float64 `json:"cpu_after,omitempty"`
+	MemoryAfter *float64 `json:"memory_after,omitempty"`
+	Caveats     []string `json:"caveats,omitempty"`
 }
 
 // Cost asks the peer at peerURL what it would cost to run taskType for
@@ -357,10 +365,11 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// Offload posts an OffloadRequest to the peer and returns its response.
-// Used by the trust-update path: a 2xx with Accepted=true is the signal to
-// nudge the peer's trust upward; a 2xx with Accepted=false (peer's own
-// budget-violation reason) is informational and leaves trust unchanged.
+// Offload posts an OffloadRequest to the peer and returns its response. It does not
+// touch trust, and nothing in the daemon calls it: moving trust on an answer is the
+// caller's, through Registry.UpdateTrust (the coordination scenario adds 0.10 on an
+// accept). A non-2xx (a refused request) is an error, and so is a 2xx without a
+// decision id: an answer the peer cannot reproduce is not a map-grounded admission.
 func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadRequest) (*OffloadResponse, error) {
 	if req == nil {
 		return nil, errors.New("peers.Client.Offload: nil request")
@@ -387,6 +396,9 @@ func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadReques
 	var out OffloadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("peers.Client.Offload: decode: %w", err)
+	}
+	if out.DecisionID == "" {
+		return nil, fmt.Errorf("peers.Client.Offload: peer %s answered without a decision; not a map-grounded admission", peerURL)
 	}
 	return &out, nil
 }

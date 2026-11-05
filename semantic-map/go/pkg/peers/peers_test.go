@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -287,6 +288,7 @@ func TestClient_HealthRespectsStatus(t *testing.T) {
 }
 
 func TestClient_OffloadAcceptResponse(t *testing.T) {
+	cpuAfter := 0.6
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/offload" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -298,25 +300,26 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req.TaskType != "pod-scheduling" {
-			t.Errorf("decoded TaskType=%q", req.TaskType)
+		if req.CPUCores != 0.5 || req.SourceNodeID != "node_B" {
+			t.Errorf("decoded %+v", req)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(OffloadResponse{
-			Accepted:             true,
-			Reason:               "ok",
-			ExpectedLatency:      9.0,
-			ExpectedResourceCost: 0.3,
+			Accepted:   true,
+			Reason:     "ok",
+			Basis:      "declared",
+			DecisionID: "adm-1-abc",
+			CPUAfter:   &cpuAfter,
+			Caveats:    []string{"demand was declared by the requester, not observed"},
 		})
 	}))
 	defer srv.Close()
 
 	c := NewClient(2 * time.Second)
 	resp, err := c.Offload(context.Background(), srv.URL, &OffloadRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_B",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: 5000,
+		SourceNodeID: "node_B",
+		CPUCores:     0.5,
+		MemoryBytes:  1 << 28,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -324,8 +327,30 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 	if !resp.Accepted {
 		t.Error("Accepted: got false, want true")
 	}
-	if resp.ExpectedLatency != 9.0 {
-		t.Errorf("ExpectedLatency: got %.3f, want 9.0", resp.ExpectedLatency)
+	if resp.DecisionID != "adm-1-abc" || resp.CPUAfter == nil || *resp.CPUAfter != 0.6 || resp.MemoryAfter != nil || len(resp.Caveats) != 1 {
+		t.Errorf("decoded %+v", resp)
+	}
+}
+
+// TestClient_OffloadRefusesAnUngroundedAnswer: a 2xx without a decision id cannot
+// be reproduced, so it is an error, not an answer; so is a non-2xx.
+func TestClient_OffloadRefusesAnUngroundedAnswer(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"no decision id": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(OffloadResponse{Accepted: true, Reason: "ok"})
+		},
+		"non-2xx": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"cpu_cores must be a finite number >= 0"}`, http.StatusBadRequest)
+		},
+	} {
+		srv := httptest.NewServer(h)
+		_, err := NewClient(2*time.Second).Offload(context.Background(), srv.URL, &OffloadRequest{CPUCores: 1})
+		srv.Close()
+		want := map[string]string{"no decision id": "without a decision", "non-2xx": "returned 400"}[name]
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err %v; want one saying %q", name, err, want)
+		}
 	}
 }
 

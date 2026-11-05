@@ -235,8 +235,8 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ╔════════════════════════▼══════════════════════════╗
    PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
    GET /cost                ║                                                   ║
-   POST /offload            ║   SemanticMap facade                              ║
-                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
+   POST /offload → Admit    ║   SemanticMap facade                              ║
+   (state map, not here)    ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
                             ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
                             ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
                             ║   └──────────┴───────────┴──────────┴──────────┘  ║
@@ -281,7 +281,7 @@ What each piece is for, when it runs, and whether it is required.
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
 | **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
-| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
+| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for a peer's `/cost` and `/offload`, and the `/offload` wire types (the answer itself is the state map's `Admit`) | `/recommend`, `/peers` | Optional |
 | **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup (not collectors: those are `sources.collectors`) | Once, at boot | Yes |
 
@@ -483,7 +483,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
-| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and the offload accept/reject path end to end |
+| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and one accepted admission on a declared demand over the wire (the daemon's route and its declines are covered in `pkg/agentmain` and `pkg/statemap`) |
 
 A separate verification (`pkg/profiles/build_priors_test.go::TestBuildSeedsStructureAndNoMagnitude`)
 asserts the inverse of what its predecessor did: for every KD in `prior_weights.json`
@@ -1423,7 +1423,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
-| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`, plus a hypothesis digest when `assume`/`without` are given; a repeat at the same revision takes `-2`, `-3`, …, reserved in the journal as for admission ids; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
 Errors on the new endpoints follow a single shape:
@@ -1641,7 +1641,7 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
 3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
 
-Outcome-driven trust updates (boost on successful offload accept, penalty on energy/latency overrun) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but the daemon itself does not yet call it automatically on `/offload` responses. Promoting that to an automatic pipeline is the obvious P7 next step.
+Outcome-driven trust updates (boost on an accepted offload, penalty on a declined one) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but nothing in the daemon calls `peers.Client.Offload`, and the client itself never touches trust: an answer moves trust only when its caller applies `UpdateTrust`. Promoting that to an automatic pipeline is the obvious P7 next step.
 
 ### Why `RecommendPeer` uses trust-weighted savings
 
@@ -1654,14 +1654,78 @@ Two candidate ranking functions:
 
 We chose the latter. The product collapses two dimensions into a single ordering, which is good enough for v1 routing decisions. A future profile that needs finer control (e.g. Pareto frontiers when latency and energy both matter) can build a richer ranker without changing the contract.
 
-### `/offload` is the decision interface, not a scheduler
+### Admission: `/offload` answers from the map
 
-The `POST /offload` handler computes `CostOfAction` locally and answers *would I accept this task within these budgets?* It does not run anything. Two reasons:
+A node decides whether it would take a workload from its own state map
+(`statemap.Map.Admit`, `pkg/statemap/admit.go`); the requester relays the question and
+never decides. The answer is a decision: accepted or declined, a reason, and a
+decision id that `GET /state/decisions/{id}` reproduces with the facts, properties and
+thresholds it read. Nothing is scheduled. Execution needs a workload runtime the map
+does not own, and keeping the answer pure lets a requester ask several nodes before
+anything moves. Peers negotiating with these answers is P7.
 
-1. Execution requires a workload runtime (container manager, function-as-a-service, etc.) that the Semantic Map deliberately does not own. The map is the *brain*, not the *body*.
-2. Keeping the decision interface pure makes it cheap and idempotent. The source agent can poll multiple peers in parallel, pick a winner, and only then commit to actually moving work — entirely outside the Semantic Map's surface.
+**Order.** The checks run in this order, and the first to fail answers: the workload,
+whether there is anything to price, the facts, the node's shares, contention, the
+projection.
 
-The response carries `expected_latency` and `expected_energy` so the source agent can record an outcome, regardless of whether the actual offload executor ever exists.
+**Demand: measured for a pod, else declared.** Only a pod is looked up: its uid is
+the cluster's, so `pod:<uid>` in this map is that workload. A unit or a group
+(`group:<name>` comes from cluster-wide labels, and `group:system` exists by default)
+names something each node has its own of, so what this map holds under that name is
+not the requester's workload; it is priced on the declared demand, and the decision
+says why. A pod with either share, `cpu_utilization@<pod>` or
+`memory_utilization@<pod>`, still active is already counted in the node's own shares:
+there is nothing to admit, and it is declined as "already running", first, with no
+basis and no projection. A stale pod with both shares is priced on them (already node
+shares), or on the declared demand per resource where that is larger, with a caveat
+and both values in the decision. A pod with one share only (the cgroup collector
+reports memory from its first tick, CPU from its second), or with a retired one, is
+priced on the declared demand, with a caveat naming the missing or retired share.
+Otherwise the demand is what the requester declares, cores over the `cpu_cores` fact
+and bytes over `memory_total`; the decision says it was declared, not observed, and
+why, and names a resource declared as zero. With nothing measured and nothing
+declared, there is nothing to price, and it declines.
+
+**Limitation.** Measured demand is keyed on the pod's UID, which matches only a pod
+that ran here and returns. An offloaded pod has a UID this node has never seen, so
+declared is the normal path; keying on owner or controller identity is future work.
+
+**Criterion: relief-based.** Accept only if taking the workload would not put the
+node where relief has to act. A node whose `cpu_contention_ratio` or
+`memory_contention_ratio` is at or above its lever's `enter` declines outright. A
+stale or retired contention reading declines only while a pod still reports what it
+is the worst of (an active `cpu_contention_ratio@pod:*`, or `memory_pressure_ratio@pod:*`
+for memory); with none, the node has been emptied (the collector stops the node's CPU
+reading when no pod is promised CPU), which is the best target, so it is taken as not
+contended, with a caveat. A contention property the map does not hold or has never
+observed is a check skipped, with a caveat; so is a lever the spec does not have,
+which the agent also logs once at startup. Then the node's `cpu_utilization` and
+`memory_utilization` plus the demand must stay at or below `1 - admitHeadroom` (a
+constant, 0.10): past it, a pod owed CPU or memory waits on what others hold, which is
+what relief relieves. A missing or non-positive fact, or a node share never observed,
+declines naming it; a stale node share declines, and a retired one declines like a
+stale one. `cpu_after` and `memory_after` are present only when the projection was
+made.
+
+**Decision ids.** `adm-<revision>-<digest>`, the digest a SHA-256 of the request's
+fields as JSON, at the revision the decision is pinned to. An identical request asked
+again at the same revision takes `-2`, `-3`, …, so no record is overwritten; an
+explicit id already used is refused. The id is reserved in the journal as it is
+chosen, in one step under the journal's lock, and released when the decision is
+recorded: requests are served in parallel and do not advance the revision, so
+concurrent identical requests take distinct ids, and of concurrent requests under one
+explicit id exactly one gets it. A refused request (a bad demand, a reused id, an
+unknown field or trailing data on the wire, which is a `400`) records nothing.
+
+**Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
+workload's own throttling, or the worst protected pod's memory stall), not a function
+of demand, so it cannot be projected for a workload that does not exist yet; and
+`assume` substitutes the value of a property already in the map, which a newcomer does
+not have. Admission therefore reads capacity headroom from the map's node shares and
+the machine's facts, through the same `DecisionBuilder`, so it is traceable the same way.
+
+The old answer, `CostOfAction` against latency and energy budgets, is gone: energy was
+never measured on this system. `/cost`, `/recommend` and `/simulate` remain as they were.
 
 ### Proof: the headline scenario
 
@@ -1669,7 +1733,7 @@ The response carries `expected_latency` and `expected_energy` so the source agen
 
 1. Pre-flight: print self-cost for A, B, C — assert `A < C < B`.
 2. `B.RecommendPeer` → must return A (highest trust-weighted savings).
-3. `B → A POST /offload` via `peers.Client` → A accepts within the budget.
+3. `B → A POST /offload` via `peers.Client`, declaring one core and 1 GiB → A admits it from its own map.
 4. B updates `Registry.UpdateTrust(A.ID, +0.10)` and prints the before/after table.
 
 The verbose output narrates each step. If the scenario passes with A chosen and trust incremented, the coordination claim is proven end-to-end. The HTTP routes, the CLI subcommand, and the operator-facing surface are plumbing around this core demo.

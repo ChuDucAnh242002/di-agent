@@ -127,23 +127,29 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			return EstimateResult{Err: "assumption on " + k + " is not a finite number"}
 		}
 	}
-	if req.ID != "" {
-		if _, used := m.journal.Decision(req.ID); used {
+	id := req.ID
+	if id != "" {
+		if !m.journal.reserve(id) {
 			// The journal keeps one record per id; a second estimate under the same
 			// id would silently replace the first, which is the trace of an answer
-			// already given.
+			// already given. Reserving under the journal lock keeps two concurrent
+			// requests from both passing this check.
 			return EstimateResult{Err: "decision id " + req.ID + " is already used"}
 		}
-	}
-	id := req.ID
-	if id == "" {
-		id = "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
+	} else {
+		base := "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
 		// Neither Decide nor Commit advances the revision, so a baseline and a
 		// counterfactual asked at the same revision would claim the same id and
 		// the journal would keep only the last of them. The hypothesis is part of
 		// the question, so it is part of the name of the answer.
 		if len(req.Assume) > 0 || len(req.Without) > 0 {
-			id += "-" + hypothesisDigest(req)
+			base += "-" + hypothesisDigest(req)
+		}
+		// The same question asked twice at one revision is two answers; the
+		// second takes a suffix rather than replacing the first.
+		id = base
+		for n := 2; !m.journal.reserve(id); n++ {
+			id = base + "-" + strconv.Itoa(n)
 		}
 	}
 

@@ -392,7 +392,7 @@ With relief enabled on a runtime that changes the system, it also writes its led
 | --------- | ------ | ---- |
 | Inbound | `node.addr` (default `:8080`, **all interfaces**) | Always. **Unauthenticated.** |
 | Outbound | Netdata, and any `http` plugin, at the URL its `sources.collectors` entry names | Every collect interval |
-| Outbound | Peer agents' `/cost`, `/healthz`, `/offload` | On `/recommend` and offload |
+| Outbound | Peer agents' `/cost`, `/healthz` | On `/recommend` |
 | Outbound | LLM at `explain.url` | Only if `explain.provider` is set; default is `none`, so **no LLM traffic by default** |
 
 No telemetry, analytics, or update checks. The agent never contacts anything you have not configured.
