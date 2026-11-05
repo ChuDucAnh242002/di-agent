@@ -2,6 +2,8 @@ package minimal
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -349,8 +351,83 @@ func TestDiscoveryCheckpointDoesNotInventTestsDuringWarmup(t *testing.T) {
 	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.pvals) != 0 || q.slots["x→y"].n != 0 {
-		t.Fatalf("warmup gained synthetic FDR evidence: %v %+v", q.pvals, q.slots["x→y"])
+	if len(q.pvals) != 0 || len(q.slots) != 0 {
+		t.Fatalf("warmup gained synthetic FDR evidence: %v %+v", q.pvals, q.slots)
+	}
+}
+
+// A pair with no candidate and no group link is not saved: it holds only readings,
+// which refill after a restart, and saving every tested pair made the snapshot and
+// each save grow with the pair budget (#56).
+func TestDiscoveryCheckpointKeepsOnlyWindowsSomethingRestsOn(t *testing.T) {
+	p := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Minute)
+	const noise = 40
+	noiseRng := rand.New(rand.NewSource(1))
+	for i := 0; i < 29; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		x := float64(i%12) / 12
+		readings := []types.PropertyReading{
+			{ID: "x", Value: x, Range: rng, At: at},
+			{ID: "y", Value: 0.1 + 0.8*x, Range: rng, At: at},
+		}
+		for j := 0; j < noise; j++ {
+			// Independent noise: tested, too weak to become a candidate.
+			v := noiseRng.Float64()
+			readings = append(readings, types.PropertyReading{ID: fmt.Sprintf("n%02d", j), Value: v, Range: rng, At: at})
+		}
+		for _, r := range readings {
+			if err := p.ObserveProperty(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	keep := map[string]bool{}
+	for _, c := range p.candidates {
+		keep[c.FromID+"→"+c.ToID] = true
+	}
+	for key := range p.links {
+		keep[key] = true
+	}
+	if !keep["x→y"] || len(p.slots) < 50*len(keep) {
+		t.Fatalf("fixture: want x→y kept among many tested pairs, got %d kept of %d tested", len(keep), len(p.slots))
+	}
+	raw, err := p.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s discoveryCheckpoint
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	saved := 0
+	for _, pair := range s.Pairs {
+		if !keep[pair.From+"→"+pair.To] {
+			t.Fatalf("saved the window of %s→%s, which nothing rests on", pair.From, pair.To)
+		}
+		saved++
+	}
+	if saved == 0 {
+		t.Fatal("candidate window was not saved")
+	}
+
+	q := NewMICorrelationProposer(nil, 0.9, 6, 12, 0)
+	if _, err := q.RestoreCheckpoint(raw, time.Now(), DiscoveryEvidenceMaxGap); err != nil {
+		t.Fatal(err)
+	}
+	if q.buffers["x→y"] == nil || q.buffers["x→y"].Len() != p.buffers["x→y"].Len() {
+		t.Fatal("candidate evidence did not resume")
+	}
+	for i := 29; i < 36; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		checkpointFeed(t, p, at, i)
+		checkpointFeed(t, q, at, i)
+	}
+	a := p.candidates[candidateID("x", "y", true)]
+	b := q.candidates[candidateID("x", "y", true)]
+	if a == nil || b == nil || a.PersistentWindows != b.PersistentWindows || a.PersistencePairs != b.PersistencePairs {
+		t.Fatalf("restored candidate diverged from uninterrupted execution: %+v vs %+v", a, b)
 	}
 }
 

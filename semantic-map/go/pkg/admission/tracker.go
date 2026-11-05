@@ -47,12 +47,13 @@ type Outcome struct {
 // OutcomeLine is one domain's check: the observed rise of Relieves over the
 // accept-time pressure the predictions were made from, against each basis's
 // predicted rise. Rises and errors are set only on scored outcomes (held, and
-// breached on a reading); an error is predicted minus observed. A domain relief
+// breached on a reading), so an unscored line has none rather than a zero; an
+// error is predicted minus observed. A domain relief
 // acted on in the window is breached with ReliefActed and Peak, relief's reading
 // when it acted, and the outcome is not scored: relief has already moved Relieves.
 type OutcomeLine struct {
 	Domain       string   `json:"domain"`
-	ObservedRise float64  `json:"observed_rise"`
+	ObservedRise *float64 `json:"observed_rise,omitempty"`
 	MapRise      *float64 `json:"map_rise,omitempty"`
 	UsageRise    *float64 `json:"usage_rise,omitempty"`
 	MapErr       *float64 `json:"map_err,omitempty"`
@@ -340,13 +341,14 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 		l, a := &lines[i], e.lines[i]
 		v := value(t.c.Map, d.Relieves)
 		settled[i], baseline[i] = v, a.Pressure
-		l.ObservedRise = v - a.Pressure
+		observed := v - a.Pressure
+		l.ObservedRise = &observed
 		// Relief's trigger is strictly above Enter.
 		if v > d.Enter {
 			l.Breached, result = true, Breached
 		}
-		l.MapRise, l.MapErr = rise(a.MapPred, a.Pressure, l.ObservedRise)
-		l.UsageRise, l.UsageErr = rise(a.UsagePred, a.Pressure, l.ObservedRise)
+		l.MapRise, l.MapErr = rise(a.MapPred, a.Pressure, observed)
+		l.UsageRise, l.UsageErr = rise(a.UsagePred, a.Pressure, observed)
 	}
 	inputs["relieves_at_accept"], inputs["relieves_now"] = baseline, settled
 	return t.record(e, result, "", lines, inputs, now)

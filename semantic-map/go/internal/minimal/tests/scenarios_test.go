@@ -878,8 +878,13 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	// Ingest 60 samples driving CE↔RC correlation:
 	// CE (community ecosystem) and RC (resource constraints) are not linked
 	// in the bootstrap — a strong correlation should generate a candidate.
+	// x steps between levels in a scrambled order (37 is coprime with 60) rather than
+	// as a ramp: two ramps agree once over the window, not 60 times, and the p-value
+	// on the effective sample size does not count a shared trend as evidence. Each
+	// level holds for three ticks because ObserveConstruct pairs a value with the
+	// other construct's latest, which on a level's first tick is the previous level.
 	for i := 0; i < 60; i++ {
-		x := float64(i) / 60.0
+		x := float64(((i/3)*37)%60) / 60.0
 		y := x*0.95 + 0.02 // strong positive linear correlation
 		_ = proposer.ObserveConstruct("CE", x)
 		_ = proposer.ObserveConstruct("RC", y)

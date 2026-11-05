@@ -71,6 +71,13 @@ func (p *MICorrelationProposer) policy() discoveryPolicy {
 
 // Checkpoint keeps raw paired evidence and its persistence counters in one record.
 // Explicit Observe pairs have no timestamps and cannot be safely resumed.
+//
+// Only the windows something rests on are kept: a pair with a candidate, whose
+// persistence run and review would otherwise start over, and a pair linking an
+// arithmetic group. A pair with neither holds nothing but readings, which refill
+// within one window after a restart. Keeping every tested pair's window made each
+// save hold the whole pair budget's evidence: over a gigabyte allocated per save at
+// a 16 GiB machine's budget.
 func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -83,9 +90,16 @@ func (p *MICorrelationProposer) Checkpoint() (json.RawMessage, error) {
 	for id, r := range p.recent {
 		s.Recent[id] = discoveryRecent{slices.Clone(r.vs), r.next}
 	}
+	keep := make(map[string]bool, len(p.candidates)+len(p.links))
+	for _, c := range p.candidates {
+		keep[c.FromID+"→"+c.ToID] = true
+	}
+	for key := range p.links {
+		keep[key] = true
+	}
 	for key, sl := range p.slots {
 		w, ok := p.buffers[key]
-		if !ok {
+		if !ok || !keep[key] {
 			continue
 		}
 		pr := p.persistence[key]
@@ -294,6 +308,7 @@ func (p *MICorrelationProposer) clearDiscoveryLocked() {
 	p.persistence = make(map[string]*pairPersistence)
 	p.lastPair = make(map[string][2]int64)
 	p.candidates = make(map[string]*types.CandidateEdge)
+	p.beforeConfirm = make(map[string]types.CandidateEdge)
 	p.order = nil
 	p.latestConstructs = make(map[string]float64)
 	p.latestProps = make(map[string]latestValue)

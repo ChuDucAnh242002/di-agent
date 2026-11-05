@@ -164,7 +164,7 @@ func TestConfoundedByOtherWorkload(t *testing.T) {
 	r.tick(time.Minute)
 	o := r.result("confounded")
 	for _, l := range o.Lines {
-		if l.MapRise != nil || l.MapErr != nil || l.UsageErr != nil {
+		if l.ObservedRise != nil || l.MapRise != nil || l.MapErr != nil || l.UsageErr != nil {
 			t.Fatalf("confounded line scored: %+v", l)
 		}
 	}
@@ -184,7 +184,7 @@ func TestBreachedByRelief(t *testing.T) {
 		t.Fatalf("lines %+v; want cpu breached by relief only", o.Lines)
 	}
 	for _, l := range o.Lines {
-		if l.ObservedRise != 0 || l.MapRise != nil || l.MapErr != nil || l.UsageRise != nil || l.UsageErr != nil {
+		if l.ObservedRise != nil || l.MapRise != nil || l.MapErr != nil || l.UsageRise != nil || l.UsageErr != nil {
 			t.Fatalf("relief-acted outcome scored: %+v", l)
 		}
 	}
@@ -252,7 +252,7 @@ func TestRiseFromAcceptBaseline(t *testing.T) {
 	record(t, r.m, "cpu_contention_ratio", "", 0.07)
 	r.tick(time.Minute)
 	o := r.result("held")
-	if c := o.Lines[0]; !near(c.ObservedRise, 0.05) || !ptrNear(c.MapErr, 0.025) {
+	if c := o.Lines[0]; !ptrNear(c.ObservedRise, 0.05) || !ptrNear(c.MapErr, 0.025) {
 		t.Fatalf("cpu line %+v; want rise 0.05 from the accept's 0.02", c)
 	}
 	rec, _ := r.j.Decision(o.OutcomeID)
@@ -286,7 +286,12 @@ func TestNotArrived(t *testing.T) {
 		t.Fatal("expired at the window's edge")
 	}
 	r.tick(time.Second)
-	r.result("not_arrived")
+	o := r.result("not_arrived")
+	for _, l := range o.Lines {
+		if l.ObservedRise != nil || l.MapRise != nil || l.UsageRise != nil {
+			t.Fatalf("not_arrived line scored: %+v", l)
+		}
+	}
 	if r.tr.Pending("web") {
 		t.Fatal("still pending")
 	}
@@ -379,7 +384,7 @@ func TestRisesAndErrors(t *testing.T) {
 	r.tick(time.Minute)
 	o := r.result("held")
 	c := o.Lines[0]
-	if c.Domain != cpuDom.Relieves || !near(c.ObservedRise, 0.05) ||
+	if c.Domain != cpuDom.Relieves || !ptrNear(c.ObservedRise, 0.05) ||
 		!ptrNear(c.MapRise, 0.075) || !ptrNear(c.MapErr, 0.025) ||
 		!ptrNear(c.UsageRise, 0.03) || !ptrNear(c.UsageErr, -0.02) {
 		t.Fatalf("cpu line %+v", c)

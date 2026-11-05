@@ -30,7 +30,8 @@ func TestMain(m *testing.M) {
 }
 
 // fixtureMain speaks wire protocol v1 on stdin/stdout, misbehaving as mode says.
-// linger keeps running after stdin closes; linger-ignore-term also ignores SIGTERM.
+// linger keeps running after stdin closes; linger-ignore-term also ignores SIGTERM;
+// slow-hello takes 2s to answer each hello.
 // It records each hello it receives in $DI_FIXTURE_DIR/hellos so a test can count
 // restarts from the plugin's side.
 func fixtureMain(mode string) {
@@ -72,6 +73,10 @@ func fixtureMain(mode string) {
 				}
 			}
 			switch mode {
+			case "slow-hello":
+				// A cold start: an interpreter loading its imports, a device opening.
+				time.Sleep(2 * time.Second)
+				reply(HelloReply{Protocol: ProtocolVersion})
 			case "hello-error":
 				reply(HelloReply{Error: "fixture refuses: no device"})
 				return

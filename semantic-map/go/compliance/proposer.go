@@ -289,6 +289,34 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		}
 	})
 
+	t.Run("ConfirmRefusesASettledCandidate", func(t *testing.T) {
+		for _, settle := range []struct {
+			name string
+			act  func(contracts.ProposerContract, string) error
+		}{
+			{"operator defer", func(p contracts.ProposerContract, id string) error {
+				return p.Defer(id, types.CandidateReview{By: types.ReviewerOperator})
+			}},
+			{"agent reject", func(p contracts.ProposerContract, id string) error {
+				return p.Reject(id, types.CandidateReview{By: types.ReviewerDecisionModel})
+			}},
+		} {
+			p := factory(t)
+			feedProperties(p, []string{"pod:a"})
+			cs, _ := p.GetCandidates()
+			if len(cs) == 0 {
+				t.Skip("implementation generated no candidates — open check skipped")
+			}
+			c := cs[0]
+			if err := settle.act(p, c.CandidateID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.Confirm(c.CandidateID, c.FromID, types.CandidateReview{}); !errors.Is(err, contracts.ErrNotOpen) {
+				t.Errorf("%s: Confirm(%q) = %v; want ErrNotOpen", settle.name, c.CandidateID, err)
+			}
+		}
+	})
+
 	t.Run("UndirectedConfirmNeedsAnEnd", func(t *testing.T) {
 		p := factory(t)
 		feedProperties(p, []string{"pod:a"})

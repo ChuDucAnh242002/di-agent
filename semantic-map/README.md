@@ -151,9 +151,11 @@ semantic-map/
     │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
     │   ├── stats/              Shared estimator primitives (concrete, NOT a contract)
-    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + FisherPValue —
+    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + EffectiveN + FisherPValue —
     │   │   │                   the one estimator statemap and the MI proposer both use
-    │   │   └── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   ├── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   └── effective_n_test.go  Lag-1 effective sample size: AR(1) false-positive share, clamps, ring order,
+    │   │                            BenchmarkFoldWithPValue
     │   ├── ingest/client/      Wire face of the sample boundary for applications
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
@@ -251,7 +253,7 @@ semantic-map/
     │       │                                           state model)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
-    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via map.proposer.enabled)
+    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values on the effective sample size; default via map.proposer.enabled)
     │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via map.tuner: true)
@@ -473,7 +475,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 - `demand` keys are `cpu` (cores) and `memory` (bytes); `source` is `declared` or `measured on <node>`; `arch` is the GOARCH a measurement was taken on; `capped: true` marks a CPU measurement taken under a relief cap.
 - `verdict`: `accept`, `decline` (including `already pending`, `already running here` for a name the runtime lists on this node, and `workload list unavailable: <err>`), `unreachable` (the peer could not be asked, answered a verdict not in this list, or answered without a decision id; `reason` is the error; a peer that timed out, or a submission whose request was cancelled, may have accepted, so the walk stops there and `reason` starts `outcome unknown, walk stopped:` — check that peer's `GET /tasks` before submitting again; a refused connection or failed lookup goes on to the next peer) or `already_asked` (the node is already in the chain; no decision).
 - A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
-- `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors are present on `held` and on `breached` from a reading only; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
+- `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors, `observed_rise` included, are present on `held` and on `breached` from a reading only, and absent rather than 0 on an unscored line; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
 - `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
 - `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value, a field the offer does not have, or data after it) with nothing recorded; decoding is strict because a misspelt `value` would read as a zero demand; `415` without a JSON content type.
 
@@ -609,7 +611,7 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
 `decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
 actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
-`defer`, or `undecided` when no tier was sure enough: the candidate stays pending and is reviewed again when its evidence moves),
+`defer`, or `undecided` when no tier was sure enough or the map refused what it settled on: the candidate keeps its status, pending or deferred by the proposer, and is reviewed again when its evidence moves),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
@@ -628,6 +630,9 @@ subjects' readings of one metric, where a shared driver is the likelier explanat
 `same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
 which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
+`PValue` is the Fisher p-value of `MIScore` on the window's effective sample size, which
+is smaller than `NObservations` when the readings are autocorrelated, so it cannot be
+recomputed from `NObservations` alone.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
@@ -662,9 +667,14 @@ proposer is off.
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
 candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
 (`mapctl candidates confirm <id> --from cpu_utilization`); without one, or with a property
-that is not an end, the answer is `400` and the candidate stays pending. A confirmation whose
-declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
+that is not an end, the answer is `400` and the candidate keeps its status. A confirmation
+whose declaration the map refuses (an opposite-sign edge already there) answers `500` and
+puts the candidate back as it was, pending or deferred by the proposer;
 a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
+`confirm` takes a pending candidate or one the proposer deferred (`cap`, `untested`,
+`grouped`, `bar`, `weakened`); one the operator or the agent deferred or rejected, or one
+already confirmed, answers `409`. The review loop's rules read the same set, so a
+composition candidate withdrawn before a cycle reached it is still confirmed by rule.
 
 ### Full endpoint table
 
@@ -1171,7 +1181,7 @@ the shape of the real thing.
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
 | `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`; at least `1s`, since timestamps are whole seconds. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello — is refused at startup, naming the entry. |
+| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello (an exec plugin has 30 s, or its `timeout` if longer, to start and answer it, and the same again at each restart) — is refused at startup, naming the entry. |
 | `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
 | `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
 | `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |
@@ -1193,7 +1203,7 @@ the shape of the real thing.
 | `map.proposer.threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
 | `map.proposer.min_spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
-| `map.proposer.fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
+| `map.proposer.fdr` | `0.05`               | Nominal false-discovery rate of the candidate bar (dependent pairs void the formal guarantee; ARCHITECTURE §6): a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
 | `map.proposer.max_pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `map.tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `profile.regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `profile.alpha` and `profile.convergence` when set. |
@@ -1315,7 +1325,8 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 
 It prints `PASS <check>` or `FAIL <check>: <why>` per check, then `certified` (exit 0) or
 `not certified (k failed)` (exit 1). Every check starts the plugin afresh; its stderr
-is shown. A plugin that does not complete its hello stops the run at `HelloRoundTrip`.
+is shown. A plugin that does not complete its hello — within 30 s for an exec plugin, as at
+agent start — stops the run at `HelloRoundTrip`.
 CI certifies the loadavg example this way on Linux.
 
 ---
@@ -1782,8 +1793,9 @@ loops:
 Each counted window contains a full proposer buffer of fresh pairs, not another review
 of the same observations. Windows do not overlap. The correlation must keep its sign
 and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
-gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
-correction is enabled. Missing declared ranges prevent persistence from accumulating
+gates, have a Fisher p-value at most 0.05 — on the window's effective sample size, so
+autocorrelated readings are not counted as independent — and clear the multiple-testing
+bar when FDR correction is enabled. Missing declared ranges prevent persistence from accumulating
 on the property path. A failed gate, sign/kind change, forgotten property, or displaced
 pair resets the run. A closer-time replacement partner revises the last pair's evidence
 instead of counting as another observation.
@@ -1804,8 +1816,9 @@ confirmations remain causal; operator confirmation of an undirected candidate re
 choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
 
 When `persist.file` is set, the same atomic state snapshot also saves the discovery
-buffers, duplicate suppression, partial-window progress, candidates and completed
-windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+buffers of pairs with a candidate or a group link, duplicate suppression,
+partial-window progress, candidates and completed windows; other tested pairs refill
+after a restart. Discovery evidence has its own 24-hour age/gap limit, independent of
 `map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
 Changed settings, expired evidence or a backwards clock produce an explicit cold-start
 log. A malformed discovery checkpoint is discarded with an error-level log while the

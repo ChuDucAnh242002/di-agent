@@ -467,11 +467,13 @@ type ArithmeticGroup struct {
 }
 
 type CandidateEdge struct {
-	CandidateID     string
-	FromID          string
-	ToID            string
-	Direction       Direction
-	MIScore         float64
+	CandidateID string
+	FromID      string
+	ToID        string
+	Direction   Direction
+	MIScore     float64
+	// PValue is Fisher's p for MIScore on the window's effective sample size (see
+	// stats.EffectiveN), not on NObservations.
 	PValue          float64
 	NObservations   int
 	DeploymentsSeen int
@@ -517,6 +519,27 @@ type CandidateEdge struct {
 	// Review is the latest review of the candidate: who looked at it, what they
 	// decided and on what evidence. Nil until someone has.
 	Review *CandidateReview
+}
+
+// Who rejected or deferred a candidate, as its Reason names them. Every other
+// deferral reason is the proposer's own.
+const (
+	ReasonOperator = "operator"
+	ReasonAgent    = "agent"
+)
+
+// Open reports whether a review may still settle c: it is pending, or the proposer
+// deferred it. The proposer's deferrals (cap, untested, grouped, bar, weakened) are
+// choices about the queue, not judgements on the pair, so a rule that holds by
+// definition (composition) settles such a candidate whatever its |r| is now. A rule
+// that reads evidence (persistent-correlation) still reads it: every proposer
+// deferral but cap comes from a fold that failed, and that fold resets
+// PersistentWindows, so only a cap-deferred pair can still count as persistent. A
+// candidate the operator or the agent deferred or rejected, or one confirmed, is not
+// open.
+func (c *CandidateEdge) Open() bool {
+	return c.Status == Pending ||
+		c.Status == Deferred && c.Reason != ReasonOperator && c.Reason != ReasonAgent
 }
 
 const PersistentWindowsRequired = 3

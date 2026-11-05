@@ -274,3 +274,198 @@ func TestPersistentCorrelationCreatesATracedAssociationForDirectedPairs(t *testi
 		t.Fatalf("missing applied decision: %+v", d)
 	}
 }
+
+// A composition candidate the proposer withdrew before any review cycle reached it —
+// its |r| weakened within the 30 s it was pending, as the mem-squeeze pair's did in
+// the case study — is still a part against its whole, and the rule settles it at the
+// next cycle.
+func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T) {
+	state, m := withdrawnComposition(t)
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Suggest, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
+		t.Fatalf("at suggest a withdrawn candidate has no queue to suggest on; reviewed %d, errors %d", s.Reviewed, s.Errors)
+	}
+	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
+		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
+	}
+	if ds := state.Journal().Decisions(0); len(ds) != 0 {
+		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
+	}
+	cfg.Level = autonomy.Full
+	if r, err = autonomy.New(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	h, err := m.CandidateHistory()
+	if err != nil || len(h) != 1 || h[0].Status != types.Confirmed || h[0].Review == nil ||
+		h[0].Review.By != types.ReviewerRules {
+		t.Fatalf("withdrawn composition candidate was not settled by the rule: %+v %v", h[0], err)
+	}
+	if !state.Covered(withdrawnFrom, withdrawnTo, 1) {
+		t.Fatal("the confirmation declared no relationship")
+	}
+}
+
+const withdrawnFrom, withdrawnTo = "memory_pressure_ratio@pod:squeeze", "memory_pressure_ratio"
+
+// withdrawnComposition builds a map whose one candidate is a composition pair the
+// proposer raised and then deferred as weakened.
+func withdrawnComposition(t *testing.T) (*statemap.Map, *semmap.SemanticMap) {
+	t.Helper()
+	const from, to = withdrawnFrom, withdrawnTo
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
+	m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+	m.AttachState(state)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Hour)
+	feed := func(i int, x, y float64) {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		for _, reading := range []types.PropertyReading{
+			{ID: from, Subject: "pod:squeeze", At: at, Value: x, Range: rng},
+			{ID: to, At: at, Value: y, Range: rng},
+		} {
+			if err := state.Record(statemap.Observation{ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ObserveProperty(reading); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	i := 0
+	for ; i < 12; i++ {
+		x := float64(i) / 12
+		feed(i, x, 0.8*x+0.1)
+	}
+	if cs, _ := m.PendingCandidates(); len(cs) != 1 || cs[0].Kind != types.CandidateKindComposition {
+		t.Fatalf("want one pending composition candidate, got %+v", cs)
+	}
+	// The pair stops holding before the reviewer's next cycle: the node total now moves
+	// with something else.
+	for ; ; i++ {
+		feed(i, float64(i%12)/12, float64((i*7)%12)/12)
+		if h, _ := m.CandidateHistory(); h[0].Status == types.Deferred {
+			if h[0].Reason != "weakened" {
+				t.Fatalf("deferred for %q; want weakened", h[0].Reason)
+			}
+			break
+		}
+		if i > 200 {
+			t.Fatal("the candidate never weakened")
+		}
+	}
+	return state, m
+}
+
+// A withdrawn candidate whose confirmation the map refuses — an opposite-sign edge
+// already holds the pair — keeps the review that settled on it, so it is reviewed
+// once: the next cycle does not confirm it again, fail again and journal another
+// decision while its evidence stands still.
+func TestARefusedWithdrawnCandidateIsReviewedOnce(t *testing.T) {
+	state, m := withdrawnComposition(t)
+	if err := state.DeclareRelationship(statemap.Relationship{From: withdrawnFrom, To: withdrawnTo,
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Full, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	h, _ := m.CandidateHistory()
+	if h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review == nil ||
+		h[0].Review.Action != types.ReviewUndecided {
+		t.Fatalf("after the refusal the candidate is %v/%q review %+v; want deferred as weakened, its undecided review kept",
+			h[0].Status, h[0].Reason, h[0].Review)
+	}
+	decisions, errs := len(state.Journal().Decisions(0)), r.Status().Errors
+	if decisions == 0 {
+		t.Fatal("the refused confirmation journaled no decision")
+	}
+	r.Cycle(context.Background())
+	if n := len(state.Journal().Decisions(0)); n != decisions {
+		t.Errorf("the second cycle journaled %d more decisions for a candidate whose evidence did not move", n-decisions)
+	}
+	if e := r.Status().Errors; e != errs {
+		t.Errorf("the second cycle failed %d more times; want the candidate left alone", e-errs)
+	}
+}
+
+// The persistent-correlation rule reads a cap-deferred candidate's evidence as it is:
+// the cap is a choice about the queue, the pair's windows still count, and the map
+// finds the candidate for the association in history, not only in the queue.
+func TestPersistentCorrelationAssociatesACapDeferredCandidate(t *testing.T) {
+	const node = "cpu_pressure"
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
+	p.SetMaxPending(1)
+	p.SetLogger(t.Logf)
+	m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
+	m.AttachState(state)
+	rng := &[2]float64{0, 1}
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 36; i++ {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%12) / 12
+		for _, reading := range []types.PropertyReading{
+			{ID: "cpu_utilization@pod:a", Subject: "pod:a", At: at, Value: x, Range: rng},
+			{ID: "cpu_utilization@pod:b", Subject: "pod:b", At: at, Value: 0.5*x + 0.2, Range: rng},
+			{ID: node, At: at, Value: 0.8*x + 0.1, Range: rng},
+		} {
+			if err := state.Record(statemap.Observation{ID: reading.ID, Subject: reading.Subject, Value: reading.Value, At: at}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ObserveProperty(reading); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	h, _ := m.CandidateHistory()
+	var capped *types.CandidateEdge
+	for _, c := range h {
+		if c.Status == types.Deferred && c.Reason == "cap" && c.PersistentWindows >= types.PersistentWindowsRequired && len(c.Caveats) == 0 {
+			capped = c
+			break
+		}
+	}
+	if capped == nil {
+		t.Fatalf("setup: no persistent cap-deferred candidate in %+v", h)
+	}
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"persistent-correlation"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Rules, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Errors != 0 {
+		t.Fatalf("errors %d: %s", s.Errors, s.LastError)
+	}
+	h, _ = m.CandidateHistory()
+	for _, c := range h {
+		if c.CandidateID == capped.CandidateID && (c.Status != types.Confirmed || c.Review == nil || !c.Review.Association) {
+			t.Fatalf("cap-deferred persistent candidate was not associated: %v/%q review %+v", c.Status, c.Reason, c.Review)
+		}
+	}
+	if !state.Associated(capped.FromID, capped.ToID, 1) {
+		t.Fatal("no association declared for the cap-deferred candidate")
+	}
+}

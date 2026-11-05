@@ -85,7 +85,7 @@ func (m *Map) Snapshot() Snapshot {
 		Discovery: append(json.RawMessage(nil), m.savedDiscovery...),
 	}
 	for _, p := range m.properties {
-		s.Properties = append(s.Properties, *p)
+		s.Properties = append(s.Properties, p.clone()) // Save encodes it after the lock is released
 	}
 	for _, r := range m.relationships {
 		s.Relationships = append(s.Relationships, *r)
