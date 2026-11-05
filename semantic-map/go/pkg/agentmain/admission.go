@@ -81,10 +81,12 @@ func buildAdmission(cfg spec.Spec, m *statemap.Map, rt runtime.Runtime, loops []
 	tr := admission.NewTracker(admission.TrackerConfig{
 		Map:       m,
 		Workloads: workloads,
-		Shares:    func(usage string) map[string]float64 { return relief.Shares(m, usage) },
+		// SharesAt at both ends, as relief reads its own outcomes: a workload silent
+		// but not yet swept neither arrives nor leaves.
+		Shares: func(usage string) map[string]float64 { return relief.SharesAt(m, usage, time.Now()) },
 		// 0.25 is the default levers' step, the move relief itself counts as a change.
 		Moved: func(usage string, at map[string]float64, except string) []string {
-			return relief.Moved(m, usage, at, except, 0.25)
+			return relief.Moved(m, usage, at, except, 0.25, time.Now())
 		},
 		Acted: reliefActed(loops),
 		IDs:   ids,

@@ -73,6 +73,16 @@ func (h *harness) judged(subject string, p float64) {
 	}
 }
 
+// liveRun is run with subject still reporting share every tick, as a workload
+// its collector still sees does: verify reads shares through the StaleAfter rule.
+func (h *harness) liveRun(d time.Duration, p float64, subject string, share float64) {
+	h.t.Helper()
+	for i := time.Duration(0); i < d; i += tick {
+		record(h.t, h.m, usage(subject), subject, share, h.now)
+		h.step(p)
+	}
+}
+
 // secondStep has pod:a's usage reflect its cap and waits for the loop to step it
 // again, at pressure p.
 func (h *harness) secondStep(subject string, share, p float64) {
@@ -124,22 +134,22 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.3, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.02, t0)
 	at := map[string]float64{"pod:a": 0.4, "pod:c": 0.01}
-	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25); len(moved) != 0 {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25, t0); len(moved) != 0 {
 		t.Fatalf("moved %v; a pod going 0.01 → 0.02 of the node is not a confound", moved)
 	}
-	if confounded(m, nodeUsage, at, "pod:a", 0.25, true) {
+	if confounded(m, nodeUsage, at, "pod:a", 0.25, true, t0) {
 		t.Fatal("confounded; want not")
 	}
 	// pod:a back at its share at act, so pod:c's rise is not CPU the cap freed.
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.04, t0)
-	if !confounded(m, nodeUsage, at, "pod:a", 0.25, true) {
+	if !confounded(m, nodeUsage, at, "pod:a", 0.25, true, t0) {
 		t.Fatal("pod:c at 0.04 from 0.01 moved 0.03: want confounded")
 	}
 	// A workload that arrived since the act moved from nothing.
 	record(t, m, usage("pod:c"), "pod:c", 0.01, t0)
 	record(t, m, usage("pod:d"), "pod:d", 0.1, t0)
-	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25, t0); len(moved) != 1 || moved[0] != "pod:d" {
 		t.Fatalf("moved %v; want the newcomer pod:d", moved)
 	}
 }
@@ -516,6 +526,47 @@ func TestAWorkloadThatLeftConfounds(t *testing.T) {
 	}
 }
 
+// A workload already silent at act took no part in the state the action was
+// priced from, so its retirement inside the settle window is not a departure —
+// even when the sweep has not yet marked it stale and the map still calls it
+// active.
+func TestAWorkloadStaleAtActDoesNotConfound(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1, "pod:c": 0.1}, evidence: true})
+	h.advance(h.m.StaleAfter() + time.Minute)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.4, h.now)
+	record(t, h.m, usage("pod:b"), "pod:b", 0.1, h.now)
+	h.act("pod:a")
+	if at := h.l.Status().InFlight.SharesAtAct; !near(at["pod:a"], 0.4) || !near(at["pod:b"], 0.1) {
+		t.Fatalf("shares at act %v; want the live workloads snapshotted", at)
+	}
+	if _, ok := h.l.Status().InFlight.SharesAtAct["pod:c"]; ok {
+		t.Fatalf("shares at act %v; pod:c was silent at act", h.l.Status().InFlight.SharesAtAct)
+	}
+	if err := h.m.RetireProperty(usage("pod:c"), "the pod was deleted", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h.liveRun(2*time.Minute, 0.44, "pod:b", 0.1)
+	c, _ := h.lastVerify().Inputs["confounded"].(map[string]any)
+	if c == nil || c["confounded"] != false {
+		t.Fatalf("confounded input %v; pod:c was stale at act, so its going is not a departure", h.lastVerify().Inputs["confounded"])
+	}
+}
+
+// A workload silent at act and still unswept at verify is as absent then as it
+// was at act: the same StaleAfter rule reads both snapshots, so it is no arrival.
+func TestAWorkloadStaleAtActAndVerifyDoesNotConfound(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1, "pod:c": 0.1}, evidence: true})
+	h.advance(h.m.StaleAfter() + time.Minute)
+	record(t, h.m, usage("pod:a"), "pod:a", 0.4, h.now)
+	record(t, h.m, usage("pod:b"), "pod:b", 0.1, h.now)
+	h.act("pod:a")
+	h.liveRun(2*time.Minute, 0.44, "pod:b", 0.1)
+	c, _ := h.lastVerify().Inputs["confounded"].(map[string]any)
+	if c == nil || c["confounded"] != false {
+		t.Fatalf("confounded input %v; pod:c was silent at act and at verify, so it did not arrive", h.lastVerify().Inputs["confounded"])
+	}
+}
+
 func TestAUsageEffectDoesNotScaleAMapPrediction(t *testing.T) {
 	var e effects
 	for range 10 {
@@ -543,17 +594,17 @@ func TestAVictimTakingUpTheFreedCPUDoesNotConfound(t *testing.T) {
 	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
 	record(t, m, usage("pod:hog"), "pod:hog", 0.38, t0)
 	record(t, m, usage("pod:victim"), "pod:victim", 0.5, t0)
-	if moved, left, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved)+len(left) != 0 || len(absorbed) != 1 {
+	if moved, left, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25, t0); len(moved)+len(left) != 0 || len(absorbed) != 1 {
 		t.Fatalf("moved %v left %v absorbed %v; the victim took up the 0.12 the hog gave up", moved, left, absorbed)
 	}
 	// The victim rose by more than the hog gave up: something besides the cap moved it.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.7, t0)
-	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25, t0); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a rise of 0.32 against 0.12 freed is a confound", moved)
 	}
 	// A workload that fell lowered contention on its own.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.2, t0)
-	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25, t0); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a fall is a confound whatever the hog gave up", moved)
 	}
 }
@@ -582,7 +633,7 @@ func TestNothingIsFreedByAWorkloadTheMapNoLongerHolds(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
 	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
 	record(t, m, usage("pod:victim"), "pod:victim", 0.6, t0)
-	if moved, _, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || len(absorbed) != 0 {
+	if moved, _, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25, t0); len(moved) != 1 || len(absorbed) != 0 {
 		t.Fatalf("moved %v absorbed %v; nothing is known to have been freed", moved, absorbed)
 	}
 }
@@ -679,7 +730,7 @@ func TestSharesLeaveOutGroups(t *testing.T) {
 	}
 	at := Shares(m, nodeUsage)
 	record(t, m, usage("pod:c"), "pod:c", 0.3, now)
-	if got := Moved(m, nodeUsage, at, "pod:c", 0.25); len(got) != 0 {
+	if got := Moved(m, nodeUsage, at, "pod:c", 0.25, now); len(got) != 0 {
 		t.Fatalf("moved %v; pod:c arriving moved only itself and its group", got)
 	}
 }
@@ -691,7 +742,7 @@ func TestMovedReportsArrivalAndExcludes(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.4, now)
 	record(t, m, usage("pod:b"), "pod:b", 0.2, now)
 	record(t, m, usage("pod:c"), "pod:c", 0.3, now)
-	got := Moved(m, nodeUsage, map[string]float64{"pod:a": 0.4}, "pod:c", 0.25)
+	got := Moved(m, nodeUsage, map[string]float64{"pod:a": 0.4}, "pod:c", 0.25, t0)
 	if len(got) != 1 || got[0] != "pod:b" {
 		t.Fatalf("moved %v; want [pod:b]", got)
 	}

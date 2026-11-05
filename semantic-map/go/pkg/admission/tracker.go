@@ -70,7 +70,7 @@ type TrackerConfig struct {
 	Map *statemap.Map
 	// Workloads maps each workload's Name to its subject, as the runtime lists them.
 	Workloads func(ctx context.Context) (map[string]string, error)
-	// Shares is relief.Shares on Map; Moved is relief.Moved on Map at the lever's step.
+	// Shares is relief.SharesAt on Map; Moved is relief.Moved on Map at the lever's step.
 	Shares func(usage string) map[string]float64
 	Moved  func(usage string, at map[string]float64, except string) []string
 	// Acted says whether relief acted in the action's domain since the time given,
