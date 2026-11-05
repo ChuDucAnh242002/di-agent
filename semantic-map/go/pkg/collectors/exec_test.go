@@ -39,6 +39,12 @@ func (l *logSink) count(prefix string) int {
 	return n
 }
 
+// restartTimeout is the collect timeout of a test that needs a restart inside
+// Collect to succeed. That restart shares the tick's deadline, and this test binary,
+// race-instrumented and started cold on a loaded machine, can take seconds to
+// answer hello; the timeout is not what those tests verify.
+const restartTimeout = 10 * time.Second
+
 // fixture builds an ExecCollector named "fx" for node "n1" that runs this test
 // binary in the given fixture mode, with its state directory under t.TempDir.
 func fixture(t *testing.T, mode string, timeout time.Duration, sink *logSink) (*ExecCollector, string) {
@@ -110,6 +116,24 @@ func TestExecProtocolMismatchRefused(t *testing.T) {
 	}
 }
 
+// Start is allowed startTimeout for a plugin's cold start, not the collect
+// timeout, but a restart inside Collect still shares the tick's deadline.
+func TestExecStartAllowsSlowHello(t *testing.T) {
+	e, _ := fixture(t, "slow-hello", time.Second, nil)
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start of a plugin slower than the collect timeout to hello: %v", err)
+	}
+	if _, err := e.Collect(); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	e.mu.Lock()
+	e.fault(nil)
+	e.mu.Unlock()
+	if _, err := e.Collect(); err == nil || !strings.Contains(err.Error(), "hello: no reply within") {
+		t.Fatalf("Collect restarting a slow plugin: err %v, want a hello timeout", err)
+	}
+}
+
 func TestExecMissingProgramRefused(t *testing.T) {
 	e := NewExecCollector(Env{NodeID: "n1"}, "fx", spec.ExecSpec{Command: filepath.Join(t.TempDir(), "absent")}, time.Second, nil)
 	defer e.Close()
@@ -171,7 +195,7 @@ func TestExecSeqMismatchDiscarded(t *testing.T) {
 }
 
 func TestExecCrashRestartsWithHello(t *testing.T) {
-	e, dir := fixture(t, "crash-once", 2*time.Second, nil)
+	e, dir := fixture(t, "crash-once", restartTimeout, nil)
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -309,7 +333,7 @@ func TestConfigJSON(t *testing.T) {
 
 func TestExecExitedBetweenTicksRestartsFirst(t *testing.T) {
 	sink := &logSink{}
-	e, dir := fixture(t, "exit-after-collect", 2*time.Second, sink)
+	e, dir := fixture(t, "exit-after-collect", restartTimeout, sink)
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

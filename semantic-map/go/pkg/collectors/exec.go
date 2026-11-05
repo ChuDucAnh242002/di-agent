@@ -44,6 +44,14 @@ const (
 	// relayDrain bounds how long a reaped process's stderr may still be relayed
 	// before the pipe is closed under it, in case a grandchild holds it open.
 	relayDrain = 200 * time.Millisecond
+	// startTimeout bounds Start — launching the plugin and its hello — when it is
+	// longer than the collect timeout. Start runs once as the agent starts, outside
+	// any tick, so no supervisor is waiting on it; a plugin's cold start (an
+	// interpreter loading its imports from an SD card on a Raspberry Pi, a device
+	// opening) can take seconds, and refusing the agent's start for that would turn
+	// a slow plugin into a dead node. A restart inside Collect still shares the
+	// tick's deadline.
+	startTimeout = 30 * time.Second
 )
 
 // ExecCollector runs an out-of-process plugin speaking wire protocol v1 over its
@@ -125,8 +133,9 @@ func NewExecCollector(env Env, name string, sp spec.ExecSpec, timeout time.Durat
 	return &ExecCollector{env: env, name: name, sp: sp, timeout: timeout, config: config, logf: logf, grace: shutdownGrace}
 }
 
-// Start spawns the plugin and completes hello. An error means the plugin could
-// not be run or refused the hello; the daemon refuses to start on it.
+// Start spawns the plugin and completes hello within startTimeout, or the collect
+// timeout when that is longer. An error means the plugin could not be run, did
+// not answer or refused the hello; the daemon refuses to start on it.
 func (e *ExecCollector) Start() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -137,7 +146,7 @@ func (e *ExecCollector) Start() error {
 		return nil
 	}
 	e.started = true
-	return e.spawn(time.Now().Add(e.timeout))
+	return e.spawn(time.Now().Add(max(e.timeout, startTimeout)))
 }
 
 // Collect sends one collect request and returns the stamped samples. A plugin
@@ -418,7 +427,8 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 	if _, err := p.stdin.Write(append(b, '\n')); err != nil {
 		return nil, fmt.Errorf("write request: %w", err)
 	}
-	t := time.NewTimer(time.Until(deadline))
+	wait := time.Until(deadline)
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	select {
 	case r := <-p.lines:
@@ -427,7 +437,7 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 		}
 		return r.line, nil
 	case <-t.C:
-		return nil, fmt.Errorf("no reply within %s", e.timeout)
+		return nil, fmt.Errorf("no reply within %s", wait.Round(time.Millisecond))
 	}
 }
 

@@ -142,7 +142,7 @@ Leave these out; the agent is authoritative for them.
 ### 3.3 Lifecycle
 
 - **Timeout.** Each tick has one deadline, the entry's `timeout` (default `min(interval/2, 5s)`). It covers everything the adapter does that tick: a restart, its hello, and the collect. The supervisor waits 500 ms beyond it, so the adapter's own, clearer error arrives first.
-- **Startup.** Every member is built and, for exec and http, sent `hello` before the collection loop starts. Any failure — unknown type, bad config, hello error, protocol mismatch, program not found — **refuses daemon start**, naming the entry (`sources.collectors[2] gpu: hello refused: …`). After startup every fault is isolated: it costs that member's tick and puts it in backoff.
+- **Startup.** Every member is built and, for exec and http, sent `hello` before the collection loop starts. Any failure — unknown type, bad config, hello error, protocol mismatch, program not found — **refuses daemon start**, naming the entry (`sources.collectors[2] gpu: hello refused: …`). An exec plugin has 30 s (or its `timeout`, if longer) to start and answer this first `hello`: startup runs outside any tick, and a cold start — an interpreter loading its imports from an SD card, a device opening — can take seconds. A restart after startup shares the tick's deadline, as above. After startup every fault is isolated: it costs that member's tick and puts it in backoff.
 - **exec.**
   - The command is resolved once per start: a bare name is looked up on the agent's `PATH`, a relative path against the agent's working directory. A command **given as a path** (it contains a `/`) runs with the **directory of the resolved command as its working directory**, so it can read files shipped beside it by relative path. A **bare name** found on `PATH` runs in the **agent's working directory**: its directory is a shared bin directory, not the plugin's.
   - The environment is minimal (§7).
@@ -253,7 +253,7 @@ go run ./cmd/mapctl collector check --http http://localhost:9100/collect
 
 | Check | Asserts |
 | ----- | ------- |
-| `HelloRoundTrip` | The plugin starts and accepts hello with protocol 1. If it fails, the run stops here. |
+| `HelloRoundTrip` | The plugin starts and accepts hello with protocol 1, within the 30 s an exec plugin has at agent start (§3.3). If it fails, the run stops here. |
 | The compliance suite | `SourceIDNonEmpty`, `SourceIDStable`, `AvailableMetricsNonEmpty`, `AvailableMetricsStableWithoutACollect`, `CollectDoesNotError`, `CollectTwiceNoError`, `SamplesHaveNonEmptyNodeID`, `SamplesHaveNonEmptyEventID`, `SamplesHaveValidTypeAndSubject` (`metric_type`, `subject` and `part_of`), `NoDuplicateSamplesInBatch`, `NoMalformedSamples`, `CollectProducesSamples`, `SamplesDeclareUnitAndRange`, `UnitAndRangeStablePerType`, `SamplesMetricTypeInAvailable`, `EventIDDeterministic` — the same assertions a Go collector passes. The adapter drops a malformed or duplicate sample before the suite sees the batch, and reports it ([`contracts.DropReporter`](../semantic-map/go/pkg/contracts/contracts.go)); `NoMalformedSamples` and `NoDuplicateSamplesInBatch` fail on those reports. |
 | `SeqEcho` | At least two collects in a row are answered with the request's `seq`. |
 | `ReplyWithinTimeout` | Each of `--ticks` collects returns within the timeout. |
