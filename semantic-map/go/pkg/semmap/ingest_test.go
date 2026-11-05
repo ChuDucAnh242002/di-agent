@@ -385,6 +385,10 @@ func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) 
 	if state.Census().Discovered != 1 {
 		t.Errorf("census discovered=%d, want 1", state.Census().Discovered)
 	}
+	// The confirmation stands, so the proposer kept nothing to reopen it with.
+	if err := proposer.Reopen(cs[0].CandidateID); err == nil {
+		t.Error("an applied confirmation could still be reopened; the proposer kept its prior status")
+	}
 }
 
 // TestConfirmCandidate_ACoveredPairDeclaresNothingMore: a candidate settled after the
@@ -475,6 +479,127 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 	for _, c := range h {
 		if c.CandidateID == cs[0].CandidateID && c.Status == types.Confirmed {
 			t.Error("history calls the candidate Confirmed although no relationship was declared")
+		}
+	}
+}
+
+// TestConfirmCandidate_FailedDeclarationRestoresAProposerDeferral: a candidate the
+// proposer deferred is open to confirmation, and a refused declaration puts it back
+// as it was — deferred, for the proposer's reason — not into the pending queue the
+// proposer took it out of. The deferral is "weakened" and the queue has room, so the
+// cap cannot put it back for Reopen.
+func TestConfirmCandidate_FailedDeclarationRestoresAProposerDeferral(t *testing.T) {
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	proposer.SetLogger(t.Logf)
+	sm := semmap.New(minimal.NewOntologyFromSpec(nil), nil, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	feed := func(i int, x, y float64) {
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: y, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	i := 0
+	for ; i < 40; i++ {
+		x := float64(i%20) / 20
+		feed(i, x, 0.9*x)
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 {
+		t.Fatalf("setup: want one pending candidate, got %+v", cs)
+	}
+	id := cs[0].CandidateID
+	// The pair stops holding: the node signal now moves with something else.
+	var withdrawn *types.CandidateEdge
+	for ; withdrawn == nil; i++ {
+		if i > 400 {
+			t.Fatal("setup: the candidate never weakened")
+		}
+		feed(i, float64(i%20)/20, float64((i*7)%20)/20)
+		h, _ := proposer.GetHistory()
+		for _, c := range h {
+			if c.CandidateID == id && c.Status == types.Deferred {
+				if c.Reason != "weakened" {
+					t.Fatalf("setup: deferred for %q; want weakened", c.Reason)
+				}
+				withdrawn = c
+			}
+		}
+	}
+	if err := state.DeclareRelationship(statemap.Relationship{From: withdrawn.FromID, To: withdrawn.ToID,
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.ConfirmCandidate(id, "", types.CandidateReview{}); err == nil {
+		t.Fatal("confirming against an opposite-sign edge succeeded")
+	}
+	h, _ := proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == id && (c.Status != types.Deferred || c.Reason != "weakened" || c.Review != nil) {
+			t.Errorf("after the refused declaration the candidate is %v/%q (review %+v); want it deferred as weakened again",
+				c.Status, c.Reason, c.Review)
+		}
+	}
+	if pending, _ := sm.PendingCandidates(); len(pending) != 0 {
+		t.Errorf("%d pending after the refusal; want none", len(pending))
+	}
+}
+
+// TestConfirmCandidate_RefusedConstructDeclarationLeavesTheCandidatePending: the
+// construct path refuses too — the ontology rejects a proposition that contradicts one
+// already in the backbone — and that refusal must put the candidate back as the
+// property-pair path does, with nothing declared.
+func TestConfirmCandidate_RefusedConstructDeclarationLeavesTheCandidatePending(t *testing.T) {
+	proposer := minimal.NewMICorrelationProposer(nil, 0.8, 10, 60, 15*time.Second)
+	sm := semmap.New(minimal.NewOntologyFromSpec(mustSpec()), nil, proposer, minimal.NewDisabledTuner())
+	before, _ := sm.Propositions()
+	var existing *types.Proposition
+	for _, p := range before {
+		if p.FromConstruct != p.ToConstruct {
+			existing = p
+			break
+		}
+	}
+	if existing == nil {
+		t.Fatal("setup: the spec has no proposition between two constructs")
+	}
+
+	// Feed the pair moving against the backbone's claim.
+	sign := 1.0
+	if existing.Direction == types.Positive {
+		sign = -1
+	}
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		if err := proposer.Observe(existing.FromConstruct, existing.ToConstruct, x, 0.5+sign*0.4*x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Direction == existing.Direction {
+		t.Fatalf("setup: want one candidate contradicting %s, got %+v", existing.PropositionID, cs)
+	}
+	from := ""
+	if cs[0].Undirected {
+		from = existing.FromConstruct
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, from, types.CandidateReview{}); err == nil {
+		t.Fatal("confirming a proposition that contradicts the backbone succeeded")
+	}
+	if after, _ := sm.Propositions(); len(after) != len(before) {
+		t.Errorf("propositions %d -> %d; a refused declaration adds none", len(before), len(after))
+	}
+	after, _ := sm.PendingCandidates()
+	if len(after) != 1 || after[0].CandidateID != cs[0].CandidateID {
+		t.Errorf("after the refused declaration pending is %v; want the candidate back, retryable", after)
+	}
+	h, _ := proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == cs[0].CandidateID && c.Status == types.Confirmed {
+			t.Error("history calls the candidate Confirmed although nothing was declared")
 		}
 	}
 }

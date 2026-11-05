@@ -553,7 +553,7 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
 `decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
 actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
-`defer`, or `undecided` when no tier was sure enough: the candidate stays pending and is reviewed again when its evidence moves),
+`defer`, or `undecided` when no tier was sure enough or the map refused what it settled on: the candidate keeps its status, pending or deferred by the proposer, and is reviewed again when its evidence moves),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
@@ -609,9 +609,14 @@ proposer is off.
 Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. Confirming an undirected
 candidate needs a body naming the end it runs from, `{"from": "cpu_utilization"}`
 (`mapctl candidates confirm <id> --from cpu_utilization`); without one, or with a property
-that is not an end, the answer is `400` and the candidate stays pending. A confirmation whose
-declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
+that is not an end, the answer is `400` and the candidate keeps its status. A confirmation
+whose declaration the map refuses (an opposite-sign edge already there) answers `500` and
+puts the candidate back as it was, pending or deferred by the proposer;
 a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
+`confirm` takes a pending candidate or one the proposer deferred (`cap`, `untested`,
+`grouped`, `bar`, `weakened`); one the operator or the agent deferred or rejected, or one
+already confirmed, answers `409`. The review loop's rules read the same set, so a
+composition candidate withdrawn before a cycle reached it is still confirmed by rule.
 
 ### Full endpoint table
 

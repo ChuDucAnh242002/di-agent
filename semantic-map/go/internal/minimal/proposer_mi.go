@@ -65,6 +65,10 @@ type MICorrelationProposer struct {
 	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
+	// beforeConfirm holds, per candidate confirmed and not yet applied, what it was
+	// before Confirm, so Reopen can put back a candidate whose declaration the facade
+	// could not make. Applied drops the entry once the confirmation stands.
+	beforeConfirm map[string]types.CandidateEdge
 
 	latestConstructs map[string]float64     // explicit construct path: id → last value
 	latestProps      map[string]latestValue // property path: id → last value, time, scope
@@ -207,6 +211,7 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 		persistence:      make(map[string]*pairPersistence),
 		lastPair:         make(map[string][2]int64),
 		candidates:       make(map[string]*types.CandidateEdge),
+		beforeConfirm:    make(map[string]types.CandidateEdge),
 		latestConstructs: make(map[string]float64),
 		latestProps:      make(map[string]latestValue),
 		recent:           make(map[string]*valueRing),
@@ -451,8 +456,9 @@ func (p *MICorrelationProposer) associated(from, to string, sign int) bool {
 }
 
 // settled is a candidate evidence cannot change: confirmed, or rejected or deferred
-// by an operator. The proposer's own deferrals (cap, untested) can still re-enter, and
-// so can an agent's rejection or deferral once the evidence has moved.
+// by an operator. The proposer's own deferrals (cap, untested, grouped, bar,
+// weakened) can still re-enter, and so can an agent's rejection or deferral once the
+// evidence has moved.
 func settled(c *types.CandidateEdge) bool {
 	return c.Status == types.Confirmed ||
 		((c.Status == types.Rejected || c.Status == types.Deferred) && c.Reason == byOperator)
@@ -984,6 +990,7 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 		c := p.candidates[cid]
 		if c != nil && (c.FromID == propertyID || c.ToID == propertyID) {
 			delete(p.candidates, cid)
+			delete(p.beforeConfirm, cid)
 			continue
 		}
 		kept = append(kept, cid)
@@ -1210,8 +1217,8 @@ const (
 	deferredByCap = "cap"
 	// byOperator and byAgent say who rejected or deferred a candidate. Only an
 	// operator's decision is final for the session.
-	byOperator = "operator"
-	byAgent    = "agent"
+	byOperator = types.ReasonOperator
+	byAgent    = types.ReasonAgent
 	// deferredUntested is a pending candidate whose pair was displaced from the
 	// budget: its numbers stopped being updated.
 	deferredUntested = "untested"
@@ -1295,7 +1302,8 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 	return out, nil
 }
 
-// Confirm marks a Pending candidate accepted and returns the proposition it represents.
+// Confirm marks an open candidate (types.CandidateEdge.Open: pending, or deferred by
+// the proposer itself) accepted and returns the proposition it represents.
 // from orients it: "" or the candidate's FromID for a directed candidate; either end
 // for an undirected one, which has no orientation until an operator gives it.
 // The synthesized PropositionID is
@@ -1311,8 +1319,9 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // the returned proposition through its own path, which declares both halves.
 //
 // The candidate is marked Confirmed here, before the facade applies the proposition.
-// If applying fails the facade calls Reopen, so the candidate returns to Pending rather
-// than standing in history as confirmed with nothing behind it.
+// If applying fails the facade calls Reopen, so the candidate returns to what it was —
+// pending, or deferred by the proposer — rather than standing in history as confirmed
+// with nothing behind it.
 func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.CandidateReview) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1320,8 +1329,8 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 	if !ok {
 		return nil, fmt.Errorf("candidate %q not found", candidateID)
 	}
-	if c.Status != types.Pending {
-		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+	if !c.Open() {
+		return nil, fmt.Errorf("%w: %s is %v (reason %q)", contracts.ErrNotOpen, candidateID, c.Status, c.Reason)
 	}
 	src, dst := c.FromID, c.ToID
 	if rv.Association && ((!c.Undirected && !rv.IsPersistentCorrelationAssociation()) || from != "") {
@@ -1363,7 +1372,8 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 	case types.CandidateKindSameSubject:
 		prop.Description += "; two metrics of one subject: they may hold together by construction"
 	}
-	c.Status = types.Confirmed
+	p.beforeConfirm[candidateID] = *c
+	c.Status, c.Reason = types.Confirmed, ""
 	rv.Applied = true
 	c.Review = stamp(c, rv, types.ReviewConfirm)
 	return prop, nil
@@ -1405,7 +1415,8 @@ func reasonFor(rv types.CandidateReview) string {
 	return byAgent
 }
 
-// Reopen returns a Confirmed candidate to Pending. The facade calls it when the
+// Reopen returns a Confirmed candidate to the status, reason and review it had before
+// Confirm: pending, or deferred by the proposer. The facade calls it when the
 // relationship a confirmation stands for could not be declared, so the candidate can
 // be retried or rejected instead of standing in history as confirmed with nothing
 // behind it.
@@ -1419,8 +1430,24 @@ func (p *MICorrelationProposer) Reopen(candidateID string) error {
 	if c.Status != types.Confirmed {
 		return fmt.Errorf("candidate %q is not Confirmed (status=%v)", candidateID, c.Status)
 	}
-	c.Status, c.Reason, c.Review = types.Pending, "", nil // the confirmation never took effect
+	before, ok := p.beforeConfirm[candidateID]
+	if !ok {
+		return fmt.Errorf("candidate %q has no status from before its confirmation", candidateID)
+	}
+	delete(p.beforeConfirm, candidateID)
+	c.Status, c.Reason, c.Review = before.Status, before.Reason, before.Review // the confirmation never took effect
+	if c.Status == types.Pending {
+		p.enforceCapLocked() // another candidate may have taken its place in the queue meanwhile
+	}
 	return nil
+}
+
+// Applied tells the proposer the facade applied a confirmation, so it will not be
+// reopened and what the candidate was before it need not be kept.
+func (p *MICorrelationProposer) Applied(candidateID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.beforeConfirm, candidateID)
 }
 
 // Reject marks a candidate Rejected. An operator's rejection is permanent for the
@@ -1471,9 +1498,10 @@ func (p *MICorrelationProposer) Defer(candidateID string, rv types.CandidateRevi
 	return nil
 }
 
-// Annotate records a review of a Pending candidate without acting on it: an
-// an undecided review, or what a reviewer would have done had the autonomy level let it.
-// The candidate stays Pending, in the operator's queue.
+// Annotate records a review of an open candidate without acting on it: an undecided
+// review, or what a reviewer would have done had the autonomy level let it. Status and
+// reason stay as they are — pending in the operator's queue, or deferred by the
+// proposer — and the review stops the candidate being due until its evidence moves.
 func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateReview) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1481,8 +1509,8 @@ func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateR
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	if c.Status != types.Pending {
-		return fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+	if !c.Open() {
+		return fmt.Errorf("%w: %s is %v (reason %q)", contracts.ErrNotOpen, candidateID, c.Status, c.Reason)
 	}
 	rv.Applied = false
 	c.Review = stamp(c, rv, types.ReviewUndecided)

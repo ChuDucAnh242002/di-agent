@@ -308,6 +308,7 @@ func (p *MICorrelationProposer) clearDiscoveryLocked() {
 	p.persistence = make(map[string]*pairPersistence)
 	p.lastPair = make(map[string][2]int64)
 	p.candidates = make(map[string]*types.CandidateEdge)
+	p.beforeConfirm = make(map[string]types.CandidateEdge)
 	p.order = nil
 	p.latestConstructs = make(map[string]float64)
 	p.latestProps = make(map[string]latestValue)

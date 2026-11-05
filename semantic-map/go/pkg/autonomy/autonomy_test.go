@@ -3,6 +3,7 @@ package autonomy_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,14 @@ func (m *fakeMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return out, nil
 }
 
-func (m *fakeMap) CandidateHistory() ([]*types.CandidateEdge, error) { return m.PendingCandidates() }
+func (m *fakeMap) CandidateHistory() ([]*types.CandidateEdge, error) {
+	var out []*types.CandidateEdge
+	for _, c := range m.cands {
+		cp := *c
+		out = append(out, &cp)
+	}
+	return out, nil
+}
 
 func (m *fakeMap) settle(id string, s types.CandidateStatus, rv types.CandidateReview) error {
 	c := m.cands[id]
@@ -55,10 +63,20 @@ func (m *fakeMap) settle(id string, s types.CandidateStatus, rv types.CandidateR
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
 	rv.PersistentWindows = c.PersistentWindows
 	c.Status, c.Review = s, &rv
+	c.Reason = types.ReasonAgent // who settled it, as the proposer records it
+	switch {
+	case s == types.Confirmed:
+		c.Reason = ""
+	case rv.By == "" || rv.By == types.ReviewerOperator:
+		c.Reason = types.ReasonOperator
+	}
 	return nil
 }
 
 func (m *fakeMap) ConfirmCandidate(id, from string, rv types.CandidateReview) error {
+	if c := m.cands[id]; !c.Open() {
+		return fmt.Errorf("candidate %q is not open (status=%v, reason=%q)", id, c.Status, c.Reason)
+	}
 	m.from[id] = from
 	return m.settle(id, types.Confirmed, rv)
 }
@@ -70,6 +88,9 @@ func (m *fakeMap) DeferCandidate(id string, rv types.CandidateReview) error {
 }
 func (m *fakeMap) AnnotateCandidate(id string, rv types.CandidateReview) error {
 	c := m.cands[id]
+	if !c.Open() {
+		return fmt.Errorf("candidate %q is not open (status=%v, reason=%q)", id, c.Status, c.Reason)
+	}
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
 	rv.PersistentWindows = c.PersistentWindows
 	c.Review = &rv
@@ -363,4 +384,86 @@ func TestRulesSettleWhatTheyCanBeforeAModelIsAsked(t *testing.T) {
 	if s := r.Status(); s.Reviewed != 3 {
 		t.Fatalf("reviewed %d; want the rule's one and the models' two", s.Reviewed)
 	}
+}
+
+// A candidate the operator or the agent settled is closed: tier 0 leaves it alone
+// even when the rule would hold and it was never reviewed.
+func TestTier0LeavesAClosedCandidateAlone(t *testing.T) {
+	const deferred, rejected = "cpu_utilization@pod:a->cpu_utilization", "cpu_utilization@pod:b->cpu_utilization"
+	d, rj := directed(deferred, types.CandidateKindComposition), directed(rejected, types.CandidateKindComposition)
+	d.Status, d.Reason = types.Deferred, types.ReasonOperator
+	rj.Status, rj.Reason = types.Rejected, types.ReasonAgent
+	m := newFakeMap(t, d, rj)
+	r := run(t, m, autonomy.Config{Level: autonomy.Full})
+	for _, c := range []*types.CandidateEdge{m.cands[deferred], m.cands[rejected]} {
+		if c.Status == types.Confirmed || c.Review != nil {
+			t.Errorf("%s: %v review %+v; a closed candidate is not reviewed", c.CandidateID, c.Status, c.Review)
+		}
+	}
+	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
+		t.Errorf("reviewed %d, errors %d; want neither", s.Reviewed, s.Errors)
+	}
+	if ds := m.st.Journal().Decisions(0); len(ds) != 0 {
+		t.Errorf("%d decisions journaled for closed candidates", len(ds))
+	}
+}
+
+// Tier 0 reviews a candidate once per evidence: a suggestion left on the queue is not
+// made again next cycle, and is once the evidence moves past what it was made on.
+func TestTier0ReviewsAgainOnlyWhenTheEvidenceMoves(t *testing.T) {
+	const id = "cpu_utilization@pod:a->cpu_utilization"
+	m := newFakeMap(t, directed(id, types.CandidateKindComposition))
+	r := run(t, m, autonomy.Config{Level: autonomy.Suggest})
+	if c := m.cands[id]; c.Status != types.Pending || c.Review == nil || c.Review.By != types.ReviewerRules {
+		t.Fatalf("first cycle: %v review %+v; want a rule's suggestion on a pending candidate", c.Status, c.Review)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Reviewed != 1 {
+		t.Fatalf("reviewed %d times at the same evidence; want once", s.Reviewed)
+	}
+	m.cands[id].MIScore, m.cands[id].NObservations = 0.6, 240
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Reviewed != 2 {
+		t.Errorf("reviewed %d times after the evidence moved; want twice", s.Reviewed)
+	}
+}
+
+// A refused annotation — the operator closed the candidate between the cycle reading
+// it and the review being recorded — is not discarded: it is counted, and the decision
+// says so.
+func TestARefusedAnnotationIsCounted(t *testing.T) {
+	const id = "cpu_utilization@pod:a->cpu_utilization"
+	c := directed(id, types.CandidateKindComposition)
+	c.Status, c.Reason = types.Deferred, "weakened"
+	m := &refusingMap{newFakeMap(t, c)}
+	cfg := autonomy.Config{Level: autonomy.Full, Logf: t.Logf}
+	parts, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Rules = parts.Rules
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Errors != 1 || !strings.Contains(s.LastError, "recording the review") {
+		t.Errorf("errors %d (%q); want the refused annotation counted", s.Errors, s.LastError)
+	}
+	if c := m.cands[id]; c.Status != types.Deferred || c.Reason != "weakened" {
+		t.Errorf("candidate is %v/%q; want it as it was", c.Status, c.Reason)
+	}
+}
+
+// refusingMap refuses every confirmation, as the map does when the declaration it
+// stands for is refused, and every annotation, as the proposer does for a candidate
+// that is no longer open.
+type refusingMap struct{ *fakeMap }
+
+func (refusingMap) ConfirmCandidate(string, string, types.CandidateReview) error {
+	return errors.New("an opposite-sign relationship covers the pair")
+}
+
+func (refusingMap) AnnotateCandidate(string, types.CandidateReview) error {
+	return errors.New("the operator closed the candidate")
 }

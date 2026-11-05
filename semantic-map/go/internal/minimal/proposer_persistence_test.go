@@ -201,3 +201,51 @@ func persistenceCandidate(t *testing.T, p *MICorrelationProposer) *types.Candida
 	}
 	return h[0]
 }
+
+// Confirm takes a candidate the proposer deferred — its deferrals are choices about
+// the queue — and refuses one the operator or the agent settled. Reopen, which the
+// facade calls when the declaration is refused, puts the candidate back as it was.
+func TestConfirmTakesProposerDeferralsAndRefusesSettledOnes(t *testing.T) {
+	for _, tc := range []struct {
+		status types.CandidateStatus
+		reason string
+		ok     bool
+	}{
+		{types.Pending, "", true},
+		{types.Deferred, deferredByCap, true},
+		{types.Deferred, deferredUntested, true},
+		{types.Deferred, deferredGrouped, true},
+		{types.Deferred, deferredByBar, true},
+		{types.Deferred, deferredWeakened, true},
+		{types.Deferred, byOperator, false},
+		{types.Deferred, byAgent, false},
+		{types.Rejected, byOperator, false},
+		{types.Rejected, byAgent, false},
+	} {
+		t.Run(fmt.Sprintf("%v/%s", tc.status, tc.reason), func(t *testing.T) {
+			p, _ := checkpointFixture(t, 29)
+			c := persistenceCandidate(t, p)
+			prior := &types.CandidateReview{By: types.ReviewerRules, Action: types.ReviewUndecided}
+			p.candidates[c.CandidateID].Status, p.candidates[c.CandidateID].Reason = tc.status, tc.reason
+			p.candidates[c.CandidateID].Review = prior
+			_, err := p.Confirm(c.CandidateID, c.FromID, types.CandidateReview{})
+			if (err == nil) != tc.ok {
+				t.Fatalf("Confirm err = %v; want ok %v", err, tc.ok)
+			}
+			after := persistenceCandidate(t, p)
+			if tc.ok && after.Status != types.Confirmed || !tc.ok && (after.Status != tc.status || after.Reason != tc.reason) {
+				t.Errorf("after Confirm: %v/%q", after.Status, after.Reason)
+			}
+			if !tc.ok {
+				return
+			}
+			if err := p.Reopen(c.CandidateID); err != nil {
+				t.Fatal(err)
+			}
+			if after := persistenceCandidate(t, p); after.Status != tc.status || after.Reason != tc.reason ||
+				after.Review == nil || *after.Review != *prior {
+				t.Errorf("after Reopen: %v/%q review %+v; want %v/%q with the review it had", after.Status, after.Reason, after.Review, tc.status, tc.reason)
+			}
+		})
+	}
+}
