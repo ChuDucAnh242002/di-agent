@@ -88,10 +88,15 @@ func (e *effects) Of(subject, basis string) float64 {
 }
 
 // Shares is every workload's current share of the node's usage, as the
-// map holds it: each subject with an active usage@<subject>.
+// map holds it: each subject with an active usage@<subject>. Groups are left
+// out: a group is the sum of its members, so counted beside them a member that
+// arrives or is capped would move its group too, read as another workload.
 func Shares(m *statemap.Map, usage string) map[string]float64 {
 	out := map[string]float64{}
 	for _, s := range m.Subjects() {
+		if statemap.IsGroup(s) {
+			continue
+		}
 		if v, ok := share(m, usage, s); ok {
 			out[s] = v
 		}
