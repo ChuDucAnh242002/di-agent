@@ -427,6 +427,14 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
 	}
+	// Every way out but a reopen leaves the confirmation standing, and the proposer
+	// need not keep what the candidate was before it.
+	reopened := false
+	defer func() {
+		if a, ok := m.proposer.(interface{ Applied(string) }); ok && !reopened {
+			a.Applied(candidateID)
+		}
+	}()
 	if rv.Association || m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
 		sign := 1
 		if prop.Direction == types.Negative {
@@ -452,6 +460,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 			// relationship behind it that would be a phantom nobody can retry or
 			// reject. Put it back as it was: pending, or deferred by the proposer.
 			if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
+				reopened = true
 				if rerr := r.Reopen(candidateID); rerr != nil {
 					return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
 				}
@@ -505,7 +514,7 @@ func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateRevie
 	return m.proposer.Defer(candidateID, rv)
 }
 
-// AnnotateCandidate records a review of a pending candidate that did not act on it:
+// AnnotateCandidate records a review of an open candidate that did not act on it:
 // an undecided review, or a suggestion under an autonomy level that reserves the action.
 func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
 	return m.proposer.Annotate(candidateID, rv)

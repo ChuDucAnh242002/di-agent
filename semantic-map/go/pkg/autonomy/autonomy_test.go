@@ -88,8 +88,8 @@ func (m *fakeMap) DeferCandidate(id string, rv types.CandidateReview) error {
 }
 func (m *fakeMap) AnnotateCandidate(id string, rv types.CandidateReview) error {
 	c := m.cands[id]
-	if c.Status != types.Pending {
-		return fmt.Errorf("candidate %q is not Pending (status=%v)", id, c.Status)
+	if !c.Open() {
+		return fmt.Errorf("candidate %q is not open (status=%v, reason=%q)", id, c.Status, c.Reason)
 	}
 	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
 	rv.PersistentWindows = c.PersistentWindows
@@ -428,7 +428,9 @@ func TestTier0ReviewsAgainOnlyWhenTheEvidenceMoves(t *testing.T) {
 	}
 }
 
-// A refused annotation is not discarded: it is counted, and the decision says so.
+// A refused annotation — the operator closed the candidate between the cycle reading
+// it and the review being recorded — is not discarded: it is counted, and the decision
+// says so.
 func TestARefusedAnnotationIsCounted(t *testing.T) {
 	const id = "cpu_utilization@pod:a->cpu_utilization"
 	c := directed(id, types.CandidateKindComposition)
@@ -454,9 +456,14 @@ func TestARefusedAnnotationIsCounted(t *testing.T) {
 }
 
 // refusingMap refuses every confirmation, as the map does when the declaration it
-// stands for is refused.
+// stands for is refused, and every annotation, as the proposer does for a candidate
+// that is no longer open.
 type refusingMap struct{ *fakeMap }
 
 func (refusingMap) ConfirmCandidate(string, string, types.CandidateReview) error {
 	return errors.New("an opposite-sign relationship covers the pair")
+}
+
+func (refusingMap) AnnotateCandidate(string, types.CandidateReview) error {
+	return errors.New("the operator closed the candidate")
 }

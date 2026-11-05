@@ -551,7 +551,7 @@ changes, or `|r|` moves by more than two standard errors of Fisher's z, since th
 `Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
 `decision-model`, `reasoning-agent`, or `intervention` when the relief loop's own verified
 actions created or promoted the relationship the candidate proposed), `Model`, `Tier`, `Action` (`confirm`, `reject`,
-`defer`, or `undecided` when no tier was sure enough: the candidate stays pending and is reviewed again when its evidence moves),
+`defer`, or `undecided` when no tier was sure enough or the map refused what it settled on: the candidate keeps its status, pending or deferred by the proposer, and is reviewed again when its evidence moves),
 `Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
 record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
 `MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.

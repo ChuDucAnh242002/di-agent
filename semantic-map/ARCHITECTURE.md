@@ -2212,7 +2212,8 @@ whole whatever its `|r|` is now. A rule that reads evidence reads it as it is no
 proposer deferral but `cap` comes from a fold that failed and resets the pair's persistence
 windows, so `persistent-correlation` can still associate a cap-deferred pair and no other. A
 confirmation the map then refuses puts the candidate back as it was, deferred for the
-proposer's reason, not into the queue. At `suggest` a withdrawn candidate is left alone: a
+proposer's reason, not into the queue, and the review is recorded on it as undecided — its
+status untouched — so it is not reviewed again until its evidence moves. At `suggest` a withdrawn candidate is left alone: a
 suggestion is a note on the queue, and it is not in the queue.
 
 **An outage is not a review.** A model that cannot answer — the server still loading, the
@@ -2273,6 +2274,7 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 | `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
 | `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending; a reopened candidate is held to the pending cap |
+| `pkg/autonomy/rules_test.go` | A rule settles a composition the proposer withdrew; a withdrawn candidate whose confirmation is refused is reviewed once, not every cycle; `persistent-correlation` associates a cap-deferred candidate |
 
 All run against fake models. No test requires Ollama.
 

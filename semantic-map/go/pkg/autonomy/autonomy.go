@@ -421,8 +421,8 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 		b.Caveat("applying %s failed: %v; the candidate was left undecided instead", o.action, err)
 		o.action, applied = types.ReviewUndecided, false
 		if err := r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id)); err != nil {
-			// Only a pending candidate takes an annotation: one the proposer withdrew
-			// keeps its review as it was, and is due again next cycle.
+			// The candidate was open a moment ago; one the operator closed meanwhile
+			// takes no annotation, and its own review stands.
 			b.Caveat("recording the undecided review failed: %v", err)
 			r.failed(fmt.Errorf("recording the review of %s: %w", c.CandidateID, err))
 		}

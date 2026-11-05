@@ -133,7 +133,7 @@ type RelationshipLookup interface {
 //     undirected candidate needs from, one of its two ends, and the proposition
 //     runs from it. Anything else fails with ErrBadConfirmation and leaves the
 //     candidate as it was.
-//   - Open candidates: Confirm accepts a candidate that is open
+//   - Open candidates: Confirm and Annotate accept a candidate that is open
 //     (types.CandidateEdge.Open): pending, or deferred by the proposer itself (cap,
 //     untested, grouped, bar, weakened), whose deferrals are choices about the queue
 //     rather than judgements on the pair. A candidate an operator or the agent
@@ -141,7 +141,8 @@ type RelationshipLookup interface {
 //   - Reviews: Confirm, Reject, Defer and Annotate take the review that decided
 //     them, and the candidate carries the latest one, stamped with its evidence at
 //     the time. Annotate records a review without acting on it (an undecided review, or a
-//     suggestion the autonomy level did not let the reviewer apply).
+//     suggestion the autonomy level did not let the reviewer apply), leaving status and
+//     reason as they were.
 //   - Settled candidates: a candidate is keyed on (from, to). After Confirm, or an
 //     operator's Reject or Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
@@ -183,7 +184,8 @@ type ProposerContract interface {
 // It is the operator's input that is wrong, not the proposer.
 const ErrBadConfirmation = contractError("the confirmation does not fit the candidate")
 
-// ErrNotOpen is returned by Confirm for a candidate no review may settle any more:
+// ErrNotOpen is returned by Confirm and Annotate for a candidate no review may settle
+// any more:
 // one an operator or the agent rejected or deferred, or one already confirmed.
 const ErrNotOpen = contractError("the candidate is not open")
 

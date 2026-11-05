@@ -280,7 +280,48 @@ func TestPersistentCorrelationCreatesATracedAssociationForDirectedPairs(t *testi
 // the case study — is still a part against its whole, and the rule settles it at the
 // next cycle.
 func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T) {
-	const from, to = "memory_pressure_ratio@pod:squeeze", "memory_pressure_ratio"
+	state, m := withdrawnComposition(t)
+	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Level, cfg.Logf = autonomy.Suggest, t.Logf
+	r, err := autonomy.New(m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
+		t.Fatalf("at suggest a withdrawn candidate has no queue to suggest on; reviewed %d, errors %d", s.Reviewed, s.Errors)
+	}
+	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
+		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
+	}
+	if ds := state.Journal().Decisions(0); len(ds) != 0 {
+		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
+	}
+	cfg.Level = autonomy.Full
+	if r, err = autonomy.New(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.Cycle(context.Background())
+	h, err := m.CandidateHistory()
+	if err != nil || len(h) != 1 || h[0].Status != types.Confirmed || h[0].Review == nil ||
+		h[0].Review.By != types.ReviewerRules {
+		t.Fatalf("withdrawn composition candidate was not settled by the rule: %+v %v", h[0], err)
+	}
+	if !state.Covered(withdrawnFrom, withdrawnTo, 1) {
+		t.Fatal("the confirmation declared no relationship")
+	}
+}
+
+const withdrawnFrom, withdrawnTo = "memory_pressure_ratio@pod:squeeze", "memory_pressure_ratio"
+
+// withdrawnComposition builds a map whose one candidate is a composition pair the
+// proposer raised and then deferred as weakened.
+func withdrawnComposition(t *testing.T) (*statemap.Map, *semmap.SemanticMap) {
+	t.Helper()
+	const from, to = withdrawnFrom, withdrawnTo
 	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
 	p := minimal.NewMICorrelationProposer(state, 0.9, 6, 12, 0)
 	m := semmap.New(minimal.NewOntologyFromSpec(nil), nil, p, minimal.NewDisabledTuner())
@@ -323,37 +364,45 @@ func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T
 			t.Fatal("the candidate never weakened")
 		}
 	}
+	return state, m
+}
+
+// A withdrawn candidate whose confirmation the map refuses — an opposite-sign edge
+// already holds the pair — keeps the review that settled on it, so it is reviewed
+// once: the next cycle does not confirm it again, fail again and journal another
+// decision while its evidence stands still.
+func TestARefusedWithdrawnCandidateIsReviewedOnce(t *testing.T) {
+	state, m := withdrawnComposition(t)
+	if err := state.DeclareRelationship(statemap.Relationship{From: withdrawnFrom, To: withdrawnTo,
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := autonomy.Build(m, autonomy.Parts{Rules: []string{"composition"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Level, cfg.Logf = autonomy.Suggest, t.Logf
+	cfg.Level, cfg.Logf = autonomy.Full, t.Logf
 	r, err := autonomy.New(m, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Cycle(context.Background())
-	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
-		t.Fatalf("at suggest a withdrawn candidate has no queue to suggest on; reviewed %d, errors %d", s.Reviewed, s.Errors)
+	h, _ := m.CandidateHistory()
+	if h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review == nil ||
+		h[0].Review.Action != types.ReviewUndecided {
+		t.Fatalf("after the refusal the candidate is %v/%q review %+v; want deferred as weakened, its undecided review kept",
+			h[0].Status, h[0].Reason, h[0].Review)
 	}
-	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
-		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
-	}
-	if ds := state.Journal().Decisions(0); len(ds) != 0 {
-		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
-	}
-	cfg.Level = autonomy.Full
-	if r, err = autonomy.New(m, cfg); err != nil {
-		t.Fatal(err)
+	decisions, errs := len(state.Journal().Decisions(0)), r.Status().Errors
+	if decisions == 0 {
+		t.Fatal("the refused confirmation journaled no decision")
 	}
 	r.Cycle(context.Background())
-	h, err := m.CandidateHistory()
-	if err != nil || len(h) != 1 || h[0].Status != types.Confirmed || h[0].Review == nil ||
-		h[0].Review.By != types.ReviewerRules {
-		t.Fatalf("withdrawn composition candidate was not settled by the rule: %+v %v", h[0], err)
+	if n := len(state.Journal().Decisions(0)); n != decisions {
+		t.Errorf("the second cycle journaled %d more decisions for a candidate whose evidence did not move", n-decisions)
 	}
-	if !state.Covered(from, to, 1) {
-		t.Fatal("the confirmation declared no relationship")
+	if e := r.Status().Errors; e != errs {
+		t.Errorf("the second cycle failed %d more times; want the candidate left alone", e-errs)
 	}
 }
 

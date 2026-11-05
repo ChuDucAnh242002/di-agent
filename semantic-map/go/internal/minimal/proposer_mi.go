@@ -65,8 +65,9 @@ type MICorrelationProposer struct {
 	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
-	// beforeConfirm holds, per confirmed candidate, what it was before Confirm, so
-	// Reopen can put back a candidate whose declaration the facade could not make.
+	// beforeConfirm holds, per candidate confirmed and not yet applied, what it was
+	// before Confirm, so Reopen can put back a candidate whose declaration the facade
+	// could not make. Applied drops the entry once the confirmation stands.
 	beforeConfirm map[string]types.CandidateEdge
 
 	latestConstructs map[string]float64     // explicit construct path: id → last value
@@ -1436,6 +1437,14 @@ func (p *MICorrelationProposer) Reopen(candidateID string) error {
 	return nil
 }
 
+// Applied tells the proposer the facade applied a confirmation, so it will not be
+// reopened and what the candidate was before it need not be kept.
+func (p *MICorrelationProposer) Applied(candidateID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.beforeConfirm, candidateID)
+}
+
 // Reject marks a candidate Rejected. An operator's rejection is permanent for the
 // session: the candidate stays in the map so later observations of the pair are
 // short-circuited. An agent's (Reason "agent") is not: the pair is still tested, and
@@ -1484,9 +1493,10 @@ func (p *MICorrelationProposer) Defer(candidateID string, rv types.CandidateRevi
 	return nil
 }
 
-// Annotate records a review of a Pending candidate without acting on it: an
-// an undecided review, or what a reviewer would have done had the autonomy level let it.
-// The candidate stays Pending, in the operator's queue.
+// Annotate records a review of an open candidate without acting on it: an undecided
+// review, or what a reviewer would have done had the autonomy level let it. Status and
+// reason stay as they are — pending in the operator's queue, or deferred by the
+// proposer — and the review stops the candidate being due until its evidence moves.
 func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateReview) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1494,8 +1504,8 @@ func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateR
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	if c.Status != types.Pending {
-		return fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+	if !c.Open() {
+		return fmt.Errorf("%w: %s is %v (reason %q)", contracts.ErrNotOpen, candidateID, c.Status, c.Reason)
 	}
 	rv.Applied = false
 	c.Review = stamp(c, rv, types.ReviewUndecided)
