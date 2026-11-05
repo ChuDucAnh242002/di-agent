@@ -65,9 +65,10 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	if len(domains) == 0 {
 		return answer(Decline, "no admission domains")
 	}
-	// Headroom created by throttling is not spare capacity.
+	// Headroom created by throttling is not spare capacity, and a phase this
+	// package does not know is not calm. "calm" is relief.Calm.
 	for _, d := range domains {
-		if d.Phase == "relieving" || d.Phase == "releasing" {
+		if d.Phase != "calm" {
 			return answer(Decline, "relief active on "+d.Relieves)
 		}
 	}

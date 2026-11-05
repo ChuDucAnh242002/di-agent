@@ -473,3 +473,57 @@ func TestReliefDomains(t *testing.T) {
 		t.Fatalf("peak %v; want the action's contention at act %v", peak, loop.Actions()[0].ContentionAtAct)
 	}
 }
+
+// TestStrictOffer: a misspelt field or trailing data is refused, not read as a
+// zero demand that could be accepted.
+func TestStrictOffer(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	for _, path := range []string{"/tasks", "/offers"} {
+		for _, body := range []string{
+			`{"name":"web","demand":{"cpu":{"vaule":2},"memory":{"value":1}}}`,
+			`{"name":"web","demand":{"cpu":{"value":0.4},"memory":{"value":1}}} {}`,
+		} {
+			resp, err := http.Post(a.srv.URL+path, "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("POST %s %s: %d; want 400", path, body, resp.StatusCode)
+			}
+		}
+	}
+	if a.decisions() != 0 {
+		t.Fatalf("%d decisions recorded; want none", a.decisions())
+	}
+}
+
+// TestPeerTimeoutStopsWalk: a peer that times out may have accepted, so the walk
+// stops there rather than risk a second accept, and says the outcome is unknown.
+func TestPeerTimeoutStopsWalk(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		writeJSON(w, admission.Hop{Node: "B", DecisionID: "admit-1-1", Verdict: admission.Accept})
+	}))
+	defer slow.Close()
+	c := newAdmitNode(t, "C", 0.02)
+	a := newAdmitNode(t, "A", 0.5)
+	a.a.client = peers.NewClient(50 * time.Millisecond)
+	a.peers = []*peers.Descriptor{{ID: "1", URL: slow.URL}, {ID: "2", URL: c.srv.URL}}
+	s := submit(t, a, smallOffer("web"))
+	if len(s.Chain) != 2 || s.Chain[1].URL != slow.URL || s.Chain[1].Verdict != admission.Unreachable ||
+		!strings.HasPrefix(s.Chain[1].Reason, "outcome unknown") || s.AcceptedBy != nil {
+		t.Fatalf("chain %+v accepted_by %+v; want the walk to stop at B, outcome unknown", s.Chain, s.AcceptedBy)
+	}
+	if c.decisions() != 0 {
+		t.Fatalf("C was asked: %d decisions", c.decisions())
+	}
+}
+
+// TestReliefCalmPinned: admission compares a domain's phase to "calm" without
+// importing relief.
+func TestReliefCalmPinned(t *testing.T) {
+	if relief.Calm != "calm" {
+		t.Fatalf("relief.Calm is %q; admission.Decide compares the phase to \"calm\"", relief.Calm)
+	}
+}

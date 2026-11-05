@@ -139,7 +139,8 @@ func TestNoDomains(t *testing.T) {
 
 func TestReliefActiveDeclines(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
-	for _, phase := range []string{"relieving", "releasing"} {
+	// A phase admission does not know is not calm either.
+	for _, phase := range []string{"relieving", "releasing", "", "warming"} {
 		c := cpuDom
 		c.Phase = phase
 		d := Decide(m, offer(0.4), []Domain{memDom, c}, self, nextID())

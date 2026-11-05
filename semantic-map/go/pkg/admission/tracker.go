@@ -146,7 +146,10 @@ func (t *Tracker) Accepted(o Offer, d Decision, domains []Domain) error {
 		return ErrAlreadyPending
 	}
 	if len(t.pending) >= PendingCap {
+		// The oldest is dropped with an outcome of its own, so GET /tasks shows it.
 		t.c.Logf("admission: pending cap %d reached, dropped %s", PendingCap, t.pending[0].name)
+		t.outcomes = append(t.outcomes, t.record(t.pending[0], Confounded, "dropped at the pending cap", nil, nil, t.c.Now()))
+		t.trimOutcomes()
 		t.pending = t.pending[1:]
 	}
 	t.pending = append(t.pending, e)
@@ -236,8 +239,18 @@ func (t *Tracker) Tick(ctx context.Context) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// An entry dropped at the cap while this tick ran already has its outcome.
+	for i, e := range finished {
+		if slices.Contains(t.pending, e) {
+			t.outcomes = append(t.outcomes, done[i])
+		}
+	}
 	t.pending = slices.DeleteFunc(t.pending, func(p *entry) bool { return slices.Contains(finished, p) })
-	t.outcomes = append(t.outcomes, done...)
+	t.trimOutcomes()
+}
+
+// trimOutcomes keeps the newest outcomeCap outcomes; the caller holds mu.
+func (t *Tracker) trimOutcomes() {
 	if n := len(t.outcomes) - outcomeCap; n > 0 {
 		t.outcomes = slices.Delete(t.outcomes, 0, n)
 	}
@@ -264,11 +277,13 @@ func (t *Tracker) snapshot(e *entry, now time.Time) *snapshot {
 	return s
 }
 
-// judge checks a settled accept, in order: confounded when another workload moved
-// since accept, which says nothing about the prediction; breached when relief acted
-// in a domain in the window, since relief acts only past Enter and its action has
-// already lowered Relieves; confounded on a stale reading; then breached past Enter,
-// else held.
+// judge checks a settled accept, in order: breached when relief acted in a domain
+// in the window, since relief acts only past Enter and its action has already
+// lowered Relieves (the workloads it capped free capacity the others absorb, so a
+// move then is relief's doing and is recorded, not a confound); confounded when
+// another workload moved since accept, which says nothing about the prediction;
+// confounded when the admitted workload no longer reports, or on a stale reading;
+// then breached past Enter, else held.
 func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	lines := make([]OutcomeLine, len(e.domains))
 	for i, d := range e.domains {
@@ -285,7 +300,6 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	moved = slices.Compact(moved)
 	if len(moved) > 0 {
 		inputs["moved"] = moved
-		return t.record(e, Confounded, "another workload moved: "+strings.Join(moved, ", "), lines, inputs, now)
 	}
 
 	peaks := map[string]float64{}
@@ -299,6 +313,13 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	if len(peaks) > 0 {
 		inputs["relief_acted"], inputs["peak"] = true, peaks
 		return t.record(e, Breached, "", lines, inputs, now)
+	}
+	if len(moved) > 0 {
+		return t.record(e, Confounded, "another workload moved: "+strings.Join(moved, ", "), lines, inputs, now)
+	}
+	// Relieves read without the workload says nothing about the prediction.
+	if !t.reporting(e, e.subject) {
+		return t.record(e, Confounded, "admitted workload no longer reporting", lines, inputs, now)
 	}
 
 	var stale []string

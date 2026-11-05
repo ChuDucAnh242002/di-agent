@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"maps"
+	"net"
 	"net/http"
 	goruntime "runtime"
 	"slices"
@@ -178,15 +180,22 @@ func registerAdmissionRoutes(mux *http.ServeMux, a *admitter) {
 }
 
 // readOffer decodes and validates an offer; a malformed one is refused before
-// anything is decided or recorded.
+// anything is decided or recorded. Decoding is strict: a misspelt field would
+// otherwise read as a zero demand, which a node could accept.
 func readOffer(w http.ResponseWriter, r *http.Request) (admission.Offer, bool) {
 	var o admission.Offer
 	if err := requireJSON(r); err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
 		return o, false
 	}
-	if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&o); err != nil {
 		writeError(w, http.StatusBadRequest, "decode offer: "+err.Error())
+		return o, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "trailing data after the offer")
 		return o, false
 	}
 	if err := o.Validate(); err != nil {
@@ -198,7 +207,9 @@ func readOffer(w http.ResponseWriter, r *http.Request) (admission.Offer, bool) {
 
 // submit decides locally, then puts the offer to each peer in id order until one
 // accepts. Only the node that took the submission walks the chain, so the chain
-// starts here whatever the request carried.
+// starts here whatever the request carried. A peer that may have received the
+// offer without answering (a timeout, a cancelled request) may have accepted it,
+// so the walk stops there: asking on could make two nodes accept.
 func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 	o.Chain = nil
 	s := submission{At: time.Now(), Name: o.Name}
@@ -211,18 +222,25 @@ func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 		}
 		slices.SortFunc(list, func(x, y *peers.Descriptor) int { return strings.Compare(x.ID, y.ID) })
 		for _, p := range list {
+			if ctx.Err() != nil {
+				break
+			}
 			// Peer ids are derived from URLs, not node ids, so the URL is what can be
 			// checked here; a node already in the chain answers already_asked itself.
 			if slices.ContainsFunc(o.Chain, func(h admission.Hop) bool { return h.URL == p.URL }) {
 				continue
 			}
 			hop, err = a.client.Offer(ctx, p.URL, o)
-			if err != nil {
+			unknown := err != nil && mayHaveArrived(err)
+			switch {
+			case unknown:
+				hop = admission.Hop{Verdict: admission.Unreachable, Reason: "outcome unknown, walk stopped: " + err.Error()}
+			case err != nil:
 				hop = admission.Hop{Verdict: admission.Unreachable, Reason: err.Error()}
 			}
 			hop.URL = p.URL
 			o.Chain = append(o.Chain, hop)
-			if hop.Verdict == admission.Accept {
+			if unknown || hop.Verdict == admission.Accept {
 				break
 			}
 		}
@@ -239,6 +257,18 @@ func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 	}
 	a.mu.Unlock()
 	return s
+}
+
+// mayHaveArrived says whether a failed offer may have reached the peer: a timeout
+// or a cancel may come after the peer accepted, a failed dial (refused, no such
+// host) never does.
+func mayHaveArrived(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return false
+	}
+	var ne net.Error
+	return (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // answer is this node's hop for an offer, counted by verdict.

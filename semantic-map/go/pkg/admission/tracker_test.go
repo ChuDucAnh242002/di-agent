@@ -195,6 +195,37 @@ func TestBreachedByRelief(t *testing.T) {
 	}
 }
 
+// TestReliefActedOutranksMoved: relief capping a workload frees CPU the others
+// absorb, so they move; the accept is still breached, with the move recorded.
+func TestReliefActedOutranksMoved(t *testing.T) {
+	r := arrived(t)
+	r.actedOn, r.peak = cpuDom.Action, 0.31
+	record(t, r.m, "cpu_utilization@pod:a", "pod:a", 0.4)
+	r.tick(time.Minute)
+	o := r.result("breached")
+	if !o.Lines[0].ReliefActed {
+		t.Fatalf("lines %+v; want cpu relief_acted", o.Lines)
+	}
+	rec, _ := r.j.Decision(o.OutcomeID)
+	if moved, _ := rec.Inputs["moved"].([]string); len(moved) != 1 || moved[0] != "pod:a" {
+		t.Fatalf("moved %v; want [pod:a] recorded", rec.Inputs["moved"])
+	}
+}
+
+// TestNoLongerReportingConfounds: an admitted workload whose usage has been
+// retired by settle is not judged on readings it no longer contributes to.
+func TestNoLongerReportingConfounds(t *testing.T) {
+	r := arrived(t)
+	if err := r.m.RetireProperty("memory_utilization@pod:web", "gone", "test"); err != nil {
+		t.Fatal(err)
+	}
+	r.tick(time.Minute)
+	o := r.result("confounded")
+	if o.Reason != "admitted workload no longer reporting" {
+		t.Fatalf("reason %q", o.Reason)
+	}
+}
+
 // TestMovedBeforeArrivalConfounds: another workload that moved between accept and
 // arrival confounds the outcome; the snapshot is taken at accept.
 func TestMovedBeforeArrivalConfounds(t *testing.T) {
@@ -285,8 +316,12 @@ func TestPendingCapDropsOldest(t *testing.T) {
 	if r.tr.Pending("w0") || !r.tr.Pending("w1") || !r.tr.Pending(fmt.Sprintf("w%d", PendingCap)) {
 		t.Fatal("cap did not drop the oldest")
 	}
-	if len(r.logs) != 1 || !strings.Contains(r.logs[0], "pending cap 32 reached, dropped w0") {
-		t.Fatalf("logs %q", r.logs)
+	o := r.result("confounded")
+	if o.Name != "w0" || o.Reason != "dropped at the pending cap" {
+		t.Fatalf("outcome %+v; want w0 dropped at the pending cap", o)
+	}
+	if rec, ok := r.j.Decision(o.OutcomeID); !ok || rec.Answer["reason"] != o.Reason {
+		t.Fatalf("drop not journalled: %v %+v", ok, rec)
 	}
 }
 

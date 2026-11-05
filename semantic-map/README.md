@@ -444,7 +444,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
   "decision_id": "admit-1762344000-7",
   "chain": [
     {"node": "node_1", "url": "", "decision_id": "admit-1762343000-3", "verdict": "decline",
-     "reason": "cpu would reach 0.930 of the node, past 0.90"},
+     "reason": "cpu_contention_ratio would reach 0.1420 on the map basis, above exit 0.1000"},
     {"node": "node_2", "url": "http://node_2:8080", "decision_id": "admit-1762344000-7",
      "verdict": "accept", "reason": "every domain stays at or below its exit level"}
   ]
@@ -471,11 +471,11 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 ```
 
 - `demand` keys are `cpu` (cores) and `memory` (bytes); `source` is `declared` or `measured on <node>`; `arch` is the GOARCH a measurement was taken on; `capped: true` marks a CPU measurement taken under a relief cap.
-- `verdict`: `accept`, `decline` (including `already pending`, `already running here` for a name the runtime lists on this node, and `workload list unavailable: <err>`), `unreachable` (the peer could not be asked, answered a verdict not in this list, or answered without a decision id; `reason` is the error) or `already_asked` (the node is already in the chain; no decision).
+- `verdict`: `accept`, `decline` (including `already pending`, `already running here` for a name the runtime lists on this node, and `workload list unavailable: <err>`), `unreachable` (the peer could not be asked, answered a verdict not in this list, or answered without a decision id; `reason` is the error; a peer that timed out, or a submission whose request was cancelled, may have accepted, so the walk stops there and `reason` starts `outcome unknown, walk stopped:` — check that peer's `GET /tasks` before submitting again; a refused connection or failed lookup goes on to the next peer) or `already_asked` (the node is already in the chain; no decision).
 - A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
-- `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, or a stale reading) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors are present on `held` and on `breached` from a reading only; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored.
+- `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors are present on `held` and on `breached` from a reading only; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
 - `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
-- `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value) with nothing recorded; `415` without a JSON content type.
+- `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value, a field the offer does not have, or data after it) with nothing recorded; decoding is strict because a misspelt `value` would read as a zero demand; `415` without a JSON content type.
 
 ### `POST /ingest-sample`
 

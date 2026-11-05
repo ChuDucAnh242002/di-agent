@@ -36,10 +36,12 @@ package agentmain
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
 // /tasks                            POST    admission.Offer                200 submission (accepted_by null: nobody accepted)
-//                                                                          400 (malformed offer)
+//                                                                          400 (malformed offer, unknown field, trailing data)
+//                                                                          415 (not JSON)
 // /tasks                            GET     —                              200 {submissions, answered, pending, outcomes}
 // /offers                           POST    admission.Offer (with chain)   200 admission.Hop
-//                                                                          400 (malformed offer)
+//                                                                          400 (malformed offer, unknown field, trailing data)
+//                                                                          415 (not JSON)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
 //                                                                          422 {error,response} (failed a gate)
 //                                                                          501 (provider disabled)

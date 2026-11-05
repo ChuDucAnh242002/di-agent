@@ -1668,7 +1668,9 @@ in bytes) a demand with its source: `declared`, or `measured on <node>` with the
 architecture it was measured on and whether it ran under a relief cap. Demand is never
 verified, because a receiver cannot check a measurement taken elsewhere; it is
 recorded with its source. A malformed offer (no name, an unknown resource, a negative
-or non-finite value) is refused before anything is decided or recorded.
+or non-finite value) is refused before anything is decided or recorded, and so is one
+with a field the offer does not have or data after it: decoding is strict, because a
+misspelt `value` would otherwise read as a zero demand a node could accept.
 
 **The domains are relief's levers.** One per relief loop: the actuator descriptor's
 `Relieves`, `Usage` and `Capacity`, the lever's `Exit`, `Enter` and `Settle`, and the
@@ -1680,8 +1682,9 @@ no domains and every offer declines: a node never admits blind.
 
 1. Architecture: the offer lists architectures and this node's is not one of them.
 2. No domains.
-3. Relief active (`relieving` or `releasing`) on any domain: headroom made by
-   throttling is not spare capacity.
+3. Relief active on any domain, which is any phase but `calm` (`relieving`,
+   `releasing`, or one admission does not know): headroom made by throttling is not
+   spare capacity.
 4. Demand: a domain's resource has no demand in the offer; a CPU demand measured on
    another architecture (nothing relates one architecture's CPU to another's; memory
    carries over).
@@ -1758,7 +1761,11 @@ stopping at the first accept. A peer whose node id is already in the chain answe
 reached, times out, answers non-2xx, answers with a verdict that is not `accept`,
 `decline`, `unreachable` or `already_asked`, or answers accept or decline without a
 decision id is recorded as `unreachable`: an answer that cannot be read or traced is
-not an accept. Each hop carries the
+not an accept. A failure after the offer may have reached the peer (a timeout, or the
+submission's own request cancelled) is different: the peer may have accepted, so the
+walk stops there, the hop is `unreachable` with a reason starting `outcome unknown`,
+and nobody is reported as accepting. Asking on could make two nodes accept one
+workload. A failed dial (refused, no such host) never reached the peer and goes on. Each hop carries the
 URL it was asked at and its decision id, so `<url>/state/decisions/<id>` resolves on
 the node that decided; traceability is per node, and the submitter keeps the chain,
 not the peers' decisions. Ids are `admit-<agent start epoch>-<seq>` for accepts,
@@ -1766,7 +1773,8 @@ declines and outcomes alike.
 
 **The outcome check.** An accept is a prediction, and the accepting node checks it
 (`admission.Tracker`, ticked on relief's interval). It keeps at most 32 pending
-accepts, dropping the oldest. At accept it takes every subject's share per domain, so
+accepts; a 33rd drops the oldest, which is journalled as `confounded` (`dropped at
+the pending cap`) so it is not lost from the readout. At accept it takes every subject's share per domain, so
 other workloads are checked from accept to judgement. The workload has arrived when
 the runtime lists one with the offered name and its `Usage@<subject>` is in the map
 for every domain; arrival only starts the `Settle` clock, and the `Relieves` and node
@@ -1775,17 +1783,26 @@ lever's `Settle` it reads `Relieves` again and journals an outcome linked to the
 accept, the first that applies:
 
 - `not_arrived`: no workload by that name within 5 minutes;
-- `confounded`: another workload moved, arrived or left since accept (`relief.Moved`,
-  the newcomer excepted); predictions are recorded, not scored;
 - `breached`, relief acted: relief acted in a domain during the window (since accept).
   Relief acts only once `Relieves` has been above `Enter` for its `EnterFor`, so this
   is the canonical false accept; the line records `relief_acted` and, as `peak`, the
   highest contention relief acted at. Relief has already lowered `Relieves`, so the
-  outcome is not scored;
+  outcome is not scored. It comes before the moved check because relief capping a
+  workload frees capacity the others absorb: a move then is relief's doing, recorded
+  as `moved`, and scoring it `confounded` would hide the breach;
+- `confounded`: another workload moved, arrived or left since accept (`relief.Moved`,
+  the newcomer excepted); predictions are recorded, not scored;
+- `confounded`, the admitted workload no longer reporting: its `Usage@<subject>` is
+  gone or retired at judgement, so `Relieves` no longer carries it;
 - `confounded`, stale reading: a domain's `Relieves` is stale at judgement;
 - `breached`: some domain's `Relieves` is above `Enter` (strictly, as relief's
   trigger is);
 - `held`: otherwise.
+
+A relief-acted outcome is scored `breached` against the accept baseline, whatever
+`Relieves` reads at settle; this deviates deliberately from the admission design
+spec's §5, which judged at settle only, because relief's own action hides the breach
+it answered.
 
 A scored outcome (`held`, or `breached` on a reading) records, per domain, the
 observed rise of `Relieves` over the accept-time pressure, the baseline both
