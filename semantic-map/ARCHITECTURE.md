@@ -1696,7 +1696,8 @@ no domains and every offer declines: a node never admits blind.
 
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent
-offers for one name cannot both be accepted.
+offers for one name cannot both be answered accept; the loser's accept decision stays
+in the journal, superseded by a decline.
 
 **The gate.** `Admit` checks, in order, the first to fail answering: the workload,
 whether there is anything to price, the facts (`cpu_cores`, `memory_total`), the
@@ -1773,7 +1774,9 @@ A scored outcome records, per domain, the observed rise of `Relieves` and each b
 predicted rise and error, the paired comparison below rests on. Nothing follows from
 an outcome: no trust update, no retry, no eviction. An accept reserves nothing (two
 offers before the first workload arrives are judged against the same usage), and only
-false accepts are observable, since a declined workload never runs.
+false accepts are observable, since a declined workload never runs, so `GET /tasks`
+reports the node's answers counted by verdict beside the outcomes, and the accepts
+still pending.
 
 **What would show the map adds nothing.** Read off a demo's outcome log; any of these
 is reported as found:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"net/http"
 	goruntime "runtime"
 	"slices"
@@ -34,8 +35,11 @@ type admitter struct {
 	peers   func() ([]*peers.Descriptor, error)
 	client  *peers.Client
 
-	mu     sync.Mutex   // guards recent
+	mu     sync.Mutex   // guards recent and answered
 	recent []submission // newest first, at most submissionCap
+	// answered counts this node's own verdicts, local and for peers: only false
+	// accepts are observable, so the decline rate is reported beside the outcomes.
+	answered map[string]int
 }
 
 // submission is one POST /tasks and where it ended. Each hop's URL and decision
@@ -156,8 +160,13 @@ func registerAdmissionRoutes(mux *http.ServeMux, a *admitter) {
 	mux.HandleFunc("GET /tasks", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		subs := slices.Clone(a.recent)
+		answered := maps.Clone(a.answered)
 		a.mu.Unlock()
-		writeJSON(w, map[string]any{"submissions": subs, "outcomes": a.tracker.Outcomes()})
+		if answered == nil {
+			answered = map[string]int{}
+		}
+		writeJSON(w, map[string]any{"submissions": subs, "answered": answered,
+			"pending": a.tracker.PendingList(), "outcomes": a.tracker.Outcomes()})
 	})
 }
 
@@ -225,10 +234,22 @@ func (a *admitter) submit(ctx context.Context, o admission.Offer) submission {
 	return s
 }
 
-// answer is this node's hop for an offer, the same for a local submission and a
-// peer's: a node already in the chain is not asked again, and a name awaiting its
-// outcome is not accepted twice.
+// answer is this node's hop for an offer, counted by verdict.
 func (a *admitter) answer(o admission.Offer) admission.Hop {
+	h := a.decide(o)
+	a.mu.Lock()
+	if a.answered == nil {
+		a.answered = map[string]int{}
+	}
+	a.answered[h.Verdict]++
+	a.mu.Unlock()
+	return h
+}
+
+// decide is the hop, the same for a local submission and a peer's: a node already
+// in the chain is not asked again, and a name awaiting its outcome is not accepted
+// twice.
+func (a *admitter) decide(o admission.Offer) admission.Hop {
 	if o.Asked(a.self.NodeID, "") {
 		return admission.Hop{Node: a.self.NodeID, Verdict: admission.AlreadyAsked, Reason: "already in the chain"}
 	}

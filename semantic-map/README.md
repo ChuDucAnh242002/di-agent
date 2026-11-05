@@ -453,10 +453,14 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 // POST /offers response: one hop
 {"node": "node_2", "url": "", "decision_id": "admit-1762344000-7", "verdict": "accept", "reason": "…"}
 
-// GET /tasks: this node's recent submissions (newest first, at most 200) and the
-// outcomes of the accepts it made (newest first)
+// GET /tasks: this node's recent submissions (newest first, at most 200), its own
+// answers counted by verdict (local and for peers), the accepts awaiting an outcome
+// (oldest first), and the outcomes of the accepts it made (newest first)
 {
   "submissions": [ /* as POST /tasks returned them */ ],
+  "answered": {"accept": 3, "decline": 9, "already_asked": 1},
+  "pending": [{"name": "api", "accept_id": "admit-1762344000-11", "accepted_at": "…",
+               "arrived": true, "subject": "pod:9c1e…"}],
   "outcomes": [
     {"name": "web", "accept_id": "admit-1762344000-7", "outcome_id": "admit-1762344000-9",
      "subject": "pod:3f2a…", "result": "held", "at": "…",
@@ -470,6 +474,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 - `verdict`: `accept`, `decline`, `unreachable` (the peer could not be asked, or answered without a decision id; `reason` is the error) or `already_asked` (the node is already in the chain; no decision).
 - A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
 - `result`: `held`, `breached`, `confounded` or `not_arrived`; rises and errors are present on `held` and `breached` only.
+- `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
 - `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value) with nothing recorded; `415` without a JSON content type.
 
 ### `POST /ingest-sample`
@@ -707,7 +712,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/peers/{id}/trust`                 | `{value}`                                                | Step 4.9 |
 | POST | `/tasks`                            | `Offer` — submit a workload; this node decides, then offers it to each peer in id order until one accepts: `{at, name, accepted_by, decision_id, chain}`, `accepted_by` null when nobody did. See [admission](#post-tasks--post-offers--get-tasks) | Admission |
 | POST | `/offers`                           | `Offer` with `chain` — a peer's offer, answered as one hop `{node, url, decision_id, verdict, reason}`; never forwarded | Admission |
-| GET  | `/tasks`                            | — `{submissions, outcomes}`: recent submissions with their chains, and the outcomes of this node's accepts | Admission |
+| GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
 | GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
@@ -1474,7 +1479,7 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 | `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
 | `POST` | `/tasks` | `Offer` | `200 {at,name,accepted_by,decision_id,chain}` |
 | `POST` | `/offers` | `Offer` with `chain` | `200 {node,url,decision_id,verdict,reason}` |
-| `GET` | `/tasks` | — | `200 {submissions,outcomes}` |
+| `GET` | `/tasks` | — | `200 {submissions,answered,pending,outcomes}` |
 
 `/offers` is the peer side: the node answers from its own state map and journals the answer as a decision; `/tasks` walks the peers and keeps the chain. Neither starts any work. See [admission](#post-tasks--post-offers--get-tasks) for the bodies.
 

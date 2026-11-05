@@ -160,22 +160,44 @@ func TestSubmitForwardsUntilAccept(t *testing.T) {
 		t.Fatal("the accept should be pending on B only")
 	}
 
-	// GET /tasks lists the submission with its chain.
-	resp, err := http.Get(a.srv.URL + "/tasks")
+	// GET /tasks lists the submission with its chain on A, and on B the accept it
+	// made for a peer, pending before any tick has judged it.
+	list := listTasks(t, a)
+	if len(list.Submissions) != 1 || list.Submissions[0].DecisionID != s.DecisionID || len(list.Submissions[0].Chain) != 2 {
+		t.Fatalf("GET /tasks %+v", list)
+	}
+	if list.Answered["decline"] != 1 || list.Answered["accept"] != 0 || len(list.Pending) != 0 {
+		t.Fatalf("A answered %v pending %v; want one decline, nothing pending", list.Answered, list.Pending)
+	}
+	lb := listTasks(t, b)
+	if len(lb.Submissions) != 0 || lb.Answered["accept"] != 1 {
+		t.Fatalf("B submissions %d answered %v; want none and one accept", len(lb.Submissions), lb.Answered)
+	}
+	if len(lb.Pending) != 1 || lb.Pending[0].Name != "web" || lb.Pending[0].AcceptID != s.DecisionID ||
+		lb.Pending[0].Arrived || !lb.Pending[0].AcceptedAt.Equal(admitT0) || len(lb.Outcomes) != 0 {
+		t.Fatalf("B pending %+v outcomes %+v; want web awaiting arrival, no outcome", lb.Pending, lb.Outcomes)
+	}
+}
+
+type taskList struct {
+	Submissions []submission              `json:"submissions"`
+	Answered    map[string]int            `json:"answered"`
+	Pending     []admission.PendingAccept `json:"pending"`
+	Outcomes    []admission.Outcome       `json:"outcomes"`
+}
+
+func listTasks(t *testing.T, ta *testAgent) taskList {
+	t.Helper()
+	resp, err := http.Get(ta.srv.URL + "/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var list struct {
-		Submissions []submission        `json:"submissions"`
-		Outcomes    []admission.Outcome `json:"outcomes"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	var l taskList
+	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Submissions) != 1 || list.Submissions[0].DecisionID != s.DecisionID || len(list.Submissions[0].Chain) != 2 {
-		t.Fatalf("GET /tasks %+v", list)
-	}
+	return l
 }
 
 func TestAllDecline(t *testing.T) {
@@ -191,6 +213,11 @@ func TestAllDecline(t *testing.T) {
 	for _, h := range s.Chain {
 		if h.DecisionID == "" || h.Reason == "" {
 			t.Fatalf("hop without decision or reason: %+v", h)
+		}
+	}
+	for _, n := range []*testAgent{a, b, c} {
+		if got := listTasks(t, n).Answered; len(got) != 1 || got["decline"] != 1 {
+			t.Fatalf("%s answered %v; want one decline", n.id, got)
 		}
 	}
 }
@@ -239,6 +266,9 @@ func TestRegistryContainsSelf(t *testing.T) {
 	s := submit(t, a, smallOffer("web"))
 	if got := verdicts(s.Chain); got != "A:decline A:already_asked" {
 		t.Fatalf("chain %s; want A:decline A:already_asked", got)
+	}
+	if ans := listTasks(t, a).Answered; ans["decline"] != 1 || ans["already_asked"] != 1 {
+		t.Fatalf("answered %v; want one decline and one already_asked", ans)
 	}
 	if a.decisions() != 2 { // the local decline and its gate
 		t.Fatalf("%d decisions; want the local decline and its gate only", a.decisions())
@@ -345,6 +375,10 @@ func TestConcurrentSubmitSameName(t *testing.T) {
 	}
 	if accepts != 1 || pending != 1 {
 		t.Fatalf("chains %+v; want one accept and one already pending", got)
+	}
+	// A race-lost accept is answered, and counted, as a decline.
+	if ans := listTasks(t, a).Answered; ans["accept"] != 1 || ans["decline"] != 1 {
+		t.Fatalf("answered %v; want one accept and one decline", ans)
 	}
 }
 

@@ -144,6 +144,27 @@ func (t *Tracker) Pending(name string) bool {
 	return slices.ContainsFunc(t.pending, func(p *entry) bool { return p.name == name })
 }
 
+// PendingAccept is an accept awaiting its outcome.
+type PendingAccept struct {
+	Name       string    `json:"name"`
+	AcceptID   string    `json:"accept_id"`
+	AcceptedAt time.Time `json:"accepted_at"`
+	// Arrived says the workload has appeared and been snapshotted; its settle runs.
+	Arrived bool   `json:"arrived"`
+	Subject string `json:"subject,omitempty"`
+}
+
+// PendingList lists the accepts awaiting an outcome, oldest first.
+func (t *Tracker) PendingList() []PendingAccept {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]PendingAccept, len(t.pending))
+	for i, e := range t.pending {
+		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
+	}
+	return out
+}
+
 // Outcomes lists recent outcomes, newest first.
 func (t *Tracker) Outcomes() []Outcome {
 	t.mu.Lock()
@@ -177,8 +198,11 @@ func (t *Tracker) Tick(ctx context.Context) {
 	for _, e := range work {
 		if e.snap == nil && err == nil {
 			if s, ok := names[e.name]; ok && t.reporting(e, s) {
-				e.subject = s
-				e.snap = t.snapshot(e, now)
+				snap := t.snapshot(e, now)
+				// Under mu, so PendingList can read arrival while Tick runs.
+				t.mu.Lock()
+				e.subject, e.snap = s, snap
+				t.mu.Unlock()
 			} else if now.Sub(e.at) > ArrivalWindow {
 				done = append(done, t.record(e, NotArrived, nil, nil, now))
 				finished = append(finished, e)
