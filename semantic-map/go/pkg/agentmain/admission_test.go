@@ -68,7 +68,8 @@ func newAdmitNode(t *testing.T, id string, p float64) *testAgent {
 	ta.a = &admitter{
 		m: m, self: admission.Self{NodeID: id, Arch: "amd64"}, ids: ids,
 		tracker: admission.NewTracker(admission.TrackerConfig{Map: m, IDs: ids, Now: func() time.Time { return admitT0 },
-			Acted: func(string, time.Time) bool { return false }}),
+			Shares: func(usage string) map[string]float64 { return relief.Shares(m, usage) },
+			Acted:  func(string, time.Time) (float64, bool) { return 0, false }}),
 		domains: func() []admission.Domain { return testDomains },
 		peers:   func() ([]*peers.Descriptor, error) { return ta.peers, nil },
 		client:  peers.NewClient(5 * time.Second),
@@ -415,7 +416,8 @@ func TestReliefDomains(t *testing.T) {
 		t.Fatalf("unexpected cpu.limit domain %+v", want)
 	}
 
-	acted := reliefActed([]*relief.Loop{loop})
+	actedFn := reliefActed([]*relief.Loop{loop})
+	acted := func(action string, since time.Time) bool { _, ok := actedFn(action, since); return ok }
 	if acted(spec.LeverCPULimit, time.Time{}) {
 		t.Fatal("acted before any action")
 	}
@@ -430,5 +432,8 @@ func TestReliefDomains(t *testing.T) {
 	at := loop.Actions()[0].ActedAt
 	if !acted(spec.LeverCPULimit, at.Add(-time.Second)) || acted(spec.LeverCPULimit, at) || acted(spec.LeverMemoryHigh, at.Add(-time.Second)) {
 		t.Fatal("acted should be true only for cpu.limit, since before its action")
+	}
+	if peak, _ := actedFn(spec.LeverCPULimit, at.Add(-time.Second)); peak != loop.Actions()[0].ContentionAtAct {
+		t.Fatalf("peak %v; want the action's contention at act %v", peak, loop.Actions()[0].ContentionAtAct)
 	}
 }

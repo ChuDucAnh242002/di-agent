@@ -126,19 +126,23 @@ func reliefDomains(loops []*relief.Loop) func() []admission.Domain {
 	}
 }
 
-// reliefActed says whether the loop for action changed anything after since: an
-// outcome window relief acted in cannot be credited to the admitted workload.
-func reliefActed(loops []*relief.Loop) func(string, time.Time) bool {
-	return func(action string, since time.Time) bool {
+// reliefActed says whether the loop for action changed anything after since, and
+// the highest contention it acted at: relief acts only past Enter, so an outcome
+// window relief acted in is a breach whose reading relief has already lowered.
+func reliefActed(loops []*relief.Loop) func(string, time.Time) (float64, bool) {
+	return func(action string, since time.Time) (float64, bool) {
+		peak, acted := 0.0, false
 		for _, l := range loops {
 			if l.Descriptor().Action != action {
 				continue
 			}
-			if slices.ContainsFunc(l.Actions(), func(a relief.Action) bool { return a.ActedAt.After(since) }) {
-				return true
+			for _, a := range l.Actions() {
+				if a.ActedAt.After(since) && (!acted || a.ContentionAtAct > peak) {
+					peak, acted = a.ContentionAtAct, true
+				}
 			}
 		}
-		return false
+		return peak, acted
 	}
 }
 

@@ -16,15 +16,17 @@ import (
 // rig is a tracker over a node map with a fake clock, a fake workload list and fakes
 // of relief's Shares and Moved that read the map directly.
 type rig struct {
-	t     *testing.T
-	m     *statemap.Map
-	j     *statemap.Journal
-	tr    *Tracker
-	now   time.Time
-	wls   map[string]string
-	acted bool
-	logs  []string
-	mu    sync.Mutex
+	t   *testing.T
+	m   *statemap.Map
+	j   *statemap.Journal
+	tr  *Tracker
+	now time.Time
+	wls map[string]string
+	// actedOn is the action relief acted on in the window, at contention peak.
+	actedOn string
+	peak    float64
+	logs    []string
+	mu      sync.Mutex
 }
 
 func newRig(t *testing.T) *rig {
@@ -57,9 +59,11 @@ func newRig(t *testing.T) *rig {
 			}
 			return out
 		},
-		Acted: func(string, time.Time) bool { return r.acted },
-		IDs:   NewIDs(t0),
-		Now:   func() time.Time { return r.now },
+		Acted: func(action string, _ time.Time) (float64, bool) {
+			return r.peak, action != "" && action == r.actedOn
+		},
+		IDs: NewIDs(t0),
+		Now: func() time.Time { return r.now },
 		Logf: func(f string, a ...any) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -166,11 +170,81 @@ func TestConfoundedByOtherWorkload(t *testing.T) {
 	}
 }
 
-func TestConfoundedByRelief(t *testing.T) {
+// TestBreachedByRelief: relief acts only past Enter, so an accept relief acted on
+// is the canonical false accept: breached, with relief's reading as the peak, and
+// not scored, since relief has already lowered the reading.
+func TestBreachedByRelief(t *testing.T) {
 	r := arrived(t)
-	r.acted = true
+	r.actedOn, r.peak = cpuDom.Action, 0.31
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
 	r.tick(time.Minute)
-	r.result("confounded")
+	o := r.result("breached")
+	c, mem := o.Lines[0], o.Lines[1]
+	if !c.Breached || !c.ReliefActed || !ptrNear(c.Peak, 0.31) || mem.Breached || mem.ReliefActed {
+		t.Fatalf("lines %+v; want cpu breached by relief only", o.Lines)
+	}
+	for _, l := range o.Lines {
+		if l.ObservedRise != 0 || l.MapRise != nil || l.MapErr != nil || l.UsageRise != nil || l.UsageErr != nil {
+			t.Fatalf("relief-acted outcome scored: %+v", l)
+		}
+	}
+	rec, _ := r.j.Decision(o.OutcomeID)
+	peaks, _ := rec.Inputs["peak"].(map[string]float64)
+	if rec.Inputs["relief_acted"] != true || !near(peaks[cpuDom.Relieves], 0.31) {
+		t.Fatalf("inputs %v", rec.Inputs)
+	}
+}
+
+// TestMovedBeforeArrivalConfounds: another workload that moved between accept and
+// arrival confounds the outcome; the snapshot is taken at accept.
+func TestMovedBeforeArrivalConfounds(t *testing.T) {
+	r := newRig(t)
+	r.accept("web")
+	record(t, r.m, "cpu_utilization@pod:a", "pod:a", 0.4)
+	r.arrive("web")
+	r.tick(10 * time.Second)
+	r.tick(time.Minute)
+	o := r.result("confounded")
+	if !strings.Contains(o.Reason, "pod:a") {
+		t.Fatalf("reason %q; want pod:a named", o.Reason)
+	}
+}
+
+// TestRiseFromAcceptBaseline: the rise is measured from the accept's pressure, the
+// predictions' baseline, not from arrival; the arrival reading is recorded.
+func TestRiseFromAcceptBaseline(t *testing.T) {
+	r := newRig(t)
+	r.accept("web")
+	record(t, r.m, "cpu_contention_ratio", "", 0.04)
+	r.arrive("web")
+	r.tick(10 * time.Second)
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	o := r.result("held")
+	if c := o.Lines[0]; !near(c.ObservedRise, 0.05) || !ptrNear(c.MapErr, 0.025) {
+		t.Fatalf("cpu line %+v; want rise 0.05 from the accept's 0.02", c)
+	}
+	rec, _ := r.j.Decision(o.OutcomeID)
+	if at, _ := rec.Inputs["relieves_at_arrival"].([]float64); len(at) != 2 || !near(at[0], 0.04) {
+		t.Fatalf("relieves_at_arrival %v", rec.Inputs["relieves_at_arrival"])
+	}
+}
+
+// TestStaleReadingConfounds: a Relieves gone stale by judgement is not scored.
+func TestStaleReadingConfounds(t *testing.T) {
+	r := arrived(t)
+	r.m.SetClock(func() time.Time { return t0.Add(2 * r.m.StaleAfter()) })
+	r.m.Sweep()
+	r.tick(time.Minute)
+	o := r.result("confounded")
+	if !strings.HasPrefix(o.Reason, "stale reading") {
+		t.Fatalf("reason %q", o.Reason)
+	}
+	for _, l := range o.Lines {
+		if l.MapRise != nil || l.UsageErr != nil {
+			t.Fatalf("stale outcome scored: %+v", l)
+		}
+	}
 }
 
 func TestNotArrived(t *testing.T) {

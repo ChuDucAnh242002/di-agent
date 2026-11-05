@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,18 +33,23 @@ var ErrAlreadyPending = errors.New("already pending")
 
 // Outcome is what became of one accept.
 type Outcome struct {
-	Name      string        `json:"name"`
-	AcceptID  string        `json:"accept_id"` // the accept's decision, which holds both predictions
-	OutcomeID string        `json:"outcome_id"`
-	Subject   string        `json:"subject"`
-	Result    string        `json:"result"`
-	Lines     []OutcomeLine `json:"lines"`
-	At        time.Time     `json:"at"`
+	Name      string `json:"name"`
+	AcceptID  string `json:"accept_id"` // the accept's decision, which holds both predictions
+	OutcomeID string `json:"outcome_id"`
+	Subject   string `json:"subject"`
+	Result    string `json:"result"`
+	// Reason says why a confounded outcome was not scored.
+	Reason string        `json:"reason,omitempty"`
+	Lines  []OutcomeLine `json:"lines"`
+	At     time.Time     `json:"at"`
 }
 
-// OutcomeLine is one domain's check: the observed rise of Relieves since the
-// arrival snapshot against each basis's predicted rise. Rises and errors are set
-// only on scored outcomes (held, breached); an error is predicted minus observed.
+// OutcomeLine is one domain's check: the observed rise of Relieves over the
+// accept-time pressure the predictions were made from, against each basis's
+// predicted rise. Rises and errors are set only on scored outcomes (held, and
+// breached on a reading); an error is predicted minus observed. A domain relief
+// acted on in the window is breached with ReliefActed and Peak, relief's reading
+// when it acted, and the outcome is not scored: relief has already moved Relieves.
 type OutcomeLine struct {
 	Domain       string   `json:"domain"`
 	ObservedRise float64  `json:"observed_rise"`
@@ -52,6 +58,8 @@ type OutcomeLine struct {
 	MapErr       *float64 `json:"map_err,omitempty"`
 	UsageErr     *float64 `json:"usage_err,omitempty"`
 	Breached     bool     `json:"breached"`
+	ReliefActed  bool     `json:"relief_acted,omitempty"`
+	Peak         *float64 `json:"peak,omitempty"`
 }
 
 // TrackerConfig wires a tracker to the agent. Workloads, Shares and Moved are
@@ -64,8 +72,9 @@ type TrackerConfig struct {
 	// Shares is relief.Shares on Map; Moved is relief.Moved on Map at the lever's step.
 	Shares func(usage string) map[string]float64
 	Moved  func(usage string, at map[string]float64, except string) []string
-	// Acted says whether relief acted in the action's domain since the time given.
-	Acted func(action string, since time.Time) bool
+	// Acted says whether relief acted in the action's domain since the time given,
+	// and the highest contention it acted at.
+	Acted func(action string, since time.Time) (peak float64, acted bool)
 	IDs   *IDs
 	Now   func() time.Time
 	Logf  func(string, ...any)
@@ -89,18 +98,21 @@ type entry struct {
 	at             time.Time
 	domains        []Domain
 	lines          []Line // the accept's, aligned with domains
+	// shares are each domain's subject shares at accept: other workloads are
+	// checked against them from accept to judgement.
+	shares []map[string]float64
 
 	subject string
 	snap    *snapshot
 }
 
-// snapshot is the node at arrival, per domain: the baseline the outcome is
-// measured from and the shares other workloads are checked against.
+// snapshot is the node at arrival, per domain, recorded beside the outcome. The
+// rise is measured from the accept's pressure, which the predictions were made
+// from; arrival only starts the settle clock.
 type snapshot struct {
 	at       time.Time
 	relieves []float64
 	usage    []float64
-	shares   []map[string]float64
 }
 
 func NewTracker(c TrackerConfig) *Tracker {
@@ -120,7 +132,11 @@ func (t *Tracker) Accepted(o Offer, d Decision, domains []Domain) error {
 			}
 		}
 	}
-	e := &entry{name: o.Name, acceptID: d.ID, at: t.c.Now(), domains: slices.Clone(domains), lines: lines}
+	shares := make([]map[string]float64, len(domains))
+	for i, dom := range domains {
+		shares[i] = t.c.Shares(dom.Usage)
+	}
+	e := &entry{name: o.Name, acceptID: d.ID, at: t.c.Now(), domains: slices.Clone(domains), lines: lines, shares: shares}
 
 	// One critical section for the check and the insert, so two offers for one
 	// name cannot both be registered.
@@ -204,7 +220,7 @@ func (t *Tracker) Tick(ctx context.Context) {
 				e.subject, e.snap = s, snap
 				t.mu.Unlock()
 			} else if now.Sub(e.at) > ArrivalWindow {
-				done = append(done, t.record(e, NotArrived, nil, nil, now))
+				done = append(done, t.record(e, NotArrived, "", nil, nil, now))
 				finished = append(finished, e)
 			}
 			continue
@@ -244,38 +260,66 @@ func (t *Tracker) snapshot(e *entry, now time.Time) *snapshot {
 	for _, d := range e.domains {
 		s.relieves = append(s.relieves, value(t.c.Map, d.Relieves))
 		s.usage = append(s.usage, value(t.c.Map, d.Usage))
-		s.shares = append(s.shares, t.c.Shares(d.Usage))
 	}
 	return s
 }
 
-// judge checks a settled accept: confounded first, since a breach another
-// workload or relief caused says nothing about the prediction.
+// judge checks a settled accept, in order: confounded when another workload moved
+// since accept, which says nothing about the prediction; breached when relief acted
+// in a domain in the window, since relief acts only past Enter and its action has
+// already lowered Relieves; confounded on a stale reading; then breached past Enter,
+// else held.
 func (t *Tracker) judge(e *entry, now time.Time) Outcome {
-	var moved []string
-	acted := false
-	for i, d := range e.domains {
-		moved = append(moved, t.c.Moved(d.Usage, e.snap.shares[i], e.subject)...)
-		acted = acted || t.c.Acted(d.Action, e.snap.at)
-	}
-	slices.Sort(moved)
-	moved = slices.Compact(moved)
-
 	lines := make([]OutcomeLine, len(e.domains))
 	for i, d := range e.domains {
 		lines[i].Domain = d.Relieves
 	}
-	if len(moved) > 0 || acted {
-		return t.record(e, Confounded, lines, map[string]any{"moved": moved, "relief_acted": acted}, now)
+	inputs := map[string]any{"relieves_at_arrival": slices.Clone(e.snap.relieves),
+		"usage_at_arrival": slices.Clone(e.snap.usage)}
+
+	var moved []string
+	for i, d := range e.domains {
+		moved = append(moved, t.c.Moved(d.Usage, e.shares[i], e.subject)...)
+	}
+	slices.Sort(moved)
+	moved = slices.Compact(moved)
+	if len(moved) > 0 {
+		inputs["moved"] = moved
+		return t.record(e, Confounded, "another workload moved: "+strings.Join(moved, ", "), lines, inputs, now)
+	}
+
+	peaks := map[string]float64{}
+	for i, d := range e.domains {
+		if peak, acted := t.c.Acted(d.Action, e.at); acted {
+			pk := peak
+			lines[i].Breached, lines[i].ReliefActed, lines[i].Peak = true, true, &pk
+			peaks[d.Relieves] = peak
+		}
+	}
+	if len(peaks) > 0 {
+		inputs["relief_acted"], inputs["peak"] = true, peaks
+		return t.record(e, Breached, "", lines, inputs, now)
+	}
+
+	var stale []string
+	for _, d := range e.domains {
+		if p, ok := t.c.Map.Property(d.Relieves); ok && p.Status == statemap.Stale {
+			stale = append(stale, d.Relieves)
+		}
+	}
+	if len(stale) > 0 {
+		inputs["stale"] = stale
+		return t.record(e, Confounded, "stale reading: "+strings.Join(stale, ", "), lines, inputs, now)
 	}
 
 	result := Held
 	settled := make([]float64, len(e.domains))
+	baseline := make([]float64, len(e.domains))
 	for i, d := range e.domains {
 		l, a := &lines[i], e.lines[i]
 		v := value(t.c.Map, d.Relieves)
-		settled[i] = v
-		l.ObservedRise = v - e.snap.relieves[i]
+		settled[i], baseline[i] = v, a.Pressure
+		l.ObservedRise = v - a.Pressure
 		// Relief's trigger is strictly above Enter.
 		if v > d.Enter {
 			l.Breached, result = true, Breached
@@ -283,14 +327,14 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 		l.MapRise, l.MapErr = rise(a.MapPred, a.Pressure, l.ObservedRise)
 		l.UsageRise, l.UsageErr = rise(a.UsagePred, a.Pressure, l.ObservedRise)
 	}
-	return t.record(e, result, lines, map[string]any{"relieves_at_arrival": slices.Clone(e.snap.relieves),
-		"usage_at_arrival": slices.Clone(e.snap.usage), "relieves_now": settled}, now)
+	inputs["relieves_at_accept"], inputs["relieves_now"] = baseline, settled
+	return t.record(e, result, "", lines, inputs, now)
 }
 
 // record commits the outcome decision, linked to the accept.
-func (t *Tracker) record(e *entry, result string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
+func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
 	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.IDs.Next(), Subject: e.subject,
-		Result: result, Lines: lines, At: now}
+		Result: result, Reason: reason, Lines: lines, At: now}
 	b := t.c.Map.Decide(o.OutcomeID, "outcome of "+e.name+"?")
 	b.Input("accept", e.acceptID)
 	b.Input("subject", e.subject)
@@ -298,7 +342,11 @@ func (t *Tracker) record(e *entry, result string, lines []OutcomeLine, inputs ma
 	for k, v := range inputs {
 		b.Input(k, v)
 	}
-	b.Commit(map[string]any{"outcome": result})
+	answer := map[string]any{"outcome": result}
+	if reason != "" {
+		answer["reason"] = reason
+	}
+	b.Commit(answer)
 	return o
 }
 
