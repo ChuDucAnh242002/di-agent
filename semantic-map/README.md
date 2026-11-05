@@ -151,9 +151,11 @@ semantic-map/
     │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
     │   ├── stats/              Shared estimator primitives (concrete, NOT a contract)
-    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + FisherPValue —
+    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + EffectiveN + FisherPValue —
     │   │   │                   the one estimator statemap and the MI proposer both use
-    │   │   └── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   ├── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   │   └── effective_n_test.go  Lag-1 effective sample size: AR(1) false-positive share, clamps, ring order,
+    │   │                            BenchmarkFoldWithPValue
     │   ├── ingest/client/      Wire face of the sample boundary for applications
     │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
     │   │   │                   subject, same MetricSample an in-process collector produces
@@ -250,7 +252,7 @@ semantic-map/
     │       │                                           state model)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
-    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via map.proposer.enabled)
+    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values on the effective sample size; default via map.proposer.enabled)
     │       ├── budget.go       DerivePairBudget       (the pair budget from memory, CPUs and the tick)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
     │       │                                           default via map.tuner: true)
@@ -570,6 +572,9 @@ subjects' readings of one metric, where a shared driver is the likelier explanat
 `same-subject` for two metrics of one subject (a capped pod's CPU and its throttling),
 which often hold together by construction.
 `Caveats` lists what the proposer could not check, such as an end with no declared range.
+`PValue` is the Fisher p-value of `MIScore` on the window's effective sample size, which
+is smaller than `NObservations` when the readings are autocorrelated, so it cannot be
+recomputed from `NObservations` alone.
 `PBar` is the p-value bar the candidate cleared at its last update: Benjamini–Hochberg at
 `map.proposer.fdr` over every pair being tested, so the more pairs are tested the more
 evidence a candidate needs. It is `0` when the correction is off.
@@ -1133,7 +1138,7 @@ the shape of the real thing.
 | `map.proposer.threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `map.proposer.min_pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. Each end must also take this many distinct readings (the readings off its commonest value, plus that value once), so a rate at zero but for a few shared spikes is not tested on its spikes. |
 | `map.proposer.min_spread` | `0.01`        | Least movement, as a share of its declared range, each end of a pair must show over the window to become a candidate. Correlation is scale-free, so without it a series that barely moves can correlate perfectly. `0` disables it. |
-| `map.proposer.fdr` | `0.05`               | False-discovery rate of the candidate bar: a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
+| `map.proposer.fdr` | `0.05`               | Nominal false-discovery rate of the candidate bar (dependent pairs void the formal guarantee; ARCHITECTURE §6): a pair becomes a candidate only when its p-value clears the Benjamini–Hochberg bar at this rate over every pair tested, so the more pairs are tested the more evidence a candidate needs. `0` disables the correction. |
 | `map.proposer.max_pairs` | `0`            | How many property pairs discovery tests at once, across every pair class. `0` derives it from the machine at start: 1% of its memory and 1% of each collection tick's CPU, whichever allows fewer (4 096 when memory cannot be read). The resolved number is logged and reported in `GET /state` under `discovery`. |
 | `map.tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `profile.regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `profile.alpha` and `profile.convergence` when set. |
@@ -1721,8 +1726,9 @@ loops:
 Each counted window contains a full proposer buffer of fresh pairs, not another review
 of the same observations. Windows do not overlap. The correlation must keep its sign
 and candidate kind, meet `map.proposer.threshold`, pass the evidence-count and variation
-gates, have a Fisher p-value at most 0.05, and clear the multiple-testing bar when FDR
-correction is enabled. Missing declared ranges prevent persistence from accumulating
+gates, have a Fisher p-value at most 0.05 — on the window's effective sample size, so
+autocorrelated readings are not counted as independent — and clear the multiple-testing
+bar when FDR correction is enabled. Missing declared ranges prevent persistence from accumulating
 on the property path. A failed gate, sign/kind change, forgotten property, or displaced
 pair resets the run. A closer-time replacement partner revises the last pair's evidence
 instead of counting as another observation.

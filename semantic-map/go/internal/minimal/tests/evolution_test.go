@@ -742,7 +742,10 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(42))
 	for tick := 0; tick < 150; tick++ {
-		base := 0.5 + 0.3*math.Sin(float64(tick)/20)
+		// A shared driver that moves tick to tick. One slow sine wave over the window
+		// is a single excursion both series ride, not 150 independent agreements, and
+		// the effective-sample-size p-value says so.
+		base := 0.5 + 0.3*(rng.Float64()-0.5)*2
 		noise := rng.NormFloat64() * 0.03
 		valueMU := base
 		valuePS := base + noise // ~95%+ correlated

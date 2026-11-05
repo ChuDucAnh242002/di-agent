@@ -182,10 +182,80 @@ func Pearson(xs, ys []float64) (float64, bool) {
 	return sxy / math.Sqrt(sxx*syy), true
 }
 
+// EffectiveN is the window's effective sample size for its Pearson r, walking the
+// ring in arrival order without copying it (see EffectiveN). A ring that has wrapped
+// holds its oldest reading at next, so arrival order starts there.
+func (w *PairWindow) EffectiveN() float64 { return effectiveN(w.xs, w.ys, w.next) }
+
+// EffectiveN is how many independent pairs the correlation of two time-ordered series
+// rests on. Telemetry is autocorrelated: a reading mostly repeats the one before, so
+// n readings carry far less than n readings' evidence, and a p-value computed on n
+// calls chance co-movement significant (two independent AR(1) series at φ = 0.9 pass
+// p ≤ 0.05 about half the time over 120 readings). The lag-1 correction of Bartlett,
+// as used by Bretherton et al. (1999, J. Climate 12:1990), is
+//
+//	n_eff = n · (1 − r1x·r1y) / (1 + r1x·r1y)
+//
+// with r1 each series' lag-1 autocorrelation. It is asymptotically exact for two
+// AR(1) series — a large-sample result — and the standard first approximation
+// otherwise. A constant series has r1 = 0 and leaves n as it is. The result is
+// clamped to [3, n]: n because a negative product (one series alternating) would
+// otherwise claim more evidence than there are readings, and 3 because Fisher's z
+// needs n − 3 > 0 to say anything — at the floor the p-value is 1. Series whose
+// lag-1 autocorrelations are both near 0.99 (a slow drift, two ramps) reach the floor
+// within one window of 120. A window shorter than 3 keeps its length, and so do
+// series of unequal length: neither has a Pearson r to correct.
+func EffectiveN(xs, ys []float64) float64 { return effectiveN(xs, ys, 0) }
+
+// effectiveN reads xs and ys in the order xs[start], …, xs[n−1], xs[0], …, xs[start−1].
+func effectiveN(xs, ys []float64, start int) float64 {
+	n := float64(len(xs))
+	if len(xs) < 3 || len(xs) != len(ys) {
+		return n
+	}
+	rr := lag1Product(xs, ys, start)
+	return math.Min(n, math.Max(3, n*(1-rr)/(1+rr)))
+}
+
+// lag1Product is r1x·r1y, each the sample lag-1 autocorrelation
+// Σ(v_t−m)(v_{t+1}−m) / Σ(v_t−m)² of its series read from start round to start−1,
+// and 0 when either series is constant. Both series are walked in one pass, and the
+// mean and the sum of squares do not depend on where the walk starts; only the lagged
+// products do.
+func lag1Product(xs, ys []float64, start int) float64 {
+	var mx, my float64
+	for i := range xs {
+		mx += xs[i]
+		my += ys[i]
+	}
+	n := float64(len(xs))
+	mx, my = mx/n, my/n
+	px, py := xs[start]-mx, ys[start]-my
+	var nx, ny float64
+	sx, sy := px*px, py*py
+	for i := 1; i < len(xs); i++ {
+		j := start + i
+		if j >= len(xs) {
+			j -= len(xs)
+		}
+		dx, dy := xs[j]-mx, ys[j]-my
+		nx += px * dx
+		ny += py * dy
+		sx += dx * dx
+		sy += dy * dy
+		px, py = dx, dy
+	}
+	if sx <= 1e-12 || sy <= 1e-12 {
+		return 0
+	}
+	return nx / sx * ny / sy
+}
+
 // FisherPValue is the two-tailed p-value for Pearson r using the Fisher z-transform:
-// z = atanh(r)·sqrt(n−3), P = erfc(|z|/sqrt 2). Returns 1.0 when n < 4.
-func FisherPValue(r float64, n int) float64 {
-	if n < 4 {
+// z = atanh(r)·sqrt(n−3), P = erfc(|z|/sqrt 2). n is a float so an effective sample
+// size can be passed as it is (see EffectiveN). Returns 1.0 when n ≤ 3.
+func FisherPValue(r float64, n float64) float64 {
+	if n <= 3 {
 		return 1.0
 	}
 	if r >= 1 {
@@ -194,6 +264,6 @@ func FisherPValue(r float64, n int) float64 {
 	if r <= -1 {
 		r = -1 + 1e-12
 	}
-	z := math.Atanh(r) * math.Sqrt(float64(n-3))
+	z := math.Atanh(r) * math.Sqrt(n-3)
 	return math.Erfc(math.Abs(z) / math.Sqrt2)
 }

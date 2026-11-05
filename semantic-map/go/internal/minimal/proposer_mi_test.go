@@ -1066,9 +1066,13 @@ func TestReplayedReadingIsNotFoldedTwice(t *testing.T) {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var batch []types.PropertyReading
+	// An irregular 0/1 pattern, not a strict alternation: two series that alternate in
+	// step are as autocorrelated as two in-step ramps, and their effective sample
+	// size is the floor, at which no p-value clears the bar.
+	pattern := []float64{0, 1, 1, 0, 1, 0, 0, 1, 1, 0}
 	for i := 0; i < 10; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
-		x := float64(i % 2)
+		x := pattern[i]
 		batch = append(batch, types.PropertyReading{ID: "x", Value: x, At: at}, types.PropertyReading{ID: "y", Value: x, At: at})
 	}
 	for range 2 { // the whole batch, then the same batch again

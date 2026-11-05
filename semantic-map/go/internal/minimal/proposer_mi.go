@@ -241,8 +241,10 @@ func (p *MICorrelationProposer) SetMinSpread(share float64) {
 	}
 }
 
-// DefaultFDR is the false-discovery rate the candidate bar holds to by default: of
-// the candidates the bar lets through, about 5% are expected to be chance.
+// DefaultFDR is the nominal false-discovery rate of the candidate bar: of the
+// candidates it lets through, about 5% would be chance were the pairs' p-values
+// independent or positively dependent. Pairs sharing a property are dependent, so
+// this is the level Benjamini–Hochberg runs at, not a proven bound.
 const DefaultFDR = 0.05
 
 // SetFDR sets the false-discovery rate of the candidate bar. A pair becomes a
@@ -1026,7 +1028,10 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	}
 	pv := 1.0 // a pair whose r is undefined was tested and showed nothing
 	if ok {
-		pv = stats.FisherPValue(r, buf.Len())
+		// On the window's effective sample size, not its length: consecutive readings
+		// of telemetry mostly repeat each other, and a p-value on the raw count is
+		// optimistic enough that the Benjamini–Hochberg bar stops being a rate.
+		pv = stats.FisherPValue(r, buf.EffectiveN())
 	}
 	p.folds++
 	candID := candidateID(fromID, toID, meta.undirected)

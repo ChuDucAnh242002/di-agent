@@ -467,11 +467,13 @@ type ArithmeticGroup struct {
 }
 
 type CandidateEdge struct {
-	CandidateID     string
-	FromID          string
-	ToID            string
-	Direction       Direction
-	MIScore         float64
+	CandidateID string
+	FromID      string
+	ToID        string
+	Direction   Direction
+	MIScore     float64
+	// PValue is Fisher's p for MIScore on the window's effective sample size (see
+	// stats.EffectiveN), not on NObservations.
 	PValue          float64
 	NObservations   int
 	DeploymentsSeen int

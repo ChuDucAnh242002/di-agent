@@ -13,9 +13,10 @@ const (
 	// PairCPUShare is the share of one collection tick, across every core, discovery
 	// may spend folding readings into tested pairs.
 	PairCPUShare = 0.01
-	// pairCPUCost is one tested pair's work per tick, set an order of magnitude above
-	// the ~0.5 µs measured on an Apple M-series core so a Raspberry Pi-class core is
-	// not overcommitted.
+	// pairCPUCost is one tested pair's work per tick, set about seven times above the
+	// ~0.7 µs measured on an Apple M-series core (one Observe into a full window of
+	// 120, its p-value on the effective sample size included) so a Raspberry Pi-class
+	// core is not overcommitted.
 	pairCPUCost = 5 * time.Microsecond
 	// FallbackPairBudget is used when the machine's memory cannot be read.
 	FallbackPairBudget = 4096
