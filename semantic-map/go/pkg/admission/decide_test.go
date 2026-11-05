@@ -1,0 +1,408 @@
+package admission
+
+import (
+	"fmt"
+	"math"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DiyazY/di-agent/pkg/statemap"
+)
+
+var unit = [2]float64{0, 1}
+
+var t0 = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+// The domains are the cpu.limit lever's descriptor and a memory lever's, with the
+// spec's default levels.
+var (
+	cpuDom = Domain{Action: "cpu.limit", Resource: "cpu", Relieves: "cpu_contention_ratio",
+		Usage: "cpu_utilization", Capacity: "cpu_cores", Exit: 0.10, Enter: 0.25, Settle: time.Minute, Phase: "calm"}
+	memDom = Domain{Action: "memory.limit", Resource: "memory", Relieves: "memory_contention_ratio",
+		Usage: "memory_utilization", Capacity: "memory_total", Exit: 0.05, Enter: 0.08, Settle: time.Minute, Phase: "calm"}
+	both = []Domain{cpuDom, memDom}
+	self = Self{NodeID: "n1", Arch: "amd64"}
+)
+
+// newMap is a map whose properties take the latest reading as their value
+// (Alpha 1), with the journal kept so a test can read the decision back.
+func newMap(t *testing.T) (*statemap.Map, *statemap.Journal) {
+	t.Helper()
+	j := statemap.NewJournal(0)
+	m := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1}, j)
+	m.SetClock(func() time.Time { return t0 })
+	return m, j
+}
+
+func record(t *testing.T, m *statemap.Map, id, subject string, v float64) {
+	t.Helper()
+	if err := m.Record(statemap.Observation{ID: id, Value: v, At: t0, Subject: subject, Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cores(t *testing.T, m *statemap.Map, n float64) {
+	t.Helper()
+	if err := m.RecordFacts("test", []statemap.Fact{statemap.NumberFact("cpu_cores", n, "cores")}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func memTotal(t *testing.T, m *statemap.Map, n float64) {
+	t.Helper()
+	if err := m.RecordFacts("test", []statemap.Fact{statemap.NumberFact("memory_total", n, "bytes")}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// effect declares subject's usage as driving cpu pressure and records one measured
+// intervention on it with effect e.
+func effect(t *testing.T, m *statemap.Map, subject string, e float64) {
+	t.Helper()
+	from := "cpu_utilization@" + subject
+	record(t, m, from, subject, 0.1)
+	if err := m.DeclareRelationship(statemap.Relationship{From: from, To: "cpu_contention_ratio", Sign: 1, Label: "drives"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.RecordIntervention(statemap.InterventionOutcome{From: from, To: "cpu_contention_ratio",
+		Agreed: true, HasEffect: true, Effect: e}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// node is a 4-core, 8 GiB node running pod:a, at cpu usage u and cpu pressure p
+// (p < 0 leaves it unrecorded), memory at 0.2 with no memory pressure. Its gate
+// passes for small offers.
+func node(t *testing.T, u, p float64) (*statemap.Map, *statemap.Journal) {
+	t.Helper()
+	m, j := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	record(t, m, "cpu_utilization", "", u)
+	record(t, m, "memory_utilization", "", 0.2)
+	record(t, m, "memory_contention_ratio", "", 0)
+	if p >= 0 {
+		record(t, m, "cpu_contention_ratio", "", p)
+	}
+	record(t, m, "cpu_utilization@pod:a", "pod:a", 0.1)
+	return m, j
+}
+
+// offer asks for cpu cores and 64 MiB, both declared.
+func offer(cpu float64) Offer {
+	return Offer{Name: "web", Demand: map[string]Demand{
+		"cpu":    {Value: cpu, Source: "declared"},
+		"memory": {Value: 64 << 20, Source: "declared"},
+	}}
+}
+
+var seq int
+
+func nextID() string { seq++; return fmt.Sprintf("admit-1-%d", seq) }
+
+func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+func ptrNear(p *float64, want float64) bool { return p != nil && near(*p, want) }
+
+func want(t *testing.T, d Decision, verdict, reason string) {
+	t.Helper()
+	if d.Verdict != verdict || !strings.HasPrefix(d.Reason, reason) {
+		t.Fatalf("got %s %q; want %s %q\nlines %+v", d.Verdict, d.Reason, verdict, reason, d.Lines)
+	}
+}
+
+func line(t *testing.T, d Decision, domain string) Line {
+	t.Helper()
+	for _, l := range d.Lines {
+		if l.Domain == domain {
+			return l
+		}
+	}
+	t.Fatalf("no line for %s in %+v", domain, d.Lines)
+	return Line{}
+}
+
+func TestArchGate(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	o := offer(0.4)
+	o.Arch = []string{"arm64"}
+	want(t, Decide(m, o, both, self, nextID()), Decline, "cannot run on amd64")
+	o.Arch = []string{"arm64", "AMD64"}
+	want(t, Decide(m, o, both, self, nextID()), Accept, "")
+}
+
+func TestNoDomains(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	want(t, Decide(m, offer(0.4), nil, self, nextID()), Decline, "no admission domains")
+}
+
+func TestReliefActiveDeclines(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	// A phase admission does not know is not calm either.
+	for _, phase := range []string{"relieving", "releasing", "", "warming"} {
+		c := cpuDom
+		c.Phase = phase
+		d := Decide(m, offer(0.4), []Domain{memDom, c}, self, nextID())
+		want(t, d, Decline, "relief active on cpu_contention_ratio")
+		if l := line(t, d, "cpu_contention_ratio"); l.Phase != phase {
+			t.Fatalf("line phase %q; want %q", l.Phase, phase)
+		}
+	}
+}
+
+// TestMissingDemand: a domain whose resource the offer does not price declines; the
+// node does not guess what memory a workload needs.
+func TestMissingDemand(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	o := offer(0.4)
+	delete(o.Demand, "memory")
+	want(t, Decide(m, o, both, self, nextID()), Decline, "unknown memory demand")
+}
+
+func TestCrossArchCPU(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	o := offer(0.4)
+	o.Demand["cpu"] = Demand{Value: 0.4, Source: "measured on n2", Arch: "arm64"}
+	want(t, Decide(m, o, both, self, nextID()), Decline, "cpu demand not from this architecture")
+
+	o = offer(0.4)
+	o.Demand["memory"] = Demand{Value: 64 << 20, Source: "measured on n2", Arch: "arm64"}
+	want(t, Decide(m, o, both, self, nextID()), Accept, "")
+}
+
+// TestHeadroom: a calm node offered more than it has left declines on the gate,
+// where every pressure-based prediction would read 0.
+func TestHeadroom(t *testing.T) {
+	m, _ := node(t, 0.8, 0)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Decline, "cpu would reach")
+	if !strings.Contains(d.Reason, "past 0.90") {
+		t.Fatalf("reason %q does not name the limit", d.Reason)
+	}
+}
+
+// TestZeroDemand: an offer demanding nothing has nothing to price; zero cpu with
+// memory still passes the gate and the predictions.
+func TestZeroDemand(t *testing.T) {
+	m, _ := node(t, 0.4, 0.05)
+	o := Offer{Name: "web", Demand: map[string]Demand{"cpu": {Source: "declared"}, "memory": {Source: "declared"}}}
+	want(t, Decide(m, o, both, self, nextID()), Decline, "nothing to price")
+
+	d := Decide(m, offer(0), both, self, nextID())
+	want(t, d, Accept, "")
+	if l := line(t, d, "cpu_contention_ratio"); !ptrNear(l.UsagePred, 0.05) || l.Share != 0 {
+		t.Fatalf("cpu line %+v; want share 0, prediction the pressure", l)
+	}
+}
+
+func TestMapBasisDecides(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	effect(t, m, "pod:a", 0.2)
+	effect(t, m, "pod:b", 0.3)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "cpu_contention_ratio")
+	if !ptrNear(l.K, 0.3) || !ptrNear(l.MapPred, 0.095) || !ptrNear(l.UsagePred, 0.0325) || l.Basis != "map" || !l.Pass {
+		t.Fatalf("cpu line %+v", l)
+	}
+	if !near(l.Share, 0.25) || !near(l.Pressure, 0.02) || !near(l.Usage, 0.4) || !near(l.Exit, 0.10) {
+		t.Fatalf("cpu line inputs %+v", l)
+	}
+	if len(l.KFrom) != 1 || !strings.Contains(l.KFrom[0], "pod:b") {
+		t.Fatalf("k from %v; want pod:b's relationship", l.KFrom)
+	}
+}
+
+func TestUsageBasisFallback(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "cpu_contention_ratio")
+	if l.MapPred != nil || l.K != nil || l.Basis != "usage" || !ptrNear(l.UsagePred, 0.0325) {
+		t.Fatalf("cpu line %+v", l)
+	}
+}
+
+// TestExitBoundary: a prediction at Exit passes, one just above it does not.
+func TestExitBoundary(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	effect(t, m, "pod:a", 0.3)
+	pred := *line(t, Decide(m, offer(1), both, self, nextID()), "cpu_contention_ratio").MapPred
+
+	c := cpuDom
+	c.Exit = pred
+	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, nextID()), Accept, "")
+	c.Exit = pred - 1e-9
+	d := Decide(m, offer(1), []Domain{c, memDom}, self, nextID())
+	want(t, d, Decline, "cpu_contention_ratio would reach")
+	if l := line(t, d, "cpu_contention_ratio"); l.Pass || l.Basis != "map" {
+		t.Fatalf("cpu line %+v", l)
+	}
+	if l := line(t, d, "memory_contention_ratio"); !l.Pass {
+		t.Fatalf("memory line %+v; every domain is evaluated", l)
+	}
+}
+
+// TestNoSubjectsReadsZero: a node running nothing has no contention reading, which
+// is a reading of 0, not a gap.
+func TestNoSubjectsReadsZero(t *testing.T) {
+	m, _ := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	record(t, m, "cpu_utilization", "", 0.4)
+	record(t, m, "memory_utilization", "", 0.2)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "cpu_contention_ratio")
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !ptrNear(l.UsagePred, 0) {
+		t.Fatalf("cpu line %+v", l)
+	}
+}
+
+// TestSubjectsWithoutContentionReadZero: subjects that report no contention of
+// their own (units, groups, BestEffort pods) leave node pressure absent, and the
+// node is calm, not unpredictable.
+func TestSubjectsWithoutContentionReadZero(t *testing.T) {
+	m, _ := node(t, 0.4, -1) // pod:a reports usage only
+	record(t, m, "cpu_utilization@unit:x", "unit:x", 0.05)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "cpu_contention_ratio")
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !l.Pass {
+		t.Fatalf("cpu line %+v", l)
+	}
+}
+
+// TestReporterWithoutPressureUnpredictable: a subject reports contention but the
+// node has no reading, so the node's worst is unknown.
+func TestReporterWithoutPressureUnpredictable(t *testing.T) {
+	m, _ := node(t, 0.4, -1)
+	record(t, m, "cpu_contention_ratio@pod:a", "pod:a", 0.01)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Decline, "no cpu_contention_ratio reading")
+	if l := line(t, d, "cpu_contention_ratio"); l.Pass || l.MapPred != nil || l.UsagePred != nil {
+		t.Fatalf("cpu line %+v", l)
+	}
+}
+
+// TestMemoryReporterWithoutPressureUnpredictable: memory's per-pod reporter is
+// memory_pressure_ratio@pod, as in Admit, so an active one with no node
+// memory_contention_ratio reading is a gap, not a calm node.
+func TestMemoryReporterWithoutPressureUnpredictable(t *testing.T) {
+	m, _ := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	record(t, m, "cpu_utilization", "", 0.4)
+	record(t, m, "memory_utilization", "", 0.2)
+	record(t, m, "cpu_contention_ratio", "", 0.02)
+	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Decline, "no memory_contention_ratio reading")
+	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
+// staleNode is node(t, 0.4, 0.02) whose memory_contention_ratio was last read
+// before the staleness window and has been swept stale; every other reading is
+// fresh.
+func staleNode(t *testing.T) *statemap.Map {
+	t.Helper()
+	m, _ := newMap(t)
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	old := t0.Add(-2 * m.StaleAfter())
+	if err := m.Record(statemap.Observation{ID: "memory_contention_ratio", Value: 0.04, At: old, Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+	m.Sweep()
+	record(t, m, "cpu_utilization", "", 0.4)
+	record(t, m, "memory_utilization", "", 0.2)
+	record(t, m, "cpu_contention_ratio", "", 0.02)
+	if p, _ := m.Property("memory_contention_ratio"); p.Status != statemap.Stale {
+		t.Fatalf("memory_contention_ratio %s; want stale", p.Status)
+	}
+	return m
+}
+
+// TestStaleWithoutReporterReadsZero: a stale node reading with no reporter is an
+// emptied node, read as 0, as Admit reads it.
+func TestStaleWithoutReporterReadsZero(t *testing.T) {
+	m := staleNode(t)
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "memory_contention_ratio")
+	if l.Pressure != 0 || !strings.Contains(l.Reason, "memory_contention_ratio is stale and no subject reports it") {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
+// TestStaleWithReporterUnpredictable: a stale node reading while a pod still
+// reports is a gap. Admit's gate declines it first, so the lever's enter is 0 here
+// to show the prediction step judges it the same way.
+func TestStaleWithReporterUnpredictable(t *testing.T) {
+	m := staleNode(t)
+	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
+	want(t, Decide(m, offer(1), both, self, nextID()), Decline, "the map's reading of memory_contention_ratio is stale")
+
+	mem := memDom
+	mem.Enter = 0
+	d := Decide(m, offer(1), []Domain{cpuDom, mem}, self, nextID())
+	want(t, d, Decline, "memory_contention_ratio is stale while memory_pressure_ratio@pod:x still reports it")
+	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
+		t.Fatalf("memory line %+v", l)
+	}
+}
+
+// TestMissingCapacity: a domain whose capacity fact the gate does not read is
+// unpredictable; the gate reads only cpu_cores and memory_total.
+func TestMissingCapacity(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	c := cpuDom
+	c.Capacity = "cpu_quota_cores"
+	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, nextID()), Decline, "no cpu_quota_cores fact")
+}
+
+// TestNoBasis: zero usage and no measured effects leave nothing to predict from.
+func TestNoBasis(t *testing.T) {
+	m, _ := node(t, 0, 0.02)
+	want(t, Decide(m, offer(1), both, self, nextID()), Decline, "no basis to predict cpu_contention_ratio")
+}
+
+func TestDecisionRecorded(t *testing.T) {
+	m, j := node(t, 0.4, 0.02)
+	effect(t, m, "pod:a", 0.3)
+	id := nextID()
+	d := Decide(m, offer(1), both, self, id)
+	rec, ok := j.Decision(id)
+	if !ok {
+		t.Fatal("no decision recorded")
+	}
+	if rec.Answer["verdict"] != d.Verdict || rec.Answer["reason"] != d.Reason {
+		t.Fatalf("answer %v; want %s %q", rec.Answer, d.Verdict, d.Reason)
+	}
+	if _, ok := rec.Inputs["offer"].(Offer); !ok {
+		t.Fatalf("offer input %T", rec.Inputs["offer"])
+	}
+	lines, ok := rec.Inputs["domains"].([]Line)
+	if !ok || len(lines) != 2 {
+		t.Fatalf("domains input %v", rec.Inputs["domains"])
+	}
+	if lines[0].MapPred == nil || lines[0].UsagePred == nil {
+		t.Fatalf("recorded cpu line %+v; want both predictions", lines[0])
+	}
+	if gate, _ := rec.Inputs["gate"].(string); gate != id+"-gate" {
+		t.Fatalf("gate input %v", rec.Inputs["gate"])
+	}
+	if _, ok := j.Decision(id + "-gate"); !ok {
+		t.Fatal("gate decision not recorded")
+	}
+
+	// A decline before the gate is recorded too.
+	id = nextID()
+	Decide(m, offer(1), nil, self, id)
+	if rec, ok := j.Decision(id); !ok || rec.Answer["verdict"] != Decline {
+		t.Fatalf("early decline recorded %v %v", ok, rec)
+	}
+}

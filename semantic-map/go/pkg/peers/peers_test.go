@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/admission"
 )
 
 // ── Registry tests ───────────────────────────────────────────────────────────
@@ -286,53 +289,104 @@ func TestClient_HealthRespectsStatus(t *testing.T) {
 	}
 }
 
-func TestClient_OffloadAcceptResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/offload" {
+// offerServer answers every POST /offers with status and body, and reports the
+// offer it was sent.
+func offerServer(t *testing.T, status int, body string, got *admission.Offer) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/offers" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 			t.Errorf("Content-Type: got %q, want application/json", ct)
 		}
-		var req OffloadRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatal(err)
-		}
-		if req.TaskType != "pod-scheduling" {
-			t.Errorf("decoded TaskType=%q", req.TaskType)
+		if got != nil {
+			if err := json.NewDecoder(r.Body).Decode(got); err != nil {
+				t.Errorf("decode offer: %v", err)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(OffloadResponse{
-			Accepted:             true,
-			Reason:               "ok",
-			ExpectedLatency:      9.0,
-			ExpectedResourceCost: 0.3,
-		})
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
-	defer srv.Close()
+}
 
-	c := NewClient(2 * time.Second)
-	resp, err := c.Offload(context.Background(), srv.URL, &OffloadRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_B",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: 5000,
-	})
+func TestOffer_ReturnsThePeersHop(t *testing.T) {
+	var got admission.Offer
+	srv := offerServer(t, 200, `{"node":"A","url":"http://a","decision_id":"admit-1-1","verdict":"accept","reason":"fits"}`, &got)
+	defer srv.Close()
+	offer := admission.Offer{Name: "web", Demand: map[string]admission.Demand{"cpu": {Value: 0.5, Source: "declared"}}}
+	hop, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL+"/", offer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Accepted {
-		t.Error("Accepted: got false, want true")
+	if hop.Node != "A" || hop.Verdict != admission.Accept || hop.DecisionID != "admit-1-1" || hop.Reason != "fits" {
+		t.Errorf("hop %+v", hop)
 	}
-	if resp.ExpectedLatency != 9.0 {
-		t.Errorf("ExpectedLatency: got %.3f, want 9.0", resp.ExpectedLatency)
+	if got.Name != "web" || got.Demand["cpu"].Value != 0.5 {
+		t.Errorf("peer received %+v", got)
 	}
 }
 
-func TestClient_OffloadNilRequestError(t *testing.T) {
+func TestOffer_DeclineWithIDIsAnAnswer(t *testing.T) {
+	srv := offerServer(t, 200, `{"node":"A","decision_id":"admit-1-2","verdict":"decline","reason":"relief active on cpu_contention_ratio"}`, nil)
+	defer srv.Close()
+	hop, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
+	if err != nil || hop.Verdict != admission.Decline {
+		t.Errorf("hop %+v, err %v", hop, err)
+	}
+}
+
+func TestOffer_Non2xxIsAnError(t *testing.T) {
+	srv := offerServer(t, 500, `boom`, nil)
+	defer srv.Close()
+	if _, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"}); err == nil {
+		t.Error("500: got nil error")
+	}
+}
+
+func TestOffer_TransportAndBodyErrors(t *testing.T) {
 	c := NewClient(2 * time.Second)
-	if _, err := c.Offload(context.Background(), "http://x", nil); err == nil {
-		t.Error("nil request: got nil error, want non-nil")
+	if _, err := c.Offer(context.Background(), "http://127.0.0.1:1", admission.Offer{Name: "web"}); err == nil {
+		t.Error("closed port: got nil error")
+	}
+	srv := offerServer(t, 200, `not json`, nil)
+	defer srv.Close()
+	if _, err := c.Offer(context.Background(), srv.URL, admission.Offer{Name: "web"}); err == nil {
+		t.Error("undecodable body: got nil error")
+	}
+}
+
+// An answer that cannot be traced to a journalled decision is not an answer.
+func TestOffer_AnswerWithoutDecisionIDIsAnError(t *testing.T) {
+	for _, body := range []string{`{"verdict":"accept"}`, `{"verdict":"decline","reason":"x"}`} {
+		srv := offerServer(t, 200, body, nil)
+		_, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "no decision id") {
+			t.Errorf("%s: err %v; want a no-decision-id error", body, err)
+		}
+	}
+}
+
+// A verdict that is not one of admission's is not an answer, even with an id.
+func TestOffer_UnknownVerdictIsAnError(t *testing.T) {
+	for _, body := range []string{`{}`, `{"decision_id":"admit-1-1","verdict":"maybe"}`, `{"decision_id":"admit-1-1","verdict":"ACCEPT"}`} {
+		srv := offerServer(t, 200, body, nil)
+		_, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "unknown verdict") {
+			t.Errorf("%s: err %v; want an unknown-verdict error", body, err)
+		}
+	}
+}
+
+func TestOffer_AlreadyAskedNeedsNoID(t *testing.T) {
+	srv := offerServer(t, 200, `{"node":"A","verdict":"already_asked","reason":"already in the chain"}`, nil)
+	defer srv.Close()
+	hop, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
+	if err != nil || hop.Verdict != admission.AlreadyAsked {
+		t.Errorf("hop %+v, err %v", hop, err)
 	}
 }
 

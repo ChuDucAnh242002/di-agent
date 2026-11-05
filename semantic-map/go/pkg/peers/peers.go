@@ -2,7 +2,7 @@
 //
 // A Registry holds Descriptors for known remote agents, each tagged with a
 // trust score in [0,1] that the reasoner uses to weight offload candidates.
-// A Client speaks HTTP to remote agents (their /cost, /healthz, /offload
+// A Client speaks HTTP to remote agents (their /cost, /healthz, /offers
 // endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
@@ -11,7 +11,7 @@
 // SQLite-backed peer state for richer profiles, or a gossip-based registry —
 // we promote the surface to pkg/contracts at that point.
 //
-// Security stance (v1): no auth on /peers or /offload endpoints. This package
+// Security stance (v1): no auth on /peers or /offers endpoints. This package
 // targets a localhost/lab-network deployment. Production hardening (mTLS,
 // signed identities, bearer tokens) is a P7 concern.
 package peers
@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/admission"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -222,7 +223,7 @@ func (r *Registry) MarkSeen(id string, when time.Time) error {
 
 // Client makes HTTP calls to remote agents. It is intentionally tiny: one
 // http.Client, a default timeout, and three methods that mirror the daemon's
-// /cost, /healthz, and /offload endpoints.
+// /cost, /healthz, and /offers endpoints.
 type Client struct {
 	http    *http.Client
 	Timeout time.Duration
@@ -248,27 +249,6 @@ type ActionCost struct {
 	Confidence      float64  `json:"Confidence"`
 	Rationale       string   `json:"Rationale"`
 	GraphPathUsed   []string `json:"GraphPathUsed"`
-}
-
-// OffloadRequest is the body sent to a peer's /offload endpoint.
-type OffloadRequest struct {
-	TaskType           string   `json:"task_type"`
-	SourceNodeID       string   `json:"source_node_id"`
-	DataSizeBytes      int64    `json:"data_size_bytes"`
-	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
-	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
-}
-
-// OffloadResponse is the body returned by a peer's /offload endpoint.
-// Accepted indicates the peer believes it can execute within the requested
-// budgets. ExpectedLatency / ExpectedResourceCost report the peer's own cost
-// estimate so the source agent can record the outcome (and adjust trust).
-type OffloadResponse struct {
-	Accepted             bool    `json:"accepted"`
-	Reason               string  `json:"reason,omitempty"`
-	ExpectedLatency      float64 `json:"expected_latency"`
-	ExpectedResourceCost float64 `json:"expected_resource_cost"`
-	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
 }
 
 // Cost asks the peer at peerURL what it would cost to run taskType for
@@ -357,38 +337,45 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// Offload posts an OffloadRequest to the peer and returns its response.
-// Used by the trust-update path: a 2xx with Accepted=true is the signal to
-// nudge the peer's trust upward; a 2xx with Accepted=false (peer's own
-// budget-violation reason) is informational and leaves trust unchanged.
-func (c *Client) Offload(ctx context.Context, peerURL string, req *OffloadRequest) (*OffloadResponse, error) {
-	if req == nil {
-		return nil, errors.New("peers.Client.Offload: nil request")
-	}
-	body, err := json.Marshal(req)
+// Offer puts a workload to the peer at peerURL and returns its answer as a hop.
+// It does not touch trust and does not retry: whether to go on to the next peer, and
+// how to record an unreachable one, is the caller's. A non-2xx, an undecodable body,
+// a verdict that is not one of admission's, or an accept/decline that names no
+// decision id is an error, because an answer that cannot be read or traced to the
+// peer's journal is not one the caller may act on.
+func (c *Client) Offer(ctx context.Context, peerURL string, o admission.Offer) (admission.Hop, error) {
+	body, err := json.Marshal(o)
 	if err != nil {
-		return nil, fmt.Errorf("peers.Client.Offload: marshal: %w", err)
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: marshal: %w", err)
 	}
-	u := strings.TrimRight(peerURL, "/") + "/offload"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	u := strings.TrimRight(peerURL, "/") + "/offers"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("peers.Client.Offload: %w", err)
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(httpReq)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("peers.Client.Offload: transport: %w", err)
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: transport: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("peers.Client.Offload: peer %s returned %d: %s", peerURL, resp.StatusCode, strings.TrimSpace(string(raw)))
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: peer %s returned %d: %s", peerURL, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	var out OffloadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("peers.Client.Offload: decode: %w", err)
+	var hop admission.Hop
+	if err := json.NewDecoder(resp.Body).Decode(&hop); err != nil {
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: decode: %w", err)
 	}
-	return &out, nil
+	switch hop.Verdict {
+	case admission.Accept, admission.Decline, admission.Unreachable, admission.AlreadyAsked:
+	default:
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: peer %s: unknown verdict %q", peerURL, hop.Verdict)
+	}
+	if hop.DecisionID == "" && hop.Verdict != admission.AlreadyAsked && hop.Verdict != admission.Unreachable {
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: peer %s: peer answer has no decision id (verdict %q), so it cannot be traced", peerURL, hop.Verdict)
+	}
+	return hop, nil
 }
 
 // ── sentinel errors ──────────────────────────────────────────────────────────

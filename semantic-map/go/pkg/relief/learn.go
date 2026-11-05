@@ -87,9 +87,9 @@ func (e *effects) Of(subject, basis string) float64 {
 	return 1
 }
 
-// workloadShares is every workload's current share of the node's usage, as the
+// Shares is every workload's current share of the node's usage, as the
 // map holds it: each subject with an active usage@<subject>.
-func workloadShares(m *statemap.Map, usage string) map[string]float64 {
+func Shares(m *statemap.Map, usage string) map[string]float64 {
 	out := map[string]float64{}
 	for _, s := range m.Subjects() {
 		if v, ok := share(m, usage, s); ok {
@@ -99,18 +99,27 @@ func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 	return out
 }
 
-// sharesAtAct is the snapshot an action's outcome is later checked against:
-// workloadShares less every workload silent for longer than the map's StaleAfter
+// Moved lists the workloads other than except that have arrived, left or moved
+// since at was taken (a SharesAt snapshot), absorbed rises included: it is who
+// would confound an outcome measured across that interval, so a decision made
+// from a stale snapshot can tell the map has changed under it.
+func Moved(m *statemap.Map, usage string, at map[string]float64, except string, step float64, now time.Time) []string {
+	moved, left, absorbed := movedSince(m, usage, at, except, step, now)
+	return confoundedBy(moved, left, absorbed, false)
+}
+
+// SharesAt is the snapshot an action's outcome is later checked against:
+// Shares less every workload silent for longer than the map's StaleAfter
 // at now. The sweep marks a silent property stale only when it next runs, so a
 // share can still read active after its source has gone quiet; a workload already
 // silent at act took no part in the state the action was priced from, and its
 // retirement during the settle window is not a departure. movedSince reads the
 // shares at verify through it too, so the one rule holds at both ends: a workload
 // silent at act and still unswept at verify did not arrive.
-func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float64 {
-	out := workloadShares(m, usage)
+func SharesAt(m *statemap.Map, usage string, now time.Time) map[string]float64 {
+	out := Shares(m, usage)
 	for s := range out {
-		// workloadShares returns only subjects whose property the map holds.
+		// Shares returns only subjects whose property the map holds.
 		if p, _ := m.Property(usage + "@" + s); now.Sub(p.LastObserved) > m.StaleAfter() {
 			delete(out, s)
 		}
@@ -123,7 +132,7 @@ func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float6
 // share then and by more than 0.02 absolute. A workload live now and absent from
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
-// them. Both at and the shares now are read through sharesAtAct, so a workload
+// them. Both at and the shares now are read through SharesAt, so a workload
 // silent at act cannot leave and one still silent at now cannot arrive.
 //
 // Rises are the exception. Capping a workload frees CPU, and the contended
@@ -135,7 +144,7 @@ func sharesAtAct(m *statemap.Map, usage string, now time.Time) map[string]float6
 // one nothing counts as freed. Whether an absorbed rise is innocent depends on the
 // verdict, which confoundedBy decides.
 func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64, now time.Time) (moved, left, absorbed []string) {
-	live := sharesAtAct(m, usage, now)
+	live := SharesAt(m, usage, now)
 	var risen []string
 	rise := 0.0
 	for s, v := range live {

@@ -260,6 +260,10 @@ func (l *Loop) Start(ctx context.Context) {
 	}
 }
 
+// Descriptor is the actuator descriptor the loop was built on: which properties
+// are the node's usage and its pressure.
+func (l *Loop) Descriptor() actuators.Descriptor { return l.d }
+
 // Pause stops the loop making changes and releasing them. It still observes,
 // runs the trigger, verifies what is in flight, and gives back what expires.
 func (l *Loop) Pause() { l.mu.Lock(); l.paused = true; l.mu.Unlock() }
@@ -352,7 +356,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	if fresh {
 		// For a resumed action's baseline, taken below; read outside the state lock,
 		// as the loop's other reads of the map are.
-		shares = sharesAtAct(l.cfg.Map, l.d.Usage, now)
+		shares = SharesAt(l.cfg.Map, l.d.Usage, now)
 	}
 
 	l.mu.Lock()
@@ -443,7 +447,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	pressure, _, fresh := l.pressure(now)
 	cooldowns := l.cooldowns(ws)
-	shares := sharesAtAct(l.cfg.Map, l.d.Usage, now)
+	shares := SharesAt(l.cfg.Map, l.d.Usage, now)
 
 	l.mu.Lock()
 	live := map[string]*Action{}
@@ -926,7 +930,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	b.Property(l.d.Relieves)
 	b.Property(l.d.Usage + "@" + plan.Subject)
 	b.Facts()
-	shares := sharesAtAct(l.cfg.Map, l.d.Usage, now)
+	shares := SharesAt(l.cfg.Map, l.d.Usage, now)
 	entry, err := l.cfg.Acting.Apply(ctx, w, l.d.Action, plan.To, now.Add(l.c.Expiry), id)
 	if err != nil {
 		// A change still in force, adopted or pending, keeps the action it spent:

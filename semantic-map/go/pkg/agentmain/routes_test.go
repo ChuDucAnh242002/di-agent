@@ -16,7 +16,6 @@ import (
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
@@ -832,7 +831,7 @@ func TestSetStrength_UnknownProposition_Returns404WithErrorJSON(t *testing.T) {
 	}
 }
 
-// ── /peers and /offload (multi-agent coordination) ───────────────────────────
+// ── /peers (multi-agent coordination) ───────────────────────────
 
 func TestPeers_AddListRemove(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
@@ -952,189 +951,6 @@ func TestPeers_DeleteUnknownReturns404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("DELETE unknown: got %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestOffload_AcceptWithinBudget(t *testing.T) {
-	base, sm, cleanup := newTestAgent(t)
-	defer cleanup()
-
-	// Probe local cost to size budgets above its actual values.
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_self",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: cost.LatencyEstimate*2 + 100, // generous
-	})
-	if resp.StatusCode != 200 {
-		t.Fatalf("/offload: %s", body(resp))
-	}
-	var out OffloadHTTPResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if !out.Accepted {
-		t.Errorf("Accepted: got false, want true (reason=%s; latency=%.3f budget=%.3f)",
-			out.Reason, out.ExpectedLatency, cost.LatencyEstimate*2+100)
-	}
-	if out.ExpectedLatency != cost.LatencyEstimate {
-		t.Errorf("ExpectedLatency: got %.3f, want %.3f", out.ExpectedLatency, cost.LatencyEstimate)
-	}
-}
-
-// drivePositiveCost biases EMAs so that both ResourceCost (sum over edges
-// into RC) and LatencyEstimate (sum over edges into PS) come out > 0.
-//
-// Without biasing, the bootstrap propositions sum to ≤0 (positives cancel
-// negatives) and both costs clamp to zero — making budget rejections
-// untestable. We push the dominant positive-target edges high and the
-// negative-target edges low, plus drive CO→PS into negative territory so
-// its (-1)*(-effective) = +effective contribution lifts the latency
-// estimate over zero. RC→PS is a conflict pair (P2−/P3+) sharing one
-// (from, to); Ingest updates both EMAs identically, so the pair always
-// contributes net zero regardless of bias direction — useful here, since
-// it means LatencyEstimate is driven entirely by CO→PS once the third edge
-// is biased.
-//
-// alpha/convergence are tuned in newOffloadTestAgent to make the EMA reach
-// usable values within ~200 ticks.
-func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
-	t.Helper()
-	// Cost is the observed level of the cost constructs, read from the state model, so
-	// making it positive means giving those constructs telemetry. The previous version
-	// drove edge observations, which moved the construct graph and — once cost came
-	// from the state model — stopped affecting the answer at all.
-	spec := mustSpec(t)
-	targets := map[string]bool{
-		spec.CostModel.ResourceConstruct: true,
-		spec.CostModel.PressureConstruct: true,
-	}
-	var metrics []string
-	for _, r := range spec.MetricRouting {
-		if targets[r.ConstructID] {
-			metrics = append(metrics, r.MetricType)
-		}
-	}
-	if len(metrics) == 0 {
-		t.Fatal("no metric routes to either cost construct")
-	}
-	for i := 0; i < 200; i++ {
-		for _, m := range metrics {
-			if err := sm.IngestSample(&types.MetricSample{
-				NodeID:        "node_self",
-				MetricType:    types.MetricType(m),
-				Value:         0.8,
-				TimestampUnix: int64(1700000000 + i),
-				EventID:       fmt.Sprintf("bias-%s-%d", m, i),
-			}); err != nil {
-				t.Fatalf("ingesting %s: %v", m, err)
-			}
-		}
-	}
-}
-
-func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
-	t.Helper()
-	sm, err := profiles.Build("edge-minimal", profiles.Config{
-		StateMap:             newTestState(t),
-		DomainSpec:           mustSpec(t),
-		EMAAlpha:             0.5,
-		ConvergenceThreshold: 100,
-		MinTrustScore:        0.5,
-	})
-	if err != nil {
-		t.Fatalf("profiles.Build: %v", err)
-	}
-	mux := http.NewServeMux()
-	registerRoutes(mux, sm, explain.NewDisabled())
-	srv := httptest.NewServer(mux)
-	return srv.URL, sm, srv.Close
-}
-
-func TestOffload_RejectExceedsLatencyBudget(t *testing.T) {
-	base, sm, cleanup := newOffloadTestAgent(t)
-	defer cleanup()
-	drivePositiveCost(t, sm)
-
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost.LatencyEstimate <= 0 {
-		t.Fatalf("test precondition: latency=%.3f must be > 0 after biasing", cost.LatencyEstimate)
-	}
-
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:        "pod-scheduling",
-		SourceNodeID:    "node_self",
-		DataSizeBytes:   1024,
-		LatencyBudgetMs: cost.LatencyEstimate / 10, // tight
-	})
-	if resp.StatusCode != 200 {
-		t.Fatalf("/offload: %s", body(resp))
-	}
-	var out OffloadHTTPResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if out.Accepted {
-		t.Errorf("expected reject; got Accepted=true reason=%q (latency=%.3f budget=%.3f)",
-			out.Reason, out.ExpectedLatency, cost.LatencyEstimate/10)
-	}
-	if !strings.Contains(out.Reason, "latency") {
-		t.Errorf("reject reason should mention latency; got %q", out.Reason)
-	}
-}
-
-func TestOffload_RejectExceedsEnergyBudget(t *testing.T) {
-	base, sm, cleanup := newOffloadTestAgent(t)
-	defer cleanup()
-	drivePositiveCost(t, sm)
-
-	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost.ResourceCost <= 0 {
-		t.Fatalf("test precondition: resource cost=%.3f must be > 0 after biasing", cost.ResourceCost)
-	}
-	tight := cost.ResourceCost / 10
-	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
-		TaskType:           "pod-scheduling",
-		SourceNodeID:       "node_self",
-		DataSizeBytes:      1024,
-		LatencyBudgetMs:    1e9, // unbounded latency
-		EnergyBudgetJoules: &tight,
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("/offload: %s", body(resp))
-	}
-	var out OffloadHTTPResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Accepted {
-		t.Errorf("expected reject on energy budget; got Accepted=true reason=%q", out.Reason)
-	}
-	if !strings.Contains(out.Reason, "energy") {
-		t.Errorf("reject reason should mention energy; got %q", out.Reason)
-	}
-}
-
-func TestOffload_RequiresJSON(t *testing.T) {
-	base, _, cleanup := newTestAgent(t)
-	defer cleanup()
-	resp := postRaw(t, base+"/offload", `{"task_type":"x"}`)
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
 	}
 }
 

@@ -208,27 +208,6 @@ type SetTrustRequest struct {
 	Value float64 `json:"value"`
 }
 
-// OffloadHTTPRequest is the body of POST /offload — the peer-side receiver of
-// an offload proposal. Named with the HTTP prefix so it does not collide with
-// pkg/peers.OffloadRequest (this is the server-side DTO; that is the
-// outbound-client DTO).
-type OffloadHTTPRequest struct {
-	TaskType           string   `json:"task_type"`
-	SourceNodeID       string   `json:"source_node_id"`
-	DataSizeBytes      int64    `json:"data_size_bytes"`
-	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
-	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
-}
-
-// OffloadHTTPResponse is the body of POST /offload — the peer's decision.
-type OffloadHTTPResponse struct {
-	Accepted             bool    `json:"accepted"`
-	Reason               string  `json:"reason,omitempty"`
-	ExpectedLatency      float64 `json:"expected_latency"`
-	ExpectedResourceCost float64 `json:"expected_resource_cost"`
-	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
-}
-
 // ── Mappers ───────────────────────────────────────────────────────────────────
 
 // directionToString converts the internal Direction enum to its wire form.

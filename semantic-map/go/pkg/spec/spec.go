@@ -312,19 +312,26 @@ type Lever struct {
 	Expiry      time.Duration `yaml:"expiry"`
 }
 
+// The levers' actions: cpu.limit relieves cpu_contention_ratio, memory.high
+// memory_contention_ratio.
+const (
+	LeverCPULimit   = "cpu.limit"
+	LeverMemoryHigh = "memory.high"
+)
+
 // defaultLevers is the levers relief has unless the file names its own: CPU
 // and memory, each relieving its own kind of node contention. Their actions are
 // the only ones a lever may name (LeverActions).
 func defaultLevers() []Lever {
 	return []Lever{{
-		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Action: LeverCPULimit, Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}, {
 		// Memory enters lower than CPU: a protected pod whose page cache is
 		// pushed out stalls about 0.11 of its time (casestudy run
 		// 2026-10-30-memrelief). min_effect keeps CPU's ratio to enter (1/8),
 		// so a usage-basis step at enter can clear it.
-		Action: "memory.high", Enter: 0.08, Exit: 0.03, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Action: LeverMemoryHigh, Enter: 0.08, Exit: 0.03, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.01, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
 }
@@ -601,10 +608,10 @@ func Default() Spec {
 			Units:     map[string][]string{"system": {"*"}}},
 		Policy: PolicySpec{
 			Defaults: Settings{
-				Allow: []string{"cpu.limit", "memory.high"}, Deny: []string{"evict"},
+				Allow: []string{LeverCPULimit, LeverMemoryHigh}, Deny: []string{"evict"},
 				Floor: Floor{
-					"cpu.limit":   NewBound(0.1, 0.5),
-					"memory.high": NewBound(64<<20, 0),
+					LeverCPULimit:   NewBound(0.1, 0.5),
+					LeverMemoryHigh: NewBound(64<<20, 0),
 				},
 				MaxActionsPerHour: 6, Cooldown: 10 * time.Minute,
 			},

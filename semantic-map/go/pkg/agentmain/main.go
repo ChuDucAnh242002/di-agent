@@ -348,6 +348,8 @@ func Main() {
 		}
 	}
 	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
+	admit := buildAdmission(cfg, state, rt, reliefLoops, sm.Peers())
+	registerAdmissionRoutes(mux, admit)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
@@ -396,6 +398,7 @@ func Main() {
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
+	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
 	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
 	// would call it; no collectors is a nil collector.

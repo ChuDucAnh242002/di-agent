@@ -330,3 +330,28 @@ func TestARelationshipRetiredByInterventionsMeasuresAfresh(t *testing.T) {
 		t.Fatalf("measured %v; want 0.4, the outcomes since the retirement", r.Measured)
 	}
 }
+
+func TestMeasuredEffectsListsOnlyMeasured(t *testing.T) {
+	m := interventionMap(t)
+	for _, id := range []string{"cpu_a", "cpu_b", "cpu_contention_ratio"} {
+		if err := m.DeclareProperty(Property{ID: id, Kind: Observed, Unit: "fraction",
+			Range: [2]float64{0, 1}, Source: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, from := range []string{"cpu_a", "cpu_b"} {
+		if err := m.DeclareRelationship(Relationship{From: from, To: "cpu_contention_ratio", Sign: 1, Label: "drives"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, e := range []float64{0.2, 0.4} {
+		mustRecord(t, m, InterventionOutcome{From: "cpu_a", To: "cpu_contention_ratio", Agreed: true, HasEffect: true, Effect: e})
+	}
+	got := m.MeasuredEffects("cpu_contention_ratio")
+	if len(got) != 1 || got[0].From != "cpu_a" || got[0].N != 2 || got[0].Effect < 0.299 || got[0].Effect > 0.301 {
+		t.Fatalf("measured effects %+v; want only pod:a, effect 0.3 over 2 outcomes", got)
+	}
+	if got[0].Relationship == "" {
+		t.Fatal("measured effect should name its relationship")
+	}
+}

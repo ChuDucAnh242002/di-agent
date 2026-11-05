@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -31,6 +32,29 @@ func (iv *Interventions) effect() (float64, bool) {
 		return 0, false
 	}
 	return clamp01(iv.EffectSum / float64(iv.EffectN)), true
+}
+
+// MeasuredEffect is the effect the agent measured by acting on From, with the
+// number of unconfounded outcomes it rests on.
+type MeasuredEffect struct {
+	Relationship, From string
+	Effect             float64
+	N                  int
+}
+
+// MeasuredEffects lists, sorted by source, the non-retired relationships into to
+// that have measured effects: what acting on each source has actually done there.
+func (m *Map) MeasuredEffects(to string) []MeasuredEffect {
+	var out []MeasuredEffect
+	for _, r := range m.Relationships("", to) {
+		if r.Status == Retired || r.Interventions == nil || r.Interventions.EffectN == 0 {
+			continue
+		}
+		e, _ := r.Interventions.effect()
+		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e, N: r.Interventions.EffectN})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
+	return out
 }
 
 // InterventionOutcome is the verified result of one action the agent took.
