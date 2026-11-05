@@ -37,7 +37,7 @@ package agentmain
 // /peers/{id}/trust                 POST    SetTrustRequest                204
 // /tasks                            POST    admission.Offer                200 submission (accepted_by null: nobody accepted)
 //                                                                          400 (malformed offer)
-// /tasks                            GET     —                              200 {submissions, outcomes}
+// /tasks                            GET     —                              200 {submissions, answered, pending, outcomes}
 // /offers                           POST    admission.Offer (with chain)   200 admission.Hop
 //                                                                          400 (malformed offer)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse

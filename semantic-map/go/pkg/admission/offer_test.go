@@ -79,4 +79,9 @@ func TestAsked(t *testing.T) {
 	if o.Asked("z", "http://z:1") {
 		t.Error("unrelated node matched")
 	}
+	// An unreachable hop carries no node id; an empty id must not match it.
+	o.Chain = append(o.Chain, Hop{Verdict: Unreachable, URL: "http://u:1"})
+	if o.Asked("", "") || o.Asked("", "http://z:1") {
+		t.Error("empty node id matched a hop without one")
+	}
 }

@@ -66,10 +66,11 @@ func (o Offer) Validate() error {
 }
 
 // Asked reports whether the chain already holds a hop for this node or URL, so
-// an offer is never put to the same node twice. An empty URL matches nothing.
+// an offer is never put to the same node twice. An empty node id or URL matches
+// nothing: unreachable hops carry no node id.
 func (o Offer) Asked(nodeID, url string) bool {
 	for _, h := range o.Chain {
-		if h.Node == nodeID || (url != "" && h.URL == url) {
+		if (nodeID != "" && h.Node == nodeID) || (url != "" && h.URL == url) {
 			return true
 		}
 	}

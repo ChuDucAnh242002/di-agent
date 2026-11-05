@@ -340,8 +340,9 @@ func (c *Client) Health(ctx context.Context, peerURL string) bool {
 // Offer puts a workload to the peer at peerURL and returns its answer as a hop.
 // It does not touch trust and does not retry: whether to go on to the next peer, and
 // how to record an unreachable one, is the caller's. A non-2xx, an undecodable body,
-// or an accept/decline that names no decision id is an error, because an answer
-// that cannot be traced to the peer's journal is not one the caller may act on.
+// a verdict that is not one of admission's, or an accept/decline that names no
+// decision id is an error, because an answer that cannot be read or traced to the
+// peer's journal is not one the caller may act on.
 func (c *Client) Offer(ctx context.Context, peerURL string, o admission.Offer) (admission.Hop, error) {
 	body, err := json.Marshal(o)
 	if err != nil {
@@ -365,6 +366,11 @@ func (c *Client) Offer(ctx context.Context, peerURL string, o admission.Offer) (
 	var hop admission.Hop
 	if err := json.NewDecoder(resp.Body).Decode(&hop); err != nil {
 		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: decode: %w", err)
+	}
+	switch hop.Verdict {
+	case admission.Accept, admission.Decline, admission.Unreachable, admission.AlreadyAsked:
+	default:
+		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: peer %s: unknown verdict %q", peerURL, hop.Verdict)
 	}
 	if hop.DecisionID == "" && hop.Verdict != admission.AlreadyAsked && hop.Verdict != admission.Unreachable {
 		return admission.Hop{}, fmt.Errorf("peers.Client.Offer: peer %s: peer answer has no decision id (verdict %q), so it cannot be traced", peerURL, hop.Verdict)

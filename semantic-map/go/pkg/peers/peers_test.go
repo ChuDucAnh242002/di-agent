@@ -359,12 +359,24 @@ func TestOffer_TransportAndBodyErrors(t *testing.T) {
 
 // An answer that cannot be traced to a journalled decision is not an answer.
 func TestOffer_AnswerWithoutDecisionIDIsAnError(t *testing.T) {
-	for _, body := range []string{`{}`, `{"verdict":"accept"}`, `{"verdict":"decline","reason":"x"}`} {
+	for _, body := range []string{`{"verdict":"accept"}`, `{"verdict":"decline","reason":"x"}`} {
 		srv := offerServer(t, 200, body, nil)
 		_, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
 		srv.Close()
 		if err == nil || !strings.Contains(err.Error(), "no decision id") {
 			t.Errorf("%s: err %v; want a no-decision-id error", body, err)
+		}
+	}
+}
+
+// A verdict that is not one of admission's is not an answer, even with an id.
+func TestOffer_UnknownVerdictIsAnError(t *testing.T) {
+	for _, body := range []string{`{}`, `{"decision_id":"admit-1-1","verdict":"maybe"}`, `{"decision_id":"admit-1-1","verdict":"ACCEPT"}`} {
+		srv := offerServer(t, 200, body, nil)
+		_, err := NewClient(2*time.Second).Offer(context.Background(), srv.URL, admission.Offer{Name: "web"})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "unknown verdict") {
+			t.Errorf("%s: err %v; want an unknown-verdict error", body, err)
 		}
 	}
 }
