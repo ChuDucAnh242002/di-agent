@@ -35,6 +35,11 @@ package agentmain
 // /peers                            POST    AddPeerRequest                 200 PeerDTO
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
+// /tasks                            POST    admission.Offer                200 submission (accepted_by null: nobody accepted)
+//                                                                          400 (malformed offer)
+// /tasks                            GET     —                              200 {submissions, outcomes}
+// /offers                           POST    admission.Offer (with chain)   200 admission.Hop
+//                                                                          400 (malformed offer)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
 //                                                                          422 {error,response} (failed a gate)
 //                                                                          501 (provider disabled)

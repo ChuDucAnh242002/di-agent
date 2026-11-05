@@ -235,8 +235,8 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ╔════════════════════════▼══════════════════════════╗
    PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
    GET /cost                ║                                                   ║
-   POST /offload → Admit    ║   SemanticMap facade                              ║
-   (state map, not here)    ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
+   POST /offers             ║   SemanticMap facade                              ║
+                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
                             ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
                             ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
                             ║   └──────────┴───────────┴──────────┴──────────┘  ║
@@ -281,7 +281,7 @@ What each piece is for, when it runs, and whether it is required.
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
 | **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
 | **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
-| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for a peer's `/cost` and `/offload`, and the `/offload` wire types (the answer itself is the state map's `Admit`) | `/recommend`, `/peers` | Optional |
+| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/tasks`, `/offers` | Optional |
 | **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup (not collectors: those are `sources.collectors`) | Once, at boot | Yes |
 
@@ -483,7 +483,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
 | `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
 | `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
-| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and one accepted admission on a declared demand over the wire (the daemon's route and its declines are covered in `pkg/agentmain` and `pkg/statemap`) |
+| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and one accepted admission on a declared demand over the wire, through a stand-in `/offers` that runs only the `Admit` gate (the daemon's route, its chain walk and its declines are covered in `pkg/agentmain` and `pkg/admission`) |
 
 A separate verification (`pkg/profiles/build_priors_test.go::TestBuildSeedsStructureAndNoMagnitude`)
 asserts the inverse of what its predecessor did: for every KD in `prior_weights.json`
@@ -1640,7 +1640,7 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
 3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
 
-Outcome-driven trust updates (boost on an accepted offload, penalty on a declined one) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but nothing in the daemon calls `peers.Client.Offload`, and the client itself never touches trust: an answer moves trust only when its caller applies `UpdateTrust`. Promoting that to an automatic pipeline is the obvious P7 next step.
+Outcome-driven trust updates (boost on an accepted offer, penalty on a declined one) are designed but not wired. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after an accepted offer, but `peers.Client.Offer` never touches trust and neither does an admission outcome: an answer moves trust only when its caller applies `UpdateTrust`. Admission does not read trust either; a submission walks peers in registry-id order.
 
 ### Why `RecommendPeer` uses trust-weighted savings
 
@@ -1653,89 +1653,158 @@ Two candidate ranking functions:
 
 We chose the latter. The product collapses two dimensions into a single ordering, which is good enough for v1 routing decisions. A future profile that needs finer control (e.g. Pareto frontiers when latency and energy both matter) can build a richer ranker without changing the contract.
 
-### Admission: `/offload` answers from the map
+### Admission: a node accepts work from its own map
 
-A node decides whether it would take a workload from its own state map
-(`statemap.Map.Admit`, `pkg/statemap/admit.go`); the requester relays the question and
-never decides. The answer is a decision: accepted or declined, a reason, and a
-decision id that `GET /state/decisions/{id}` reproduces with the facts, properties and
-thresholds it read. Nothing is scheduled. Execution needs a workload runtime the map
-does not own, and keeping the answer pure lets a requester ask several nodes before
-anything moves. Peers negotiating with these answers is P7.
+A submitter offers a workload by name and demand; a node answers from its own state
+map whether it would run it, and the answer is a prediction the node then checks. The
+broker is dumb: it asks, records the chain of answers, and starts the workload on the
+node that accepted. No node decides for another, and the agent never starts anything
+itself, so it never needs runtime credentials for this (`pkg/admission`,
+`pkg/agentmain/admission.go`).
 
-**Order.** The checks run in this order, and the first to fail answers: the workload,
-whether there is anything to price, the facts, the node's shares, contention, the
-projection.
+**The offer.** `Name` (what the workload will run under, so the accepting node can
+find it when it arrives), optional `Arch`, and per resource (`cpu` in cores, `memory`
+in bytes) a demand with its source: `declared`, or `measured on <node>` with the
+architecture it was measured on and whether it ran under a relief cap. Demand is never
+verified, because a receiver cannot check a measurement taken elsewhere; it is
+recorded with its source. A malformed offer (no name, an unknown resource, a negative
+or non-finite value) is refused before anything is decided or recorded.
 
-**Demand: measured for a pod, else declared.** Only a pod is looked up: its uid is
-the cluster's, so `pod:<uid>` in this map is that workload. A unit or a group
-(`group:<name>` comes from cluster-wide labels, and `group:system` exists by default)
-names something each node has its own of, so what this map holds under that name is
-not the requester's workload; it is priced on the declared demand, and the decision
-says why. A pod with either share, `cpu_utilization@<pod>` or
-`memory_utilization@<pod>`, still active is already counted in the node's own shares:
-there is nothing to admit, and it is declined as "already running", first, with no
-basis and no projection. A stale pod with both shares is priced on them (already node
-shares), or on the declared demand per resource where that is larger, with a caveat
-and both values in the decision. A pod with one share only (the cgroup collector
-reports memory from its first tick, CPU from its second), or with a retired one, is
-priced on the declared demand, with a caveat naming the missing or retired share.
-Otherwise the demand is what the requester declares, cores over the `cpu_cores` fact
-and bytes over `memory_total`; the decision says it was declared, not observed, and
-why, and names a resource declared as zero. With nothing measured and nothing
-declared, there is nothing to price, and it declines.
+**The domains are relief's levers.** One per relief loop: the actuator descriptor's
+`Relieves`, `Usage` and `Capacity`, the lever's `Exit`, `Enter` and `Settle`, and the
+loop's phase. Admission predicts the pressure relief acts on, against relief's own
+levels, so an accept means "relief would not have to act". With relief off there are
+no domains and every offer declines: a node never admits blind.
 
-**Limitation.** Measured demand is keyed on the pod's UID, which matches only a pod
-that ran here and returns. An offloaded pod has a UID this node has never seen, so
-declared is the normal path; keying on owner or controller identity is future work.
+**The decision, in order** (`admission.Decide`; each a decline with its reason):
 
-**Criterion: relief-based.** Accept only if taking the workload would not put the
-node where relief has to act. A node whose `cpu_contention_ratio` or
-`memory_contention_ratio` is at or above its lever's `enter` declines outright. A
-stale or retired contention reading declines only while a pod still reports what it
-is the worst of (an active `cpu_contention_ratio@pod:*`, or `memory_pressure_ratio@pod:*`
-for memory); with none, the node has been emptied (the collector stops the node's CPU
+1. Architecture: the offer lists architectures and this node's is not one of them.
+2. No domains.
+3. Relief active (`relieving` or `releasing`) on any domain: headroom made by
+   throttling is not spare capacity.
+4. Demand: a domain's resource has no demand in the offer; a CPU demand measured on
+   another architecture (nothing relates one architecture's CPU to another's; memory
+   carries over).
+5. The headroom gate, `statemap.Map.Admit`, with the CPU and memory levers' `Enter`
+   (see *The gate* below). It is its own journalled decision, id `<admission id>-gate`,
+   linked from the admission record as `gate`. A calm node offered more than it has
+   left would read zero on every pressure prediction below, so the shares must fit
+   first.
+6. Prediction, per domain: the pressure the domain would reach with the workload
+   added must be at or below `Exit`, the level relief releases caps at. Admitting up
+   to `Enter` would hold pressure in the band where caps never release.
+
+A name already awaiting its outcome on this node declines `already pending` before
+any of this, and the check-and-register is one critical section, so two concurrent
+offers for one name cannot both be accepted.
+
+**The gate.** `Admit` checks, in order, the first to fail answering: the workload,
+whether there is anything to price, the facts (`cpu_cores`, `memory_total`), the
+node's shares, contention, the projection. Admission calls it with no workload, so the
+demand is the offer's, declared: cores over `cpu_cores`, bytes over `memory_total`, a
+resource declared as zero named in a caveat; with no demand at all there is nothing to
+price and it declines. A missing or non-positive fact, or a node share never observed,
+stale or retired, declines naming it. A node whose `cpu_contention_ratio` or
+`memory_contention_ratio` is at or above its lever's `Enter` declines. A stale or
+retired contention reading declines only while a pod still reports what it is the
+worst of (an active `cpu_contention_ratio@pod:*`, or `memory_pressure_ratio@pod:*` for
+memory); with none, the node has been emptied (the collector stops the node's CPU
 reading when no pod is promised CPU), which is the best target, so it is taken as not
-contended, with a caveat. A contention property the map does not hold or has never
-observed is a check skipped, with a caveat; so is a lever the spec does not have,
-which the agent also logs once at startup. Then the node's `cpu_utilization` and
-`memory_utilization` plus the demand must stay at or below `1 - admitHeadroom` (a
-constant, 0.10): past it, a pod owed CPU or memory waits on what others hold, which is
-what relief relieves. A missing or non-positive fact, or a node share never observed,
-declines naming it; a stale node share declines, and a retired one declines like a
-stale one. `cpu_after` and `memory_after` are present only when the projection was
-made.
+contended, with a caveat. A contention property never observed, or a lever the spec
+does not have, is a check skipped, with a caveat. Then node share plus demand must
+stay at or below `1 - admitHeadroom` (a constant, 0.10) of the node. An explicit
+decision id already used is refused and records nothing (`Admit`'s own auto ids digest
+the request as JSON at the pinned revision, suffixed `-2`, `-3` on a retry).
 
-**Decision ids.** `adm-<revision>-<digest>`, the digest a SHA-256 of the request's
-fields as JSON, at the revision the decision is pinned to. An identical request asked
-again at the same revision takes `-2`, `-3`, …, so no record is overwritten; an
-explicit id already used is refused. A refused request (a bad demand, a reused id, an
-unknown field or trailing data on the wire, which is a `400`) records nothing.
+Called with a workload, `Admit` also prices a pod (`pod:<uid>`) from the map: one with
+a share still active is declined "already running" (nothing to admit); a stale pod
+with both shares is priced on the larger of measured and declared per resource, both
+recorded; one with a single or retired share falls back to declared, caveated. A unit
+or a group names something each node has its own of, so it is always declared.
+*Limitation:* measured demand is keyed on the pod's UID, which matches only a pod that
+ran here and returns; an offloaded pod has a UID this node has never seen, so declared
+is the normal path, and keying on owner or controller identity is future work.
+Admission does not pass a workload today, since an offer names what the workload will
+run under, not a pod UID.
 
-**Why not `/state/estimate?assume=`.** Contention is a measured stall (PSI less the
-workload's own throttling, or the worst protected pod's memory stall), not a function
-of demand, so it cannot be projected for a workload that does not exist yet; and
-`assume` substitutes the value of a property already in the map, which a newcomer does
-not have. Admission therefore reads capacity headroom from the map's node shares and
-the machine's facts, through the same `DecisionBuilder`, so it is traceable the same way.
+**Two prediction bases, both always recorded.** With `share` the demand over the
+domain's capacity fact and `pressure` the current `Relieves` reading:
 
-The old answer, `CostOfAction` against latency and energy budgets, is gone: energy was
-never measured on this system. `/cost`, `/recommend` and `/simulate` remain as they were.
+- *map*: `pressure + k · share`, `k` the largest effect relief has measured on this
+  node by acting on some subject's `Usage@<subject>` towards `Relieves`
+  (`Map.MeasuredEffects`; the largest, so it leans towards declining). It exists only
+  where relief has acted and its outcomes were evidence.
+- *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
+
+The map basis decides when it exists, the usage basis otherwise; both are written into
+the record whenever their inputs exist, so the basis that did not decide can be scored
+too. A node with no `Relieves` reading reads 0 when no subject reports one (an idle
+node is calm) and declines when a subject does (the gap is a gap).
+
+**The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
+a decline puts the offer, with the chain so far, to each registered peer in
+registry-id order through `POST /offers`, skipping a URL already in the chain and
+stopping at the first accept. A peer whose node id is already in the chain answers
+`already_asked` without deciding; a peer never forwards. A peer that cannot be
+reached, times out, answers non-2xx, or answers without a decision id is recorded as
+`unreachable`: an answer that cannot be traced is not an accept. Each hop carries the
+URL it was asked at and its decision id, so `<url>/state/decisions/<id>` resolves on
+the node that decided; traceability is per node, and the submitter keeps the chain,
+not the peers' decisions. Ids are `admit-<agent start epoch>-<seq>` for accepts,
+declines and outcomes alike.
+
+**The outcome check.** An accept is a prediction, and the accepting node checks it
+(`admission.Tracker`, ticked on relief's interval). It keeps at most 32 pending
+accepts, dropping the oldest. The workload has arrived when the runtime lists one with
+the offered name and its `Usage@<subject>` is in the map for every domain; the node
+then snapshots each domain's `Relieves`, node `Usage`, and every other subject's
+share. After the lever's `Settle` it reads `Relieves` again and journals an outcome
+linked to the accept:
+
+- `not_arrived`: no workload by that name within 5 minutes;
+- `confounded`: another workload moved, arrived or left since the snapshot
+  (`relief.Moved`), or relief acted in a domain during the window; predictions are
+  recorded, not scored;
+- `breached`: some domain's `Relieves` is above `Enter` (strictly, as relief's
+  trigger is);
+- `held`: otherwise.
+
+A scored outcome records, per domain, the observed rise of `Relieves` and each basis's
+predicted rise and error, the paired comparison below rests on. Nothing follows from
+an outcome: no trust update, no retry, no eviction. An accept reserves nothing (two
+offers before the first workload arrives are judged against the same usage), and only
+false accepts are observable, since a declined workload never runs.
+
+**What would show the map adds nothing.** Read off a demo's outcome log; any of these
+is reported as found:
+
+1. The map basis decides fewer than a third of decisions: the contribution shrinks to
+   traceability.
+2. On scored outcomes the map basis's error is no lower than the usage basis's, on the
+   same cases (both are always recorded): the measured slope does not predict better
+   than proportion.
+3. The headroom gate plus "relief inactive" alone give the same verdicts as the full
+   decision: the prediction step is not doing the deciding.
+
+`POST /offload` and `peers.Client.Offload` are gone; `Admit` survives as step 5. The
+older answer, `CostOfAction` against latency and energy budgets, was never an
+admission criterion: energy was never measured on this system. `/cost`, `/recommend`
+and `/simulate` remain as they were.
 
 ### Proof: the headline scenario
 
-`TestScenario_CoordinationOffload` is the load-bearing test for this layer. It wires three in-process agents (A idle, B loaded, C medium), gives each its own `httptest.NewServer` running the minimum surface (`/cost`, `/healthz`, `/offload`), cross-registers them, and walks B through a complete coordination cycle:
+`TestScenario_CoordinationOffload` is the load-bearing test for this layer. It wires three in-process agents (A idle, B loaded, C medium), gives each its own `httptest.NewServer` running the minimum surface (`/cost`, `/healthz`, and a stand-in `/offers` that runs only the `Admit` gate), cross-registers them, and walks B through a complete coordination cycle:
 
 1. Pre-flight: print self-cost for A, B, C — assert `A < C < B`.
 2. `B.RecommendPeer` → must return A (highest trust-weighted savings).
-3. `B → A POST /offload` via `peers.Client`, declaring one core and 1 GiB → A admits it from its own map.
+3. `B → A POST /offers` via `peers.Client.Offer`, declaring one core and 1 GiB → A admits it from its own map.
 4. B updates `Registry.UpdateTrust(A.ID, +0.10)` and prints the before/after table.
 
 The verbose output narrates each step. If the scenario passes with A chosen and trust incremented, the coordination claim is proven end-to-end. The HTTP routes, the CLI subcommand, and the operator-facing surface are plumbing around this core demo.
 
 ### v1 security stance
 
-No auth on `/peers` or `/offload`. The deployment target is localhost / lab-network. Production hardening — mTLS, signed peer identities, bearer tokens, or a capability-based access control — is a deliberate P7 concern. Treating it as "out of scope for v1" is documented here so a future reviewer cannot mistake the omission for an oversight.
+No auth on `/peers`, `/tasks` or `/offers`. The deployment target is localhost / lab-network. Production hardening — mTLS, signed peer identities, bearer tokens, or a capability-based access control — is a deliberate P7 concern. Treating it as "out of scope for v1" is documented here so a future reviewer cannot mistake the omission for an oversight.
 
 ---
 

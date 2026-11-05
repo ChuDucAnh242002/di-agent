@@ -32,19 +32,26 @@ var ErrAlreadyPending = errors.New("already pending")
 
 // Outcome is what became of one accept.
 type Outcome struct {
-	Name, AcceptID, OutcomeID, Subject, Result string
-	Lines                                      []OutcomeLine
-	At                                         time.Time
+	Name      string        `json:"name"`
+	AcceptID  string        `json:"accept_id"` // the accept's decision, which holds both predictions
+	OutcomeID string        `json:"outcome_id"`
+	Subject   string        `json:"subject"`
+	Result    string        `json:"result"`
+	Lines     []OutcomeLine `json:"lines"`
+	At        time.Time     `json:"at"`
 }
 
 // OutcomeLine is one domain's check: the observed rise of Relieves since the
 // arrival snapshot against each basis's predicted rise. Rises and errors are set
 // only on scored outcomes (held, breached); an error is predicted minus observed.
 type OutcomeLine struct {
-	Domain                               string
-	ObservedRise                         float64
-	MapRise, UsageRise, MapErr, UsageErr *float64
-	Breached                             bool
+	Domain       string   `json:"domain"`
+	ObservedRise float64  `json:"observed_rise"`
+	MapRise      *float64 `json:"map_rise,omitempty"`
+	UsageRise    *float64 `json:"usage_rise,omitempty"`
+	MapErr       *float64 `json:"map_err,omitempty"`
+	UsageErr     *float64 `json:"usage_err,omitempty"`
+	Breached     bool     `json:"breached"`
 }
 
 // TrackerConfig wires a tracker to the agent. Workloads, Shares and Moved are
