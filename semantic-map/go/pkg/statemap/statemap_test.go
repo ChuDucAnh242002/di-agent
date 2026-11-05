@@ -1309,6 +1309,23 @@ func TestRecordWithoutRangeAssumesUnitIntervalAndSaysSo(t *testing.T) {
 	}
 }
 
+// Save encodes the snapshot after releasing the map's lock, so a snapshot that shares a
+// property's Labels with the map is encoded while observations merge labels into it: a
+// fatal concurrent map iteration and map write in the save loop, which ended a case-study
+// run on the VM.
+func TestSnapshotDoesNotShareLabelsWithTheMap(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "burstable"}})
+	snap := m.Snapshot()
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 2, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"name": "redis-0"}})
+	if _, ok := snap.Properties[0].Labels["name"]; ok {
+		t.Fatal("an observation after the snapshot changed its labels: the snapshot shares the map's")
+	}
+}
+
 func TestRecordMergesLabelsAndKeepsSubjectImmutable(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",

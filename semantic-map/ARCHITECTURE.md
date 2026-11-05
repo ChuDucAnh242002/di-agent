@@ -2185,8 +2185,14 @@ rejected reviews do not reopen every window. The rule is stateless and uses the 
 confirmation and decision-journal paths. Persistent-correlation approvals retain
 `Review.Association` and declare a symmetric `association` relationship rather than
 choosing an orientation, including for scoped-to-node pairs. The state
-snapshot also carries the proposer's bounded buffers, timestamps, replacement rollback
-state, grouping links and candidate history. Checkpoint capture runs outside the state
+snapshot also carries the proposer's timestamps, replacement rollback state, grouping
+links, candidate history, and the buffers of the pairs something rests on: a pair with a
+candidate, whose persistence run would otherwise start over, and a pair linking a group.
+Every other tested pair holds only readings and refills within one window after a
+restart. Saving all of them made each save hold the whole pair budget's evidence, about
+115 MB of checkpoint and over a gigabyte allocated per save at a 16 GiB machine's
+64 000 pairs, so the snapshot and the agent's memory grew as the budget filled (#56).
+Checkpoint capture runs outside the state
 mutex to avoid proposer/state lock inversion. Restore requires matching discovery
 settings and checkpoint/pair timestamps within a separate 24-hour discovery age/gap
 limit. Expired or changed-policy evidence is explicitly discarded; a malformed

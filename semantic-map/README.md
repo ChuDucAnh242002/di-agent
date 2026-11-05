@@ -1742,8 +1742,9 @@ confirmations remain causal; operator confirmation of an undirected candidate re
 choosing an endpoint. A strength assertion cannot turn an association into a causal edge.
 
 When `persist.file` is set, the same atomic state snapshot also saves the discovery
-buffers, duplicate suppression, partial-window progress, candidates and completed
-windows. Discovery evidence has its own 24-hour age/gap limit, independent of
+buffers of pairs with a candidate or a group link, duplicate suppression,
+partial-window progress, candidates and completed windows; other tested pairs refill
+after a restart. Discovery evidence has its own 24-hour age/gap limit, independent of
 `map.stale_after`; matching, fresh checkpoints resume across ordinary restarts.
 Changed settings, expired evidence or a backwards clock produce an explicit cold-start
 log. A malformed discovery checkpoint is discarded with an error-level log while the
