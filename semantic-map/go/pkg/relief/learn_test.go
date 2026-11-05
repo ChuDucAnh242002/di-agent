@@ -663,3 +663,16 @@ func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
 		t.Fatalf("map-basis factor %v after a measured effect; want 1, nothing left to correct", f)
 	}
 }
+
+func TestMovedReportsArrivalAndExcludes(t *testing.T) {
+	now := time.Now()
+	m := newMap(t, func() time.Time { return now })
+	cores(t, m, 4)
+	record(t, m, usage("pod:a"), "pod:a", 0.4, now)
+	record(t, m, usage("pod:b"), "pod:b", 0.2, now)
+	record(t, m, usage("pod:c"), "pod:c", 0.3, now)
+	got := Moved(m, nodeUsage, map[string]float64{"pod:a": 0.4}, "pod:c", 0.25)
+	if len(got) != 1 || got[0] != "pod:b" {
+		t.Fatalf("moved %v; want [pod:b]", got)
+	}
+}
