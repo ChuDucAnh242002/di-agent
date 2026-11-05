@@ -241,8 +241,10 @@ func (p *MICorrelationProposer) SetMinSpread(share float64) {
 	}
 }
 
-// DefaultFDR is the false-discovery rate the candidate bar holds to by default: of
-// the candidates the bar lets through, about 5% are expected to be chance.
+// DefaultFDR is the nominal false-discovery rate of the candidate bar: of the
+// candidates it lets through, about 5% would be chance were the pairs' p-values
+// independent or positively dependent. Pairs sharing a property are dependent, so
+// this is the level Benjamini–Hochberg runs at, not a proven bound.
 const DefaultFDR = 0.05
 
 // SetFDR sets the false-discovery rate of the candidate bar. A pair becomes a
