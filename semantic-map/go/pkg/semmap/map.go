@@ -399,7 +399,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		if from != "" {
 			return fmt.Errorf("association %q cannot specify a direction", candidateID)
 		}
-		cs, err := m.proposer.GetCandidates()
+		cs, err := m.proposer.GetHistory()
 		if err != nil {
 			return err
 		}
@@ -427,6 +427,27 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
 	}
+	// Every way out but a reopen leaves the confirmation standing, and the proposer
+	// need not keep what the candidate was before it.
+	reopened := false
+	defer func() {
+		if a, ok := m.proposer.(interface{ Applied(string) }); ok && !reopened {
+			a.Applied(candidateID)
+		}
+	}()
+	// refused puts the candidate back as it was — pending, or deferred by the
+	// proposer — when the declaration was refused before anything was applied: Confirm
+	// marked it Confirmed, and with nothing behind it that would be a phantom nobody can
+	// retry or reject.
+	refused := func(err error) error {
+		if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
+			reopened = true
+			if rerr := r.Reopen(candidateID); rerr != nil {
+				return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
+			}
+		}
+		return fmt.Errorf("%w; candidate %s is back to its status before the confirmation", err, candidateID)
+	}
 	if rv.Association || m.isPropertyPair(prop.FromConstruct, prop.ToConstruct) {
 		sign := 1
 		if prop.Direction == types.Negative {
@@ -448,22 +469,21 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
 		})
 		if err != nil {
-			// The proposer marked the candidate Confirmed on the way out; with no
-			// relationship behind it that would be a phantom nobody can retry or
-			// reject. Put it back.
-			if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
-				if rerr := r.Reopen(candidateID); rerr != nil {
-					return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
-				}
-			}
-			return fmt.Errorf("%w; candidate %s is pending again", err, candidateID)
+			return refused(err)
 		}
 		return nil
 	}
 	// The facade applies it, because this is the only path that reaches both the
 	// declaration and the state model. A confirmed candidate that landed only in the
-	// declaration would appear in Propositions() and take part in no answer.
-	return m.AddValidatedProposition(prop)
+	// declaration would appear in Propositions() and take part in no answer. The
+	// ontology validates before it appends, so its refusal — a proposition contradicting
+	// the backbone — applied nothing. A failure in the state model comes after the
+	// backbone took the proposition, so the confirmation stands: reopening it would let
+	// a second confirmation add the proposition twice.
+	if err := m.ontology.AddValidatedProposition(prop); err != nil {
+		return refused(err)
+	}
+	return m.declareProposition(prop)
 }
 
 // isPropertyPair reports whether a confirmed candidate relates two properties of the
@@ -505,7 +525,7 @@ func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateRevie
 	return m.proposer.Defer(candidateID, rv)
 }
 
-// AnnotateCandidate records a review of a pending candidate that did not act on it:
+// AnnotateCandidate records a review of an open candidate that did not act on it:
 // an undecided review, or a suggestion under an autonomy level that reserves the action.
 func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
 	return m.proposer.Annotate(candidateID, rv)
@@ -707,6 +727,12 @@ func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
 	if err := m.ontology.AddValidatedProposition(p); err != nil {
 		return err
 	}
+	return m.declareProposition(p)
+}
+
+// declareProposition declares, in the state model, a proposition the ontology has
+// accepted: its endpoints if missing, and the relationship.
+func (m *SemanticMap) declareProposition(p *types.Proposition) error {
 	if m.state == nil {
 		return nil
 	}

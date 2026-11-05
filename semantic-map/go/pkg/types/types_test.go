@@ -58,3 +58,30 @@ func TestCandidateStatusIsNamedInJSON(t *testing.T) {
 		t.Errorf("String() = %q", Confirmed.String())
 	}
 }
+
+// Open: a review may settle a pending candidate or one the proposer deferred, never
+// one the operator or the agent settled, nor a confirmed one.
+func TestCandidateOpen(t *testing.T) {
+	for _, tc := range []struct {
+		status CandidateStatus
+		reason string
+		want   bool
+	}{
+		{Pending, "", true},
+		{Deferred, "cap", true},
+		{Deferred, "untested", true},
+		{Deferred, "grouped", true},
+		{Deferred, "bar", true},
+		{Deferred, "weakened", true},
+		{Deferred, ReasonOperator, false},
+		{Deferred, ReasonAgent, false},
+		{Rejected, ReasonOperator, false},
+		{Rejected, ReasonAgent, false},
+		{Confirmed, "", false},
+	} {
+		c := CandidateEdge{Status: tc.status, Reason: tc.reason}
+		if got := c.Open(); got != tc.want {
+			t.Errorf("%v/%q: Open() = %v; want %v", tc.status, tc.reason, got, tc.want)
+		}
+	}
+}

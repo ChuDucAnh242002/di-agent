@@ -294,9 +294,11 @@ func (r *Reviewer) Run(ctx context.Context) {
 	}
 }
 
-// Cycle reviews up to MaxPer candidates that are due: pending, and never reviewed or
-// with evidence that has moved since their last review. Strongest first, so a full
-// queue spends the models on the candidates most likely to matter.
+// Cycle reviews the candidates that are due: never reviewed, or with evidence that
+// has moved since their last review. Tier 0 runs over every open candidate
+// (types.CandidateEdge.Open), pending or withdrawn by the proposer; the models then
+// take up to MaxPer pending ones, strongest first, so a full queue spends them on
+// the candidates most likely to matter.
 func (r *Reviewer) Cycle(ctx context.Context) {
 	r.cycle.Lock()
 	defer r.cycle.Unlock()
@@ -316,16 +318,32 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	})
 	reviewed, waiting := 0, 0
 	r.down.decider, r.down.reasoner = false, false
-	// Tier 0 first, over every due candidate: a rule costs nothing and a model call a
-	// minute or more on a node, so what a rule settles never waits behind the models'
-	// queue, and does not count against their cap.
+	// Tier 0 first, over every open candidate that is due — pending, or deferred by the
+	// proposer: a rule costs nothing and a model call a minute or more on a node, so
+	// what a rule settles never waits behind the models' queue, and does not count
+	// against their cap. The proposer's deferrals are included because a cycle runs
+	// as long as its model calls take, and a candidate can be raised and withdrawn
+	// (its |r| weakened, the cap took it) between two cycles; a rule that holds by
+	// definition still holds, and one that reads evidence reads it as it is now.
+	history, err := r.m.CandidateHistory()
+	if err != nil {
+		r.failed(err)
+		return
+	}
 	settled := map[string]bool{}
-	for _, c := range due {
+	for _, c := range history {
 		if ctx.Err() != nil {
 			break
 		}
-		if _, ok := r.rules(Evidence{Candidate: *c}); !ok || !r.endsActive(c) {
+		if !c.Open() || !c.Review.Outdated(c) {
 			continue
+		}
+		o, ok := r.rules(Evidence{Candidate: *c})
+		if !ok || !r.endsActive(c) {
+			continue
+		}
+		if c.Status != types.Pending && !r.cfg.Level.permits(o.tier, o.action) {
+			continue // a suggestion is recorded on the queue, and a withdrawn candidate is not in it
 		}
 		if ok, err := r.review(ctx, c, pending); err == nil && ok {
 			settled[c.CandidateID] = true
@@ -402,7 +420,12 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	if err != nil {
 		b.Caveat("applying %s failed: %v; the candidate was left undecided instead", o.action, err)
 		o.action, applied = types.ReviewUndecided, false
-		_ = r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id))
+		if err := r.m.AnnotateCandidate(c.CandidateID, r.reviewOf(o, id)); err != nil {
+			// The candidate was open a moment ago; one the operator closed meanwhile
+			// takes no annotation, and its own review stands.
+			b.Caveat("recording the undecided review failed: %v", err)
+			r.failed(fmt.Errorf("recording the review of %s: %w", c.CandidateID, err))
+		}
 	}
 	b.Note("tier %d (%s): %s", o.tier, o.by, o.why)
 	answer := map[string]any{

@@ -44,6 +44,15 @@ const (
 	// relayDrain bounds how long a reaped process's stderr may still be relayed
 	// before the pipe is closed under it, in case a grandchild holds it open.
 	relayDrain = 200 * time.Millisecond
+	// startTimeout bounds launching the plugin and its hello, at Start and at every
+	// restart, when it is longer than the collect timeout. A plugin's cold start (an
+	// interpreter loading its imports from an SD card on a Raspberry Pi, a device
+	// opening) can take seconds, and a restart is a cold start too: held to the
+	// tick's deadline, a plugin that needs longer would fail every restart after
+	// its first fault and back off for good. A restart that outlives the tick is
+	// abandoned by the supervisor, which skips the member while it runs, so the
+	// other members' ticks do not wait for it.
+	startTimeout = 30 * time.Second
 )
 
 // ExecCollector runs an out-of-process plugin speaking wire protocol v1 over its
@@ -66,6 +75,11 @@ type ExecCollector struct {
 	extraEnv []string
 	// grace is shutdownGrace; tests shorten it.
 	grace time.Duration
+
+	// stop is closed by Close before it takes mu, so a Start or Collect waiting on
+	// a reply gives up at once instead of holding Close for up to startTimeout.
+	stop     chan struct{}
+	stopOnce sync.Once
 
 	// mu serialises Start, Collect and Close, which own proc.
 	mu      sync.Mutex
@@ -122,11 +136,13 @@ func NewExecCollector(env Env, name string, sp spec.ExecSpec, timeout time.Durat
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &ExecCollector{env: env, name: name, sp: sp, timeout: timeout, config: config, logf: logf, grace: shutdownGrace}
+	return &ExecCollector{env: env, name: name, sp: sp, timeout: timeout, config: config, logf: logf,
+		grace: shutdownGrace, stop: make(chan struct{})}
 }
 
-// Start spawns the plugin and completes hello. An error means the plugin could
-// not be run or refused the hello; the daemon refuses to start on it.
+// Start spawns the plugin and completes hello within startTimeout, or the collect
+// timeout when that is longer. An error means the plugin could not be run, did
+// not answer or refused the hello; the daemon refuses to start on it.
 func (e *ExecCollector) Start() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -137,16 +153,24 @@ func (e *ExecCollector) Start() error {
 		return nil
 	}
 	e.started = true
-	return e.spawn(time.Now().Add(e.timeout))
+	return e.spawn(e.startDeadline(time.Now()))
+}
+
+// startDeadline is when a launch begun at now must have answered hello:
+// startTimeout, or the collect timeout when that is longer.
+func (e *ExecCollector) startDeadline(now time.Time) time.Time {
+	return now.Add(max(e.timeout, startTimeout))
 }
 
 // Collect sends one collect request and returns the stamped samples. A plugin
 // that faulted earlier, or exited since the last tick, is restarted first.
 //
-// The whole call, restart and hello included, shares one deadline of the
-// configured timeout: the supervisor waits only a short grace beyond it, so a
-// restart tick that gave hello and collect a timeout each would be abandoned by
-// the supervisor even when the plugin is merely slow to start.
+// A restart is a cold start, so its hello has the startup allowance (Start), not
+// the tick's deadline. The collect shares the tick's deadline with the restart: a
+// restart that used it up returns an error without collecting, and the plugin,
+// now running, collects from the next tick. Such a restart outlives the
+// supervisor's wait, which abandons the call and skips the member until it ends;
+// the other members' ticks do not wait for it.
 func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -156,7 +180,8 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	e.availMu.Lock()
 	e.drops = nil
 	e.availMu.Unlock()
-	deadline := time.Now().Add(e.timeout)
+	begin := time.Now()
+	deadline := begin.Add(e.timeout)
 	if e.proc != nil {
 		// A plugin that exited between ticks is not a fault of this tick; reap it
 		// and start a fresh one instead of writing into a dead pipe. It is still a
@@ -173,8 +198,12 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 			e.restarts.Add(1)
 		}
 		e.started = true
-		if err := e.spawn(deadline); err != nil {
+		if err := e.spawn(e.startDeadline(begin)); err != nil {
 			return nil, fmt.Errorf("restart: %w", err)
+		}
+		if took := time.Since(begin); took >= e.timeout {
+			return nil, fmt.Errorf("restart: plugin took %s to start and answer hello, past this tick's %s timeout; it collects from the next tick",
+				took.Round(time.Millisecond), e.timeout)
 		}
 	}
 	e.seq++
@@ -229,6 +258,7 @@ func (e *ExecCollector) Restarts() int64 { return e.restarts.Load() }
 // when the plugin exited on EOF, and says which signal it took otherwise, so a
 // caller joining Close errors learns which plugins ignore the protocol's stop.
 func (e *ExecCollector) Close() error {
+	e.stopOnce.Do(func() { close(e.stop) })
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.closed = true
@@ -418,7 +448,9 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 	if _, err := p.stdin.Write(append(b, '\n')); err != nil {
 		return nil, fmt.Errorf("write request: %w", err)
 	}
-	t := time.NewTimer(time.Until(deadline))
+	// Never negative: a deadline already passed is reported as 0s, not "-3ms".
+	wait := max(time.Until(deadline), 0)
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	select {
 	case r := <-p.lines:
@@ -427,7 +459,9 @@ func (e *ExecCollector) roundTrip(req any, deadline time.Time) ([]byte, error) {
 		}
 		return r.line, nil
 	case <-t.C:
-		return nil, fmt.Errorf("no reply within %s", e.timeout)
+		return nil, fmt.Errorf("no reply within %s", wait.Round(time.Millisecond))
+	case <-e.stop:
+		return nil, errors.New("collector closed")
 	}
 }
 
