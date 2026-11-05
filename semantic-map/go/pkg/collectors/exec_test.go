@@ -39,10 +39,11 @@ func (l *logSink) count(prefix string) int {
 	return n
 }
 
-// restartTimeout is the collect timeout of a test that needs a restart inside
-// Collect to succeed. That restart shares the tick's deadline, and this test binary,
-// race-instrumented and started cold on a loaded machine, can take seconds to
-// answer hello; the timeout is not what those tests verify.
+// restartTimeout is the collect timeout of a test that needs a restart and the
+// collect after it to succeed in one Collect. The collect is made only when the
+// restart left time in the tick, and this test binary, race-instrumented and
+// started cold on a loaded machine, can take seconds to answer hello; the timeout
+// is not what those tests verify.
 const restartTimeout = 10 * time.Second
 
 // fixture builds an ExecCollector named "fx" for node "n1" that runs this test
@@ -116,10 +117,12 @@ func TestExecProtocolMismatchRefused(t *testing.T) {
 	}
 }
 
-// Start is allowed startTimeout for a plugin's cold start, not the collect
-// timeout, but a restart inside Collect still shares the tick's deadline.
-func TestExecStartAllowsSlowHello(t *testing.T) {
-	e, _ := fixture(t, "slow-hello", time.Second, nil)
+// A plugin slower to start than the collect timeout is allowed startTimeout for
+// its cold start, at Start and at a restart after a fault. The restart outlives
+// its tick, so that tick collects nothing and says why; the next one collects
+// from the restarted plugin.
+func TestExecSlowStartRecoversAfterFault(t *testing.T) {
+	e, dir := fixture(t, "slow-hello", time.Second, nil)
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start of a plugin slower than the collect timeout to hello: %v", err)
 	}
@@ -129,8 +132,79 @@ func TestExecStartAllowsSlowHello(t *testing.T) {
 	e.mu.Lock()
 	e.fault(nil)
 	e.mu.Unlock()
-	if _, err := e.Collect(); err == nil || !strings.Contains(err.Error(), "hello: no reply within") {
-		t.Fatalf("Collect restarting a slow plugin: err %v, want a hello timeout", err)
+	if _, err := e.Collect(); err == nil || !strings.Contains(err.Error(), "it collects from the next tick") {
+		t.Fatalf("Collect restarting a slow plugin: err %v, want the restart to outlive the tick and say so", err)
+	}
+	if got, err := e.Collect(); err != nil || len(got) == 0 {
+		t.Fatalf("Collect after the slow restart = %d samples, err %v; want the plugin recovered", len(got), err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "hellos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "hello\n"); n != 2 || e.Restarts() != 1 {
+		t.Fatalf("fixture saw %d hellos, Restarts %d; want 2 and 1", n, e.Restarts())
+	}
+}
+
+// Under a supervisor, a slow restart holds up neither the tick nor the other
+// members: the tick gives up on it after the member's wait, the member is stuck
+// until the restart ends, and it collects again once out of backoff.
+func TestExecSlowRestartUnderSupervisor(t *testing.T) {
+	e, _ := fixture(t, "slow-hello", time.Second, nil)
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	other := &fakeCollector{id: "other", samples: []*types.MetricSample{sample("x", "share")}}
+	s, clk := newTestSupervisor(t, Member{Name: "fx", Kind: "exec", C: e, Timeout: time.Second}, member("other", other))
+	if _, err := s.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.fault(nil)
+	e.mu.Unlock()
+
+	start := time.Now()
+	out, _ := s.Collect()
+	if d := time.Since(start); d > time.Second+outOfProcessGrace+500*time.Millisecond {
+		t.Fatalf("tick with a slow restart in flight took %s", d)
+	}
+	if len(out) != 1 || statusOf(t, s, "fx").State != "stuck" {
+		t.Fatalf("tick = %d samples, fx %+v; want the other member's sample and fx stuck", len(out), statusOf(t, s, "fx"))
+	}
+	for deadline := time.Now().Add(startTimeout); statusOf(t, s, "fx").State == "stuck"; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("still stuck after the startup allowance")
+		}
+	}
+	clk.Advance(time.Hour)
+	out, _ = s.Collect()
+	if st := statusOf(t, s, "fx"); st.State != "ok" || len(out) < 2 {
+		t.Fatalf("after the restart: fx %+v, %d samples; want fx collecting again", st, len(out))
+	}
+}
+
+// Close does not wait out a plugin's startup allowance: a hello in flight gives up.
+func TestExecCloseInterruptsSlowStart(t *testing.T) {
+	e, dir := fixture(t, "slow-hello", time.Second, nil)
+	done := make(chan error, 1)
+	go func() { done <- e.Start() }()
+	// The fixture records the hello before it sleeps on it.
+	for deadline := time.Now().Add(startTimeout); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "hellos")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture never received hello")
+		}
+	}
+	start := time.Now()
+	e.Close()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Close during a slow hello took %s", d)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("Start interrupted by Close succeeded")
 	}
 }
 
