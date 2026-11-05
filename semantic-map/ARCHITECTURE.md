@@ -1796,7 +1796,8 @@ accept, the first that applies:
   workload frees capacity the others absorb: a move then is relief's doing, recorded
   as `moved`, and scoring it `confounded` would hide the breach;
 - `confounded`: another workload moved, arrived or left since accept (`relief.Moved`,
-  the newcomer excepted); predictions are recorded, not scored;
+  the newcomer excepted; groups are not workloads here, being sums of their members, so
+  a newcomer's own group does not count as moving); predictions are recorded, not scored;
 - `confounded`, the admitted workload no longer reporting: its `Usage@<subject>` is
   gone or retired at judgement, so `Relieves` no longer carries it;
 - `confounded`, stale reading: a domain's `Relieves` is stale at judgement;

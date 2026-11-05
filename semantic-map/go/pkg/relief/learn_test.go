@@ -664,6 +664,26 @@ func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
 	}
 }
 
+func TestSharesLeaveOutGroups(t *testing.T) {
+	// A group is the sum of its members: counted beside them, a pod arriving or capped
+	// would move its group too, and read as some other workload moving.
+	now := time.Now()
+	m := newMap(t, func() time.Time { return now })
+	cores(t, m, 4)
+	if err := m.DeclareGroup("group:compute", []string{"pod:a", "pod:c"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	record(t, m, usage("pod:a"), "pod:a", 0.4, now)
+	if s := Shares(m, nodeUsage); len(s) != 1 || s["pod:a"] == 0 {
+		t.Fatalf("shares %v; want pod:a alone", s)
+	}
+	at := Shares(m, nodeUsage)
+	record(t, m, usage("pod:c"), "pod:c", 0.3, now)
+	if got := Moved(m, nodeUsage, at, "pod:c", 0.25); len(got) != 0 {
+		t.Fatalf("moved %v; pod:c arriving moved only itself and its group", got)
+	}
+}
+
 func TestMovedReportsArrivalAndExcludes(t *testing.T) {
 	now := time.Now()
 	m := newMap(t, func() time.Time { return now })
