@@ -107,10 +107,10 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 			return AdmitResult{Err: d.name + " must be a finite number >= 0"}
 		}
 	}
-	if req.ID != "" {
-		if _, used := m.journal.Decision(req.ID); used {
-			return AdmitResult{Err: "decision id " + req.ID + " is already used"}
-		}
+	// An explicit id is claimed before any work, and every path from here commits a
+	// decision, which releases the claim.
+	if req.ID != "" && !m.journal.reserve(req.ID) {
+		return AdmitResult{Err: "decision id " + req.ID + " is already used"}
 	}
 	what := req.Workload
 	if what == "" {
@@ -162,7 +162,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 		var seen, missing, retired []string
 		var last time.Time
 		for i, pid := range ids {
-			p, ok := b.Property(pid)
+			p, ok := b.PropertyNotUsingRetired(pid)
 			switch {
 			case !ok:
 				missing = append(missing, pid)
@@ -225,7 +225,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 	// the past.
 	node := map[string]float64{}
 	for _, k := range []string{"cpu_utilization", "memory_utilization"} {
-		p, ok := b.Property(k)
+		p, ok := b.PropertyNotUsingRetired(k)
 		if !ok || p.NObservations == 0 {
 			return answer(false, "the map has no reading of node "+k)
 		}
@@ -237,8 +237,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 
 	// 4. A node already contended is where relief would be acting. A stale or retired
 	// contention reading says so only while a pod still reports what it is the worst
-	// of: with none, the node has been emptied, which is not contention. b.Property's
-	// own caveat on a retired reading says its last value was used; here it is not.
+	// of: with none, the node has been emptied, which is not contention.
 	for _, c := range []struct {
 		id, kind string
 		enter    float64
@@ -247,7 +246,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 			b.Caveat("no relief lever for %s, so %s was not checked", c.kind, c.id)
 			continue
 		}
-		p, ok := b.Property(c.id)
+		p, ok := b.PropertyNotUsingRetired(c.id)
 		if !ok || p.NObservations == 0 {
 			b.Caveat("%s has no reading, so %s contention was not checked", c.id, c.kind)
 			continue
@@ -300,7 +299,8 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 
 // admitID names an admission from the revision it was asked at and a digest of its
 // hypothesis. A retry of the same request at the same revision takes the next free
-// suffix (-2, -3, …), so no earlier record is overwritten.
+// suffix (-2, -3, …), so no earlier record is overwritten. The id is reserved in the
+// journal as it is chosen, so concurrent identical requests take distinct ones.
 func (m *Map) admitID(rev uint64, req AdmitRequest) string {
 	raw, _ := json.Marshal(struct {
 		From, Workload                               string
@@ -310,7 +310,7 @@ func (m *Map) admitID(rev uint64, req AdmitRequest) string {
 	base := "adm-" + strconv.FormatUint(rev, 10) + "-" + hex.EncodeToString(h[:])[:8]
 	id := base
 	for n := 2; ; n++ {
-		if _, used := m.journal.Decision(id); !used {
+		if m.journal.reserve(id) {
 			return id
 		}
 		id = base + "-" + strconv.Itoa(n)

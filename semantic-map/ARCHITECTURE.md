@@ -1422,7 +1422,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
-| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`, plus a hypothesis digest when `assume`/`without` are given; a repeat at the same revision takes `-2`, `-3`, …, reserved in the journal as for admission ids; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
 Errors on the new endpoints follow a single shape:
@@ -1733,6 +1733,11 @@ ran here and returns; an offloaded pod has a UID this node has never seen, so de
 is the normal path, and keying on owner or controller identity is future work.
 Admission does not pass a workload today, since an offer names what the workload will
 run under, not a pod UID.
+
+**Decision ids.** An id is reserved in the journal as it is chosen, in one step under
+the journal's lock, and released when the decision is recorded: requests are served in
+parallel and do not advance the revision, so concurrent identical requests take
+distinct ids, and of concurrent requests under one explicit id exactly one gets it.
 
 **Two prediction bases, both always recorded.** With `share` the demand over the
 domain's capacity fact and `pressure` the current `Relieves` reading:

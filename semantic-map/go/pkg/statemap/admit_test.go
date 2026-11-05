@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -447,6 +448,10 @@ func TestAdmitARetiredPodShareFallsBackToDeclared(t *testing.T) {
 	if !res.Accepted || res.Basis != BasisDeclared || !hasCaveat(res.Caveats, "cpu_utilization@pod:w is retired") {
 		t.Errorf("%+v; want priced on the declared demand, naming the retired share", res)
 	}
+	// The retired share's last value was not what was priced; no caveat may say it was.
+	if hasCaveat(res.Caveats, "last value was used") || !hasCaveat(res.Caveats, "cpu_utilization@pod:w is retired (test); its last value was not used") {
+		t.Errorf("caveats %q; want the retired share's value said to be unused", res.Caveats)
+	}
 }
 
 func TestAdmitDeclinesWhenMemoryContended(t *testing.T) {
@@ -596,6 +601,9 @@ func TestAdmitAQuietContentionReading(t *testing.T) {
 				if !res.Accepted || !hasCaveat(res.Caveats, id+" is "+string(status)+" and no workload reports it, so the node is taken as not contended") {
 					t.Errorf("%s: %+v; want accepted with the quiet reading caveated", name, res)
 				}
+				if hasCaveat(res.Caveats, "last value was used") {
+					t.Errorf("%s: caveats %q; the retired reading's value was not used", name, res.Caveats)
+				}
 			}
 		}
 	}
@@ -640,5 +648,56 @@ func TestAdmitAnUnseenPodIsPricedOnItsDeclaredDemand(t *testing.T) {
 	res := m.Admit(req)
 	if !res.Accepted || res.Basis != BasisDeclared || !hasCaveat(res.Caveats, "has not seen pod:new here") {
 		t.Errorf("%+v; want priced on the declared demand, saying the pod is unseen", res)
+	}
+}
+
+// TestAdmitIDsAreUniqueUnderConcurrentRequests: neither Decide nor Commit advances
+// the revision and requests are served in parallel, so identical requests at one
+// revision race for one name. Each must get its own id and its own record, and of
+// concurrent requests under one explicit id exactly one may have it.
+func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
+	m, _ := admitFixture(t)
+	const n = 16
+	before := len(m.Journal().Decisions(0))
+	results := make([]AdmitResult, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() { defer wg.Done(); results[i] = m.Admit(admitReq(1, 0)) }()
+	}
+	wg.Wait()
+	ids := map[string]bool{}
+	for _, r := range results {
+		if r.Err != "" || ids[r.DecisionID] {
+			t.Fatalf("%+v; want a fresh id per request (have %v)", r, ids)
+		}
+		ids[r.DecisionID] = true
+		d, ok := m.Journal().Decision(r.DecisionID)
+		if !ok || d.ID != r.DecisionID || d.Revision != r.Revision || d.Answer["accepted"] != r.Accepted {
+			t.Errorf("decision %s: record %+v does not match what the caller got", r.DecisionID, d)
+		}
+	}
+	if after := len(m.Journal().Decisions(0)); after != before+n {
+		t.Errorf("journal holds %d decisions, was %d; want %d new records", after, before, n)
+	}
+
+	req := admitReq(1, 0)
+	req.ID = "shared"
+	for i := range n {
+		wg.Add(1)
+		go func() { defer wg.Done(); results[i] = m.Admit(req) }()
+	}
+	wg.Wait()
+	won := 0
+	for _, r := range results {
+		switch {
+		case r.Err == "":
+			won++
+		case !strings.Contains(r.Err, "already used") || r.DecisionID != "":
+			t.Errorf("%+v; want the id refused before a decision", r)
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d requests got the explicit id; want exactly one", won)
 	}
 }

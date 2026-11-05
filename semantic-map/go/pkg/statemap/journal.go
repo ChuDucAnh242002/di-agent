@@ -113,6 +113,10 @@ type Journal struct {
 	dropped  uint64
 
 	decisions map[string]*Decision
+	// reserved holds ids claimed by decisions being built and not yet committed:
+	// a check of decisions alone leaves the window between choosing an id and
+	// recording it, in which a concurrent request can choose the same one.
+	reserved map[string]bool
 }
 
 // DefaultJournalCapacity bounds the in-memory record.
@@ -149,7 +153,25 @@ func (j *Journal) append(e Event) {
 	}
 	if e.Decision != nil {
 		j.decisions[e.Decision.ID] = e.Decision
+		delete(j.reserved, e.Decision.ID)
 	}
+}
+
+// reserve claims id for a decision about to be built, and reports whether it was
+// free: neither recorded nor claimed by a decision still being built. The check and
+// the claim are one step under the lock, so of concurrent callers only one gets it.
+// The claim is released when the decision is recorded.
+func (j *Journal) reserve(id string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if _, used := j.decisions[id]; used || j.reserved[id] {
+		return false
+	}
+	if j.reserved == nil {
+		j.reserved = map[string]bool{}
+	}
+	j.reserved[id] = true
+	return true
 }
 
 // RecordDecision appends a decision and returns it.
@@ -305,7 +327,16 @@ func (m *Map) Decide(id, question string) *DecisionBuilder {
 // Property reads a property and records it as an input. A missing or retired
 // property is reported as a caveat rather than an error, because an agent should
 // answer with what it has and say what it lacked.
-func (b *DecisionBuilder) Property(id string) (Property, bool) {
+func (b *DecisionBuilder) Property(id string) (Property, bool) { return b.read(id, true) }
+
+// PropertyNotUsingRetired reads a property as Property does, for a caller that does
+// not use a retired property's last value: the caveat on a retired one says so, and
+// the caller records what it did instead.
+func (b *DecisionBuilder) PropertyNotUsingRetired(id string) (Property, bool) {
+	return b.read(id, false)
+}
+
+func (b *DecisionBuilder) read(id string, retiredValueUsed bool) (Property, bool) {
 	b.m.mu.RLock()
 	p, ok := b.m.properties[id]
 	var copied Property
@@ -324,8 +355,12 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 	}
 	switch copied.Status {
 	case Retired:
+		used := "used"
+		if !retiredValueUsed {
+			used = "not used"
+		}
 		b.caveats = append(b.caveats,
-			fmt.Sprintf("property %s is retired (%s); its last value was used", id, copied.RetiredReason))
+			fmt.Sprintf("property %s is retired (%s); its last value was %s", id, copied.RetiredReason, used))
 	case Stale:
 		b.caveats = append(b.caveats,
 			fmt.Sprintf("property %s is stale: last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
