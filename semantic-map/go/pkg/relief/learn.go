@@ -87,16 +87,30 @@ func (e *effects) Of(subject, basis string) float64 {
 	return 1
 }
 
-// workloadShares is every workload's current share of the node's usage, as the
-// map holds it: each subject with an active usage@<subject>.
-func workloadShares(m *statemap.Map, usage string) map[string]float64 {
+// Shares is every workload's current share of the node's usage, as the
+// map holds it: each subject with an active usage@<subject>. Groups are left
+// out: a group is the sum of its members, so counted beside them a member that
+// arrives or is capped would move its group too, read as another workload.
+func Shares(m *statemap.Map, usage string) map[string]float64 {
 	out := map[string]float64{}
 	for _, s := range m.Subjects() {
+		if statemap.IsGroup(s) {
+			continue
+		}
 		if v, ok := share(m, usage, s); ok {
 			out[s] = v
 		}
 	}
 	return out
+}
+
+// Moved lists the workloads other than except that have arrived, left or moved
+// since at was taken (a Shares snapshot), absorbed rises included: it is who
+// would confound an outcome measured across that interval, so a decision made
+// from a stale snapshot can tell the map has changed under it.
+func Moved(m *statemap.Map, usage string, at map[string]float64, except string, step float64) []string {
+	moved, left, absorbed := movedSince(m, usage, at, except, step)
+	return confoundedBy(moved, left, absorbed, false)
 }
 
 // movedSince lists, sorted, the workloads other than throttled whose share of
@@ -115,7 +129,7 @@ func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 // one nothing counts as freed. Whether an absorbed rise is innocent depends on the
 // verdict, which confoundedBy decides.
 func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64) (moved, left, absorbed []string) {
-	live := workloadShares(m, usage)
+	live := Shares(m, usage)
 	var risen []string
 	rise := 0.0
 	for s, now := range live {

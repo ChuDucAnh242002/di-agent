@@ -170,8 +170,9 @@ semantic-map/
     │   │   ├── http.go         HTTPCollector — a plugin reached over HTTP
     │   │   └── plugin/         plugin.Serve — the exec loop for a plugin written in Go (stdlib + pkg/types only)
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
-    │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
+    │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offers)
     │   │   └── peers_test.go   Registry + httptest client coverage
+    │   ├── admission/          Map-grounded admission: offers, the decision, the outcome tracker (concrete, NOT a contract)
     │   ├── spec/               The agent's one configuration document, agent.yaml (concrete, NOT a contract)
     │   │   ├── spec.go         Spec types + Default(), Parse (defaults overlaid, ${VAR} expanded, unknown keys refused), Load, Validate, Redacted, YAML
     │   │   └── spec_test.go    Defaults, overlay, validation, redaction, round trip
@@ -421,6 +422,63 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 `p95_*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward).
 
+### `POST /tasks` · `POST /offers` · `GET /tasks`
+
+Admission. `POST /tasks` submits a workload to any node: it decides from its own map, and on a decline offers it to each registered peer in id order through their `POST /offers` until one accepts. The submitter starts the workload on `accepted_by` under `name`; the agent never starts it.
+
+```json
+// POST /tasks request (also the POST /offers body, which adds "chain")
+{
+  "name": "web",
+  "image": "nginx:1.27",
+  "arch": ["amd64", "arm64"],
+  "demand": {
+    "cpu":    {"value": 0.5, "source": "declared"},
+    "memory": {"value": 268435456, "source": "measured on node_2", "arch": "arm64"}
+  }
+}
+
+// POST /tasks response: 200 whether or not anyone accepted (accepted_by null)
+{
+  "at": "2026-11-05T12:00:00Z",
+  "name": "web",
+  "accepted_by": {"node": "node_2", "url": "http://node_2:8080"},
+  "decision_id": "admit-1762344000-7",
+  "chain": [
+    {"node": "node_1", "url": "", "decision_id": "admit-1762343000-3", "verdict": "decline",
+     "reason": "cpu_contention_ratio would reach 0.1420 on the map basis, above exit 0.1000"},
+    {"node": "node_2", "url": "http://node_2:8080", "decision_id": "admit-1762344000-7",
+     "verdict": "accept", "reason": "every domain stays at or below its exit level"}
+  ]
+}
+
+// POST /offers response: one hop
+{"node": "node_2", "url": "", "decision_id": "admit-1762344000-7", "verdict": "accept", "reason": "…"}
+
+// GET /tasks: this node's recent submissions (newest first, at most 200), its own
+// answers counted by verdict (local and for peers), the accepts awaiting an outcome
+// (oldest first), and the outcomes of the accepts it made (newest first)
+{
+  "submissions": [ /* as POST /tasks returned them */ ],
+  "answered": {"accept": 3, "decline": 9, "already_asked": 1},
+  "pending": [{"name": "api", "accept_id": "admit-1762344000-11", "accepted_at": "…",
+               "arrived": true, "subject": "pod:9c1e…"}],
+  "outcomes": [
+    {"name": "web", "accept_id": "admit-1762344000-7", "outcome_id": "admit-1762344000-9",
+     "subject": "pod:3f2a…", "result": "held", "at": "…",
+     "lines": [{"domain": "cpu_contention_ratio", "observed_rise": 0.01,
+                "map_rise": 0.02, "map_err": 0.01, "usage_rise": 0.03, "usage_err": 0.02, "breached": false}]}
+  ]
+}
+```
+
+- `demand` keys are `cpu` (cores) and `memory` (bytes); `source` is `declared` or `measured on <node>`; `arch` is the GOARCH a measurement was taken on; `capped: true` marks a CPU measurement taken under a relief cap.
+- `verdict`: `accept`, `decline` (including `already pending`, `already running here` for a name the runtime lists on this node, and `workload list unavailable: <err>`), `unreachable` (the peer could not be asked, answered a verdict not in this list, or answered without a decision id; `reason` is the error; a peer that timed out, or a submission whose request was cancelled, may have accepted, so the walk stops there and `reason` starts `outcome unknown, walk stopped:` — check that peer's `GET /tasks` before submitting again; a refused connection or failed lookup goes on to the next peer) or `already_asked` (the node is already in the chain; no decision).
+- A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
+- `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors, `observed_rise` included, are present on `held` and on `breached` from a reading only, and absent rather than 0 on an unscored line; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
+- `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
+- `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value, a field the offer does not have, or data after it) with nothing recorded; decoding is strict because a misspelt `value` would read as a zero demand; `415` without a JSON content type.
+
 ### `POST /ingest-sample`
 
 Feed one typed `MetricSample` to the facade's `IngestSample`. The daemon records
@@ -662,7 +720,9 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
 | POST | `/peers/{id}/trust`                 | `{value}`                                                | Step 4.9 |
-| POST | `/offload`                          | `{source_node_id, workload?, cpu_cores, memory_bytes}` (`peers.OffloadRequest`) — would this node take the workload, answered from its own map: `{accepted, reason, basis, decision_id, cpu_after?, memory_after?, caveats?}`. `basis` is `measured` when `workload` is a pod (`pod:<uid>`) the map holds with both `cpu_utilization@` and `memory_utilization@` stale (the larger of each and the declared share is priced), `declared` otherwise (cores over `cpu_cores`, bytes over `memory_total`), including a unit or a group and a pod with one share only or a retired one; absent when the answer came before demand was priced. Declined, naming why, in this order: the pod is already running here (a share is active; nothing to admit); nothing to price (no measurement and no declared demand); a fact missing or not positive; a node share never observed, stale or retired; contention at or above a relief lever's `enter`, or a stale or retired contention reading while a pod still reports it (with none it is taken as not contended, caveated); CPU or memory would pass 0.90 of the node. `cpu_after`/`memory_after` are present only when the projection was made. `GET /state/decisions/{decision_id}` reproduces it; `400` for a negative or non-finite demand, an unknown field or trailing data, and nothing is recorded | Admission |
+| POST | `/tasks`                            | `Offer` — submit a workload; this node decides, then offers it to each peer in id order until one accepts: `{at, name, accepted_by, decision_id, chain}`, `accepted_by` null when nobody did. See [admission](#post-tasks--post-offers--get-tasks) | Admission |
+| POST | `/offers`                           | `Offer` with `chain` — a peer's offer, answered as one hop `{node, url, decision_id, verdict, reason}`; never forwarded | Admission |
+| GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
 | GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
@@ -756,7 +816,7 @@ Values that cannot be what was meant are refused at startup, every one named. In
 
 ### The runtime and the relief loops
 
-The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). The levers' `enter` levels also gate `POST /offload` whether or not relief is enabled: a node at or above one declines new work, and dropping a lever from the list drops that admission check (logged once at startup). It runs one relief loop per lever in `loops.relief.levers`: a lever is an action and the thresholds it acts on, the pressure it relieves being the one its actuator names (`GET /actuators`). The defaults hold two: `cpu.limit`, relieving `cpu_contention_ratio`, and `memory.high`, relieving `memory_contention_ratio`; naming the list in the file replaces it, so `levers: [{action: cpu.limit}]` turns the memory lever off. The actuators are built only while relief is enabled, so with relief off `GET /actuators` lists no built action and `GET /workloads` has an empty `can`. A change the ledger holds for an action no lever runs is not given back by anything: start logs a warning for each, and `GET /actuators` shows it under `unmanaged` in a `built: false` row. So is one another node recorded (a ledger file shared or copied between nodes): it is never adopted, warned of, and shown under `unmanaged`. The loops share one budget: `max_actions_per_hour` is one count for every lever (a rule's own `max_actions_per_hour` is the limit for its workloads, against that one count), and a workload one lever acts on is cooling down for every other lever for its `cooldown`, so two levers never stack changes on one workload; the lever that acted may still step its own change. The action and the hold on the workload are reserved together, in one step, before the change is made, so a lever ticking at the same moment cannot take the workload while the first change is still going through; a change whose Set fails keeps the action and the hold: one that reads back changed is adopted, and any other is left pending, since a request the client gave up on may still land; it is read again every pass, committed if it lands, and settled as `not_applied` once it still reads as before `settle` after it was written (the entry's `set_at`), which gives the action back; meanwhile nothing is planned on its workload. Each lever has at most one action in flight. `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default; `cpu.limit` acts there on every workload but the agent's own, limited or not); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
+The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). Admission (`POST /tasks`, `POST /offers`) uses the relief levers as its domains and adds no flags: with relief off it declines every offer (`no admission domains`), and dropping a lever from the list drops that domain. Set `node.id` explicitly on every node: cloned VMs share a hostname, and a node whose id is already in an offer's chain answers `already_asked`. It runs one relief loop per lever in `loops.relief.levers`: a lever is an action and the thresholds it acts on, the pressure it relieves being the one its actuator names (`GET /actuators`). The defaults hold two: `cpu.limit`, relieving `cpu_contention_ratio`, and `memory.high`, relieving `memory_contention_ratio`; naming the list in the file replaces it, so `levers: [{action: cpu.limit}]` turns the memory lever off. The actuators are built only while relief is enabled, so with relief off `GET /actuators` lists no built action and `GET /workloads` has an empty `can`. A change the ledger holds for an action no lever runs is not given back by anything: start logs a warning for each, and `GET /actuators` shows it under `unmanaged` in a `built: false` row. So is one another node recorded (a ledger file shared or copied between nodes): it is never adopted, warned of, and shown under `unmanaged`. The loops share one budget: `max_actions_per_hour` is one count for every lever (a rule's own `max_actions_per_hour` is the limit for its workloads, against that one count), and a workload one lever acts on is cooling down for every other lever for its `cooldown`, so two levers never stack changes on one workload; the lever that acted may still step its own change. The action and the hold on the workload are reserved together, in one step, before the change is made, so a lever ticking at the same moment cannot take the workload while the first change is still going through; a change whose Set fails keeps the action and the hold: one that reads back changed is adopted, and any other is left pending, since a request the client gave up on may still land; it is read again every pass, committed if it lands, and settled as `not_applied` once it still reads as before `settle` after it was written (the entry's `set_at`), which gives the action back; meanwhile nothing is planned on its workload. Each lever has at most one action in flight. `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default; `cpu.limit` acts there on every workload but the agent's own, limited or not); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
 
 ```yaml
 # relief on dry-run: the loop decides, records and verifies; nothing is changed
@@ -1428,11 +1488,13 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 | `POST` | `/peers` | `{url,note?}` | `200 PeerDTO` (idempotent on URL) |
 | `DELETE` | `/peers/{id}` | — | `204` |
 | `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
-| `POST` | `/offload` | `{source_node_id,workload?,cpu_cores,memory_bytes}` | `200 {accepted,reason,basis,decision_id,cpu_after?,memory_after?,caveats?}`; `400` for a negative or non-finite demand, an unknown field or trailing data |
+| `POST` | `/tasks` | `Offer` | `200 {at,name,accepted_by,decision_id,chain}` |
+| `POST` | `/offers` | `Offer` with `chain` | `200 {node,url,decision_id,verdict,reason}` |
+| `GET` | `/tasks` | — | `200 {submissions,answered,pending,outcomes}` |
 
-`/offload` is the peer side of the protocol: the node answers from its own state map (`statemap.Map.Admit`) whether it would take the workload, and journals the answer as a decision. The requester only relays; it never decides. It does not schedule any work — that is a P7 (execution) concern. See [the endpoint table](#full-endpoint-table) for the criterion.
+`/offers` is the peer side: the node answers from its own state map and journals the answer as a decision; `/tasks` walks the peers and keeps the chain. Neither starts any work. See [admission](#post-tasks--post-offers--get-tasks) for the bodies.
 
-These three endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
+These endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 
 ### `mapctl peers`
 
@@ -1460,7 +1522,7 @@ For every call, the reasoner:
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
 5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure. Richer schemes (per-outcome updates after `/offload`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 
@@ -1474,7 +1536,7 @@ The verbose output narrates pre-flight self-costs, the peer query, the rationale
 
 ### v1 scope and security
 
-* No auth on `/peers` or `/offload` yet. Intended for localhost / lab-network deployment. Production hardening (mTLS, bearer tokens, signed peer identities) is a P7 concern.
+* No auth on `/peers`, `/tasks` or `/offers` yet. Intended for localhost / lab-network deployment. Production hardening (mTLS, bearer tokens, signed peer identities) is a P7 concern.
 * `peers.Registry` and `peers.Client` are concrete types in `pkg/peers/`, **not** a seventh contract. The contract surface stays at six (Collector, Ontology, Reasoner, Proposer, Tuner, Runtime). We promote when a second implementation arrives (e.g. SQLite-backed registry, gossip discovery).
 
 ---

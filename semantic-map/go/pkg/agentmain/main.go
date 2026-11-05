@@ -348,14 +348,13 @@ func Main() {
 		}
 	}
 	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
+	admit := buildAdmission(cfg, state, rt, reliefLoops, sm.Peers())
+	registerAdmissionRoutes(mux, admit)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
 	}
 	registerStateRoutes(mux, state, sm.Discovery, autonomyStatus(reviewer))
-	// The levers' enter levels are where relief would act, whether or not relief runs
-	// here: admission answers by the same bar either way.
-	registerOffloadRoute(mux, state, cfg.Loops.Relief.Levers)
 	registerAutonomyRoutes(mux, reviewer)
 	// CgroupRoot does not re-check the entries: collectors.Build above has already
 	// refused a list whose cgroup config does not decode.
@@ -399,6 +398,7 @@ func Main() {
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
+	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
 	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
 	// would call it; no collectors is a nil collector.

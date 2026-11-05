@@ -35,8 +35,13 @@ package agentmain
 // /peers                            POST    AddPeerRequest                 200 PeerDTO
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
-// /offload                          POST    peers.OffloadRequest           200 peers.OffloadResponse
-//                                                                          400 (demand not a finite number >= 0)
+// /tasks                            POST    admission.Offer                200 submission (accepted_by null: nobody accepted)
+//                                                                          400 (malformed offer, unknown field, trailing data)
+//                                                                          415 (not JSON)
+// /tasks                            GET     —                              200 {submissions, answered, pending, outcomes}
+// /offers                           POST    admission.Offer (with chain)   200 admission.Hop
+//                                                                          400 (malformed offer, unknown field, trailing data)
+//                                                                          415 (not JSON)
 // /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
 //                                                                          422 {error,response} (failed a gate)
 //                                                                          501 (provider disabled)
@@ -65,8 +70,6 @@ import (
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
-	"github.com/DiyazY/di-agent/pkg/spec"
-	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -713,9 +716,6 @@ func requireJSON(r *http.Request) error {
 //	POST   /peers           register a new peer (idempotent on URL)
 //	DELETE /peers/{id}      unregister a peer
 //	POST   /peers/{id}/trust override a peer's trust (test + operator path)
-//
-// POST /offload, the receiving side, answers from the state map and is wired by
-// registerOffloadRoute.
 func registerPeerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	mux.HandleFunc("GET /peers", func(w http.ResponseWriter, r *http.Request) {
 		list, err := sm.Peers().List()
@@ -792,60 +792,6 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 		LastSeen:  d.LastSeen,
 		Note:      d.Note,
 	}
-}
-
-// registerOffloadRoute wires POST /offload, the receiving side of the peer
-// protocol: another node asks whether this one would take a workload, and this node
-// answers from its own map (statemap.Map.Admit). The answer is a journalled decision;
-// nothing is scheduled. The contention bars are the relief levers' enter levels, so
-// "accepted" means taking the workload would not put the node where relief acts. A
-// lever the spec does not have is a check skipped: logged here once, and said in
-// every decision. The wire is strict: an unknown field or trailing data is a 400,
-// since a field this node does not read is a demand it would silently ignore.
-func registerOffloadRoute(mux *http.ServeMux, state *statemap.Map, levers []spec.Lever) {
-	enter := leverEnters(levers)
-	for _, l := range []struct{ action, id string }{
-		{spec.LeverCPULimit, "cpu_contention_ratio"}, {spec.LeverMemoryHigh, "memory_contention_ratio"},
-	} {
-		if enter[l.action] <= 0 {
-			log.Printf("offload: no %s lever, so admission will not check %s", l.action, l.id)
-		}
-	}
-	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
-		if err := requireJSON(r); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		var req peers.OffloadRequest
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if _, err := dec.Token(); err != io.EOF {
-			writeError(w, http.StatusBadRequest, "trailing data after the request")
-			return
-		}
-		res := state.Admit(statemap.AdmitRequest{From: req.SourceNodeID, Workload: req.Workload,
-			CPUCores: req.CPUCores, MemoryBytes: req.MemoryBytes,
-			CPUEnter: enter[spec.LeverCPULimit], MemoryEnter: enter[spec.LeverMemoryHigh]})
-		if res.Err != "" {
-			writeError(w, http.StatusBadRequest, res.Err)
-			return
-		}
-		writeJSON(w, peers.OffloadResponse{Accepted: res.Accepted, Reason: res.Reason, Basis: string(res.Basis),
-			DecisionID: res.DecisionID, CPUAfter: res.CPUAfter, MemoryAfter: res.MemoryAfter, Caveats: res.Caveats})
-	})
-}
-
-// leverEnters is each lever's enter level, by action.
-func leverEnters(levers []spec.Lever) map[string]float64 {
-	enter := map[string]float64{}
-	for _, l := range levers {
-		enter[l.Action] = l.Enter
-	}
-	return enter
 }
 
 // registerExplainRoute wires POST /explain. The endpoint is always registered
