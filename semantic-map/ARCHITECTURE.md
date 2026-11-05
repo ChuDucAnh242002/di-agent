@@ -1697,7 +1697,10 @@ no domains and every offer declines: a node never admits blind.
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent
 offers for one name cannot both be answered accept; the loser's accept decision stays
-in the journal, superseded by a decline.
+in the journal, superseded by a decline that names it (`superseded`). A name the
+runtime already lists on this node declines `already running here` (its outcome would
+be judged on nothing it changed), and a listing that fails declines `workload list
+unavailable: <err>`; each is a journalled decision of its own.
 
 **The gate.** `Admit` checks, in order, the first to fail answering: the workload,
 whether there is anything to price, the facts (`cpu_cores`, `memory_total`), the
@@ -1734,21 +1737,28 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
 - *map*: `pressure + k · share`, `k` the largest effect relief has measured on this
   node by acting on some subject's `Usage@<subject>` towards `Relieves`
   (`Map.MeasuredEffects`; the largest, so it leans towards declining). It exists only
-  where relief has acted and its outcomes were evidence.
+  where relief has acted and its outcomes were evidence. `k ≤ 1`: each measured
+  effect is clamped to [0,1] before it is averaged.
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into
 the record whenever their inputs exist, so the basis that did not decide can be scored
-too. A node with no `Relieves` reading reads 0 when no subject reports one (an idle
-node is calm) and declines when a subject does (the gap is a gap).
+too. Whether a subject reports `Relieves` is read through `Admit`'s reporter table
+(`statemap.ContentionReporter`: an active `cpu_contention_ratio@pod:*`, or
+`memory_pressure_ratio@pod:*` for memory; `<Relieves>@*` for a reading the table does
+not name). A node with no `Relieves` reading, or a stale or retired one, reads 0 when
+no subject reports one (an idle or emptied node is calm) and declines when a subject
+does (the gap is a gap), as the gate does.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
 a decline puts the offer, with the chain so far, to each registered peer in
 registry-id order through `POST /offers`, skipping a URL already in the chain and
 stopping at the first accept. A peer whose node id is already in the chain answers
 `already_asked` without deciding; a peer never forwards. A peer that cannot be
-reached, times out, answers non-2xx, or answers without a decision id is recorded as
-`unreachable`: an answer that cannot be traced is not an accept. Each hop carries the
+reached, times out, answers non-2xx, answers with a verdict that is not `accept`,
+`decline`, `unreachable` or `already_asked`, or answers accept or decline without a
+decision id is recorded as `unreachable`: an answer that cannot be read or traced is
+not an accept. Each hop carries the
 URL it was asked at and its decision id, so `<url>/state/decisions/<id>` resolves on
 the node that decided; traceability is per node, and the submitter keeps the chain,
 not the peers' decisions. Ids are `admit-<agent start epoch>-<seq>` for accepts,
@@ -1756,32 +1766,45 @@ declines and outcomes alike.
 
 **The outcome check.** An accept is a prediction, and the accepting node checks it
 (`admission.Tracker`, ticked on relief's interval). It keeps at most 32 pending
-accepts, dropping the oldest. The workload has arrived when the runtime lists one with
-the offered name and its `Usage@<subject>` is in the map for every domain; the node
-then snapshots each domain's `Relieves`, node `Usage`, and every other subject's
-share. After the lever's `Settle` it reads `Relieves` again and journals an outcome
-linked to the accept:
+accepts, dropping the oldest. At accept it takes every subject's share per domain, so
+other workloads are checked from accept to judgement. The workload has arrived when
+the runtime lists one with the offered name and its `Usage@<subject>` is in the map
+for every domain; arrival only starts the `Settle` clock, and the `Relieves` and node
+`Usage` read then are recorded (`relieves_at_arrival`, `usage_at_arrival`). After the
+lever's `Settle` it reads `Relieves` again and journals an outcome linked to the
+accept, the first that applies:
 
 - `not_arrived`: no workload by that name within 5 minutes;
-- `confounded`: another workload moved, arrived or left since the snapshot
-  (`relief.Moved`), or relief acted in a domain during the window; predictions are
-  recorded, not scored;
+- `confounded`: another workload moved, arrived or left since accept (`relief.Moved`,
+  the newcomer excepted); predictions are recorded, not scored;
+- `breached`, relief acted: relief acted in a domain during the window (since accept).
+  Relief acts only once `Relieves` has been above `Enter` for its `EnterFor`, so this
+  is the canonical false accept; the line records `relief_acted` and, as `peak`, the
+  highest contention relief acted at. Relief has already lowered `Relieves`, so the
+  outcome is not scored;
+- `confounded`, stale reading: a domain's `Relieves` is stale at judgement;
 - `breached`: some domain's `Relieves` is above `Enter` (strictly, as relief's
   trigger is);
 - `held`: otherwise.
 
-A scored outcome records, per domain, the observed rise of `Relieves` and each basis's
-predicted rise and error, the paired comparison below rests on. Nothing follows from
-an outcome: no trust update, no retry, no eviction. An accept reserves nothing (two
-offers before the first workload arrives are judged against the same usage), and only
-false accepts are observable, since a declined workload never runs, so `GET /tasks`
-reports the node's answers counted by verdict beside the outcomes, and the accepts
-still pending.
+A scored outcome (`held`, or `breached` on a reading) records, per domain, the
+observed rise of `Relieves` over the accept-time pressure, the baseline both
+predictions were made from, and each basis's predicted rise and error, the paired
+comparison below rests on. Nothing follows from an outcome: no trust update, no retry,
+no eviction. An accept reserves nothing (two offers before the first workload arrives
+are judged against the same usage), and only false accepts are observable, since a
+declined workload never runs, so `GET /tasks` reports the node's answers counted by
+verdict beside the outcomes, and the accepts still pending. An accept superseded by a
+decline (one that names it as `superseded`) is excluded from accept tallies; the
+answer counts already record it as the decline. Outcomes and submissions are held in
+memory (at most 200 each) and do not survive a restart, so a demo's readout is
+captured from `GET /tasks` during the run.
 
 **What would show the map adds nothing.** Read off a demo's outcome log; any of these
 is reported as found:
 
-1. The map basis decides fewer than a third of decisions: the contribution shrinks to
+1. The map basis decides fewer than a third of the decisions that reached the
+   prediction step (a decline before it has no basis): the contribution shrinks to
    traceability.
 2. On scored outcomes the map basis's error is no lower than the usage basis's, on the
    same cases (both are always recorded): the measured slope does not predict better
