@@ -75,7 +75,7 @@ pressure) were missed in earlier runs: no single pair reaches the threshold.
 | P2 counterfactual + departure | 50 | the agent is asked for node memory without `mem-wave`, and the decision id kept; then `mem-wave` is deleted |
 | P2 observe | 50–65 | `mem-wave`'s properties go stale (2 min) and retire (10 min) |
 | P3 quiesce + restart | 65–72 | the other planted pods are deleted; the agent restarts from its snapshot on `agent-relief.yaml` |
-| P4 CPU, no relief | 72–117 | `hog` and `victim` applied; `cpu.limit` checked at 77 and 100: calm, no action, `cpu_contention_ratio` near zero |
+| P4 CPU, no relief | 72–117 | `hog` and `victim` applied; `cpu.limit` checked at 77 and 100: calm, no action, and `cpu_contention_ratio` under 0.05 (the measure's own waiting floor), or the mark says `not calm` |
 | P5 release | 117–127 | `hog` and `victim` deleted |
 
 P4 is the case where CPU relief must *not* act. Relief's CPU signal is the worst waiting of a pod

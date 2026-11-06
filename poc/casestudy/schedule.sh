@@ -212,15 +212,19 @@ phase_P4() {
 
 # cpu_relief_calm marks the cpu.limit lever's phase and action count with the node's
 # contention and pressure, the verdict in the event: "calm" only when the lever is calm,
-# has not acted, and the node has a contention reading (calm with no signal proves
-# nothing). A read that fails is recorded as null, as revision() does, rather than let
-# set -e end the timetable before P5 removes the pods.
+# has not acted, and the node's contention is under OWED_TOLERANCE — so the check holds
+# P4's premise that nothing is owed, not just that relief did nothing (no reading is not
+# calm: a lever with no signal is calm by default). A read that fails is recorded as
+# null, as revision() does, rather than let set -e end the timetable before P5 removes
+# the pods.
+OWED_TOLERANCE=0.05 # the measure's own waitingFloor: below it a pod is not waiting
 cpu_relief_calm() {
     local lever contention pressure verdict=calm
     lever=$(curl -sf "$API/relief" | jq -c '[.levers[] | select(.action == "cpu.limit") | {phase, actions}][0]' 2>/dev/null || echo null)
     contention=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_contention_ratio") | .value][0]' 2>/dev/null || echo null)
     pressure=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_pressure_ratio") | .value][0]' 2>/dev/null || echo null)
-    if [ "$(jq -r '"\(.phase) \(.actions)"' <<<"${lever:-null}")" != "calm 0" ] || [ "${contention:-null}" = null ]; then
+    if [ "$(jq -r '"\(.phase) \(.actions)"' <<<"${lever:-null}")" != "calm 0" ] ||
+        ! jq -en --argjson c "${contention:-null}" --argjson t "$OWED_TOLERANCE" '$c != null and $c < $t' >/dev/null 2>&1; then
         verdict="not calm"
         echo "cpu.limit not calm $1: lever ${lever:-null}, contention ${contention:-null}" >&2
     fi
