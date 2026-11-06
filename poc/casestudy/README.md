@@ -81,13 +81,13 @@ pressure) were missed in earlier runs: no single pair reaches the threshold.
 P4 is the case where CPU relief must *not* act. Relief's CPU signal is the worst waiting of a pod
 owed CPU it does not get, owed meaning its `cpu.weight` share of the pods' CPUs, and the kernel's
 scheduler already enforces that share between pods. `hog` (six threads) and `victim` (three), both
-requesting 100m, each get about three of the six pod CPUs: `victim` all it runs on, `hog` waiting
-about half its time on its own threads. Nothing is owed, so nothing is relieved; capping `hog` would
-make its own wait worse. What `hog` needs is more CPU than this node promised it, which is
-admission's question, not relief's. Run 2026-11-05 showed it with `victim` at 100m and again at a
-3-core request (`cpu.weight` 118 against 4): `victim` held 3.00 cores at contention 0.000. Memory
-relief (`memrelief.sh`) is where relief acts: the kernel protects no pod's page cache from a
-neighbour unless `memory.low` is set, and Kubernetes does not set it.
+requesting 100m, each get about three of the six pod CPUs: `victim` all it runs on, `hog` waiting on
+its own threads past its share. Nothing is owed, so nothing is relieved; capping `hog` would make its
+own wait worse. What `hog` needs is more CPU than this node promised it, which is admission's
+question, not relief's. `run-2026-11-05-victim-req3/results.md` has the readings, with `victim` at
+100m and at a 3-core request, and `run-2026-11-06-pr64/results.md` this timetable's P4 passing.
+Memory relief (`memrelief.sh`) is where relief acts: the kernel protects no pod's page cache from a
+neighbour unless `memory.low` or `memory.min` is set, and Kubernetes sets neither with MemoryQoS off.
 
 Everything runs on the node, as root, from this directory, next to an `agent` binary:
 
@@ -105,7 +105,7 @@ memory against node memory and that relationship has at least one observation (a
 moment ago has no strength, and the estimate would leave it out), and the estimate returned 200 with a
 decision id and `mem-wave` in `excluded`. The mark records which reviewer confirmed it.
 `repeat-p2.sh <out-dir>` runs that episode on its own against the running agent, and exits non-zero when it refuses.
-`verify.sh <out-dir>` reruns P3–P5 on a fresh map: the verification run of the measured `Intervened` strength.
+`verify.sh <out-dir>` reruns P3–P5 on a fresh map: P4 checks that `cpu.limit` stays calm beside `hog` and `victim`.
 
 Both write JSON lines stamped with the VM's clock: `capture.jsonl` (`t`, `endpoint`, `status`,
 `body`; a failed poll has `status: 0` and `body: null`) and `phases.jsonl` (`t`, `phase`, `event`, and

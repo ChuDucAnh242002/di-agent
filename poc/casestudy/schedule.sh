@@ -195,9 +195,9 @@ phase_P3() {
 # cpu.weight gives each its weighted share of the pods' CPUs, so the victim gets the
 # three cores it runs on and the hog waits on its own threads past its share. Nothing
 # is owed to anyone, cpu_contention_ratio stays near zero, and the cpu.limit lever
-# must not act: capping the hog would only make its own wait worse. Run 2026-11-05
-# (victim at 100m, then at a 3-core request) showed both. Checked five minutes in
-# and again at steady state.
+# must not act: capping the hog would only make its own wait worse. Runs 2026-11-05
+# showed this with the victim at 100m and again at a 3-core request (results in
+# run-2026-11-05-victim-req3). Checked five minutes in and again at steady state.
 phase_P4() {
     at 72
     apply hog
@@ -211,16 +211,20 @@ phase_P4() {
 }
 
 # cpu_relief_calm marks the cpu.limit lever's phase and action count with the node's
-# contention and pressure, and says so when the lever has left calm or acted.
+# contention and pressure, the verdict in the event: "calm" only when the lever is calm,
+# has not acted, and the node has a contention reading (calm with no signal proves
+# nothing). A read that fails is recorded as null, as revision() does, rather than let
+# set -e end the timetable before P5 removes the pods.
 cpu_relief_calm() {
-    local lever contention pressure
-    lever=$(curl -sf "$API/relief" | jq -c '.levers[] | select(.action == "cpu.limit") | {phase, actions}')
-    contention=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_contention_ratio") | .value][0]')
-    pressure=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_pressure_ratio") | .value][0]')
-    mark P4 "cpu.limit $1" --argjson lever "${lever:-null}" --argjson contention "${contention:-null}" --argjson pressure "${pressure:-null}"
-    if [ "$(jq -r '.phase' <<<"${lever:-null}")" != calm ] || [ "$(jq -r '.actions' <<<"${lever:-null}")" != 0 ]; then
-        echo "cpu.limit not calm $1: $lever (contention $contention)" >&2
+    local lever contention pressure verdict=calm
+    lever=$(curl -sf "$API/relief" | jq -c '[.levers[] | select(.action == "cpu.limit") | {phase, actions}][0]' 2>/dev/null || echo null)
+    contention=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_contention_ratio") | .value][0]' 2>/dev/null || echo null)
+    pressure=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_pressure_ratio") | .value][0]' 2>/dev/null || echo null)
+    if [ "$(jq -r '"\(.phase) \(.actions)"' <<<"${lever:-null}")" != "calm 0" ] || [ "${contention:-null}" = null ]; then
+        verdict="not calm"
+        echo "cpu.limit not calm $1: lever ${lever:-null}, contention ${contention:-null}" >&2
     fi
+    mark P4 "cpu.limit $verdict $1" --argjson lever "${lever:-null}" --argjson contention "${contention:-null}" --argjson pressure "${pressure:-null}"
 }
 
 phase_P5() {

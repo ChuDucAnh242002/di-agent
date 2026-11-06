@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# demo.sh — a 44-minute compressed run to watch the map evolve: fresh map, planted
+# demo.sh — a 48-minute compressed run to watch the map evolve: fresh map, planted
 # workloads arrive and the review loop (level full, decision model on the node's Ollama)
 # settles what discovery proposes; the planted pods leave, a hog runs beside a victim
 # (the kernel gives each its CPU share, so CPU relief has nothing to do), everything
