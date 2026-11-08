@@ -1087,7 +1087,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; when runtime requests are known, emits node memory admission headroom from `MemAvailable` after reserving each pod's unused request; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, memory\_admission\_headroom\_ratio, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript` — built-in `type: script` | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1696,8 +1696,11 @@ no domains and every offer declines: a node never admits blind.
    left would read zero on every pressure prediction below, so the shares must fit
    first.
 6. Prediction, per domain: the pressure the domain would reach with the workload
-   added must be at or below `Exit`, the level relief releases caps at. Admitting up
-   to `Enter` would hold pressure in the band where caps never release.
+   added must be at or below `Exit`, the level relief releases caps at. For memory,
+   when the cgroup collector has a successful request listing, the offer must also fit the
+   `memory_admission_headroom_ratio` from `MemAvailable` after reserving the
+   unconsumed portion of running pods' requests. Admitting up to `Enter` would hold
+   pressure in the band where caps never release.
 
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent
@@ -1744,11 +1747,19 @@ distinct ids, and of concurrent requests under one explicit id exactly one gets 
 **Two prediction bases, both always recorded.** With `share` the demand over the
 domain's capacity fact and `pressure` the current `Relieves` reading:
 
-- *map*: `pressure + k · share`, `k` the largest effect relief has measured on this
-  node by acting on some subject's `Usage@<subject>` towards `Relieves`
-  (`Map.MeasuredEffects`; the largest, so it leans towards declining). It exists only
-  where relief has acted and its outcomes were evidence. `k ≤ 1`: each measured
-  effect is clamped to [0,1] before it is averaged.
+- *map*: `pressure + k · share`, `k` the pooled effect relief has measured on this
+  node by acting on workloads' `Usage@<subject>` towards `Relieves`
+  (`Map.MeasuredDomainEffect`). It is pooled across subjects and kept separately from
+  their graph relationships, so a subject leaving retires its edge but does not erase
+  what the node measured. One zero-effect pseudo-sample shrinks the observed mean toward
+  zero; a single outcome therefore contributes, but is not treated as full confidence.
+  The decision records the observation count, latest contributing source and verify
+  decision; the estimate and its provenance survive snapshot restore. Version-5
+  snapshots migrate the pair effects, though they may not have retained the latest
+  contributing decision ID or slopes above 1, which the older pair measurements
+  clamped. It exists only where relief has acted and its outcomes
+  were evidence. It is a response slope, not a relationship strength, and can exceed 1;
+  pair-level relationship strengths remain clamped to [0,1].
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into
@@ -1772,6 +1783,20 @@ Until the workload appears in a successful request refresh and a subsequent head
 sample is ingested, another memory offer can be admitted against the same headroom; the
 per-name pending check prevents duplicate offers for one name but does not reserve
 aggregate capacity across different names.
+
+`pkg/admission/comparison_test.go` compares the predictor with the headroom-only
+gate on five controlled cases and on generated offers against linear and logistic
+pressure curves. In the five fixed cases, the baseline has two false accepts and no
+unnecessary declines; the predictor has no false accepts and one unnecessary decline.
+For 18 CPU offers per curve, both make no errors on the linear curve; on the logistic
+curve, the baseline has five false accepts and no unnecessary declines, while the
+predictor has three false accepts and no unnecessary declines. For 12 calm-memory
+offers, the ordinary utilization headroom gate has six false accepts; the dynamic
+memory-headroom bound has none, with no unnecessary declines in this matrix. The
+curves use the same functional forms as the scripted scenarios, but these offers and
+labels are generated for the tests, not read from production traces or scenario-runner
+admissions. The memory matrix also defines safety by the supplied headroom bound.
+These results are deterministic regression checks, not evidence of field accuracy.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
 a decline puts the offer, with the chain so far, to each registered peer in
@@ -1838,17 +1863,18 @@ answer counts already record it as the decline. Outcomes and submissions are hel
 memory (at most 200 each) and do not survive a restart, so a demo's readout is
 captured from `GET /tasks` during the run.
 
-**What would show the map adds nothing.** Read off a demo's outcome log; any of these
-is reported as found:
+**What would show the map adds nothing.** Read off a demo's outcome log and the
+prediction summary in `GET /tasks`; any of these is reported as found:
 
-1. The map basis decides fewer than a third of the decisions that reached the
-   prediction step (a decline before it has no basis): the contribution shrinks to
-   traceability.
-2. On scored outcomes the map basis's error is no lower than the usage basis's, on the
-   same cases (both are always recorded): the measured slope does not predict better
-   than proportion.
-3. The headroom gate plus "relief inactive" alone give the same verdicts as the full
-   decision: the prediction step is not doing the deciding.
+1. The map basis accounts for fewer than a third of domain evaluations among offers
+   that reached prediction (the counters exclude earlier declines): the contribution
+   shrinks to traceability.
+2. On paired scored outcomes the map basis's mean absolute error is no lower than the
+   usage basis's (both are recorded when available): the measured slope does not predict
+   better than proportion.
+3. Prediction-stage declines (`changed_by_prediction`) are absent or rare relative
+   to prediction-stage decisions: the phase and headroom gates, rather than prediction,
+   are doing the deciding.
 
 `POST /offload` and `peers.Client.Offload` are gone; `Admit` survives as step 5. The
 older answer, `CostOfAction` against latency and energy budgets, was never an
@@ -2523,7 +2549,7 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Relationships.** Each outcome is a `RecordIntervention` on `cpu_utilization@<subject> → cpu_contention_ratio`. Structure follows runs since the last structural change: two agreeing unconfounded outcomes create the relationship with `intervened` provenance, or promote a seeded, learned or discovered one to it; two nulls retire it. An operator's `asserted` relationship is neither promoted nor retired: its outcomes are counted and the run starts again. Confounded outcomes never move either run.
 
-**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node, clamped to [0, 1] (`measuredEffect`; none when the share fell by no more than 0.02). The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. That run measured CPU contention as any stall, which counted `hog`'s waiting on its own threads; under owed contention the same pair owes nothing (above), and no CPU intervention has been shown on the VM since. The verify decision records the outcome's `effect`.
+**Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node (`measuredEffect`; none when the share fell by no more than 0.02). Pair-level relationship strength clamps this measurement to [0, 1]. The admission domain effect retains the slope above 1 because it projects a node response per unit workload share, not a relationship strength. The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. That run measured CPU contention as any stall, which counted `hog`'s waiting on its own threads; under owed contention the same pair owes nothing (above), and no CPU intervention has been shown on the VM since. The verify decision records the outcome's `effect`.
 
 **Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
 
