@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/runtime/kubernetes"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // TestBothLeversBuiltByDefault: relief enabled with the default levers runs one
@@ -193,9 +195,11 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 	dr.Put(runtime.Workload{Subject: "unit:x", UID: "uid-x",
 		Resources: map[string]runtime.Resource{"memory": {Request: f64(1)}}})
 	req := &minimal.Requests{}
+	headroomMu := &sync.Mutex{}
 	var logged []string
 	invalidated := 0
-	r := &requestsRefresher{rt: rt, req: req, logf: func(f string, a ...any) { logged = append(logged, f) },
+	r := &requestsRefresher{rt: rt, req: req, headroomMu: headroomMu,
+		logf:    func(f string, a ...any) { logged = append(logged, f) },
 		onStale: func() { invalidated++ }}
 	r.refresh(context.Background())
 	got, ok := req.Load()
@@ -232,6 +236,67 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 	}
 }
 
+type blockingCollector struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c blockingCollector) Collect() ([]*types.MetricSample, error) {
+	close(c.started)
+	<-c.release
+	return []*types.MetricSample{{MetricType: types.MemoryAdmissionHeadroomRatio}}, nil
+}
+
+func (blockingCollector) SourceID() string { return "test" }
+
+func (blockingCollector) AvailableMetrics() []types.MetricType {
+	return []types.MetricType{types.MemoryAdmissionHeadroomRatio}
+}
+
+func TestFailedRequestRefreshCannotInvalidateBeforeInFlightHeadroomIngest(t *testing.T) {
+	headroomMu := &sync.Mutex{}
+	req := &minimal.Requests{}
+	req.Store(map[string]float64{"pod": 1})
+	collector := blockingCollector{started: make(chan struct{}), release: make(chan struct{})}
+	var steps []string
+	collectDone := make(chan struct{})
+	go func() {
+		defer close(collectDone)
+		collectAndIngest(collector, headroomMu, func(*types.MetricSample) error {
+			steps = append(steps, "ingested")
+			return nil
+		})
+	}()
+	<-collector.started
+
+	refreshDone := make(chan struct{})
+	r := &requestsRefresher{
+		rt:         &listing{err: errors.New("runtime unavailable")},
+		req:        req,
+		headroomMu: headroomMu,
+		logf:       func(string, ...any) {},
+		onStale:    func() { steps = append(steps, "invalidated") },
+	}
+	go func() {
+		defer close(refreshDone)
+		r.refresh(context.Background())
+	}()
+	select {
+	case <-refreshDone:
+		t.Fatal("request refresh invalidated headroom while collection still held the gate")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(collector.release)
+	<-collectDone
+	<-refreshDone
+	if !reflect.DeepEqual(steps, []string{"ingested", "invalidated"}) {
+		t.Fatalf("operation order %v; want ingest to finish before invalidation", steps)
+	}
+	if _, ok := req.LoadFresh(); ok {
+		t.Fatal("failed refresh left cached requests fresh")
+	}
+}
+
 // TestNoRequestsOnTheDryRun: the dry run lists no requests, so the refresh is
 // not started and the collector drops the request condition.
 func TestNoRequestsOnTheDryRun(t *testing.T) {
@@ -242,7 +307,8 @@ func TestNoRequestsOnTheDryRun(t *testing.T) {
 	req := &minimal.Requests{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if startRequestsLoop(ctx, "dry-run", rt, req, t.Logf, nil) {
+	headroomMu := &sync.Mutex{}
+	if startRequestsLoop(ctx, "dry-run", rt, req, headroomMu, t.Logf, nil) {
 		t.Fatal("started on the dry run")
 	}
 	if _, ok := req.Load(); ok {
@@ -250,7 +316,7 @@ func TestNoRequestsOnTheDryRun(t *testing.T) {
 	}
 	l := &listing{ws: []runtime.Workload{{Subject: "pod:a", UID: "u",
 		Resources: map[string]runtime.Resource{"memory": {Request: f64(5)}}}}}
-	if !startRequestsLoop(ctx, "kubernetes", l, req, t.Logf, nil) {
+	if !startRequestsLoop(ctx, "kubernetes", l, req, headroomMu, t.Logf, nil) {
 		t.Fatal("not started on kubernetes")
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -340,7 +406,7 @@ func TestASidecarsRequestIsPartOfThePodsPromise(t *testing.T) {
 	}
 	rt := kubernetes.New(runtime.Env{NodeID: "n1", Spec: spec.RuntimeSpec{Kind: "kubernetes"}}, fake.NewSimpleClientset(p))
 	req := &minimal.Requests{}
-	(&requestsRefresher{rt: rt, req: req, logf: t.Logf}).refresh(context.Background())
+	(&requestsRefresher{rt: rt, req: req, headroomMu: &sync.Mutex{}, logf: t.Logf}).refresh(context.Background())
 	got, ok := req.Load()
 	if !ok || got["uid-v"] != 320<<20 {
 		t.Fatalf("requests %v; want the victim's 320Mi, sidecar included", got)

@@ -3,6 +3,7 @@ package agentmain
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
@@ -17,17 +18,20 @@ const requestsEvery = 30 * time.Second
 // runtime lists: each pod's memory request, by UID. A listing that fails keeps
 // the last requests, and the failure is logged once until a listing succeeds.
 type requestsRefresher struct {
-	rt      runtime.Runtime
-	req     *minimal.Requests
-	logf    func(string, ...any)
-	onStale func()
-	failing bool
+	rt         runtime.Runtime
+	req        *minimal.Requests
+	headroomMu *sync.Mutex
+	logf       func(string, ...any)
+	onStale    func()
+	failing    bool
 }
 
 // refresh lists the workloads once and stores their requests.
 func (r *requestsRefresher) refresh(ctx context.Context) {
 	ws, err := r.rt.Workloads(ctx)
 	if err != nil {
+		r.headroomMu.Lock()
+		defer r.headroomMu.Unlock()
 		r.req.MarkStale()
 		if !r.failing && r.onStale != nil {
 			r.onStale()
@@ -51,7 +55,9 @@ func (r *requestsRefresher) refresh(ctx context.Context) {
 			m[w.UID] = *req
 		}
 	}
+	r.headroomMu.Lock()
 	r.req.Store(m)
+	r.headroomMu.Unlock()
 }
 
 // startRequestsLoop refreshes req from rt once now and every requestsEvery
@@ -59,11 +65,11 @@ func (r *requestsRefresher) refresh(ctx context.Context) {
 // no pod there has a request, and with none stored the collector drops the
 // condition that a pod be within its request rather than count no pod.
 func startRequestsLoop(ctx context.Context, kind string, rt runtime.Runtime, req *minimal.Requests,
-	logf func(string, ...any), onStale func()) bool {
+	headroomMu *sync.Mutex, logf func(string, ...any), onStale func()) bool {
 	if kind == "dry-run" {
 		return false
 	}
-	r := &requestsRefresher{rt: rt, req: req, logf: logf, onStale: onStale}
+	r := &requestsRefresher{rt: rt, req: req, headroomMu: headroomMu, logf: logf, onStale: onStale}
 	go func() {
 		r.refresh(ctx)
 		t := time.NewTicker(requestsEvery)
