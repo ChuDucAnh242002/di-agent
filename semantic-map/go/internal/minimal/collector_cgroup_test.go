@@ -2,6 +2,7 @@ package minimal
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -347,6 +348,83 @@ func keys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestMemoryAdmissionHeadroomReservesUnusedRequests(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	req := &Requests{}
+	req.Store(map[string]float64{testUID: float64(1 << 30), "pending-pod": float64(1 << 30)})
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
+		Subjects: true, MaxSubjects: 256, MemTotalBytes: uint64(fakeMemTotalKB) * 1024,
+		ProcRoot: procRoot, Requests: req,
+	})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio]
+	if s == nil {
+		t.Fatal("no memory admission headroom sample")
+	}
+	available := float64(fakeMemAvailableKB) * 1024
+	current := float64(268435456)
+	reserved := (1<<30 - current) + (1 << 30)
+	want := (available - float64(reserved)) / float64(fakeMemTotalKB*1024)
+	if math.Abs(s.Value-want) > 1e-9 || s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
+		t.Fatalf("headroom sample %+v; want share %.6f", s, want)
+	}
+}
+
+func TestMemoryAdmissionHeadroomRequiresFreshRequests(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	req := &Requests{}
+	req.Store(map[string]float64{"pending-pod": float64(1 << 30)})
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
+		Subjects: true, MaxSubjects: 256, MemTotalBytes: uint64(fakeMemTotalKB) * 1024,
+		ProcRoot: procRoot, Requests: req,
+	})
+	if samples, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	} else if bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio] == nil {
+		t.Fatal("fresh runtime requests did not produce admission headroom")
+	}
+	req.MarkStale()
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio] != nil {
+		t.Fatal("stale runtime requests produced a current admission headroom bound")
+	}
+}
+
+func TestMemoryAdmissionHeadroomReservesFullRequestWhenPodIsUnread(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	req := &Requests{}
+	req.Store(map[string]float64{testUID: float64(1 << 30)})
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
+		Subjects: true, MaxSubjects: 256, MemTotalBytes: uint64(fakeMemTotalKB) * 1024,
+		ProcRoot: procRoot, Requests: req,
+	})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(podA, "cpu.stat")); err != nil {
+		t.Fatal(err)
+	}
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio]
+	if s == nil {
+		t.Fatal("no memory admission headroom sample")
+	}
+	available := float64(fakeMemAvailableKB) * 1024
+	want := (available - (1 << 30)) / float64(fakeMemTotalKB*1024)
+	if math.Abs(s.Value-want) > 1e-9 {
+		t.Fatalf("headroom sample %v; want %.6f after reserving the full request", s.Value, want)
+	}
 }
 
 // TestSubjectMemoryIsSilentWhenNodeCapacityIsUnknown: without MemTotal there is no

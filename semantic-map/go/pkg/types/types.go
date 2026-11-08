@@ -249,6 +249,8 @@ type OutcomeSimulation struct {
 //	MemoryContentionRatio node only: the worst PSI memory.some stall of a promised pod
 //	                     within its memory request and not limiting itself, or its
 //	                     io.some stall while it refaults its page cache
+//	MemoryAdmissionHeadroomRatio node only: MemAvailable after reserving known pods'
+//	                     unused memory requests, as a share of node memory
 //	MemoryEventsHigh     memory.events high: times over memory.high in the window (count)
 //	MemoryEventsMax      memory.events max: times at memory.max in the window (count)
 //	MemoryOOMKills       memory.events oom_kill: OOM kills in the window (count)
@@ -279,6 +281,8 @@ const (
 	CPUContentionRatio  MetricType = "cpu_contention_ratio"
 	// MemoryContentionRatio is node-level, on [0,1].
 	MemoryContentionRatio MetricType = "memory_contention_ratio"
+	// MemoryAdmissionHeadroomRatio is node-level, on [0,1].
+	MemoryAdmissionHeadroomRatio MetricType = "memory_admission_headroom_ratio"
 	// The memory.events counts are per subject, per window, on [0, 1e9].
 	MemoryEventsHigh MetricType = "memory_events_high"
 	MemoryEventsMax  MetricType = "memory_events_max"
