@@ -20,6 +20,7 @@ type requestsRefresher struct {
 	rt      runtime.Runtime
 	req     *minimal.Requests
 	logf    func(string, ...any)
+	onStale func()
 	failing bool
 }
 
@@ -27,6 +28,10 @@ type requestsRefresher struct {
 func (r *requestsRefresher) refresh(ctx context.Context) {
 	ws, err := r.rt.Workloads(ctx)
 	if err != nil {
+		r.req.MarkStale()
+		if !r.failing && r.onStale != nil {
+			r.onStale()
+		}
 		if !r.failing {
 			r.logf("memory requests: listing workloads: %v; memory contention counts pods against the requests last listed", err)
 		}
@@ -53,11 +58,12 @@ func (r *requestsRefresher) refresh(ctx context.Context) {
 // until ctx ends, and reports whether it started. On the dry run it does not:
 // no pod there has a request, and with none stored the collector drops the
 // condition that a pod be within its request rather than count no pod.
-func startRequestsLoop(ctx context.Context, kind string, rt runtime.Runtime, req *minimal.Requests, logf func(string, ...any)) bool {
+func startRequestsLoop(ctx context.Context, kind string, rt runtime.Runtime, req *minimal.Requests,
+	logf func(string, ...any), onStale func()) bool {
 	if kind == "dry-run" {
 		return false
 	}
-	r := &requestsRefresher{rt: rt, req: req, logf: logf}
+	r := &requestsRefresher{rt: rt, req: req, logf: logf, onStale: onStale}
 	go func() {
 		r.refresh(ctx)
 		t := time.NewTicker(requestsEvery)

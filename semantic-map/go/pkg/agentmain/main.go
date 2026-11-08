@@ -370,6 +370,11 @@ func Main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if state.MarkPropertyStale("memory_admission_headroom_ratio",
+		"runtime workload requests have not been refreshed for this process", "requests") {
+		log.Printf("memory admission headroom: invalidated pending a fresh runtime workload listing")
+	}
+
 	go func() {
 		log.Printf("semantic-map agent starting profile=%s addr=%s ui=%t", cfg.Profile.Name, cfg.Node.Addr, cfg.Node.UI)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -392,7 +397,12 @@ func Main() {
 		log.Printf("relief: %s acting every %s through runtime %s%s", l.Status().Action, cfg.Loops.Relief.Interval, rt.Name(), dry)
 		go l.Start(ctx)
 	}
-	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, log.Printf) {
+	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, log.Printf, func() {
+		if state.MarkPropertyStale("memory_admission_headroom_ratio",
+			"runtime workload listing failed; request reservations are no longer fresh", "requests") {
+			log.Printf("memory admission headroom: invalidated after runtime workload listing failed")
+		}
+	}) {
 		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))

@@ -224,6 +224,19 @@ func TestUsageBasisFallback(t *testing.T) {
 	}
 }
 
+func TestExpiredMemoryHeadroomFallsBackToPressurePrediction(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	record(t, m, "memory_admission_headroom_ratio", "", 0.005)
+	m.SetClock(func() time.Time { return t0.Add(m.StaleAfter() + time.Second) })
+
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Accept, "")
+	l := line(t, d, "memory_contention_ratio")
+	if l.MemoryHeadroom != nil || l.Basis != "usage" || !strings.Contains(l.Reason, "headroom is stale") {
+		t.Fatalf("memory line %+v; want stale bound ignored and pressure prediction used", l)
+	}
+}
+
 // TestExitBoundary: a prediction at Exit passes, one just above it does not.
 func TestExitBoundary(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)

@@ -1695,6 +1695,27 @@ func TestObservationRevivesARetiredProperty(t *testing.T) {
 	}
 }
 
+func TestMarkPropertyStaleAndObservationRestoresIt(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Observe("memory_admission_headroom_ratio", 0.2, c.now())
+	if !m.MarkPropertyStale("memory_admission_headroom_ratio", "request listing failed", "requests") {
+		t.Fatal("fresh property was not marked stale")
+	}
+	if p, _ := m.Property("memory_admission_headroom_ratio"); p.Status != Stale {
+		t.Fatalf("status %s; want stale", p.Status)
+	}
+	if m.MarkPropertyStale("memory_admission_headroom_ratio", "still unavailable", "requests") {
+		t.Fatal("already stale property reported a new transition")
+	}
+	c.advance(time.Second)
+	if err := m.Record(Observation{ID: "memory_admission_headroom_ratio", Value: 0.3, At: c.now()}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("memory_admission_headroom_ratio"); p.Status != Active {
+		t.Fatalf("status after new sample %s; want active", p.Status)
+	}
+}
+
 func TestDerivedGoesStaleWhenNoMemberIsActiveAndReturnsWithThem(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, ConvergenceObservations: 2})
 	_ = m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}})

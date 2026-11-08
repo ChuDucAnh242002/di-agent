@@ -194,7 +194,9 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 		Resources: map[string]runtime.Resource{"memory": {Request: f64(1)}}})
 	req := &minimal.Requests{}
 	var logged []string
-	r := &requestsRefresher{rt: rt, req: req, logf: func(f string, a ...any) { logged = append(logged, f) }}
+	invalidated := 0
+	r := &requestsRefresher{rt: rt, req: req, logf: func(f string, a ...any) { logged = append(logged, f) },
+		onStale: func() { invalidated++ }}
 	r.refresh(context.Background())
 	got, ok := req.Load()
 	if !ok || !reflect.DeepEqual(got, map[string]float64{"uid-a": 1 << 30}) {
@@ -208,6 +210,12 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 	if got, _ := req.Load(); !reflect.DeepEqual(got, map[string]float64{"uid-a": 1 << 30}) {
 		t.Errorf("after a failed listing requests %v; want the last kept", got)
 	}
+	if _, ok := req.LoadFresh(); ok {
+		t.Error("failed listing left cached requests marked fresh")
+	}
+	if invalidated != 1 {
+		t.Errorf("stale callback ran %d times; want once for the failed-listing streak", invalidated)
+	}
 	if len(logged) != 1 {
 		t.Errorf("logged %v; want one line for the streak", logged)
 	}
@@ -218,6 +226,9 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 	r.refresh(context.Background())
 	if len(logged) != 3 {
 		t.Errorf("logged %v; want a recovery and the new streak said", logged)
+	}
+	if invalidated != 2 {
+		t.Errorf("stale callback ran %d times; want once per failed-listing streak", invalidated)
 	}
 }
 
@@ -231,7 +242,7 @@ func TestNoRequestsOnTheDryRun(t *testing.T) {
 	req := &minimal.Requests{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if startRequestsLoop(ctx, "dry-run", rt, req, t.Logf) {
+	if startRequestsLoop(ctx, "dry-run", rt, req, t.Logf, nil) {
 		t.Fatal("started on the dry run")
 	}
 	if _, ok := req.Load(); ok {
@@ -239,7 +250,7 @@ func TestNoRequestsOnTheDryRun(t *testing.T) {
 	}
 	l := &listing{ws: []runtime.Workload{{Subject: "pod:a", UID: "u",
 		Resources: map[string]runtime.Resource{"memory": {Request: f64(5)}}}}}
-	if !startRequestsLoop(ctx, "kubernetes", l, req, t.Logf) {
+	if !startRequestsLoop(ctx, "kubernetes", l, req, t.Logf, nil) {
 		t.Fatal("not started on kubernetes")
 	}
 	deadline := time.Now().Add(5 * time.Second)
