@@ -1759,6 +1759,14 @@ not name). A node with no `Relieves` reading, or a stale or retired one, reads 0
 no subject reports one (an idle or emptied node is calm) and declines when a subject
 does (the gap is a gap), as the gate does.
 
+Memory additionally uses a fresh `memory_admission_headroom_ratio` as a conservative
+capacity bound. The cgroup collector subtracts the unused memory requests of known pods
+from node `MemAvailable`, divides by `MemTotal`, and reserves a full request when a pod
+cannot be read. The bound is emitted only while the runtime's workload listing is fresh.
+A failed listing marks the last bound stale immediately; a bound whose observation has
+otherwise aged past `map.stale_after` is ignored as well. If the bound is unavailable or
+stale, admission falls back to its map/usage pressure prediction.
+
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
 a decline puts the offer, with the chain so far, to each registered peer in
 registry-id order through `POST /offers`, skipping a URL already in the chain and
