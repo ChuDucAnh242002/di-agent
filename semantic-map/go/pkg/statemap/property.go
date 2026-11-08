@@ -509,6 +509,10 @@ type Map struct {
 	// interventions holds the counters by pair "from->to"; see Interventions.
 	interventions map[string]*Interventions
 
+	// domainEffects pools verified intervention effects by usage metric and
+	// relieves metric, independently of subject and relationship lifecycle.
+	domainEffects map[string]*DomainInterventionEffect
+
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
@@ -553,6 +557,7 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		interventions: make(map[string]*Interventions),
+		domainEffects: make(map[string]*DomainInterventionEffect),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,

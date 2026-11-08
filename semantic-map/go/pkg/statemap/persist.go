@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,9 +30,10 @@ import (
 // confidences survive; the raw pairs behind them do not, so the estimator resumes
 // from what it concluded rather than from what it was mid-way through concluding.
 
-// SnapshotVersion identifies the on-disk format. A snapshot from a different version
-// is refused rather than guessed at: restoring a misread field would put wrong values
-// into a model the agent then reasons from, which is worse than starting cold.
+// SnapshotVersion identifies the on-disk format. Version 5 is migrated explicitly:
+// its pair-level intervention evidence is used to rebuild pooled domain effects.
+// Other versions are refused rather than guessed at: restoring a misread field would
+// put wrong values into a model the agent then reasons from, which is worse than cold.
 // Version 2 named the property and relationship fields explicitly. A version 1 file
 // would half-load under those names — Go's decoder matches "ID" to "id"
 // case-insensitively but not "NObservations" to "n_observations" — so the values would
@@ -39,8 +41,9 @@ import (
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
-// from directional relationships; other versions are refused rather than guessed at.
-const SnapshotVersion = 5
+// from directional relationships. Version 6 persists pooled intervention effects.
+const SnapshotVersion = 6
+const legacySnapshotVersion = 5
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -62,6 +65,10 @@ type Snapshot struct {
 	// Interventions are the counters by pair "from->to", saved apart from the
 	// relationships because they exist before any relationship does.
 	Interventions map[string]Interventions `json:"interventions,omitempty"`
+
+	// DomainEffects pool the measured response by usage metric and relieves metric,
+	// so admission can retain verified node knowledge after a subject disappears.
+	DomainEffects map[string]DomainInterventionEffect `json:"domain_effects,omitempty"`
 
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
@@ -95,6 +102,12 @@ func (m *Map) Snapshot() Snapshot {
 			s.Interventions = map[string]Interventions{}
 		}
 		s.Interventions[k] = *iv
+	}
+	for k, e := range m.domainEffects {
+		if s.DomainEffects == nil {
+			s.DomainEffects = map[string]DomainInterventionEffect{}
+		}
+		s.DomainEffects[k] = *e
 	}
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
@@ -231,7 +244,7 @@ func (m *Map) Load(path string) (bool, error) {
 	if err := json.Unmarshal(blob, &snap); err != nil {
 		return false, fmt.Errorf("decoding snapshot: %w", err)
 	}
-	if snap.Version != SnapshotVersion {
+	if snap.Version != SnapshotVersion && snap.Version != legacySnapshotVersion {
 		return false, fmt.Errorf(
 			"snapshot is version %d, this agent writes version %d: refusing to guess at "+
 				"the difference, since a misread field would become state the agent reasons from",
@@ -274,6 +287,42 @@ func (m *Map) Load(path string) (bool, error) {
 	for k, iv := range snap.Interventions {
 		iv := iv
 		m.interventions[k] = &iv
+	}
+	for k, e := range snap.DomainEffects {
+		e := e
+		m.domainEffects[k] = &e
+	}
+	if snap.Version == legacySnapshotVersion || len(snap.DomainEffects) == 0 {
+		// Version 5 already contains pair-level effects. Recover the pooled estimate
+		// from those counters the first time they are restored.
+		for pair, iv := range snap.Interventions {
+			if iv.EffectN == 0 {
+				continue
+			}
+			from, to, ok := strings.Cut(pair, "->")
+			if !ok {
+				continue
+			}
+			usage, _, scoped := strings.Cut(from, "@")
+			if !scoped || usage == "" {
+				continue
+			}
+			key := interventionKey(usage, to)
+			e := m.domainEffects[key]
+			if e == nil {
+				e = &DomainInterventionEffect{}
+				m.domainEffects[key] = e
+			}
+			e.EffectSum += iv.EffectSum
+			e.N += iv.EffectN
+			measuredAt := iv.EffectLast
+			if measuredAt.IsZero() {
+				measuredAt = iv.Last
+			}
+			if measuredAt.After(e.Last) {
+				e.LastSource, e.LastDecision, e.Last = from, iv.EffectLastDecision, measuredAt
+			}
+		}
 	}
 	m.revision = snap.Revision
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)

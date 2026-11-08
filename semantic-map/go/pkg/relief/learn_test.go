@@ -684,8 +684,8 @@ func TestNoEffectIsMeasuredWhenTheShareDidNotMove(t *testing.T) {
 	if _, ok := measuredEffect(0.3, 0.5, 0.49); ok {
 		t.Fatal("a share drop of 0.01 measured an effect; want none")
 	}
-	if e, ok := measuredEffect(0.3, 0.5, 0.4); !ok || math.Abs(e-1) > 1e-9 {
-		t.Fatalf("effect %v ok=%v; want 0.3/0.1 clamped to 1", e, ok)
+	if e, ok := measuredEffect(0.3, 0.5, 0.4); !ok || math.Abs(e-3) > 1e-9 {
+		t.Fatalf("effect %v ok=%v; want the unclamped response slope 0.3/0.1", e, ok)
 	}
 	if e, ok := measuredEffect(0.05, 0.5, 0.25); !ok || math.Abs(e-0.2) > 1e-9 {
 		t.Fatalf("effect %v ok=%v; want 0.05/0.25", e, ok)
