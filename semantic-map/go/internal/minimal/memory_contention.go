@@ -9,7 +9,12 @@ import (
 // them. The collector reads it every collect; whoever lists the workloads stores it. It is
 // safe for concurrent Store and Load, and the zero value holds nothing yet.
 type Requests struct {
-	m atomic.Pointer[map[string]float64]
+	m atomic.Pointer[requestSnapshot]
+}
+
+type requestSnapshot struct {
+	requests map[string]float64
+	fresh    bool
 }
 
 // Store replaces the requests with a copy of m, so a later write to m changes nothing here.
@@ -18,7 +23,7 @@ func (r *Requests) Store(m map[string]float64) {
 	for k, v := range m {
 		cp[k] = v
 	}
-	r.m.Store(&cp)
+	r.m.Store(&requestSnapshot{requests: cp, fresh: true})
 }
 
 // Load is the requests last stored, and false until the first Store: before it nothing is
@@ -29,7 +34,30 @@ func (r *Requests) Load() (map[string]float64, bool) {
 	if p == nil {
 		return nil, false
 	}
-	return *p, true
+	return p.requests, true
+}
+
+// LoadFresh is Load when the last runtime listing succeeded.
+func (r *Requests) LoadFresh() (map[string]float64, bool) {
+	p := r.m.Load()
+	if p == nil || !p.fresh {
+		return nil, false
+	}
+	return p.requests, true
+}
+
+// MarkStale preserves the last requests for contention accounting but prevents them
+// from being used as a current admission headroom bound.
+func (r *Requests) MarkStale() {
+	for {
+		p := r.m.Load()
+		if p == nil || !p.fresh {
+			return
+		}
+		if r.m.CompareAndSwap(p, &requestSnapshot{requests: p.requests}) {
+			return
+		}
+	}
 }
 
 // podMem is what memoryContention needs of one pod promised memory (not BestEffort) with a
