@@ -31,7 +31,10 @@ type Line struct {
 	Domain, Phase, Basis, Reason string
 	Share, Pressure, Usage, Exit float64
 	MapPred, UsagePred, K        *float64
+	MemoryHeadroom               *float64
 	KFrom                        []string
+	KDecisionIDs                 []string
+	KObservations                int
 	Pass                         bool
 }
 
@@ -39,6 +42,7 @@ type Line struct {
 type Decision struct {
 	ID, Verdict, Reason string
 	Lines               []Line
+	PredictionReached   bool
 }
 
 // Decide answers an offer from this node's map and records the answer under id.
@@ -52,10 +56,11 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	for i, d := range domains {
 		lines[i] = Line{Domain: d.Relieves, Phase: d.Phase, Exit: d.Exit}
 	}
+	predictionReached := false
 	answer := func(verdict, reason string) Decision {
 		b.Input("domains", slices.Clone(lines))
 		b.Commit(map[string]any{"verdict": verdict, "reason": reason})
-		return Decision{ID: id, Verdict: verdict, Reason: reason, Lines: lines}
+		return Decision{ID: id, Verdict: verdict, Reason: reason, Lines: lines, PredictionReached: predictionReached}
 	}
 
 	if len(o.Arch) > 0 && !slices.ContainsFunc(o.Arch, func(a string) bool { return strings.EqualFold(a, self.Arch) }) {
@@ -103,6 +108,7 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	if !gate.Accepted {
 		return answer(Decline, gate.Reason)
 	}
+	predictionReached = true
 
 	facts := map[string]statemap.Fact{}
 	for _, f := range b.Facts() {
@@ -159,19 +165,31 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		notes = append(notes, fmt.Sprintf("%s is %s and no subject reports it", d.Relieves, p.Status))
 	}
 	l.Pressure = pressure
-
-	// k is the largest slope relief measured on this node by acting on a subject's
-	// usage, so the map prediction leans towards declining.
-	for _, e := range m.MeasuredEffects(d.Relieves) {
-		if !strings.HasPrefix(e.From, d.Usage+"@") {
-			continue
+	headroomExceeded := false
+	memoryHeadroom := 0.0
+	if d.Resource == "memory" {
+		if p, ok := b.Property("memory_admission_headroom_ratio"); ok &&
+			p.NObservations > 0 && p.Status == statemap.Active {
+			headroom := p.Value
+			l.MemoryHeadroom = &headroom
+			memoryHeadroom = headroom
+			headroomExceeded = l.Share > headroom
 		}
-		switch {
-		case l.K == nil || e.Effect > *l.K:
-			k := e.Effect
-			l.K, l.KFrom = &k, []string{e.Relationship}
-		case e.Effect == *l.K:
-			l.KFrom = append(l.KFrom, e.Relationship)
+	}
+
+	// k is the pooled response slope measured by interventions for this domain. Unlike
+	// relationship strength, the slope may exceed 1 when pressure responds sharply.
+	// Its estimate
+	// is shrunk toward zero until repeated outcomes build support; the pooled record
+	// survives retirement of any contributing source property or relationship.
+	if e, ok := m.MeasuredDomainEffect(d.Usage, d.Relieves); ok {
+		k := e.Estimate()
+		l.K, l.KObservations = &k, e.N
+		if e.LastSource != "" {
+			l.KFrom = []string{e.LastSource}
+		}
+		if e.LastDecision != "" {
+			l.KDecisionIDs = []string{e.LastDecision}
 		}
 	}
 	if l.K != nil {
@@ -181,6 +199,10 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	if usage > 0 {
 		p := clamp01(pressure * (usage + l.Share) / usage)
 		l.UsagePred = &p
+	}
+	if headroomExceeded {
+		l.Basis = "memory-headroom"
+		return fail(fmt.Sprintf("memory demand share %.4f exceeds admission headroom %.4f", l.Share, memoryHeadroom))
 	}
 
 	var pred float64
