@@ -39,11 +39,21 @@ type admitter struct {
 	peers     func() ([]*peers.Descriptor, error)
 	client    *peers.Client
 
-	mu     sync.Mutex   // guards recent and answered
+	mu     sync.Mutex   // guards recent, answered and prediction stats
 	recent []submission // newest first, at most submissionCap
 	// answered counts this node's own verdicts, local and for peers: only false
 	// accepts are observable, so the decline rate is reported beside the outcomes.
-	answered map[string]int
+	answered   map[string]int
+	prediction predictionStats
+}
+
+type predictionStats struct {
+	Decisions           int            `json:"decisions"`
+	BasisEvaluations    int            `json:"basis_evaluations"`
+	ByBasis             map[string]int `json:"by_basis"`
+	Accepted            int            `json:"accepted"`
+	Declined            int            `json:"declined"`
+	ChangedByPrediction int            `json:"changed_by_prediction"`
 }
 
 // submission is one POST /tasks and where it ended. Each hop's URL and decision
@@ -172,12 +182,23 @@ func registerAdmissionRoutes(mux *http.ServeMux, a *admitter) {
 		a.mu.Lock()
 		subs := slices.Clone(a.recent)
 		answered := maps.Clone(a.answered)
+		prediction := a.prediction
+		prediction.ByBasis = maps.Clone(a.prediction.ByBasis)
 		a.mu.Unlock()
 		if answered == nil {
 			answered = map[string]int{}
 		}
+		if prediction.ByBasis == nil {
+			prediction.ByBasis = map[string]int{}
+		}
 		writeJSON(w, map[string]any{"submissions": subs, "answered": answered,
-			"pending": a.tracker.PendingList(), "outcomes": a.tracker.Outcomes()})
+			"pending": a.tracker.PendingList(), "outcomes": a.tracker.Outcomes(),
+			"prediction": map[string]any{
+				"decisions": prediction.Decisions, "basis_evaluations": prediction.BasisEvaluations,
+				"by_basis": prediction.ByBasis, "accepted": prediction.Accepted,
+				"declined": prediction.Declined, "changed_by_prediction": prediction.ChangedByPrediction,
+				"outcome_errors": a.tracker.PredictionSummary(),
+			}})
 	})
 }
 
@@ -305,6 +326,7 @@ func (a *admitter) decide(ctx context.Context, o admission.Offer) admission.Hop 
 	}
 	doms := a.domains()
 	d := admission.Decide(a.m, o, doms, a.self, a.ids.Next())
+	a.recordPrediction(d)
 	if d.Verdict == admission.Accept {
 		if err := a.tracker.Accepted(o, d, doms); errors.Is(err, admission.ErrAlreadyPending) {
 			// Another offer for the name was registered between the check and
@@ -314,6 +336,35 @@ func (a *admitter) decide(ctx context.Context, o admission.Offer) admission.Hop 
 		}
 	}
 	return admission.Hop{Node: a.self.NodeID, DecisionID: d.ID, Verdict: d.Verdict, Reason: d.Reason}
+}
+
+// recordPrediction counts decisions that reached the prediction step. Since the
+// relief-phase and headroom gates have already passed, a prediction decline is a
+// verdict that the prediction step changed.
+func (a *admitter) recordPrediction(d admission.Decision) {
+	if !d.PredictionReached {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.prediction.Decisions++
+	for _, line := range d.Lines {
+		basis := line.Basis
+		if basis == "" {
+			basis = "none"
+		}
+		if a.prediction.ByBasis == nil {
+			a.prediction.ByBasis = map[string]int{}
+		}
+		a.prediction.ByBasis[basis]++
+		a.prediction.BasisEvaluations++
+	}
+	if d.Verdict == admission.Accept {
+		a.prediction.Accepted++
+	} else if d.Verdict == admission.Decline {
+		a.prediction.Declined++
+		a.prediction.ChangedByPrediction++
+	}
 }
 
 // decline records a decline made before Decide; superseded is the accept it

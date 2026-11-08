@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -61,6 +62,21 @@ type OutcomeLine struct {
 	Breached     bool     `json:"breached"`
 	ReliefActed  bool     `json:"relief_acted,omitempty"`
 	Peak         *float64 `json:"peak,omitempty"`
+}
+
+// PredictionError is the mean absolute error of one admission prediction basis.
+type PredictionError struct {
+	N   int     `json:"n"`
+	MAE float64 `json:"mean_absolute_error"`
+}
+
+// PredictionSummary compares the two bases on outcomes still retained by the
+// tracker. Paired counts use only outcomes for which both errors were recorded.
+type PredictionSummary struct {
+	Outcomes int             `json:"outcomes"`
+	Paired   int             `json:"paired"`
+	Map      PredictionError `json:"map"`
+	Usage    PredictionError `json:"usage"`
 }
 
 // TrackerConfig wires a tracker to the agent. Workloads, Shares and Moved are
@@ -192,6 +208,36 @@ func (t *Tracker) Outcomes() []Outcome {
 	out := slices.Clone(t.outcomes)
 	slices.Reverse(out)
 	return out
+}
+
+// PredictionSummary describes prediction errors over the outcomes currently
+// retained by the tracker. Confounded and otherwise unscored outcomes are omitted.
+func (t *Tracker) PredictionSummary() PredictionSummary {
+	outcomes := t.Outcomes()
+	var summary PredictionSummary
+	mapAbs, usageAbs := 0.0, 0.0
+	for _, outcome := range outcomes {
+		paired := false
+		for _, line := range outcome.Lines {
+			if line.MapErr == nil || line.UsageErr == nil {
+				continue
+			}
+			paired = true
+			summary.Paired++
+			summary.Map.N++
+			summary.Usage.N++
+			mapAbs += math.Abs(*line.MapErr)
+			usageAbs += math.Abs(*line.UsageErr)
+		}
+		if paired {
+			summary.Outcomes++
+		}
+	}
+	if summary.Map.N > 0 {
+		summary.Map.MAE = mapAbs / float64(summary.Map.N)
+		summary.Usage.MAE = usageAbs / float64(summary.Usage.N)
+	}
+	return summary
 }
 
 // Tick snapshots accepts whose workload has arrived, judges those whose settle
