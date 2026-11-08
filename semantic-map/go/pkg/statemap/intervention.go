@@ -2,7 +2,9 @@ package statemap
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -20,6 +22,11 @@ type Interventions struct {
 	NullRun      int       `json:"null_run"`
 	Last         time.Time `json:"last,omitzero"`
 	LastDecision string    `json:"last_decision,omitempty"`
+	// EffectLastDecision identifies the latest unconfounded outcome included in
+	// EffectSum. It can differ from LastDecision when later outcomes were not
+	// measurable.
+	EffectLastDecision string    `json:"effect_last_decision,omitempty"`
+	EffectLast         time.Time `json:"effect_last,omitzero"`
 	// EffectSum and EffectN accumulate the measured effects of unconfounded outcomes;
 	// their mean is the Measured strength of the relationship on this pair.
 	EffectSum float64 `json:"effect_sum,omitempty"`
@@ -40,6 +47,7 @@ type MeasuredEffect struct {
 	Relationship, From string
 	Effect             float64
 	N                  int
+	DecisionID         string
 }
 
 // MeasuredEffects lists, sorted by source, the non-retired relationships into to
@@ -51,10 +59,42 @@ func (m *Map) MeasuredEffects(to string) []MeasuredEffect {
 			continue
 		}
 		e, _ := r.Interventions.effect()
-		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e, N: r.Interventions.EffectN})
+		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e,
+			N: r.Interventions.EffectN, DecisionID: r.Interventions.EffectLastDecision})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
 	return out
+}
+
+// DomainInterventionEffect is the node's pooled, verified response for a usage
+// metric and a relieves metric, independent of any one subject's relationship.
+type DomainInterventionEffect struct {
+	EffectSum    float64   `json:"effect_sum"`
+	N            int       `json:"n"`
+	LastSource   string    `json:"last_source,omitempty"`
+	LastDecision string    `json:"last_decision,omitempty"`
+	Last         time.Time `json:"last,omitzero"`
+}
+
+// Estimate shrinks the observed mean toward zero with one zero-effect pseudo-sample.
+// Domain effects are response slopes, not relationship strengths, so they may exceed 1.
+func (e DomainInterventionEffect) Estimate() float64 {
+	if e.N <= 0 {
+		return 0
+	}
+	return math.Max(0, e.EffectSum/float64(e.N+1))
+}
+
+// MeasuredDomainEffect returns the pooled effect of verified interventions from
+// usage to relieves. It remains available when contributing subjects and edges retire.
+func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEffect, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.domainEffects[interventionKey(usage, relieves)]
+	if !ok || e.N == 0 {
+		return DomainInterventionEffect{}, false
+	}
+	return *e, true
 }
 
 // InterventionOutcome is the verified result of one action the agent took.
@@ -121,6 +161,9 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	if o.From == "" || o.To == "" || o.From == o.To {
 		return "", "", fmt.Errorf("intervention needs two distinct endpoints, got %q -> %q", o.From, o.To)
 	}
+	if o.HasEffect && (math.IsNaN(o.Effect) || math.IsInf(o.Effect, 0) || o.Effect < 0) {
+		return "", "", fmt.Errorf("intervention effect must be finite and non-negative, got %v", o.Effect)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -157,6 +200,19 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	if !o.Confounded && o.HasEffect {
 		iv.EffectSum += clamp01(o.Effect)
 		iv.EffectN++
+		iv.EffectLastDecision = o.DecisionID
+		iv.EffectLast = now
+		if usage, _, scoped := strings.Cut(o.From, "@"); scoped && usage != "" {
+			key := interventionKey(usage, o.To)
+			e := m.domainEffects[key]
+			if e == nil {
+				e = &DomainInterventionEffect{}
+				m.domainEffects[key] = e
+			}
+			e.EffectSum += o.Effect
+			e.N++
+			e.LastSource, e.LastDecision, e.Last = o.From, o.DecisionID, now
+		}
 	}
 	m.bump(EventIntervention, target, "intervention", map[string]any{
 		"outcome": outcome, "decision": o.DecisionID, "agreed": iv.Agreed, "null": iv.Null,
