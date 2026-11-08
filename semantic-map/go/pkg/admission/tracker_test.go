@@ -145,6 +145,13 @@ func TestHeld(t *testing.T) {
 	if o.Subject != "pod:web" || o.Name != "web" || r.tr.Pending("web") {
 		t.Fatalf("outcome %+v pending %v", o, r.tr.Pending("web"))
 	}
+	summary := r.tr.PredictionSummary()
+	if summary.Outcomes != 1 || summary.Paired != 1 || summary.Map.N != 1 || summary.Usage.N != 1 {
+		t.Fatalf("prediction summary %+v; want the shared CPU predictions scored", summary)
+	}
+	if summary.Map.MAE == summary.Usage.MAE {
+		t.Fatalf("prediction summary %+v; expected distinct basis errors", summary)
+	}
 }
 
 func TestBreached(t *testing.T) {
