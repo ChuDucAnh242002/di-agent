@@ -487,8 +487,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 - A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
 - `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors, `observed_rise` included, are present on `held` and on `breached` from a reading only, and absent rather than 0 on an unscored line; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
 - `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
-- `prediction` counts offers that passed the relief-phase and headroom gates and reached prediction. `by_basis` counts per-domain evaluations (including `none` where the inputs could not produce a basis); `changed_by_prediction` counts declines at that step, when the phase and headroom gates alone would have admitted the offer. `outcome_errors` compares map and usage mean absolute errors on the same scored lines from the outcomes currently retained (at most 200); confounded and otherwise unscored lines are excluded. These counters and outcomes are in-memory and reset on restart.
-- The cgroup collector adds a memory admission bound after a successful pod-request listing: dynamic `MemAvailable` minus each pod's unconsumed request, divided by `MemTotal`. Offers larger than that headroom decline even if the pressure prediction is calm. When requests are unknown or a listing fails, the existing pressure predictors are used.
+- `prediction` counts offers that passed the relief-phase and `statemap.Map.Admit` gates and reached prediction. `basis_evaluations` and `by_basis` count only per-domain map and usage predictions with the inputs needed to calculate them; missing inputs are excluded. `changed_by_prediction` counts declines caused by a map or usage projection exceeding the domain's exit threshold, not declines from earlier gates or missing inputs. `outcome_errors` compares map and usage mean absolute errors on the same scored lines from the outcomes currently retained (at most 200); confounded and otherwise unscored lines are excluded. These counters and outcomes are in-memory and reset on restart.
 - `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value, a field the offer does not have, or data after it) with nothing recorded; decoding is strict because a misspelt `value` would read as a zero demand; `415` without a JSON content type.
 
 ### `POST /ingest-sample`
@@ -1840,10 +1839,8 @@ becomes outdated. The map snapshot and proposer checkpoint are captured separate
 restore reconciles candidate status against relationships already present in the map.
 A clean shutdown saves immediately; an unclean exit can lose up to `persist.interval`
 of progress. This checkpoint is separate from the state estimator's raw windows, which
-still restart cold. Snapshot format 6 is current; format 5 is migrated by rebuilding
-pooled admission effects from its pair-level intervention evidence (older snapshots may
-not retain the latest contributing decision ID). Older versions are rejected, and older
-binaries cannot load format 6.
+still restart cold. Snapshot format 6 is current. Older versions, including format 5,
+are rejected; older binaries cannot load format 6.
 
 This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
 confirmations still participate in estimates; associations do not. This feature does

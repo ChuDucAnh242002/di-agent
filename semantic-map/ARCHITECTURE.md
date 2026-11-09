@@ -1696,11 +1696,8 @@ no domains and every offer declines: a node never admits blind.
    left would read zero on every pressure prediction below, so the shares must fit
    first.
 6. Prediction, per domain: the pressure the domain would reach with the workload
-   added must be at or below `Exit`, the level relief releases caps at. For memory,
-   when the cgroup collector has a successful request listing, the offer must also fit the
-   `memory_admission_headroom_ratio` from `MemAvailable` after reserving the
-   unconsumed portion of running pods' requests. Admitting up to `Enter` would hold
-   pressure in the band where caps never release.
+   added must be at or below `Exit`, the level relief releases caps at. Admitting up
+   to `Enter` would hold pressure in the band where caps never release.
 
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent
@@ -1749,17 +1746,15 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
 
 - *map*: `pressure + k · share`, `k` the pooled effect relief has measured on this
   node by acting on workloads' `Usage@<subject>` towards `Relieves`
-  (`Map.MeasuredDomainEffect`). It is pooled across subjects and kept separately from
-  their graph relationships, so a subject leaving retires its edge but does not erase
-  what the node measured. One zero-effect pseudo-sample shrinks the observed mean toward
-  zero; a single outcome therefore contributes, but is not treated as full confidence.
-  The decision records the observation count, latest contributing source and verify
-  decision; the estimate and its provenance survive snapshot restore. Version-5
-  snapshots migrate the pair effects, though they may not have retained the latest
-  contributing decision ID or slopes above 1, which the older pair measurements
-  clamped. It exists only where relief has acted and its outcomes
-  were evidence. It is a response slope, not a relationship strength, and can exceed 1;
-  pair-level relationship strengths remain clamped to [0,1].
+  (`Map.MeasuredDomainEffect`). For each domain, the strongest verified effect from a
+  live directional relationship is used; retired relationships and retired or stale
+  sources cannot affect new decisions. Retiring a relationship discards its domain
+  evidence, so a later relationship must build its own evidence. One zero-effect
+  pseudo-sample shrinks the observed mean toward zero; a single outcome therefore
+  contributes, but is not treated as full confidence. The decision records the
+  observation count, source and verify decision. The response slope may exceed 1, but
+  individual measurements and the estimate are capped at 4; pair-level relationship
+  strengths remain clamped to [0,1].
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into
@@ -1784,19 +1779,8 @@ sample is ingested, another memory offer can be admitted against the same headro
 per-name pending check prevents duplicate offers for one name but does not reserve
 aggregate capacity across different names.
 
-`pkg/admission/comparison_test.go` compares the predictor with the headroom-only
-gate on five controlled cases and on generated offers against linear and logistic
-pressure curves. In the five fixed cases, the baseline has two false accepts and no
-unnecessary declines; the predictor has no false accepts and one unnecessary decline.
-For 18 CPU offers per curve, both make no errors on the linear curve; on the logistic
-curve, the baseline has five false accepts and no unnecessary declines, while the
-predictor has three false accepts and no unnecessary declines. For 12 calm-memory
-offers, the ordinary utilization headroom gate has six false accepts; the dynamic
-memory-headroom bound has none, with no unnecessary declines in this matrix. The
-curves use the same functional forms as the scripted scenarios, but these offers and
-labels are generated for the tests, not read from production traces or scenario-runner
-admissions. The memory matrix also defines safety by the supplied headroom bound.
-These results are deterministic regression checks, not evidence of field accuracy.
+`pkg/admission/comparison_test.go` verifies behavior directly: measured slopes above 1
+can drive a decline, while retired-source evidence cannot affect a new decision.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
 a decline puts the offer, with the chain so far, to each registered peer in
@@ -1873,8 +1857,8 @@ prediction summary in `GET /tasks`; any of these is reported as found:
    usage basis's (both are recorded when available): the measured slope does not predict
    better than proportion.
 3. Prediction-stage declines (`changed_by_prediction`) are absent or rare relative
-   to prediction-stage decisions: the phase and headroom gates, rather than prediction,
-   are doing the deciding.
+   to prediction-stage decisions: earlier gates, rather than prediction, are doing
+   the deciding.
 
 `POST /offload` and `peers.Client.Offload` are gone; `Admit` survives as step 5. The
 older answer, `CostOfAction` against latency and energy budgets, was never an
