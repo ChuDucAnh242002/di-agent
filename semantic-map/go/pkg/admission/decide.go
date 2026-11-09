@@ -163,17 +163,25 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	headroomExceeded := false
 	memoryHeadroom := 0.0
 	if d.Resource == "memory" {
-		if p, ok := b.Property("memory_admission_headroom_ratio"); ok &&
-			p.NObservations > 0 && p.Status == statemap.Active {
+		const id = "memory_admission_headroom_ratio"
+		p, ok := b.Property(id)
+		switch {
+		case !ok:
+			notes = append(notes, "memory admission headroom unavailable: missing")
+		case p.NObservations == 0:
+			notes = append(notes, "memory admission headroom unavailable: no observations")
+		case p.Status != statemap.Active:
+			notes = append(notes, fmt.Sprintf("memory admission headroom unavailable: %s", p.Status))
+		default:
 			age := b.At().Sub(p.LastObserved)
-			if age >= 0 && age <= m.StaleAfter() {
-				headroom := p.Value
-				l.MemoryHeadroom = &headroom
-				memoryHeadroom = headroom
-				headroomExceeded = l.Share > headroom
-			} else {
-				notes = append(notes, "memory admission headroom is stale")
+			if age < 0 || age > m.StaleAfter() {
+				notes = append(notes, "memory admission headroom unavailable: stale")
+				break
 			}
+			headroom := p.Value
+			l.MemoryHeadroom = &headroom
+			memoryHeadroom = headroom
+			headroomExceeded = l.Share > headroom
 		}
 	}
 

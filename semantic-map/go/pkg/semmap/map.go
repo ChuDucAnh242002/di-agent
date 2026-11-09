@@ -243,11 +243,13 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return err
 	}
 
-	// Every observed property reaches the proposer; it applies the pairing rule
-	// itself. The range it gets is the one the map holds, and only when a producer
-	// declared it: an assumed [0,1] would make the variation gate measure movement
-	// against a scale nobody stated. Advisory: its errors must not block telemetry.
-	if m.proposer != nil {
+	// The admission headroom bound is derived from memory utilization and pod
+	// requests, so it must not be rediscovered as an independent relationship.
+	// Other observed properties reach the proposer, which applies the pairing rule.
+	// The range it gets is the one the map holds, and only when a producer declared
+	// it: an assumed [0,1] would make the variation gate measure movement against a
+	// scale nobody stated. Advisory: its errors must not block telemetry.
+	if m.proposer != nil && sample.MetricType != types.MemoryAdmissionHeadroomRatio {
 		reading := types.PropertyReading{ID: id, Subject: sample.Subject, Chart: sample.Chart, PartOf: sample.PartOf, Value: value,
 			At: time.Unix(sample.TimestampUnix, 0)}
 		if p, ok := m.state.Property(id); ok && p.RangeDeclared {

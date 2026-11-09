@@ -224,16 +224,49 @@ func TestUsageBasisFallback(t *testing.T) {
 	}
 }
 
-func TestExpiredMemoryHeadroomFallsBackToPressurePrediction(t *testing.T) {
-	m, _ := node(t, 0.4, 0.02)
-	record(t, m, "memory_admission_headroom_ratio", "", 0.005)
-	m.SetClock(func() time.Time { return t0.Add(m.StaleAfter() + time.Second) })
-
-	d := Decide(m, offer(1), both, self, nextID())
-	want(t, d, Accept, "")
-	l := line(t, d, "memory_contention_ratio")
-	if l.MemoryHeadroom != nil || l.Basis != "usage" || !strings.Contains(l.Reason, "headroom is stale") {
-		t.Fatalf("memory line %+v; want stale bound ignored and pressure prediction used", l)
+func TestUnavailableMemoryHeadroomIsNamedAndFallsBack(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		setup  func(*testing.T, *statemap.Map)
+	}{
+		{name: "missing", status: "missing"},
+		{name: "never observed", status: "no observations", setup: func(t *testing.T, m *statemap.Map) {
+			if err := m.DeclareProperty(statemap.Property{ID: "memory_admission_headroom_ratio", Range: unit}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "marked stale", status: "stale", setup: func(t *testing.T, m *statemap.Map) {
+			record(t, m, "memory_admission_headroom_ratio", "", 0.005)
+			if !m.MarkPropertyStale("memory_admission_headroom_ratio", "test", "test") {
+				t.Fatal("headroom property was not marked stale")
+			}
+		}},
+		{name: "expired", status: "stale", setup: func(t *testing.T, m *statemap.Map) {
+			record(t, m, "memory_admission_headroom_ratio", "", 0.005)
+			m.SetClock(func() time.Time { return t0.Add(m.StaleAfter() + time.Second) })
+		}},
+		{name: "retired", status: "retired", setup: func(t *testing.T, m *statemap.Map) {
+			record(t, m, "memory_admission_headroom_ratio", "", 0.005)
+			if err := m.RetireProperty("memory_admission_headroom_ratio", "test", "test"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := node(t, 0.4, 0.02)
+			if tc.setup != nil {
+				tc.setup(t, m)
+			}
+			d := Decide(m, offer(1), both, self, nextID())
+			want(t, d, Accept, "")
+			l := line(t, d, "memory_contention_ratio")
+			note := "memory admission headroom unavailable: " + tc.status
+			if l.MemoryHeadroom != nil || l.Basis != "usage" || !strings.Contains(l.Reason, note) {
+				t.Fatalf("memory line %+v; want fallback and caveat %q", l, note)
+			}
+		})
 	}
 }
 

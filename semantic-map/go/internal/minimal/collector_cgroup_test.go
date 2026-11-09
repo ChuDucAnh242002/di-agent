@@ -29,6 +29,16 @@ func writeCgroup(t *testing.T, dir string, usageUsec, periods, throttled uint64,
 	}
 }
 
+func writeMemoryStat(t *testing.T, dir string, refault, file, shmem uint64) {
+	t.Helper()
+	content := "workingset_refault_file " + strconv.FormatUint(refault, 10) +
+		"\nfile " + strconv.FormatUint(file, 10) +
+		"\nshmem " + strconv.FormatUint(shmem, 10) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // nestedPodUID is a pod-shaped cgroup created INSIDE podA's directory, so the walk
 // would recognise it if (and only if) it wrongly descended into an already-recognised
 // subject. It must never appear as a subject.
@@ -352,6 +362,8 @@ func keys[V any](m map[string]V) []string {
 
 func TestMemoryAdmissionHeadroomReservesUnusedRequests(t *testing.T) {
 	root, _, _, _, procRoot := fakeTree(t)
+	podA := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+	writeMemoryStat(t, podA, 10, 128<<20, 32<<20)
 	req := &Requests{}
 	req.Store(map[string]float64{testUID: float64(1 << 30), "pending-pod": float64(1 << 30)})
 	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
@@ -367,11 +379,76 @@ func TestMemoryAdmissionHeadroomReservesUnusedRequests(t *testing.T) {
 		t.Fatal("no memory admission headroom sample")
 	}
 	available := float64(fakeMemAvailableKB) * 1024
-	current := float64(268435456)
-	reserved := (1<<30 - current) + (1 << 30)
+	nonReclaimable := float64(268435456 - (128 << 20) + (32 << 20))
+	reserved := (1<<30 - nonReclaimable) + (1 << 30)
 	want := (available - float64(reserved)) / float64(fakeMemTotalKB*1024)
 	if math.Abs(s.Value-want) > 1e-9 || s.Unit != "fraction" || s.Range == nil || *s.Range != [2]float64{0, 1} {
 		t.Fatalf("headroom sample %+v; want share %.6f", s, want)
+	}
+}
+
+func TestMemoryAdmissionHeadroomKeepsPageCacheReserved(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	const request = uint64(1 << 30)
+	if err := os.WriteFile(filepath.Join(podA, "memory.current"), []byte(strconv.FormatUint(request, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMemoryStat(t, podA, 0, request, 0)
+	req := &Requests{}
+	req.Store(map[string]float64{testUID: float64(request)})
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
+		Subjects: true, MaxSubjects: 256, MemTotalBytes: uint64(fakeMemTotalKB) * 1024,
+		ProcRoot: procRoot, Requests: req,
+	})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio]
+	if s == nil {
+		t.Fatal("no memory admission headroom sample")
+	}
+	want := (float64(fakeMemAvailableKB)*1024 - float64(request)) / float64(fakeMemTotalKB*1024)
+	if math.Abs(s.Value-want) > 1e-9 {
+		t.Fatalf("headroom sample %.6f; want %.6f with cache still reserved", s.Value, want)
+	}
+}
+
+func TestMemoryAdmissionHeadroomReservesFullRequestWithoutReliableMemoryStat(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "missing", setup: func(*testing.T, string) {}},
+		{name: "inconsistent", setup: func(t *testing.T, pod string) {
+			content := "workingset_refault_file 0\nfile 999999999\nshmem 1000000000\n"
+			if err := os.WriteFile(filepath.Join(pod, "memory.stat"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, podA, _, _, procRoot := fakeTree(t)
+			tc.setup(t, podA)
+			req := &Requests{}
+			req.Store(map[string]float64{testUID: float64(1 << 30)})
+			c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{
+				Subjects: true, MaxSubjects: 256, MemTotalBytes: uint64(fakeMemTotalKB) * 1024,
+				ProcRoot: procRoot, Requests: req,
+			})
+			samples, err := c.Collect()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := bySubject(samples)[""][types.MemoryAdmissionHeadroomRatio]
+			if s == nil {
+				t.Fatal("no memory admission headroom sample")
+			}
+			want := (float64(fakeMemAvailableKB)*1024 - float64(1<<30)) / float64(fakeMemTotalKB*1024)
+			if math.Abs(s.Value-want) > 1e-9 {
+				t.Fatalf("headroom sample %.6f; want %.6f with full request reserved", s.Value, want)
+			}
+		})
 	}
 }
 

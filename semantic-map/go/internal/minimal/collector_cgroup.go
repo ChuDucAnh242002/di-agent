@@ -207,10 +207,11 @@ type cpuSnapshot struct {
 	// hasMemEvents is false where the file, or one of the fields, is absent.
 	memEvents    [len(memEventFields)]uint64
 	hasMemEvents bool
-	// refaultFile and memFile are memory.stat's workingset_refault_file (pages,
-	// cumulative) and file (bytes); hasMemStat is false where either is absent.
-	refaultFile, memFile uint64
-	hasMemStat           bool
+	// refaultFile, memFile and memShmem are memory.stat's workingset_refault_file
+	// (pages, cumulative), file and shmem (bytes). hasMemStat covers refaultFile
+	// and memFile; hasMemShmem is separate so missing shmem does not disable refaults.
+	refaultFile, memFile, memShmem uint64
+	hasMemStat, hasMemShmem        bool
 }
 
 // memEventFields are the memory.events counters read per cgroup, and the metric each
@@ -467,8 +468,11 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 						break
 					}
 					if podMemoryRead["pod:"+uid] {
-						if snap := c.prev["pod:"+uid]; snap != nil && snap.hasMemCurrent {
-							request -= float64(snap.memCurrent)
+						if snap := c.prev["pod:"+uid]; snap != nil && snap.hasMemCurrent &&
+							snap.hasMemStat && snap.hasMemShmem {
+							if used, ok := nonReclaimableMemory(snap.memCurrent, snap.memFile, snap.memShmem); ok {
+								request -= float64(used)
+							}
 						}
 					}
 					if request > 0 {
@@ -506,8 +510,9 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if ev, err := readMemEvents(filepath.Join(dir, "memory.events")); err == nil {
 		snap.memEvents, snap.hasMemEvents = ev, true
 	}
-	if rf, file, err := readMemStat(filepath.Join(dir, "memory.stat")); err == nil {
+	if rf, file, shmem, hasShmem, err := readMemStat(filepath.Join(dir, "memory.stat")); err == nil {
 		snap.refaultFile, snap.memFile, snap.hasMemStat = rf, file, true
+		snap.memShmem, snap.hasMemShmem = shmem, hasShmem
 	}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
@@ -990,34 +995,49 @@ func readCPUSteal(path string) (steal, total uint64, ok bool) {
 	return 0, 0, false
 }
 
-// readMemStat returns memory.stat's workingset_refault_file (pages) and file (bytes).
-// An error when the file is unreadable or lacks either: a counter read as 0 would
-// become a spurious delta when it appears.
-func readMemStat(path string) (refaultFile, file uint64, err error) {
+// readMemStat returns memory.stat's workingset_refault_file (pages), file and shmem
+// (bytes). shmem is optional here because refault accounting does not need it; callers
+// that use memory.stat to estimate reclaimable cache must require hasShmem.
+func readMemStat(path string) (refaultFile, file, shmem uint64, hasShmem bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, false, err
 	}
 	var hasRefault, hasFile bool
 	for _, line := range strings.Split(string(raw), "\n") {
 		f := strings.Fields(line)
-		if len(f) != 2 || (f[0] != "workingset_refault_file" && f[0] != "file") {
+		if len(f) != 2 || (f[0] != "workingset_refault_file" && f[0] != "file" && f[0] != "shmem") {
 			continue
 		}
 		v, err := strconv.ParseUint(f[1], 10, 64)
 		if err != nil {
-			return 0, 0, fmt.Errorf("%s: %s: %w", path, f[0], err)
+			if f[0] == "shmem" {
+				continue
+			}
+			return 0, 0, 0, false, fmt.Errorf("%s: %s: %w", path, f[0], err)
 		}
-		if f[0] == "file" {
+		switch f[0] {
+		case "file":
 			file, hasFile = v, true
-		} else {
+		case "shmem":
+			shmem, hasShmem = v, true
+		case "workingset_refault_file":
 			refaultFile, hasRefault = v, true
 		}
 	}
 	if !hasRefault || !hasFile {
-		return 0, 0, fmt.Errorf("%s lacks workingset_refault_file or file", path)
+		return 0, 0, 0, false, fmt.Errorf("%s lacks workingset_refault_file or file", path)
 	}
-	return refaultFile, file, nil
+	return refaultFile, file, shmem, hasShmem, nil
+}
+
+// nonReclaimableMemory excludes reclaimable file cache but restores shmem, which
+// memory.stat includes in file even though reclaim requires swapping it.
+func nonReclaimableMemory(current, file, shmem uint64) (uint64, bool) {
+	if file > current || shmem > file {
+		return 0, false
+	}
+	return current - file + shmem, true
 }
 
 // readMemEvents returns the cumulative counters of a cgroup v2 memory.events file, in

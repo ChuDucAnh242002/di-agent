@@ -3,6 +3,7 @@ package semmap_test
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,6 +277,57 @@ func TestIngestSample_FeedsProposerAndForgetsOnRetirement(t *testing.T) {
 	for _, c := range cs {
 		if c.FromID == "cpu_utilization@pod:a" {
 			t.Error("candidate survived its endpoint's retirement")
+		}
+	}
+}
+
+func TestIngestSample_AdmissionHeadroomIsRecordedButExcludedFromDiscovery(t *testing.T) {
+	spec := mustSpec()
+	state := statemap.New(statemap.Config{AdmitUnknown: true, Learn: true}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 3, 60, 15*time.Second)
+	proposer.SetMaxPairs(1)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	rng := [2]float64{0, 1}
+	for i := 0; i < 30; i++ {
+		x := float64(i%10) / 10
+		at := t0 + int64(i)*5
+		for _, sample := range []*types.MetricSample{
+			{MetricType: types.MemoryAdmissionHeadroomRatio, Value: 1 - x, TimestampUnix: at, EventID: "h" + strconv.Itoa(i)},
+			{MetricType: types.MemoryUtilization, Value: x, TimestampUnix: at, EventID: "m" + strconv.Itoa(i)},
+			{MetricType: types.MemoryUtilization, Subject: "pod:cache", Value: x, TimestampUnix: at, EventID: "p" + strconv.Itoa(i)},
+		} {
+			sample.Unit, sample.Range = "fraction", &rng
+			if err := sm.IngestSample(sample); err != nil {
+				t.Fatalf("ingest %s: %v", sample.MetricType, err)
+			}
+		}
+	}
+
+	if p, ok := state.Property(string(types.MemoryAdmissionHeadroomRatio)); !ok || p.NObservations != 30 {
+		t.Fatalf("admission headroom property %+v, ok=%v; want 30 state observations", p, ok)
+	}
+	d, err := sm.Discovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Properties != 2 || d.EligiblePairs != 1 || d.TestedPairs != 1 {
+		t.Fatalf("discovery %+v; want only the two memory-utilization properties to use the one-pair budget", d)
+	}
+	candidates, err := sm.PendingCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range candidates {
+		if strings.Contains(c.CandidateID, string(types.MemoryAdmissionHeadroomRatio)) {
+			t.Errorf("derived admission metric entered discovery: %s", c.CandidateID)
 		}
 	}
 }
