@@ -32,9 +32,10 @@ type Line struct {
 	Share, Pressure, Usage, Exit float64
 	MapPred, UsagePred, K        *float64
 	MemoryHeadroom               *float64
-	KFrom                        []string
-	KDecisionIDs                 []string
+	KLastSource                  string
+	KLastDecision                string
 	KObservations                int
+	predictionDeclined           bool
 	Pass                         bool
 }
 
@@ -43,6 +44,7 @@ type Decision struct {
 	ID, Verdict, Reason string
 	Lines               []Line
 	PredictionReached   bool
+	PredictionChanged   bool
 }
 
 // Decide answers an offer from this node's map and records the answer under id.
@@ -57,10 +59,12 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 		lines[i] = Line{Domain: d.Relieves, Phase: d.Phase, Exit: d.Exit}
 	}
 	predictionReached := false
+	predictionChanged := false
 	answer := func(verdict, reason string) Decision {
 		b.Input("domains", slices.Clone(lines))
 		b.Commit(map[string]any{"verdict": verdict, "reason": reason})
-		return Decision{ID: id, Verdict: verdict, Reason: reason, Lines: lines, PredictionReached: predictionReached}
+		return Decision{ID: id, Verdict: verdict, Reason: reason, Lines: lines,
+			PredictionReached: predictionReached, PredictionChanged: predictionChanged}
 	}
 
 	if len(o.Arch) > 0 && !slices.ContainsFunc(o.Arch, func(a string) bool { return strings.EqualFold(a, self.Arch) }) {
@@ -117,6 +121,7 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	reason := ""
 	for i, d := range domains {
 		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity])
+		predictionChanged = predictionChanged || lines[i].predictionDeclined
 		if !lines[i].Pass && reason == "" {
 			reason = lines[i].Reason
 		}
@@ -190,20 +195,13 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		}
 	}
 
-	// k is the pooled response slope measured by interventions for this domain. Unlike
-	// relationship strength, the slope may exceed 1 when pressure responds sharply.
-	// Its estimate
-	// is shrunk toward zero until repeated outcomes build support; the pooled record
-	// survives retirement of any contributing source property or relationship.
+	// k is the strongest response slope measured on a live relationship from this
+	// usage metric to relieves. Unlike relationship strength, it may exceed 1.
+	// Its estimate is shrunk toward zero until repeated outcomes build support.
 	if e, ok := m.MeasuredDomainEffect(d.Usage, d.Relieves); ok {
 		k := e.Estimate()
 		l.K, l.KObservations = &k, e.N
-		if e.LastSource != "" {
-			l.KFrom = []string{e.LastSource}
-		}
-		if e.LastDecision != "" {
-			l.KDecisionIDs = []string{e.LastDecision}
-		}
+		l.KLastSource, l.KLastDecision = e.LastSource, e.LastDecision
 	}
 	if l.K != nil {
 		p := clamp01(pressure + *l.K*l.Share)
@@ -217,7 +215,6 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		l.Basis = "memory-headroom"
 		return fail(fmt.Sprintf("memory demand share %.4f exceeds admission headroom %.4f", l.Share, memoryHeadroom))
 	}
-
 	var pred float64
 	switch {
 	case l.MapPred != nil:
@@ -228,6 +225,7 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		return fail("no basis to predict " + d.Relieves)
 	}
 	if pred > d.Exit {
+		l.predictionDeclined = true
 		return fail(fmt.Sprintf("%s would reach %.4f on the %s basis, above exit %.4f", d.Relieves, pred, l.Basis, d.Exit))
 	}
 	l.Pass = true
