@@ -255,6 +255,11 @@ func TestAllDecline(t *testing.T) {
 
 func TestPredictionDeclineIsCountedAsChangingTheVerdict(t *testing.T) {
 	a := newAdmitNode(t, "A", 0.02)
+	if err := a.a.m.DeclareRelationship(statemap.Relationship{
+		From: "cpu_utilization@pod:a", To: "cpu_contention_ratio", Sign: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := a.a.m.RecordIntervention(statemap.InterventionOutcome{
 		From: "cpu_utilization@pod:a", To: "cpu_contention_ratio", Agreed: true,
 		HasEffect: true, Effect: 0.9, DecisionID: "verify-effect",
@@ -273,6 +278,27 @@ func TestPredictionDeclineIsCountedAsChangingTheVerdict(t *testing.T) {
 		prediction.ByBasis["usage"] != 1 || prediction.Declined != 1 ||
 		prediction.ChangedByPrediction != 1 {
 		t.Fatalf("prediction summary %+v; want one map-driven decline beyond the gates", prediction)
+	}
+}
+
+func TestMissingPredictionInputsDoNotCountAsBasisOrChangedVerdict(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	a.a.domains = func() []admission.Domain {
+		return []admission.Domain{{
+			Resource: "cpu", Relieves: "cpu_contention_ratio", Usage: "cpu_utilization",
+			Capacity: "missing_capacity", Exit: 0.10, Enter: 0.25, Phase: "calm",
+		}}
+	}
+
+	s := submit(t, a, smallOffer("web"))
+	if s.Chain[0].Verdict != admission.Decline {
+		t.Fatalf("hop %+v; missing capacity should decline", s.Chain[0])
+	}
+	prediction := listTasks(t, a).Prediction
+	if prediction.Decisions != 1 || prediction.BasisEvaluations != 0 ||
+		len(prediction.ByBasis) != 0 || prediction.Declined != 1 ||
+		prediction.ChangedByPrediction != 0 {
+		t.Fatalf("prediction summary %+v; missing inputs are not a basis or a prediction-driven decline", prediction)
 	}
 }
 

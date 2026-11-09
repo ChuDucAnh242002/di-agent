@@ -338,9 +338,7 @@ func (a *admitter) decide(ctx context.Context, o admission.Offer) admission.Hop 
 	return admission.Hop{Node: a.self.NodeID, DecisionID: d.ID, Verdict: d.Verdict, Reason: d.Reason}
 }
 
-// recordPrediction counts decisions that reached the prediction step. Since the
-// relief-phase and headroom gates have already passed, a prediction decline is a
-// verdict that the prediction step changed.
+// recordPrediction counts decisions that reached the prediction step.
 func (a *admitter) recordPrediction(d admission.Decision) {
 	if !d.PredictionReached {
 		return
@@ -350,8 +348,8 @@ func (a *admitter) recordPrediction(d admission.Decision) {
 	a.prediction.Decisions++
 	for _, line := range d.Lines {
 		basis := line.Basis
-		if basis == "" {
-			basis = "none"
+		if basis != "map" && basis != "usage" {
+			continue
 		}
 		if a.prediction.ByBasis == nil {
 			a.prediction.ByBasis = map[string]int{}
@@ -363,7 +361,9 @@ func (a *admitter) recordPrediction(d admission.Decision) {
 		a.prediction.Accepted++
 	} else if d.Verdict == admission.Decline {
 		a.prediction.Declined++
-		a.prediction.ChangedByPrediction++
+		if d.PredictionChanged {
+			a.prediction.ChangedByPrediction++
+		}
 	}
 }
 
