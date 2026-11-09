@@ -731,7 +731,7 @@ fraction.
 | `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
 | `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst waiting of a pod owed CPU it does not get — its weighted fair share of the pods' CPUs (`cpu.weight`, capped by its `cpu.max`), by water-filling (`owedContention`) — not a BestEffort pod's or a unit's, whose waiting is not the runtime's to relieve, and not a pod's past its share, which waits on its own threads; unrouted; relief's signal (§16) |
 | `memory_contention_ratio` | —       | worse    | node only: the worst stall of a pod promised memory — its `memory_pressure_ratio`, or its `io_pressure_ratio` when larger and its `memory_refault_ratio` is at least 0.01/s — (not BestEffort, not a unit) that is not limiting itself (its `memory.events` `high` and `max` did not rise this window; a pod without a delta of both — unreadable, first seen, counters reset — is unknown and not counted) and, when the runtime's requests are known, is within its memory request (`memory.current` ≤ request); emitted in a window the node has a memory PSI reading when no pod is promised memory (0, so relief sees a fresh reading and can release) or every promised pod was read (0 when every one is excluded); with some promised pod unread only a positive value is emitted, never a 0, since a 0 releases caps and an unread pod may be the one stalling; absent without node memory PSI; unrouted; the memory lever's trigger |
-| `memory_admission_headroom_ratio` | — | worse | node only, [0,1]: `MemAvailable` after reserving known pods' unused requests; unrouted; read by memory admission as a capacity bound, not a discovery signal |
+| `memory_admission_headroom_ratio` | — | better | node only, [0,1]: `MemAvailable` after reserving known pods' unused requests; unrouted; read by memory admission as a capacity bound, not a discovery signal |
 | `memory_events_high`    | —         | worse    | per subject: times over `memory.high` in the window (`memory.events` `high` delta), `count` on [0, 1e9]; none for the node; unrouted |
 | `memory_events_max`     | —         | worse    | per subject: times at `memory.max` in the window (`memory.events` `max` delta), `count` on [0, 1e9]; unrouted |
 | `memory_oom_kills`      | —         | worse    | per subject: processes OOM-killed in the window (`memory.events` `oom_kill` delta), `count` on [0, 1e9]; unrouted |
@@ -1766,7 +1766,12 @@ from node `MemAvailable`, divides by `MemTotal`, and reserves a full request whe
 cannot be read. The bound is emitted only while the runtime's workload listing is fresh.
 A failed listing marks the last bound stale immediately; a bound whose observation has
 otherwise aged past `map.stale_after` is ignored as well. If the bound is unavailable or
-stale, admission falls back to its map/usage pressure prediction.
+stale, admission falls back to its map/usage pressure prediction. Accepted offers that
+are not yet present in a fresh runtime request listing are not included in this bound.
+Until the workload appears in a successful request refresh and a subsequent headroom
+sample is ingested, another memory offer can be admitted against the same headroom; the
+per-name pending check prevents duplicate offers for one name but does not reserve
+aggregate capacity across different names.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
 a decline puts the offer, with the chain so far, to each registered peer in
