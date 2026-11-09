@@ -200,19 +200,12 @@ func TestRequestsRefreshedFromRuntime(t *testing.T) {
 	if !ok || !reflect.DeepEqual(got, map[string]float64{"uid-a": 1 << 30}) {
 		t.Fatalf("requests %v (stored %v); want uid-a's only", got, ok)
 	}
-	if _, ok := req.LoadFresh(); !ok {
-		t.Fatal("successful listing did not mark requests fresh")
-	}
-
 	failing := &listing{err: errors.New("apiserver down")}
 	r.rt = failing
 	r.refresh(context.Background())
 	r.refresh(context.Background())
 	if got, _ := req.Load(); !reflect.DeepEqual(got, map[string]float64{"uid-a": 1 << 30}) {
 		t.Errorf("after a failed listing requests %v; want the last kept", got)
-	}
-	if _, ok := req.LoadFresh(); ok {
-		t.Error("failed listing left cached requests marked fresh")
 	}
 	if len(logged) != 1 {
 		t.Errorf("logged %v; want one line for the streak", logged)

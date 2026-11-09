@@ -244,7 +244,6 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.CPUStealRatio,
 	types.CPUContentionRatio,
 	types.MemoryContentionRatio,
-	types.MemoryAdmissionHeadroomRatio,
 	types.MemoryEventsHigh,
 	types.MemoryEventsMax,
 	types.MemoryOOMKills,
@@ -344,7 +343,6 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
-	podMemoryRead := map[string]bool{}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
@@ -384,12 +382,6 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
-			for _, sample := range samples {
-				if sample.MetricType == types.MemoryUtilization && sample.Subject == info.subject {
-					podMemoryRead[info.subject] = true
-					break
-				}
-			}
 			// Node contention is relief's trigger and relief acts on pods: a pod that was
 			// promised CPU sets it. A BestEffort pod's waiting is the share it was promised,
 			// and a unit's is not the runtime's to relieve; both are still emitted.
@@ -454,33 +446,6 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		v := memoryContention(memPods, req, haveReq)
 		if memPromised == len(memPods) || v > 0 {
 			out = append(out, c.sample(types.MemoryContentionRatio, unitNodeShare, v, now, window, "", nil))
-		}
-	}
-	if rootErr == nil && c.opts.Requests != nil {
-		if req, known := c.opts.Requests.LoadFresh(); known {
-			if total, headroom, ok := readMemAvailable(filepath.Join(c.opts.ProcRoot, "meminfo")); ok {
-				reserved := 0.0
-				valid := true
-				for uid, request := range req {
-					if request < 0 || math.IsNaN(request) || math.IsInf(request, 0) {
-						valid = false
-						break
-					}
-					if podMemoryRead["pod:"+uid] {
-						if snap := c.prev["pod:"+uid]; snap != nil && snap.hasMemCurrent {
-							request -= float64(snap.memCurrent)
-						}
-					}
-					if request > 0 {
-						reserved += request
-					}
-				}
-				if valid {
-					share := clamp(math.Max(0, float64(headroom)-reserved)/float64(total), 0, 1)
-					out = append(out, c.sample(types.MemoryAdmissionHeadroomRatio, unitNodeShare,
-						share, now, now, "", nil))
-				}
-			}
 		}
 	}
 	for subject := range c.prev {

@@ -75,16 +75,6 @@ func TestRequestsLoadBeforeStoreAndCopies(t *testing.T) {
 	if !ok || len(m) != 1 || m["a"] != 1 {
 		t.Fatalf("Load = %v, %v; want the map as stored, untouched by later writes to the argument", m, ok)
 	}
-	if fresh, ok := r.LoadFresh(); !ok || fresh["a"] != 1 {
-		t.Fatalf("LoadFresh = %v, %v; want the latest listed requests", fresh, ok)
-	}
-	r.MarkStale()
-	if stale, ok := r.Load(); !ok || stale["a"] != 1 {
-		t.Fatalf("Load after MarkStale = %v, %v; want retained requests", stale, ok)
-	}
-	if fresh, ok := r.LoadFresh(); ok || fresh != nil {
-		t.Fatalf("LoadFresh after MarkStale = %v, %v; want nil, false", fresh, ok)
-	}
 	r.Store(nil)
 	if m, ok := r.Load(); !ok || len(m) != 0 {
 		t.Fatalf("Load after Store(nil) = %v, %v; want an empty map, true", m, ok)

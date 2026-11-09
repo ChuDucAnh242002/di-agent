@@ -27,7 +27,6 @@ type requestsRefresher struct {
 func (r *requestsRefresher) refresh(ctx context.Context) {
 	ws, err := r.rt.Workloads(ctx)
 	if err != nil {
-		r.req.MarkStale()
 		if !r.failing {
 			r.logf("memory requests: listing workloads: %v; memory contention counts pods against the requests last listed", err)
 		}
