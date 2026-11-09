@@ -991,6 +991,7 @@ func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
 			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
+			m.forgetDomainInterventionEffectLocked(r.From, r.To)
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
 				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
@@ -1473,6 +1474,7 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
+	m.forgetDomainInterventionEffectLocked(r.From, r.To)
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 

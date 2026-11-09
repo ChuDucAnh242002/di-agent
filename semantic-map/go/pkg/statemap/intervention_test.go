@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func interventionMap(t *testing.T) *Map {
@@ -359,7 +358,7 @@ func TestMeasuredEffectsListsOnlyMeasured(t *testing.T) {
 	}
 }
 
-func TestMeasuredEffectsSurviveRetirementAndRestart(t *testing.T) {
+func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t *testing.T) {
 	m, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
 	from, to := "memory_utilization@pod:gone", "memory_contention_ratio"
 	for _, p := range []Property{
@@ -389,16 +388,19 @@ func TestMeasuredEffectsSurviveRetirementAndRestart(t *testing.T) {
 		}
 	}
 	assertMeasured(m.MeasuredEffects(to))
+	if estimate, ok := m.MeasuredDomainEffect("memory_utilization", to); !ok ||
+		!nearly(estimate.Estimate(), 1.0/3) || estimate.N != 2 ||
+		estimate.LastSource != from || estimate.LastDecision != "verify-2" {
+		t.Fatalf("domain effect %+v (%v); want a shrunken estimate from the live source", estimate, ok)
+	}
 	if err := m.RetireProperty(from, "subject left", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if got := m.MeasuredEffects(to); len(got) != 0 {
 		t.Fatalf("retired relationship remains in active measured effects: %+v", got)
 	}
-	if estimate, ok := m.MeasuredDomainEffect("memory_utilization", to); !ok ||
-		!nearly(estimate.Estimate(), 1.0/3) || estimate.N != 2 ||
-		estimate.LastSource != from || estimate.LastDecision != "verify-2" {
-		t.Fatalf("domain effect %+v (%v); want a pooled, shrunken estimate with provenance", estimate, ok)
+	if estimate, ok := m.MeasuredDomainEffect("memory_utilization", to); ok {
+		t.Fatalf("retired source still informs new decisions: %+v", estimate)
 	}
 
 	path := filepath.Join(t.TempDir(), "snap.json")
@@ -412,47 +414,46 @@ func TestMeasuredEffectsSurviveRetirementAndRestart(t *testing.T) {
 	if got := m2.MeasuredEffects(to); len(got) != 0 {
 		t.Fatalf("restored retired relationship remains in active measured effects: %+v", got)
 	}
-	if estimate, ok := m2.MeasuredDomainEffect("memory_utilization", to); !ok ||
-		!nearly(estimate.Estimate(), 1.0/3) || estimate.N != 2 ||
-		estimate.LastSource != from || estimate.LastDecision != "verify-2" {
-		t.Fatalf("restored domain effect %+v (%v); want the persisted estimate and provenance", estimate, ok)
+	if estimate, ok := m2.MeasuredDomainEffect("memory_utilization", to); ok {
+		t.Fatalf("restored retired source still informs new decisions: %+v", estimate)
 	}
 
-	legacy := m.Snapshot()
-	legacy.Version = legacySnapshotVersion
-	legacy.DomainEffects = nil
-	for pair, iv := range legacy.Interventions {
-		iv.EffectLastDecision, iv.EffectLast = "", time.Time{}
-		legacy.Interventions[pair] = iv
-	}
-	raw, err := json.Marshal(legacy)
+	unsupported := m.Snapshot()
+	unsupported.Version = 5
+	raw, err := json.Marshal(unsupported)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyPath := filepath.Join(t.TempDir(), "legacy-snap.json")
-	if err := os.WriteFile(legacyPath, raw, 0o600); err != nil {
+	oldPath := filepath.Join(t.TempDir(), "old-snap.json")
+	if err := os.WriteFile(oldPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m3, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
-	if ok, err := m3.Load(legacyPath); err != nil || !ok {
-		t.Fatalf("load legacy snapshot: %v %v", ok, err)
-	}
-	if estimate, ok := m3.MeasuredDomainEffect("memory_utilization", to); !ok ||
-		!nearly(estimate.Estimate(), 1.0/3) || estimate.N != 2 ||
-		estimate.LastSource != from {
-		t.Fatalf("migrated domain effect %+v (%v); want effect reconstructed from pair counters", estimate, ok)
+	if ok, err := m3.Load(oldPath); err == nil || ok || !strings.Contains(err.Error(), "snapshot is version 5") {
+		t.Fatalf("load version 5 snapshot = %t, %v; want explicit refusal", ok, err)
 	}
 }
 
 func TestDomainInterventionSlopeCanExceedOne(t *testing.T) {
 	m, _ := newTestMap(t, Config{})
 	from, to := "memory_utilization@pod:hog", "memory_contention_ratio"
+	for _, p := range []Property{
+		{ID: from, Kind: Observed, Subject: "pod:hog", Unit: "fraction", Range: [2]float64{0, 1}},
+		{ID: to, Kind: Observed, Unit: "fraction", Range: [2]float64{0, 1}},
+	} {
+		if err := m.DeclareProperty(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: from, To: to, Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
 	mustRecord(t, m, InterventionOutcome{
 		From: from, To: to, Agreed: true, HasEffect: true, Effect: 4.8, DecisionID: "verify-sharp-response",
 	})
 	e, ok := m.MeasuredDomainEffect("memory_utilization", to)
-	if !ok || !nearly(e.Estimate(), 2.4) {
-		t.Fatalf("domain slope %+v (%t); want 2.4 after one zero-effect shrinkage sample", e, ok)
+	if !ok || !nearly(e.Estimate(), 2) {
+		t.Fatalf("domain slope %+v (%t); want capped slope 4 shrunk to 2", e, ok)
 	}
 	if pair, ok := m.interventions[interventionKey(from, to)]; !ok || pair.EffectSum != 1 {
 		t.Fatalf("pair effect %+v (%t); want relationship strength kept within [0,1]", pair, ok)

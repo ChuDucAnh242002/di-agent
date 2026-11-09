@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// MaxDomainInterventionSlope caps measured response slopes to keep one
+// small-denominator observation from dominating admission predictions.
+const MaxDomainInterventionSlope = 4.0
+
 // Interventions is what the agent did to a relationship's From end and saw happen at
 // its To end. It is evidence of a different kind from correlation: the agent moved
 // one side itself, so the other side's response is not a shared cause.
@@ -66,8 +70,7 @@ func (m *Map) MeasuredEffects(to string) []MeasuredEffect {
 	return out
 }
 
-// DomainInterventionEffect is the node's pooled, verified response for a usage
-// metric and a relieves metric, independent of any one subject's relationship.
+// DomainInterventionEffect is the verified response for one source relationship.
 type DomainInterventionEffect struct {
 	EffectSum    float64   `json:"effect_sum"`
 	N            int       `json:"n"`
@@ -82,19 +85,38 @@ func (e DomainInterventionEffect) Estimate() float64 {
 	if e.N <= 0 {
 		return 0
 	}
-	return math.Max(0, e.EffectSum/float64(e.N+1))
+	return math.Min(MaxDomainInterventionSlope, math.Max(0, e.EffectSum/float64(e.N+1)))
 }
 
-// MeasuredDomainEffect returns the pooled effect of verified interventions from
-// usage to relieves. It remains available when contributing subjects and edges retire.
+// MeasuredDomainEffect returns the largest verified response from a live source
+// relationship from usage to relieves. Evidence from retired sources cannot affect
+// new decisions.
 func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEffect, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	e, ok := m.domainEffects[interventionKey(usage, relieves)]
-	if !ok || e.N == 0 {
-		return DomainInterventionEffect{}, false
+	var best DomainInterventionEffect
+	found := false
+	for _, r := range m.relationships {
+		if r.Status == Retired || r.Association || r.Sign != 1 || r.To != relieves ||
+			!strings.HasPrefix(r.From, usage+"@") {
+			continue
+		}
+		p := m.properties[r.From]
+		if p == nil || p.Status != Active {
+			continue
+		}
+		e := m.domainEffects[interventionKey(r.From, relieves)]
+		if e == nil || e.N == 0 {
+			continue
+		}
+		candidate := *e
+		candidate.LastSource = r.From
+		if !found || candidate.Estimate() > best.Estimate() ||
+			(candidate.Estimate() == best.Estimate() && candidate.LastSource < best.LastSource) {
+			best, found = candidate, true
+		}
 	}
-	return *e, true
+	return best, found
 }
 
 // InterventionOutcome is the verified result of one action the agent took.
@@ -111,6 +133,10 @@ type InterventionOutcome struct {
 }
 
 func interventionKey(from, to string) string { return from + "->" + to }
+
+func (m *Map) forgetDomainInterventionEffectLocked(from, to string) {
+	delete(m.domainEffects, interventionKey(from, to))
+}
 
 // pairRelationshipLocked finds the relationship an intervention pair maps to: sign
 // +1, preferring the unlabelled id, then the first by id. A retired one is returned
@@ -203,13 +229,13 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		iv.EffectLastDecision = o.DecisionID
 		iv.EffectLast = now
 		if usage, _, scoped := strings.Cut(o.From, "@"); scoped && usage != "" {
-			key := interventionKey(usage, o.To)
+			key = interventionKey(o.From, o.To)
 			e := m.domainEffects[key]
 			if e == nil {
 				e = &DomainInterventionEffect{}
 				m.domainEffects[key] = e
 			}
-			e.EffectSum += o.Effect
+			e.EffectSum += math.Min(MaxDomainInterventionSlope, o.Effect)
 			e.N++
 			e.LastSource, e.LastDecision, e.Last = o.From, o.DecisionID, now
 		}
@@ -264,7 +290,7 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		m.retireRelationshipLocked(live, "two interventions had no effect", "intervention", now)
 		iv.AgreedRun, iv.NullRun = 0, 0
 		// A relationship created on this pair again is a new claim, measured by the
-		// outcomes that create it; the retired one keeps the measurement it had.
+		// outcomes that create it.
 		iv.EffectSum, iv.EffectN = 0, 0
 		return id, "retired", nil
 	}
