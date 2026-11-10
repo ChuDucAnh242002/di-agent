@@ -119,12 +119,15 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 		facts[f.Key] = f
 	}
 	reason := ""
+	nonPredictionFailure := false
 	for i, d := range domains {
 		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity])
 		predictionChanged = predictionChanged || lines[i].predictionDeclined
+		nonPredictionFailure = nonPredictionFailure || (!lines[i].Pass && !lines[i].predictionDeclined)
 		if !lines[i].Pass && reason == "" {
 			reason = lines[i].Reason
 		}
+		predictionChanged = predictionChanged && !nonPredictionFailure
 	}
 	if reason != "" {
 		return answer(Decline, reason)

@@ -302,6 +302,26 @@ func TestMissingPredictionInputsDoNotCountAsBasisOrChangedVerdict(t *testing.T) 
 	}
 }
 
+func TestMemoryHeadroomDeclineIsNotCountedAsPrediction(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	unit := [2]float64{0, 1}
+	if err := a.a.m.Record(statemap.Observation{
+		ID: "memory_admission_headroom_ratio", Value: 0, At: admitT0, Range: &unit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := submit(t, a, smallOffer("web"))
+	if s.Chain[0].Verdict != admission.Decline || !strings.Contains(s.Chain[0].Reason, "memory demand share") {
+		t.Fatalf("hop %+v; want memory-headroom decline", s.Chain[0])
+	}
+	prediction := listTasks(t, a).Prediction
+	if prediction.Decisions != 1 || prediction.Declined != 1 ||
+		prediction.ChangedByPrediction != 0 || prediction.BasisEvaluations != 1 ||
+		len(prediction.ByBasis) != 1 || prediction.ByBasis["usage"] != 1 {
+		t.Fatalf("summary %+v; only CPU's usage basis should be counted", prediction)
+	}
+}
+
 func TestPeerDown(t *testing.T) {
 	a, b, c := newAdmitNode(t, "A", 0.5), newAdmitNode(t, "B", 0.02), newAdmitNode(t, "C", 0.02)
 	a.knows(b, c)

@@ -234,6 +234,7 @@ func TestMapBasisIgnoresEffectAfterSourceRetires(t *testing.T) {
 
 func TestMapBasisPreservesResponseSlopeAboveOne(t *testing.T) {
 	m, _ := node(t, 0.4, 0.01)
+	record(t, m, "memory_admission_headroom_ratio", "", 0.5)
 	from := "memory_utilization@pod:hog"
 	record(t, m, from, "pod:hog", 0.1)
 	if err := m.DeclareRelationship(statemap.Relationship{From: from, To: "memory_contention_ratio", Sign: 1}); err != nil {
@@ -252,6 +253,30 @@ func TestMapBasisPreservesResponseSlopeAboveOne(t *testing.T) {
 	l := line(t, d, "memory_contention_ratio")
 	if l.Basis != "map" || !ptrNear(l.K, 2) || !ptrNear(l.MapPred, 0.10) {
 		t.Fatalf("memory line %+v; want capped/shrunk response slope 2", l)
+	}
+}
+
+func TestPredictionChangedRequiresEveryFailureToBePredictionDriven(t *testing.T) {
+	for _, failure := range []string{"missing capacity", "missing reading", "memory headroom"} {
+		t.Run(failure, func(t *testing.T) {
+			m, _ := node(t, 0.2, 0.08)
+			effect(t, m, "pod:a", 3.2)
+			domains := []Domain{cpuDom, memDom}
+			switch failure {
+			case "missing capacity":
+				domains[1].Capacity = "missing_capacity"
+			case "missing reading":
+				domains[1].Relieves = "custom_pressure"
+				record(t, m, "custom_pressure@pod:a", "pod:a", 0.01)
+			case "memory headroom":
+				record(t, m, "memory_admission_headroom_ratio", "", 0)
+			}
+			got := Decide(m, offer(1.6), domains, self, nextID())
+			if got.Verdict != Decline || !got.Lines[0].predictionDeclined ||
+				got.Lines[1].Pass || got.Lines[1].predictionDeclined || got.PredictionChanged {
+				t.Fatalf("decision %+v; an independent non-prediction failure must exclude changed_by_prediction", got)
+			}
+		})
 	}
 }
 
