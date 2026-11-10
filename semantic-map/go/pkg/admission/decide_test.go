@@ -66,7 +66,7 @@ func effect(t *testing.T, m *statemap.Map, subject string, e float64) {
 		t.Fatal(err)
 	}
 	if _, _, err := m.RecordIntervention(statemap.InterventionOutcome{From: from, To: "cpu_contention_ratio",
-		Agreed: true, HasEffect: true, Effect: e}); err != nil {
+		Agreed: true, DecisionID: "verify-" + subject, HasEffect: true, Effect: e}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -203,14 +203,80 @@ func TestMapBasisDecides(t *testing.T) {
 	d := Decide(m, offer(1), both, self, nextID())
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
-	if !ptrNear(l.K, 0.3) || !ptrNear(l.MapPred, 0.095) || !ptrNear(l.UsagePred, 0.0325) || l.Basis != "map" || !l.Pass {
-		t.Fatalf("cpu line %+v", l)
+	if !ptrNear(l.K, 0.15) || !ptrNear(l.MapPred, 0.0575) ||
+		!ptrNear(l.UsagePred, 0.0325) || l.KObservations != 1 || l.Basis != "map" || !l.Pass {
+		t.Fatalf("cpu line %+v; want the strongest single live-source estimate", l)
 	}
 	if !near(l.Share, 0.25) || !near(l.Pressure, 0.02) || !near(l.Usage, 0.4) || !near(l.Exit, 0.10) {
 		t.Fatalf("cpu line inputs %+v", l)
 	}
-	if len(l.KFrom) != 1 || !strings.Contains(l.KFrom[0], "pod:b") {
-		t.Fatalf("k from %v; want pod:b's relationship", l.KFrom)
+	if l.KLastSource != "cpu_utilization@pod:b" {
+		t.Fatalf("k source %q; want the strongest live source property", l.KLastSource)
+	}
+	if l.KLastDecision != "verify-pod:b" {
+		t.Fatalf("k decision %q; want the measured intervention decision", l.KLastDecision)
+	}
+}
+
+func TestMapBasisIgnoresEffectAfterSourceRetires(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	effect(t, m, "pod:gone", 0.3)
+	if err := m.RetireProperty("cpu_utilization@pod:gone", "subject left", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	d := Decide(m, offer(1), both, self, nextID())
+	l := line(t, d, "cpu_contention_ratio")
+	if l.Basis != "usage" || l.K != nil || l.MapPred != nil {
+		t.Fatalf("retired source still influenced prediction: %+v", l)
+	}
+}
+
+func TestMapBasisPreservesResponseSlopeAboveOne(t *testing.T) {
+	m, _ := node(t, 0.4, 0.01)
+	record(t, m, "memory_admission_headroom_ratio", "", 0.5)
+	from := "memory_utilization@pod:hog"
+	record(t, m, from, "pod:hog", 0.1)
+	if err := m.DeclareRelationship(statemap.Relationship{From: from, To: "memory_contention_ratio", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.RecordIntervention(statemap.InterventionOutcome{
+		From: from, To: "memory_contention_ratio", Agreed: true, DecisionID: "verify-sharp-response",
+		HasEffect: true, Effect: 4.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := offer(0.4)
+	o.Demand["memory"] = Demand{Value: 0.05 * (8 << 30), Source: "declared"}
+	d := Decide(m, o, []Domain{memDom}, self, nextID())
+	want(t, d, Decline, "memory_contention_ratio would reach")
+	l := line(t, d, "memory_contention_ratio")
+	if l.Basis != "map" || !ptrNear(l.K, 2) || !ptrNear(l.MapPred, 0.10) {
+		t.Fatalf("memory line %+v; want capped/shrunk response slope 2", l)
+	}
+}
+
+func TestPredictionChangedRequiresEveryFailureToBePredictionDriven(t *testing.T) {
+	for _, failure := range []string{"missing capacity", "missing reading", "memory headroom"} {
+		t.Run(failure, func(t *testing.T) {
+			m, _ := node(t, 0.2, 0.08)
+			effect(t, m, "pod:a", 3.2)
+			domains := []Domain{cpuDom, memDom}
+			switch failure {
+			case "missing capacity":
+				domains[1].Capacity = "missing_capacity"
+			case "missing reading":
+				domains[1].Relieves = "custom_pressure"
+				record(t, m, "custom_pressure@pod:a", "pod:a", 0.01)
+			case "memory headroom":
+				record(t, m, "memory_admission_headroom_ratio", "", 0)
+			}
+			got := Decide(m, offer(1.6), domains, self, nextID())
+			if got.Verdict != Decline || !got.Lines[0].predictionDeclined ||
+				got.Lines[1].Pass || got.Lines[1].predictionDeclined || got.PredictionChanged {
+				t.Fatalf("decision %+v; an independent non-prediction failure must exclude changed_by_prediction", got)
+			}
+		})
 	}
 }
 
@@ -267,6 +333,28 @@ func TestUnavailableMemoryHeadroomIsNamedAndFallsBack(t *testing.T) {
 				t.Fatalf("memory line %+v; want fallback and caveat %q", l, note)
 			}
 		})
+	}
+}
+
+func TestMemoryHeadroomBoundsCalmAdmission(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	record(t, m, "memory_admission_headroom_ratio", "", 0.005)
+	from := "memory_utilization@pod:a"
+	record(t, m, from, "pod:a", 0.1)
+	if err := m.DeclareRelationship(statemap.Relationship{From: from, To: "memory_contention_ratio", Sign: 1, Label: "drives"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.RecordIntervention(statemap.InterventionOutcome{
+		From: from, To: "memory_contention_ratio", Agreed: true, DecisionID: "memory-verify", HasEffect: true, Effect: 0.1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := Decide(m, offer(1), both, self, nextID())
+	want(t, d, Decline, "memory demand share")
+	l := line(t, d, "memory_contention_ratio")
+	if l.Pass || l.Basis != "memory-headroom" || !ptrNear(l.MemoryHeadroom, 0.005) ||
+		l.MapPred == nil || l.UsagePred == nil {
+		t.Fatalf("memory line %+v", l)
 	}
 }
 

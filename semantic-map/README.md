@@ -457,10 +457,20 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 
 // GET /tasks: this node's recent submissions (newest first, at most 200), its own
 // answers counted by verdict (local and for peers), the accepts awaiting an outcome
-// (oldest first), and the outcomes of the accepts it made (newest first)
+// (oldest first), the outcomes of the accepts it made (newest first), and admission
+// prediction counts plus paired error summaries for the retained outcomes
 {
   "submissions": [ /* as POST /tasks returned them */ ],
   "answered": {"accept": 3, "decline": 9, "already_asked": 1},
+  "prediction": {
+    "decisions": 4, "basis_evaluations": 8, "by_basis": {"map": 3, "usage": 5},
+    "accepted": 3, "declined": 1, "changed_by_prediction": 1,
+    "outcome_errors": {
+      "outcomes": 2, "paired": 3,
+      "map": {"n": 3, "mean_absolute_error": 0.012},
+      "usage": {"n": 3, "mean_absolute_error": 0.021}
+    }
+  },
   "pending": [{"name": "api", "accept_id": "admit-1762344000-11", "accepted_at": "…",
                "arrived": true, "subject": "pod:9c1e…"}],
   "outcomes": [
@@ -477,6 +487,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 - A hop's `url` is empty for the node that answered it locally; otherwise `<url>/state/decisions/<decision_id>` reproduces that node's decision. An outcome's `accept_id` is the accept it judges, whose decision holds both predictions.
 - `result`: `held`, `breached`, `confounded` (with `reason`: another workload moved, the admitted workload no longer reporting, a stale reading, or `dropped at the pending cap` when a 33rd accept pushed out the oldest) or `not_arrived`. `observed_rise` is from the accept-time pressure the predictions were made from. Rises and errors, `observed_rise` included, are present on `held` and on `breached` from a reading only, and absent rather than 0 on an unscored line; a domain relief acted on during the window is `breached` with `relief_acted: true` and `peak` (relief's reading when it acted), unscored, even when other workloads moved (relief capping one frees CPU the others take).
 - `answered` is the decline rate beside the outcomes: only false accepts can be observed, since a declined workload never runs.
+- `prediction` counts offers that passed the relief-phase and `statemap.Map.Admit` gates and reached prediction. `basis_evaluations` and `by_basis` count only per-domain map and usage predictions with the inputs needed to calculate them; missing inputs and memory-headroom gates are excluded. `changed_by_prediction` counts a decline only when every failing domain failed because a map or usage projection exceeded its exit threshold. A separate failure from missing inputs or memory headroom excludes the offer, even if another domain's projection also exceeded exit. `outcome_errors` compares map and usage mean absolute errors on the same scored lines from the outcomes currently retained (at most 200); confounded and otherwise unscored lines are excluded. These counters and outcomes are in-memory and reset on restart.
 - `400` on a malformed offer (no `name`, an unknown resource, a negative or non-finite value, a field the offer does not have, or data after it) with nothing recorded; decoding is strict because a misspelt `value` would read as a zero demand; `415` without a JSON content type.
 
 ### `POST /ingest-sample`
@@ -1828,8 +1839,8 @@ becomes outdated. The map snapshot and proposer checkpoint are captured separate
 restore reconciles candidate status against relationships already present in the map.
 A clean shutdown saves immediately; an unclean exit can lose up to `persist.interval`
 of progress. This checkpoint is separate from the state estimator's raw windows, which
-still restart cold. Snapshot format 5 is the only supported format; older versions are
-rejected, and older binaries cannot load format 5.
+still restart cold. Snapshot format 6 is current. Older versions, including format 5,
+are rejected; older binaries cannot load format 6.
 
 This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
 confirmations still participate in estimates; associations do not. This feature does

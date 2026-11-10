@@ -192,7 +192,8 @@ func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled 
 // drop in node contention per unit drop in the workload's share of the node's
 // usage (the descriptor's Usage: CPU for cpu.limit, memory for memory.high), both
 // fractions of the node, so in the range-normalised units the estimate projects in.
-// It is clamped to [0, 1] like every strength, a rise in contention measuring zero.
+// A rise in contention measures zero. Relationship strengths clamp this value to
+// [0,1]; admission slopes retain values above 1 but cap at MaxDomainInterventionSlope.
 // A share that fell by no more than confoundAbs gives nothing to divide by, and no
 // effect is measured.
 func measuredEffect(observed, shareAtAct, shareNow float64) (float64, bool) {
@@ -200,7 +201,7 @@ func measuredEffect(observed, shareAtAct, shareNow float64) (float64, bool) {
 	if drop <= confoundAbs {
 		return 0, false
 	}
-	return math.Min(1, math.Max(0, observed/drop)), true
+	return math.Min(statemap.MaxDomainInterventionSlope, math.Max(0, observed/drop)), true
 }
 
 // confoundedBy is the workloads an outcome cannot be separated from. Moved and left

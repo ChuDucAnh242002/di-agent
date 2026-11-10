@@ -185,6 +185,24 @@ func TestSubmitForwardsUntilAccept(t *testing.T) {
 		lb.Pending[0].Arrived || !lb.Pending[0].AcceptedAt.Equal(admitT0) || len(lb.Outcomes) != 0 {
 		t.Fatalf("B pending %+v outcomes %+v; want web awaiting arrival, no outcome", lb.Pending, lb.Outcomes)
 	}
+	if lb.Prediction.Decisions != 1 || lb.Prediction.BasisEvaluations != 2 ||
+		lb.Prediction.ByBasis["usage"] != 2 || lb.Prediction.Accepted != 1 ||
+		lb.Prediction.ChangedByPrediction != 0 {
+		t.Fatalf("B prediction summary %+v; want one accepted decision on two usage bases", lb.Prediction)
+	}
+	if list.Prediction.Decisions != 0 {
+		t.Fatalf("A prediction summary %+v; gate decline should not reach prediction", list.Prediction)
+	}
+}
+
+type taskPrediction struct {
+	Decisions           int                         `json:"decisions"`
+	BasisEvaluations    int                         `json:"basis_evaluations"`
+	ByBasis             map[string]int              `json:"by_basis"`
+	Accepted            int                         `json:"accepted"`
+	Declined            int                         `json:"declined"`
+	ChangedByPrediction int                         `json:"changed_by_prediction"`
+	OutcomeErrors       admission.PredictionSummary `json:"outcome_errors"`
 }
 
 type taskList struct {
@@ -192,6 +210,7 @@ type taskList struct {
 	Answered    map[string]int            `json:"answered"`
 	Pending     []admission.PendingAccept `json:"pending"`
 	Outcomes    []admission.Outcome       `json:"outcomes"`
+	Prediction  taskPrediction            `json:"prediction"`
 }
 
 func listTasks(t *testing.T, ta *testAgent) taskList {
@@ -224,9 +243,82 @@ func TestAllDecline(t *testing.T) {
 		}
 	}
 	for _, n := range []*testAgent{a, b, c} {
-		if got := listTasks(t, n).Answered; len(got) != 1 || got["decline"] != 1 {
+		tasks := listTasks(t, n)
+		if got := tasks.Answered; len(got) != 1 || got["decline"] != 1 {
 			t.Fatalf("%s answered %v; want one decline", n.id, got)
 		}
+		if tasks.Prediction.Decisions != 0 {
+			t.Fatalf("%s prediction summary %+v; relief/headroom gate declines must not count as prediction", n.id, tasks.Prediction)
+		}
+	}
+}
+
+func TestPredictionDeclineIsCountedAsChangingTheVerdict(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	if err := a.a.m.DeclareRelationship(statemap.Relationship{
+		From: "cpu_utilization@pod:a", To: "cpu_contention_ratio", Sign: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.a.m.RecordIntervention(statemap.InterventionOutcome{
+		From: "cpu_utilization@pod:a", To: "cpu_contention_ratio", Agreed: true,
+		HasEffect: true, Effect: 0.9, DecisionID: "verify-effect",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	o := smallOffer("web")
+	o.Demand["cpu"] = admission.Demand{Value: 1.8, Source: "declared"}
+	s := submit(t, a, o)
+	if s.Chain[0].Verdict != admission.Decline || !strings.Contains(s.Chain[0].Reason, "map basis") {
+		t.Fatalf("hop %+v; want prediction-stage map decline", s.Chain[0])
+	}
+	prediction := listTasks(t, a).Prediction
+	if prediction.Decisions != 1 || prediction.ByBasis["map"] != 1 ||
+		prediction.ByBasis["usage"] != 1 || prediction.Declined != 1 ||
+		prediction.ChangedByPrediction != 1 {
+		t.Fatalf("prediction summary %+v; want one map-driven decline beyond the gates", prediction)
+	}
+}
+
+func TestMissingPredictionInputsDoNotCountAsBasisOrChangedVerdict(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	a.a.domains = func() []admission.Domain {
+		return []admission.Domain{{
+			Resource: "cpu", Relieves: "cpu_contention_ratio", Usage: "cpu_utilization",
+			Capacity: "missing_capacity", Exit: 0.10, Enter: 0.25, Phase: "calm",
+		}}
+	}
+
+	s := submit(t, a, smallOffer("web"))
+	if s.Chain[0].Verdict != admission.Decline {
+		t.Fatalf("hop %+v; missing capacity should decline", s.Chain[0])
+	}
+	prediction := listTasks(t, a).Prediction
+	if prediction.Decisions != 1 || prediction.BasisEvaluations != 0 ||
+		len(prediction.ByBasis) != 0 || prediction.Declined != 1 ||
+		prediction.ChangedByPrediction != 0 {
+		t.Fatalf("prediction summary %+v; missing inputs are not a basis or a prediction-driven decline", prediction)
+	}
+}
+
+func TestMemoryHeadroomDeclineIsNotCountedAsPrediction(t *testing.T) {
+	a := newAdmitNode(t, "A", 0.02)
+	unit := [2]float64{0, 1}
+	if err := a.a.m.Record(statemap.Observation{
+		ID: "memory_admission_headroom_ratio", Value: 0, At: admitT0, Range: &unit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := submit(t, a, smallOffer("web"))
+	if s.Chain[0].Verdict != admission.Decline || !strings.Contains(s.Chain[0].Reason, "memory demand share") {
+		t.Fatalf("hop %+v; want memory-headroom decline", s.Chain[0])
+	}
+	prediction := listTasks(t, a).Prediction
+	if prediction.Decisions != 1 || prediction.Declined != 1 ||
+		prediction.ChangedByPrediction != 0 || prediction.BasisEvaluations != 1 ||
+		len(prediction.ByBasis) != 1 || prediction.ByBasis["usage"] != 1 {
+		t.Fatalf("summary %+v; only CPU's usage basis should be counted", prediction)
 	}
 }
 

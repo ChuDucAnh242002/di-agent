@@ -2,9 +2,15 @@ package statemap
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"time"
 )
+
+// MaxDomainInterventionSlope caps measured response slopes to keep one
+// small-denominator observation from dominating admission predictions.
+const MaxDomainInterventionSlope = 4.0
 
 // Interventions is what the agent did to a relationship's From end and saw happen at
 // its To end. It is evidence of a different kind from correlation: the agent moved
@@ -20,10 +26,18 @@ type Interventions struct {
 	NullRun      int       `json:"null_run"`
 	Last         time.Time `json:"last,omitzero"`
 	LastDecision string    `json:"last_decision,omitempty"`
+	// EffectLastDecision identifies the latest unconfounded outcome included in
+	// EffectSum. It can differ from LastDecision when later outcomes were not
+	// measurable.
+	EffectLastDecision string    `json:"effect_last_decision,omitempty"`
+	EffectLast         time.Time `json:"effect_last,omitzero"`
 	// EffectSum and EffectN accumulate the measured effects of unconfounded outcomes;
 	// their mean is the Measured strength of the relationship on this pair.
 	EffectSum float64 `json:"effect_sum,omitempty"`
 	EffectN   int     `json:"effect_n,omitempty"`
+	// Slopes retain responses above 1 without changing graph strengths.
+	SlopeSum float64 `json:"slope_sum,omitempty"`
+	SlopeN   int     `json:"slope_n,omitempty"`
 }
 
 // effect is the mean measured effect, and whether there is one.
@@ -40,6 +54,7 @@ type MeasuredEffect struct {
 	Relationship, From string
 	Effect             float64
 	N                  int
+	DecisionID         string
 }
 
 // MeasuredEffects lists, sorted by source, the non-retired relationships into to
@@ -51,10 +66,62 @@ func (m *Map) MeasuredEffects(to string) []MeasuredEffect {
 			continue
 		}
 		e, _ := r.Interventions.effect()
-		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e, N: r.Interventions.EffectN})
+		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e,
+			N: r.Interventions.EffectN, DecisionID: r.Interventions.EffectLastDecision})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
 	return out
+}
+
+// DomainInterventionEffect is the verified response for one source relationship.
+type DomainInterventionEffect struct {
+	EffectSum    float64   `json:"effect_sum"`
+	N            int       `json:"n"`
+	LastSource   string    `json:"last_source,omitempty"`
+	LastDecision string    `json:"last_decision,omitempty"`
+	Last         time.Time `json:"last,omitzero"`
+}
+
+// Estimate shrinks the observed mean toward zero with one zero-effect pseudo-sample.
+// Domain effects are response slopes, not relationship strengths, so they may exceed 1.
+func (e DomainInterventionEffect) Estimate() float64 {
+	if e.N <= 0 {
+		return 0
+	}
+	return math.Min(MaxDomainInterventionSlope, math.Max(0, e.EffectSum/float64(e.N+1)))
+}
+
+// MeasuredDomainEffect returns the largest verified response from a live source
+// relationship from usage to relieves. Evidence from retired sources cannot affect
+// new decisions.
+func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEffect, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var best DomainInterventionEffect
+	found := false
+	for _, r := range m.relationships {
+		if r.Status == Retired || r.Association || r.Sign != 1 || r.To != relieves ||
+			!strings.HasPrefix(r.From, usage+"@") {
+			continue
+		}
+		p := m.properties[r.From]
+		if p == nil || p.Status != Active {
+			continue
+		}
+		iv := m.interventions[interventionKey(r.From, relieves)]
+		if iv == nil || iv.SlopeN == 0 {
+			continue
+		}
+		candidate := DomainInterventionEffect{
+			EffectSum: iv.SlopeSum, N: iv.SlopeN, LastSource: r.From,
+			LastDecision: iv.EffectLastDecision, Last: iv.EffectLast,
+		}
+		if !found || candidate.Estimate() > best.Estimate() ||
+			(candidate.Estimate() == best.Estimate() && candidate.LastSource < best.LastSource) {
+			best, found = candidate, true
+		}
+	}
+	return best, found
 }
 
 // InterventionOutcome is the verified result of one action the agent took.
@@ -121,6 +188,9 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	if o.From == "" || o.To == "" || o.From == o.To {
 		return "", "", fmt.Errorf("intervention needs two distinct endpoints, got %q -> %q", o.From, o.To)
 	}
+	if o.HasEffect && (math.IsNaN(o.Effect) || math.IsInf(o.Effect, 0) || o.Effect < 0) {
+		return "", "", fmt.Errorf("intervention effect must be finite and non-negative, got %v", o.Effect)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -157,6 +227,10 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 	if !o.Confounded && o.HasEffect {
 		iv.EffectSum += clamp01(o.Effect)
 		iv.EffectN++
+		iv.EffectLastDecision = o.DecisionID
+		iv.EffectLast = now
+		iv.SlopeSum += math.Min(MaxDomainInterventionSlope, o.Effect)
+		iv.SlopeN++
 	}
 	m.bump(EventIntervention, target, "intervention", map[string]any{
 		"outcome": outcome, "decision": o.DecisionID, "agreed": iv.Agreed, "null": iv.Null,
@@ -208,8 +282,9 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		m.retireRelationshipLocked(live, "two interventions had no effect", "intervention", now)
 		iv.AgreedRun, iv.NullRun = 0, 0
 		// A relationship created on this pair again is a new claim, measured by the
-		// outcomes that create it; the retired one keeps the measurement it had.
+		// outcomes that create it.
 		iv.EffectSum, iv.EffectN = 0, 0
+		iv.SlopeSum, iv.SlopeN = 0, 0
 		return id, "retired", nil
 	}
 	return id, "", nil
