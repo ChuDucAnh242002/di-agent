@@ -324,6 +324,9 @@ func (m *Map) Decide(id, question string) *DecisionBuilder {
 	}
 }
 
+// At is the timestamp pinned to this decision.
+func (b *DecisionBuilder) At() time.Time { return b.at }
+
 // Property reads a property and records it as an input. A missing or retired
 // property is reported as a caveat rather than an error, because an agent should
 // answer with what it has and say what it lacked.

@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,6 +58,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // Version is the daemon's reported semver. Returned by GET /version.
@@ -369,6 +371,12 @@ func Main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	headroomMu := &sync.Mutex{}
+
+	if state.MarkPropertyStale("memory_admission_headroom_ratio",
+		"runtime workload requests have not been refreshed for this process", "requests") {
+		log.Printf("memory admission headroom: invalidated pending a fresh runtime workload listing")
+	}
 
 	go func() {
 		log.Printf("semantic-map agent starting profile=%s addr=%s ui=%t", cfg.Profile.Name, cfg.Node.Addr, cfg.Node.UI)
@@ -392,7 +400,12 @@ func Main() {
 		log.Printf("relief: %s acting every %s through runtime %s%s", l.Status().Action, cfg.Loops.Relief.Interval, rt.Name(), dry)
 		go l.Start(ctx)
 	}
-	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, log.Printf) {
+	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, headroomMu, log.Printf, func() {
+		if state.MarkPropertyStale("memory_admission_headroom_ratio",
+			"runtime workload listing failed; request reservations are no longer fresh", "requests") {
+			log.Printf("memory admission headroom: invalidated after runtime workload listing failed")
+		}
+	}) {
 		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
@@ -406,7 +419,7 @@ func Main() {
 	if sup != nil {
 		collector = sup
 	}
-	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval)
+	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval, headroomMu)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
 	}
@@ -482,6 +495,7 @@ func startCollectionLoop(
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
 	interval time.Duration,
+	headroomMu *sync.Mutex,
 ) {
 	switch {
 	case collector == nil:
@@ -493,7 +507,7 @@ func startCollectionLoop(
 	}
 
 	log.Printf("collection loop started: source=%s interval=%s", collector.SourceID(), interval)
-	go runCollectionLoop(ctx, sm, collector, interval)
+	go runCollectionLoop(ctx, sm, collector, interval, headroomMu)
 }
 
 // runCollectionLoop is the body of the scheduler goroutine. Errors from the
@@ -506,6 +520,7 @@ func runCollectionLoop(
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
 	interval time.Duration,
+	headroomMu *sync.Mutex,
 ) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -515,20 +530,30 @@ func runCollectionLoop(
 			log.Printf("collection loop exiting: %v", ctx.Err())
 			return
 		case <-t.C:
-			samples, err := collector.Collect()
-			if err != nil {
-				log.Printf("collection loop: Collect error: %v", err)
-				continue
-			}
-			for _, s := range samples {
-				if s == nil {
-					continue
-				}
-				if err := sm.IngestSample(s); err != nil {
-					log.Printf("collection loop: IngestSample error metric=%s node=%s: %v",
-						s.MetricType, s.NodeID, err)
-				}
-			}
+			collectAndIngest(collector, headroomMu, sm.IngestSample)
+		}
+	}
+}
+
+func collectAndIngest(
+	collector contracts.CollectorContract,
+	headroomMu *sync.Mutex,
+	ingest func(*types.MetricSample) error,
+) {
+	headroomMu.Lock()
+	defer headroomMu.Unlock()
+	samples, err := collector.Collect()
+	if err != nil {
+		log.Printf("collection loop: Collect error: %v", err)
+		return
+	}
+	for _, s := range samples {
+		if s == nil {
+			continue
+		}
+		if err := ingest(s); err != nil {
+			log.Printf("collection loop: IngestSample error metric=%s node=%s: %v",
+				s.MetricType, s.NodeID, err)
 		}
 	}
 }

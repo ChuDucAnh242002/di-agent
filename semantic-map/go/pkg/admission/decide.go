@@ -31,6 +31,7 @@ type Line struct {
 	Domain, Phase, Basis, Reason string
 	Share, Pressure, Usage, Exit float64
 	MapPred, UsagePred, K        *float64
+	MemoryHeadroom               *float64
 	KFrom                        []string
 	Pass                         bool
 }
@@ -159,6 +160,30 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		notes = append(notes, fmt.Sprintf("%s is %s and no subject reports it", d.Relieves, p.Status))
 	}
 	l.Pressure = pressure
+	headroomExceeded := false
+	memoryHeadroom := 0.0
+	if d.Resource == "memory" {
+		const id = "memory_admission_headroom_ratio"
+		p, ok := b.Property(id)
+		switch {
+		case !ok:
+			notes = append(notes, "memory admission headroom unavailable: missing")
+		case p.NObservations == 0:
+			notes = append(notes, "memory admission headroom unavailable: no observations")
+		case p.Status != statemap.Active:
+			notes = append(notes, fmt.Sprintf("memory admission headroom unavailable: %s", p.Status))
+		default:
+			age := b.At().Sub(p.LastObserved)
+			if age < 0 || age > m.StaleAfter() {
+				notes = append(notes, "memory admission headroom unavailable: stale")
+				break
+			}
+			headroom := p.Value
+			l.MemoryHeadroom = &headroom
+			memoryHeadroom = headroom
+			headroomExceeded = l.Share > headroom
+		}
+	}
 
 	// k is the largest slope relief measured on this node by acting on a subject's
 	// usage, so the map prediction leans towards declining.
@@ -181,6 +206,10 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	if usage > 0 {
 		p := clamp01(pressure * (usage + l.Share) / usage)
 		l.UsagePred = &p
+	}
+	if headroomExceeded {
+		l.Basis = "memory-headroom"
+		return fail(fmt.Sprintf("memory demand share %.4f exceeds admission headroom %.4f", l.Share, memoryHeadroom))
 	}
 
 	var pred float64

@@ -174,7 +174,7 @@ type CgroupOptions struct {
 	// advance it instead of sleeping.
 	Now func() time.Time
 	// Requests is the pods' memory requests, which memory_contention_ratio counts a pod
-	// against; nil, or nothing stored yet, drops the request condition.
+	// against; it also gates whether the admission headroom bound can be emitted.
 	Requests *Requests
 	// Logf receives the collector's own log lines: an unreadable root, a root with
 	// no pod cgroups while subjects are on, and subjects skipped by the cap. nil
@@ -207,10 +207,11 @@ type cpuSnapshot struct {
 	// hasMemEvents is false where the file, or one of the fields, is absent.
 	memEvents    [len(memEventFields)]uint64
 	hasMemEvents bool
-	// refaultFile and memFile are memory.stat's workingset_refault_file (pages,
-	// cumulative) and file (bytes); hasMemStat is false where either is absent.
-	refaultFile, memFile uint64
-	hasMemStat           bool
+	// refaultFile, memFile and memShmem are memory.stat's workingset_refault_file
+	// (pages, cumulative), file and shmem (bytes). hasMemStat covers refaultFile
+	// and memFile; hasMemShmem is separate so missing shmem does not disable refaults.
+	refaultFile, memFile, memShmem uint64
+	hasMemStat, hasMemShmem        bool
 }
 
 // memEventFields are the memory.events counters read per cgroup, and the metric each
@@ -244,6 +245,7 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.CPUStealRatio,
 	types.CPUContentionRatio,
 	types.MemoryContentionRatio,
+	types.MemoryAdmissionHeadroomRatio,
 	types.MemoryEventsHigh,
 	types.MemoryEventsMax,
 	types.MemoryOOMKills,
@@ -343,6 +345,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
+	podMemoryRead := map[string]bool{}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
@@ -382,6 +385,12 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			}
 			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
 			out = append(out, samples...)
+			for _, sample := range samples {
+				if sample.MetricType == types.MemoryUtilization && sample.Subject == info.subject {
+					podMemoryRead[info.subject] = true
+					break
+				}
+			}
 			// Node contention is relief's trigger and relief acts on pods: a pod that was
 			// promised CPU sets it. A BestEffort pod's waiting is the share it was promised,
 			// and a unit's is not the runtime's to relieve; both are still emitted.
@@ -448,6 +457,36 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			out = append(out, c.sample(types.MemoryContentionRatio, unitNodeShare, v, now, window, "", nil))
 		}
 	}
+	if rootErr == nil && c.opts.Requests != nil {
+		if req, known := c.opts.Requests.LoadFresh(); known {
+			if total, available, ok := readMemAvailable(filepath.Join(c.opts.ProcRoot, "meminfo")); ok {
+				reserved := 0.0
+				valid := true
+				for uid, request := range req {
+					if request < 0 || math.IsNaN(request) || math.IsInf(request, 0) {
+						valid = false
+						break
+					}
+					if podMemoryRead["pod:"+uid] {
+						if snap := c.prev["pod:"+uid]; snap != nil && snap.hasMemCurrent &&
+							snap.hasMemStat && snap.hasMemShmem {
+							if used, ok := nonReclaimableMemory(snap.memCurrent, snap.memFile, snap.memShmem); ok {
+								request -= float64(used)
+							}
+						}
+					}
+					if request > 0 {
+						reserved += request
+					}
+				}
+				if valid {
+					share := clamp(math.Max(0, float64(available)-reserved)/float64(total), 0, 1)
+					out = append(out, c.sample(types.MemoryAdmissionHeadroomRatio, unitNodeShare,
+						share, now, now, "", nil))
+				}
+			}
+		}
+	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
 			delete(c.prev, subject)
@@ -471,8 +510,9 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if ev, err := readMemEvents(filepath.Join(dir, "memory.events")); err == nil {
 		snap.memEvents, snap.hasMemEvents = ev, true
 	}
-	if rf, file, err := readMemStat(filepath.Join(dir, "memory.stat")); err == nil {
+	if rf, file, shmem, hasShmem, err := readMemStat(filepath.Join(dir, "memory.stat")); err == nil {
 		snap.refaultFile, snap.memFile, snap.hasMemStat = rf, file, true
+		snap.memShmem, snap.hasMemShmem = shmem, hasShmem
 	}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
@@ -731,9 +771,18 @@ func (c *CgroupCollector) cmdLabel(dir string) string {
 // node figure and the sum of its subjects' figures are not the same quantity and
 // should not be expected to add up.
 func readMemInUseShare(path string) (float64, bool) {
+	total, available, ok := readMemAvailable(path)
+	if !ok {
+		return 0, false
+	}
+	return float64(total-available) / float64(total), true
+}
+
+// readMemAvailable parses MemTotal and MemAvailable from /proc/meminfo in bytes.
+func readMemAvailable(path string) (uint64, uint64, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	defer f.Close()
 	var total, available uint64
@@ -755,10 +804,11 @@ func readMemInUseShare(path string) (float64, bool) {
 			available, haveAvailable = kb, true
 		}
 	}
-	if !haveTotal || !haveAvailable || total == 0 || available > total {
-		return 0, false
+	maxKB := ^uint64(0) / 1024
+	if !haveTotal || !haveAvailable || total == 0 || available > total || total > maxKB {
+		return 0, 0, false
 	}
-	return float64(total-available) / float64(total), true
+	return total * 1024, available * 1024, true
 }
 
 // readMemTotal parses MemTotal from /proc/meminfo (a kB figure) and returns it in
@@ -945,34 +995,49 @@ func readCPUSteal(path string) (steal, total uint64, ok bool) {
 	return 0, 0, false
 }
 
-// readMemStat returns memory.stat's workingset_refault_file (pages) and file (bytes).
-// An error when the file is unreadable or lacks either: a counter read as 0 would
-// become a spurious delta when it appears.
-func readMemStat(path string) (refaultFile, file uint64, err error) {
+// readMemStat returns memory.stat's workingset_refault_file (pages), file and shmem
+// (bytes). shmem is optional here because refault accounting does not need it; callers
+// that use memory.stat to estimate reclaimable cache must require hasShmem.
+func readMemStat(path string) (refaultFile, file, shmem uint64, hasShmem bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, false, err
 	}
 	var hasRefault, hasFile bool
 	for _, line := range strings.Split(string(raw), "\n") {
 		f := strings.Fields(line)
-		if len(f) != 2 || (f[0] != "workingset_refault_file" && f[0] != "file") {
+		if len(f) != 2 || (f[0] != "workingset_refault_file" && f[0] != "file" && f[0] != "shmem") {
 			continue
 		}
 		v, err := strconv.ParseUint(f[1], 10, 64)
 		if err != nil {
-			return 0, 0, fmt.Errorf("%s: %s: %w", path, f[0], err)
+			if f[0] == "shmem" {
+				continue
+			}
+			return 0, 0, 0, false, fmt.Errorf("%s: %s: %w", path, f[0], err)
 		}
-		if f[0] == "file" {
+		switch f[0] {
+		case "file":
 			file, hasFile = v, true
-		} else {
+		case "shmem":
+			shmem, hasShmem = v, true
+		case "workingset_refault_file":
 			refaultFile, hasRefault = v, true
 		}
 	}
 	if !hasRefault || !hasFile {
-		return 0, 0, fmt.Errorf("%s lacks workingset_refault_file or file", path)
+		return 0, 0, 0, false, fmt.Errorf("%s lacks workingset_refault_file or file", path)
 	}
-	return refaultFile, file, nil
+	return refaultFile, file, shmem, hasShmem, nil
+}
+
+// nonReclaimableMemory excludes reclaimable file cache but restores shmem, which
+// memory.stat includes in file even though reclaim requires swapping it.
+func nonReclaimableMemory(current, file, shmem uint64) (uint64, bool) {
+	if file > current || shmem > file {
+		return 0, false
+	}
+	return current - file + shmem, true
 }
 
 // readMemEvents returns the cumulative counters of a cgroup v2 memory.events file, in

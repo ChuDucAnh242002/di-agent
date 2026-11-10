@@ -1042,6 +1042,20 @@ func (m *Map) RetireProperty(id, reason, actor string) error {
 	return nil
 }
 
+// MarkPropertyStale withdraws a property's last observation from current reasoning
+// without retiring the property. A later observation makes it active again.
+func (m *Map) MarkPropertyStale(id, reason, actor string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.properties[id]
+	if !ok || p.Status == Retired || p.Status == Stale || p.NObservations == 0 {
+		return false
+	}
+	p.Status = Stale
+	m.bump(EventPropertyStale, id, actor, map[string]any{"reason": reason}, m.now())
+	return true
+}
+
 // retirePropertyLocked is the part of RetireProperty that runs under the write lock,
 // split out so the unlock can be deferred. A panic anywhere in here — the clock, the
 // journal, a hook a future revision adds — would otherwise leave the map's write lock

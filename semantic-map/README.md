@@ -286,7 +286,7 @@ semantic-map/
     │   ├── collectors_route.go GET /collectors: each configured collector's status
     │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loops with their kill switch; buildActing (each lever's actuator + ledger), buildRelief (one loop per lever, one shared Budget)
     │   ├── actuators_route.go  GET /actuators: each action's descriptor and the changes the ledger holds
-    │   ├── requests.go         The pods' memory requests, listed from the runtime every 30s for the cgroup collector's memory contention
+    │   ├── requests.go         Runtime pod memory requests: used for contention and to freshness-gate admission headroom
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
