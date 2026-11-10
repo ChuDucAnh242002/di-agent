@@ -227,7 +227,8 @@ func TestMapBasisIgnoresEffectAfterSourceRetires(t *testing.T) {
 
 	d := Decide(m, offer(1), both, self, nextID())
 	l := line(t, d, "cpu_contention_ratio")
-	if l.Basis != "usage" || l.K != nil || l.MapPred != nil {
+	want(t, d, Accept, "")
+	if l.Basis != "usage" || l.K != nil || l.MapPred != nil || d.PredictionChanged {
 		t.Fatalf("retired source still influenced prediction: %+v", l)
 	}
 }
@@ -251,8 +252,31 @@ func TestMapBasisPreservesResponseSlopeAboveOne(t *testing.T) {
 	d := Decide(m, o, []Domain{memDom}, self, nextID())
 	want(t, d, Decline, "memory_contention_ratio would reach")
 	l := line(t, d, "memory_contention_ratio")
-	if l.Basis != "map" || !ptrNear(l.K, 2) || !ptrNear(l.MapPred, 0.10) {
+	if l.Basis != "map" || !ptrNear(l.K, 2) || !ptrNear(l.MapPred, 0.10) || !d.PredictionChanged {
 		t.Fatalf("memory line %+v; want capped/shrunk response slope 2", l)
+	}
+}
+
+func TestPredictionChangedWhenBothDomainsFailOnPrediction(t *testing.T) {
+	m, _ := node(t, 0.2, 0.08)
+	effect(t, m, "pod:a", 3.2)
+	from := "memory_utilization@pod:a"
+	record(t, m, from, "pod:a", 0.1)
+	record(t, m, "memory_admission_headroom_ratio", "", 0.5)
+	if err := m.DeclareRelationship(statemap.Relationship{From: from, To: memDom.Relieves, Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.RecordIntervention(statemap.InterventionOutcome{
+		From: from, To: memDom.Relieves, Agreed: true, HasEffect: true, Effect: 3.2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := offer(1.6)
+	o.Demand["memory"] = Demand{Value: 0.1 * (8 << 30), Source: "declared"}
+	got := Decide(m, o, both, self, nextID())
+	if got.Verdict != Decline || !got.PredictionChanged ||
+		!got.Lines[0].predictionDeclined || !got.Lines[1].predictionDeclined {
+		t.Fatalf("decision %+v; both prediction failures must count as changed_by_prediction", got)
 	}
 }
 
