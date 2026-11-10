@@ -63,9 +63,6 @@ type Snapshot struct {
 	// relationships because they exist before any relationship does.
 	Interventions map[string]Interventions `json:"interventions,omitempty"`
 
-	// DomainEffects persist each source relationship's measured response slope.
-	DomainEffects map[string]DomainInterventionEffect `json:"domain_effects,omitempty"`
-
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
 	Events []Event `json:"events"`
@@ -98,12 +95,6 @@ func (m *Map) Snapshot() Snapshot {
 			s.Interventions = map[string]Interventions{}
 		}
 		s.Interventions[k] = *iv
-	}
-	for k, e := range m.domainEffects {
-		if s.DomainEffects == nil {
-			s.DomainEffects = map[string]DomainInterventionEffect{}
-		}
-		s.DomainEffects[k] = *e
 	}
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
@@ -283,10 +274,6 @@ func (m *Map) Load(path string) (bool, error) {
 	for k, iv := range snap.Interventions {
 		iv := iv
 		m.interventions[k] = &iv
-	}
-	for k, e := range snap.DomainEffects {
-		e := e
-		m.domainEffects[k] = &e
 	}
 	m.revision = snap.Revision
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)

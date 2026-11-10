@@ -458,4 +458,32 @@ func TestDomainInterventionSlopeCanExceedOne(t *testing.T) {
 	if pair, ok := m.interventions[interventionKey(from, to)]; !ok || pair.EffectSum != 1 {
 		t.Fatalf("pair effect %+v (%t); want relationship strength kept within [0,1]", pair, ok)
 	}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := newTestMap(t, Config{})
+	if ok, err := restored.Load(path); err != nil || !ok {
+		t.Fatalf("load: %t, %v", ok, err)
+	}
+	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); !ok || got != e {
+		t.Fatalf("restored slope %+v (%t); want %+v", got, ok, e)
+	}
+	id := RelationshipID(from, to, "")
+	if err := restored.RetireRelationship(id, "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.DeclareRelationship(Relationship{From: from, To: to, Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); ok {
+		t.Fatalf("revived relationship reused retired evidence: %+v", got)
+	}
+	mustRecord(t, restored, InterventionOutcome{
+		From: from, To: to, Agreed: true, HasEffect: true, Effect: 0.4, DecisionID: "fresh",
+	})
+	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); !ok ||
+		got.N != 1 || !nearly(got.Estimate(), 0.2) || got.LastDecision != "fresh" {
+		t.Fatalf("revived relationship slope %+v (%t); want only fresh evidence", got, ok)
+	}
 }

@@ -509,10 +509,6 @@ type Map struct {
 	// interventions holds the counters by pair "from->to"; see Interventions.
 	interventions map[string]*Interventions
 
-	// domainEffects pools verified intervention effects by usage metric and
-	// relieves metric, independently of subject and relationship lifecycle.
-	domainEffects map[string]*DomainInterventionEffect
-
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
@@ -557,7 +553,6 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		interventions: make(map[string]*Interventions),
-		domainEffects: make(map[string]*DomainInterventionEffect),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
@@ -991,7 +986,9 @@ func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
 			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
-			m.forgetDomainInterventionEffectLocked(r.From, r.To)
+			if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
+				iv.SlopeSum, iv.SlopeN = 0, 0
+			}
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
 				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
@@ -1488,7 +1485,9 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	m.forgetDomainInterventionEffectLocked(r.From, r.To)
+	if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
+		iv.SlopeSum, iv.SlopeN = 0, 0
+	}
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 

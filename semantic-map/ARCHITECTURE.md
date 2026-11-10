@@ -1744,7 +1744,7 @@ distinct ids, and of concurrent requests under one explicit id exactly one gets 
 **Two prediction bases, both always recorded.** With `share` the demand over the
 domain's capacity fact and `pressure` the current `Relieves` reading:
 
-- *map*: `pressure + k · share`, `k` the pooled effect relief has measured on this
+- *map*: `pressure + k · share`, `k` the strongest effect relief has measured on this
   node by acting on workloads' `Usage@<subject>` towards `Relieves`
   (`Map.MeasuredDomainEffect`). For each domain, the strongest verified effect from a
   live directional relationship is used; retired relationships and retired or stale
@@ -1755,6 +1755,8 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
   observation count, source and verify decision. The response slope may exceed 1, but
   individual measurements and the estimate are capped at 4; pair-level relationship
   strengths remain clamped to [0,1].
+  Slopes are stored alongside the pair's intervention counters as `SlopeSum` and
+  `SlopeN`, persisted in snapshot format 6, not in a separate evidence pool.
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into

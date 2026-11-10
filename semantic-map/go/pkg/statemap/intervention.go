@@ -35,6 +35,9 @@ type Interventions struct {
 	// their mean is the Measured strength of the relationship on this pair.
 	EffectSum float64 `json:"effect_sum,omitempty"`
 	EffectN   int     `json:"effect_n,omitempty"`
+	// Slopes retain responses above 1 without changing graph strengths.
+	SlopeSum float64 `json:"slope_sum,omitempty"`
+	SlopeN   int     `json:"slope_n,omitempty"`
 }
 
 // effect is the mean measured effect, and whether there is one.
@@ -105,12 +108,14 @@ func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEf
 		if p == nil || p.Status != Active {
 			continue
 		}
-		e := m.domainEffects[interventionKey(r.From, relieves)]
-		if e == nil || e.N == 0 {
+		iv := m.interventions[interventionKey(r.From, relieves)]
+		if iv == nil || iv.SlopeN == 0 {
 			continue
 		}
-		candidate := *e
-		candidate.LastSource = r.From
+		candidate := DomainInterventionEffect{
+			EffectSum: iv.SlopeSum, N: iv.SlopeN, LastSource: r.From,
+			LastDecision: iv.EffectLastDecision, Last: iv.EffectLast,
+		}
 		if !found || candidate.Estimate() > best.Estimate() ||
 			(candidate.Estimate() == best.Estimate() && candidate.LastSource < best.LastSource) {
 			best, found = candidate, true
@@ -133,10 +138,6 @@ type InterventionOutcome struct {
 }
 
 func interventionKey(from, to string) string { return from + "->" + to }
-
-func (m *Map) forgetDomainInterventionEffectLocked(from, to string) {
-	delete(m.domainEffects, interventionKey(from, to))
-}
 
 // pairRelationshipLocked finds the relationship an intervention pair maps to: sign
 // +1, preferring the unlabelled id, then the first by id. A retired one is returned
@@ -228,17 +229,8 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		iv.EffectN++
 		iv.EffectLastDecision = o.DecisionID
 		iv.EffectLast = now
-		if usage, _, scoped := strings.Cut(o.From, "@"); scoped && usage != "" {
-			key = interventionKey(o.From, o.To)
-			e := m.domainEffects[key]
-			if e == nil {
-				e = &DomainInterventionEffect{}
-				m.domainEffects[key] = e
-			}
-			e.EffectSum += math.Min(MaxDomainInterventionSlope, o.Effect)
-			e.N++
-			e.LastSource, e.LastDecision, e.Last = o.From, o.DecisionID, now
-		}
+		iv.SlopeSum += math.Min(MaxDomainInterventionSlope, o.Effect)
+		iv.SlopeN++
 	}
 	m.bump(EventIntervention, target, "intervention", map[string]any{
 		"outcome": outcome, "decision": o.DecisionID, "agreed": iv.Agreed, "null": iv.Null,
@@ -292,6 +284,7 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		// A relationship created on this pair again is a new claim, measured by the
 		// outcomes that create it.
 		iv.EffectSum, iv.EffectN = 0, 0
+		iv.SlopeSum, iv.SlopeN = 0, 0
 		return id, "retired", nil
 	}
 	return id, "", nil
