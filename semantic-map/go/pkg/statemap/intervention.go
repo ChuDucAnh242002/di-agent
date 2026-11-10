@@ -3,14 +3,13 @@ package statemap
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 )
 
-// MaxDomainInterventionSlope caps measured response slopes to keep one
+// MaxInterventionSlope caps measured response slopes to keep one
 // small-denominator observation from dominating admission predictions.
-const MaxDomainInterventionSlope = 4.0
+const MaxInterventionSlope = 4.0
 
 // Interventions is what the agent did to a relationship's From end and saw happen at
 // its To end. It is evidence of a different kind from correlation: the agent moved
@@ -48,56 +47,31 @@ func (iv *Interventions) effect() (float64, bool) {
 	return clamp01(iv.EffectSum / float64(iv.EffectN)), true
 }
 
-// MeasuredEffect is the effect the agent measured by acting on From, with the
-// number of unconfounded outcomes it rests on.
-type MeasuredEffect struct {
-	Relationship, From string
-	Effect             float64
-	N                  int
-	DecisionID         string
-}
-
-// MeasuredEffects lists, sorted by source, the non-retired relationships into to
-// that have measured effects: what acting on each source has actually done there.
-func (m *Map) MeasuredEffects(to string) []MeasuredEffect {
-	var out []MeasuredEffect
-	for _, r := range m.Relationships("", to) {
-		if r.Status == Retired || r.Interventions == nil || r.Interventions.EffectN == 0 {
-			continue
-		}
-		e, _ := r.Interventions.effect()
-		out = append(out, MeasuredEffect{Relationship: r.ID, From: r.From, Effect: e,
-			N: r.Interventions.EffectN, DecisionID: r.Interventions.EffectLastDecision})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
-	return out
-}
-
-// DomainInterventionEffect is the verified response for one source relationship.
-type DomainInterventionEffect struct {
-	EffectSum    float64   `json:"effect_sum"`
-	N            int       `json:"n"`
-	LastSource   string    `json:"last_source,omitempty"`
-	LastDecision string    `json:"last_decision,omitempty"`
-	Last         time.Time `json:"last,omitzero"`
+// Slope is the verified response for one source relationship.
+type Slope struct {
+	EffectSum    float64
+	N            int
+	LastSource   string
+	LastDecision string
+	Last         time.Time
 }
 
 // Estimate shrinks the observed mean toward zero with one zero-effect pseudo-sample.
-// Domain effects are response slopes, not relationship strengths, so they may exceed 1.
-func (e DomainInterventionEffect) Estimate() float64 {
+// Slopes may exceed 1, unlike relationship strengths.
+func (e Slope) Estimate() float64 {
 	if e.N <= 0 {
 		return 0
 	}
-	return math.Min(MaxDomainInterventionSlope, math.Max(0, e.EffectSum/float64(e.N+1)))
+	return math.Max(0, e.EffectSum/float64(e.N+1))
 }
 
-// MeasuredDomainEffect returns the largest verified response from a live source
+// LiveSlope returns the largest verified response from a live source
 // relationship from usage to relieves. Evidence from retired sources cannot affect
 // new decisions.
-func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEffect, bool) {
+func (m *Map) LiveSlope(usage, relieves string) (Slope, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var best DomainInterventionEffect
+	var best Slope
 	found := false
 	for _, r := range m.relationships {
 		if r.Status == Retired || r.Association || r.Sign != 1 || r.To != relieves ||
@@ -112,7 +86,7 @@ func (m *Map) MeasuredDomainEffect(usage, relieves string) (DomainInterventionEf
 		if iv == nil || iv.SlopeN == 0 {
 			continue
 		}
-		candidate := DomainInterventionEffect{
+		candidate := Slope{
 			EffectSum: iv.SlopeSum, N: iv.SlopeN, LastSource: r.From,
 			LastDecision: iv.EffectLastDecision, Last: iv.EffectLast,
 		}
@@ -229,7 +203,7 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		iv.EffectN++
 		iv.EffectLastDecision = o.DecisionID
 		iv.EffectLast = now
-		iv.SlopeSum += math.Min(MaxDomainInterventionSlope, o.Effect)
+		iv.SlopeSum += math.Min(MaxInterventionSlope, o.Effect)
 		iv.SlopeN++
 	}
 	m.bump(EventIntervention, target, "intervention", map[string]any{

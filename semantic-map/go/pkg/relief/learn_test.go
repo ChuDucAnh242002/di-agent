@@ -687,8 +687,8 @@ func TestNoEffectIsMeasuredWhenTheShareDidNotMove(t *testing.T) {
 	if e, ok := measuredEffect(0.3, 0.5, 0.4); !ok || math.Abs(e-3) > 1e-9 {
 		t.Fatalf("effect %v ok=%v; want the unclamped response slope 0.3/0.1", e, ok)
 	}
-	if e, ok := measuredEffect(0.5, 0.5, 0.479); !ok || e != statemap.MaxDomainInterventionSlope {
-		t.Fatalf("small-denominator effect %v ok=%v; want cap %v", e, ok, statemap.MaxDomainInterventionSlope)
+	if e, ok := measuredEffect(0.5, 0.5, 0.479); !ok || e != statemap.MaxInterventionSlope {
+		t.Fatalf("small-denominator effect %v ok=%v; want cap %v", e, ok, statemap.MaxInterventionSlope)
 	}
 	if e, ok := measuredEffect(0.05, 0.5, 0.25); !ok || math.Abs(e-0.2) > 1e-9 {
 		t.Fatalf("effect %v ok=%v; want 0.05/0.25", e, ok)

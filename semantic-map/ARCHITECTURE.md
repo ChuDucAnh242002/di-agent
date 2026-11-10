@@ -1746,17 +1746,18 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
 
 - *map*: `pressure + k · share`, `k` the strongest effect relief has measured on this
   node by acting on workloads' `Usage@<subject>` towards `Relieves`
-  (`Map.MeasuredDomainEffect`). For each domain, the strongest verified effect from a
+  (`Map.LiveSlope`). For each domain, the strongest verified effect from a
   live directional relationship is used; retired relationships and retired or stale
-  sources cannot affect new decisions. Retiring a relationship discards its domain
-  evidence, so a later relationship must build its own evidence. One zero-effect
+  sources cannot affect new decisions. Soft retirement retains both strength and
+  slope evidence for a later revival; two null interventions reset both measurements
+  so a relationship created again on that pair builds fresh evidence. One zero-effect
   pseudo-sample shrinks the observed mean toward zero; a single outcome therefore
   contributes, but is not treated as full confidence. The decision records the
   observation count, source and verify decision. The response slope may exceed 1, but
   individual measurements and the estimate are capped at 4; pair-level relationship
   strengths remain clamped to [0,1].
   Slopes are stored alongside the pair's intervention counters as `SlopeSum` and
-  `SlopeN`, persisted in snapshot format 6, not in a separate evidence pool.
+  `SlopeN`, persisted in snapshot format 6.
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into
@@ -1781,7 +1782,7 @@ sample is ingested, another memory offer can be admitted against the same headro
 per-name pending check prevents duplicate offers for one name but does not reserve
 aggregate capacity across different names.
 
-`pkg/admission/comparison_test.go` verifies behavior directly: measured slopes above 1
+`pkg/admission/decide_test.go` verifies behavior directly: measured slopes above 1
 can drive a decline, while retired-source evidence cannot affect a new decision.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on
