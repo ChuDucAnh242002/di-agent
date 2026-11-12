@@ -49,7 +49,7 @@ func (iv *Interventions) effect() (float64, bool) {
 
 // Slope is the verified response for one source relationship.
 type Slope struct {
-	EffectSum    float64
+	SlopeSum     float64
 	N            int
 	LastSource   string
 	LastDecision string
@@ -62,7 +62,7 @@ func (e Slope) Estimate() float64 {
 	if e.N <= 0 {
 		return 0
 	}
-	return math.Max(0, e.EffectSum/float64(e.N+1))
+	return math.Min(MaxInterventionSlope, math.Max(0, e.SlopeSum/float64(e.N+1)))
 }
 
 // LiveSlope returns the largest verified response from a live source
@@ -87,7 +87,7 @@ func (m *Map) LiveSlope(usage, relieves string) (Slope, bool) {
 			continue
 		}
 		candidate := Slope{
-			EffectSum: iv.SlopeSum, N: iv.SlopeN, LastSource: r.From,
+			SlopeSum: iv.SlopeSum, N: iv.SlopeN, LastSource: r.From,
 			LastDecision: iv.EffectLastDecision, Last: iv.EffectLast,
 		}
 		if !found || candidate.Estimate() > best.Estimate() ||

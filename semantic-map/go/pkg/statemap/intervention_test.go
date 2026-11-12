@@ -493,6 +493,9 @@ func TestLiveSlopeSelection(t *testing.T) {
 }
 
 func TestInterventionSlopeCanExceedOne(t *testing.T) {
+	if got := (Slope{SlopeSum: 20, N: 1}).Estimate(); got != MaxInterventionSlope {
+		t.Fatalf("estimate %v; want persisted/corrupt sum capped at %v", got, MaxInterventionSlope)
+	}
 	m, _ := newTestMap(t, Config{})
 	from, to := "memory_utilization@pod:hog", "memory_contention_ratio"
 	for _, p := range []Property{
@@ -525,7 +528,7 @@ func TestInterventionSlopeCanExceedOne(t *testing.T) {
 		t.Fatalf("load: %t, %v", ok, err)
 	}
 	if got, ok := restored.LiveSlope("memory_utilization", to); !ok ||
-		got.EffectSum != e.EffectSum || got.N != e.N || got.LastSource != e.LastSource ||
+		got.SlopeSum != e.SlopeSum || got.N != e.N || got.LastSource != e.LastSource ||
 		got.LastDecision != e.LastDecision || !got.Last.Equal(e.Last) {
 		t.Fatalf("restored slope %+v (%t); want %+v", got, ok, e)
 	}
