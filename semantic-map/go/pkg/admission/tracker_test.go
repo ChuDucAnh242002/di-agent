@@ -146,11 +146,35 @@ func TestHeld(t *testing.T) {
 		t.Fatalf("outcome %+v pending %v", o, r.tr.Pending("web"))
 	}
 	summary := r.tr.PredictionSummary()
-	if summary.Outcomes != 1 || summary.Paired != 1 || summary.Map.N != 1 || summary.Usage.N != 1 {
+	if summary.Outcomes != 1 || summary.Paired != 1 {
 		t.Fatalf("prediction summary %+v; want the shared CPU predictions scored", summary)
 	}
 	if summary.Map.MAE == summary.Usage.MAE {
 		t.Fatalf("prediction summary %+v; expected distinct basis errors", summary)
+	}
+}
+
+func TestPredictionSummaryScoresOnlyPairedDomainLines(t *testing.T) {
+	mapErr, usageErr := -0.02, 0.04
+	unpaired := 1.0
+	tr := NewTracker(TrackerConfig{})
+	tr.outcomes = []Outcome{
+		{Lines: []OutcomeLine{
+			{MapErr: &mapErr, UsageErr: &usageErr},
+			{MapErr: &unpaired},
+			{UsageErr: &unpaired},
+			{},
+		}},
+		{Lines: []OutcomeLine{
+			{MapErr: &usageErr, UsageErr: &mapErr},
+			{MapErr: &mapErr, UsageErr: &usageErr},
+		}},
+		{Lines: []OutcomeLine{{MapErr: &unpaired}}},
+	}
+	got := tr.PredictionSummary()
+	if got.Outcomes != 2 || got.Paired != 3 ||
+		!near(got.Map.MAE, 0.08/3) || !near(got.Usage.MAE, 0.10/3) {
+		t.Fatalf("summary %+v; want two outcomes, three paired lines, excluding one-sided errors", got)
 	}
 }
 

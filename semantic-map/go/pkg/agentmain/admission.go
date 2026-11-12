@@ -48,12 +48,12 @@ type admitter struct {
 }
 
 type predictionStats struct {
-	Decisions           int            `json:"decisions"`
-	BasisEvaluations    int            `json:"basis_evaluations"`
-	ByBasis             map[string]int `json:"by_basis"`
-	Accepted            int            `json:"accepted"`
-	Declined            int            `json:"declined"`
-	ChangedByPrediction int            `json:"changed_by_prediction"`
+	Decisions           int
+	BasisEvaluations    int
+	ByBasis             map[string]int
+	Accepted            int
+	Declined            int
+	ChangedByPrediction int
 }
 
 // submission is one POST /tasks and where it ended. Each hop's URL and decision
