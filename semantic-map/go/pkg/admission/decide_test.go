@@ -274,8 +274,10 @@ func TestPredictionChangedWhenBothDomainsFailOnPrediction(t *testing.T) {
 	o := offer(1.6)
 	o.Demand["memory"] = Demand{Value: 0.1 * (8 << 30), Source: "declared"}
 	got := Decide(m, o, both, self, nextID())
+	cpuLine := line(t, got, cpuDom.Relieves)
+	memLine := line(t, got, memDom.Relieves)
 	if got.Verdict != Decline || !got.PredictionChanged ||
-		!got.Lines[0].predictionDeclined || !got.Lines[1].predictionDeclined {
+		!cpuLine.predictionDeclined || !memLine.predictionDeclined {
 		t.Fatalf("decision %+v; both prediction failures must count as changed_by_prediction", got)
 	}
 }
