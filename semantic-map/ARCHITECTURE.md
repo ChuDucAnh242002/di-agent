@@ -1753,9 +1753,9 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
   so a relationship created again on that pair builds fresh evidence. One zero-effect
   pseudo-sample shrinks the observed mean toward zero; a single outcome therefore
   contributes, but is not treated as full confidence. The decision records the
-  observation count, source and verify decision. The response slope may exceed 1, but
-  individual measurements and the estimate are capped at 4; pair-level relationship
-  strengths remain clamped to [0,1].
+  observation count, source and verify decision. The response slope may exceed 1;
+  individual measurements are capped at 4, which bounds the estimate too. Pair-level
+  relationship strengths remain clamped to [0,1].
   Slopes are stored alongside the pair's intervention counters as `SlopeSum` and
   `SlopeN`, persisted in snapshot format 6.
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
