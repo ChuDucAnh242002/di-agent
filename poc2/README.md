@@ -181,6 +181,56 @@ curl localhost:8000/status
 
 API changes are in memory only: a pod restart or a new `make helm-install` returns to the Helm/`STREAMER_*` values. Use those for permanent settings.
 
+#### Engine dataset playground
+
+The optional playground includes an Engine Dataset panel for the configured
+run. It can switch between synthetic generation and **recorded real-data
+replay**, adjust pacing and looping, and set a synthetic seed. It does not
+control a physical engine, provide pause/seek, or switch run IDs. Each apply
+restarts the shared stream from the beginning, and switching modes can mix
+origins in an agent collection window. The panel displays streamer and
+collector status separately; collector readiness does not prove that the agent
+is ingesting data.
+
+Enable the panel with `playground.enabled=true`,
+`playground.dataset.enabled=true`, and
+`playground.dataset.existingSecret=<secret-name>`. The secret must contain an
+`htpasswd` key; it protects writes to the stream configuration. For example,
+create an Apache-compatible password file interactively, then create the
+secret without putting passwords on the command line:
+
+```bash
+# Build and push the updated playground to the registry/tag used by your chart.
+make -C poc2 images IMAGES=playground REGISTRY=<your-registry> TAG=<your-tag>
+htpasswd -c -m /secure/path/dataset-htpasswd demo
+kubectl create secret generic dataset-playground-auth \
+  --from-file=htpasswd=/secure/path/dataset-htpasswd
+helm upgrade --install di-agent-system poc2/helm/di-agent-system --reuse-values \
+  --set playground.image.tag=<your-tag> \
+  --set playground.enabled=true \
+  --set playground.dataset.enabled=true \
+  --set playground.dataset.existingSecret=dataset-playground-auth
+kubectl port-forward svc/playground 8080:80
+kubectl port-forward svc/grafana 3000:3000
+```
+
+Open `http://localhost:8080` and authenticate when applying settings. HTTP
+Basic authentication is not encrypted by the playground's NodePort; use
+port-forwarding or an authenticated TLS ingress and restrict network access.
+The authentication protects the playground proxy only, not direct in-cluster
+access to replay-streamer. The local Vite development proxy also has no
+authentication and must not be exposed to untrusted networks.
+
+Grafana provisions an **Engine dataset telemetry** dashboard at
+`http://localhost:3000/d/engine-dataset` when port-forwarded as above. It
+filters by run, signal, source and origin and plots raw pipeline values
+aggregated into display windows against emission time. Set
+`playground.dataset.grafanaDashboardUrl` to a browser-accessible dashboard URL
+to show a link in the panel. The agent's collection-window means are separate
+from Grafana's display aggregation. Configure `agent.datasetNodeName` to enable
+ingestion by one agent, and inspect that agent's UI to verify its properties.
+See [playground/README.md](playground/README.md) for local development and tests.
+
 `streamer.runId` selects the dataset (default `1000rpm_150kW_0001`). All of the run's sources (`short` and every `long_*` file) are streamed together: they share the same time grid (`t` steps of 7200 from 0), so each tick emits the next `pointsPerInterval` time steps for every signal, and shorter sources simply end before the longer ones (the run then loops if `loop=true`).
 
 At ingest, each multi-signal CSV is split into one file per signal next to it in `data/` (`<run>_timeseries_<source>_<signal>.csv`, containing only `Data1_<signal>` and `Data1_time_<signal>`); the split files are what is loaded into PostgreSQL. Files that are already split can be placed in `data/` (or the `DATA_URL` share) as-is and are loaded directly. Run `DATA_DIR=poc2/data python3 poc2/data-ingest/ingest.py --split-only` to produce them locally without a database. To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
