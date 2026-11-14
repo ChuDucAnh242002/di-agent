@@ -328,7 +328,9 @@ Missing ranges still prevent persistence from accumulating. See the
 [persistence requirements](../semantic-map/README.md#rules-only-persistent-correlation).
 
 The agent mounts `/var/lib/di-agent` from `agent.persistence.hostPath` (default:
-`/var/lib/di-agent`) on each worker. State and discovery checkpoints survive pod
+`/var/lib/di-agent-v6`) on each worker. This fresh host directory avoids loading
+incompatible state left at the previous default; the old directory is left untouched.
+State and discovery checkpoints survive pod
 replacement on that worker; they are not shared across nodes and do not survive loss
 of the node's disk. Fresh evidence resumes only within `map.stale_after` and under
 matching discovery settings; stale checkpoints start a new evidence run. An unclean

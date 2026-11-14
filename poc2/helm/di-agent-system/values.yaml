@@ -65,7 +65,7 @@ agent:
     reasoningBackend: none
   # Node-local: survives pod replacement, never shared between workers.
   persistence:
-    hostPath: /var/lib/di-agent
+    hostPath: /var/lib/di-agent-v6
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
   nodeSelector: {}
