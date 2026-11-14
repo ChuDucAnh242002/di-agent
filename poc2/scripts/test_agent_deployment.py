@@ -60,6 +60,34 @@ state_file.write_text(json.dumps(state))
 
 
 class AgentDeploymentTests(unittest.TestCase):
+    def test_live_pontos_render_replaces_replay_and_uses_secret_file(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART),
+             "--set", "pontos.enabled=true", "--set", "agent.datasetNodeName=worker-1"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("name: pontos-bridge", rendered)
+        self.assertIn("secretName: pontos-credentials", rendered)
+        self.assertIn("mountPath: /var/run/secrets/pontos", rendered)
+        self.assertIn('name: COLLECT_INTERVAL\n              value: "1s"', rendered)
+        self.assertNotIn("name: replay-streamer", rendered)
+        self.assertNotIn("name: postgres-ingest", rendered)
+        self.assertNotIn("username_pw_set", rendered)
+
+    def test_live_pontos_rejects_missing_worker_or_invalid_interval(self):
+        for overrides in [
+            [],
+            ["--set", "agent.datasetNodeName=worker-1", "--set", "pontos.collectInterval=0s"],
+            ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.enabled=false"],
+            ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.kafkaTopic=other"],
+        ]:
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(
+                    ["helm", "template", "test", str(CHART), "--set", "pontos.enabled=true", *overrides],
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -282,7 +310,7 @@ sys.exit(1 if count == 1 else 0)
 
         baseline = render()
         self.assertIn("mountPath: /var/lib/di-agent", baseline)
-        self.assertIn('path: "/var/lib/di-agent"', baseline)
+        self.assertIn('path: "/var/lib/di-agent-v6"', baseline)
         self.assertIn("type: DirectoryOrCreate", baseline)
         self.assertNotIn("diagent.io/restartedAt:", baseline)
         self.assertNotIn("diagent.io/config-checksum:", baseline)

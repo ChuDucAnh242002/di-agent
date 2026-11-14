@@ -44,6 +44,27 @@ datasetCollector:
   nodeSelector: {}
   resources: {}
 
+pontos:
+  # Live mode replaces engine replay/ingestion, using the same Kafka topic.
+  enabled: false
+  image:
+    repository: pontos-bridge
+    tag: ""
+  existingSecret: pontos-credentials
+  # Agent polling is independent of the source's per-sensor MQTT cadence.
+  # Integer seconds, minimum 1s. Empty polls produce no samples.
+  collectInterval: 1s
+  # Empty selects all vessels, for the curated numeric signal set only.
+  vessels: []
+  # Empty uses the bridge's curated defaults. Override with tag -> {unit, range?}.
+  # Unbounded physical quantities are not assigned invented normalization ranges.
+  signals: {}
+  maxActiveSeries: 2000
+  queueSize: 10000
+  maxSourceAgeSeconds: 300
+  nodeSelector: {}
+  resources: {}
+
 agent:
   # One agent on each eligible worker; control-plane/master nodes are excluded.
   enabled: true
@@ -65,7 +86,7 @@ agent:
     reasoningBackend: none
   # Node-local: survives pod replacement, never shared between workers.
   persistence:
-    hostPath: /var/lib/di-agent
+    hostPath: /var/lib/di-agent-v6
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
   nodeSelector: {}
