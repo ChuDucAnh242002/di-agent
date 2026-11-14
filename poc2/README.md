@@ -192,34 +192,26 @@ origins in an agent collection window. The panel displays streamer and
 collector status separately; collector readiness does not prove that the agent
 is ingesting data.
 
-Enable the panel with `playground.enabled=true`,
-`playground.dataset.enabled=true`, and
-`playground.dataset.existingSecret=<secret-name>`. The secret must contain an
-`htpasswd` key; it protects writes to the stream configuration. For example,
-create an Apache-compatible password file interactively, then create the
-secret without putting passwords on the command line:
+Enable the panel with `playground.enabled=true` and
+`playground.dataset.enabled=true`. For example:
 
 ```bash
 # Build and push the updated playground to the registry/tag used by your chart.
 make -C poc2 images IMAGES=playground REGISTRY=<your-registry> TAG=<your-tag>
-htpasswd -c -m /secure/path/dataset-htpasswd demo
-kubectl create secret generic dataset-playground-auth \
-  --from-file=htpasswd=/secure/path/dataset-htpasswd
 helm upgrade --install di-agent-system poc2/helm/di-agent-system --reuse-values \
   --set playground.image.tag=<your-tag> \
   --set playground.enabled=true \
-  --set playground.dataset.enabled=true \
-  --set playground.dataset.existingSecret=dataset-playground-auth
+  --set playground.dataset.enabled=true
 kubectl port-forward svc/playground 8080:80
 kubectl port-forward svc/grafana 3000:3000
 ```
 
-Open `http://localhost:8080` and authenticate when applying settings. HTTP
-Basic authentication is not encrypted by the playground's NodePort; use
-port-forwarding or an authenticated TLS ingress and restrict network access.
-The authentication protects the playground proxy only, not direct in-cluster
-access to replay-streamer. The local Vite development proxy also has no
-authentication and must not be exposed to untrusted networks.
+Open `http://localhost:8080`. Dataset settings can be changed without a
+password by anyone who can reach the playground; changes affect the shared
+stream. The playground NodePort and the in-cluster replay-streamer are not
+authenticated. Restrict access to trusted developers and networks, or use an
+authenticated TLS ingress. The local Vite development proxy is also
+unauthenticated and must not be exposed to untrusted networks.
 
 Grafana provisions an **Engine dataset telemetry** dashboard at
 `http://localhost:3000/d/engine-dataset` when port-forwarded as above. It

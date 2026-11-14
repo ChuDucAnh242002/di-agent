@@ -322,8 +322,6 @@ playground:
   switchboardUpstream: "switchboard:8000"
   dataset:
     enabled: false
-    # Secret containing an htpasswd file under the key "htpasswd".
-    existingSecret: ""
     # Browser-accessible URL, e.g. http://localhost:3000/d/engine-dataset.
     grafanaDashboardUrl: ""
   nodeSelector: {}

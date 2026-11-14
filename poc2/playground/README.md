@@ -4,7 +4,7 @@ The React/Vite playground controls the optional ship simulators and, when
 enabled, displays and controls the synthetic and recorded engine dataset
 stream. The dataset controls do not operate a physical engine. See the
 [poc2 deployment guide](../README.md#engine-dataset-playground) for enabling
-the panel, protecting its shared writes, and accessing its Grafana dashboard.
+the panel, restricting access, and accessing its Grafana dashboard.
 
 ## Local development
 
@@ -38,5 +38,5 @@ services. The dataset tests are stubbed; they do not prove end-to-end Kafka,
 InfluxDB, or agent ingestion.
 
 The container uses nginx and the Helm chart to expose configured services.
-With the dataset panel enabled, the chart requires an existing Kubernetes
-secret containing the `htpasswd` file used to authenticate replay writes.
+Dataset replay writes are unauthenticated; restrict access to trusted
+developers and networks.
