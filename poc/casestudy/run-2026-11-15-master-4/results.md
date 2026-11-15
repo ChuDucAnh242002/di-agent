@@ -77,7 +77,7 @@ Categories: (a) agent defect, (b) harness, timing, workload or readout artefact,
 | M6 calibration fed | fail | (b) | Follows from the row above: no verify, so no `relief.memory.high` entry. |
 | M6 chain, narrative | not exercised | (b) | Follows from the row above: no verify for M9 to read. |
 | M6 intervention edge | not exercised | (b)/(c) | `interventions: 0`, since relief never acted. One act would not build the edge anyway; it needs two agreeing outcomes. |
-| M8 slow at 175 + 10 min | fail | **(b)** | `base→slow "calm for 10m0s"` came 3.5 min after the M8 deletion. Calm had begun before it (the last admission came at the end of M7, and deleting pods is not an attention event). Same as run 3. |
+| M8 slow at 175 + 10 min | fail | **(b)** | `base→slow "calm for 10m0s"` came 3.5 min after the M8 deletion. Calm had begun at 00:06:38, the first pace tick after probe-6's outcome (00:05:56) closed the last pending accept, and 10 min later is 00:16:38. Deleting pods (00:13:10) is not an attention event. Same as run 3. |
 | M5 pending accept / cap at the kill | not exercised | (c) | Nothing was pending at 87: `offer-m3` closed `not_arrived` (`admit-1.460`) before the kill. Relief acts only in M6, after the kill. |
 | M7 map_rise | not exercised | (c) | No measured effect: there is no intervention edge, and every accept has `MapPred` null. |
 | M7 declines cite their gate | not exercised | (c) | No decline in the run (one accept at 72, six accepts in M7). Run 3 passed it, and so does `TestReliefActiveDeclines`. |
