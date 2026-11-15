@@ -279,6 +279,10 @@ calm_wait() {
 m7() {
     at 145; mark M7 start
     remove page-hog; mark M7 "deleted page-hog"
+    # cycler is M1's load that keeps cycling; left running it moves while every probe
+    # settles, and the outcome is confounded rather than scored.
+    local cyc; cyc=$(uid_of cycler)
+    remove cycler; mark M7 "deleted cycler" --arg subject "pod:$cyc"
     calm_wait "$CALM_WAIT"
     local n name body accept slot
     for n in 1 2 3 4 5 6; do

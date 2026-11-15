@@ -106,12 +106,16 @@ row M1 01 "composition cpu_utilization@pod:* -> cpu_utilization confirmed by rul
     "$(jq -r 'if length == 0 then "unverifiable" elif all(.confirm_at != null and .confirm_at <= 1 and .by == "rules") then "pass" else "fail" end' <<<"$r")" \
     "$(jq -c 'map({c: (.c | sub("cpu_utilization@"; "")), confirm_review: .confirm_at, by})' <<<"$r")"
 ta=$(mk M1 'applied twin-a' subject); tb=$(mk M1 'applied twin-b' subject)
-r=$(jq --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" --argjson e "$M1e" \
-    '[.[] | select(.kind == "relationship.declared" and .detail.association == true and ([.detail.from, .detail.to] | sort) == ([$a, $b] | sort))][0] | if . == null then null else {target, actor, k, by_m1_end: (.k <= $e)} end' "$W/ev.json")
-pw=$(jq -s --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" '[.[] | select(.endpoint == "/candidates?status=all" and .status == 200) | .body[]?
-    | select(([.FromID, .ToID] | sort) == ([$a, $b] | sort)) | .PersistentWindows] | last // null' "$W/cap.jsonl")
-row M1 01 "twins associated by persistent-correlation by t=50" \
-    "$(jq -r --argjson pw "$pw" 'if . != null and .by_m1_end then "pass" else "reported" end' <<<"$r")" "declared: $(jq -c . <<<"$r"); pending-with-windows: $pw"
+# Any time in the run: the pace may slow during M1 (discovery in progress is not attention
+# work), which fills the persistence windows four times slower. The reading says when the
+# association arrived (minutes after M0 began, wall clock) and the pace then (the last
+# pace.changed before it; base when none, as every life starts at base).
+r=$(jq --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" --argjson e "$M1e" --argjson t0 "$(t M0 '^start$')" \
+    '. as $ev | [.[] | select(.kind == "relationship.declared" and .detail.association == true and ([.detail.from, .detail.to] | sort) == ([$a, $b] | sort))][0]
+     | if . == null then null else . as $d | {target, k, minute: (((.ts - $t0) / 60) * 10 | round / 10), by_m1_end: (.k <= $e),
+         pace: ([$ev[] | select(.kind == "pace.changed" and .k < $d.k and .inc == $d.inc)] | last | .detail.to // "base")} end' "$W/ev.json")
+row M1 01 "twins associated by persistent-correlation (any time in the run)" \
+    "$(jq -r 'if . != null then "pass" else "fail" end' <<<"$r")" "declared: $(jq -c . <<<"$r")"
 r=$(jq -c --argjson a "$(t M1 '^start$')" --argjson b "$(t M1 '^end$')" '[.[] | select(.endpoint == "/autonomy" and .status == 200 and .t >= $a and .t <= $b) | .body]
     | {captures: length, errors: (map(.errors) | max), waiting: (map(.waiting) | max)}' "$W/cap.json")
 dec=$(jq -c '[.[] | select(.endpoint == "/config" and .status == 200) | .body][0] | .. | objects | select(has("review")) | .review | {decision: .decision.backend, reasoning: .reasoning.backend}' "$W/cap.json" 2>/dev/null | head -1)
@@ -313,7 +317,9 @@ r=$(jq -c --arg s "@$sub" --argjson a "$M8s" '([.[] | select(.kind == "property.
     | {admitted_ts: $adm.ts, wake: (if $w == null then null else {reason: $w.detail.reason, after_admit_s: ($w.ts - $adm.ts)} end)}' "$W/ev.json")
 row M8 05 "wake on arrival: slow->base within a tick of noise admitted, reason property admitted" \
     "$(verdict "$(jq '.wake != null and .wake.after_admit_s <= 60 and .wake.after_admit_s >= -1 and (.wake.reason | startswith("property admitted"))' <<<"$r")")" "$r"
-subs=$(jq -c '[.[] | select(.phase == "M1" or .phase == "M6") | .subject // empty] | unique' "$W/phases.json")
+# The pods M8 deletes: M1's and M6's, less any deleted before (cycler, in M7).
+subs=$(jq -c '([.[] | select(.phase == "M7" and (.event | startswith("deleted"))) | .subject // empty]) as $gone
+    | [.[] | select(.phase == "M1" or .phase == "M6") | .subject // empty] | unique - $gone' "$W/phases.json")
 r=$(jq -c --argjson subs "$subs" --argjson td "${td:-0}" --argjson a "$M8s" '[$subs[] as $s | ([.[] | select(.k >= $a and (.target | endswith("@" + $s)))]) as $e
     | select(($e | length) > 0) | {s: ($s | .[4:12]), stale_min: ([$e[] | select(.kind == "property.stale") | .ts] | min | if . == null then null else (. - $td) / 60 end),
       retired_min: ([$e[] | select(.kind == "property.retired") | .ts] | min | if . == null then null else (. - $td) / 60 end)}]' "$W/ev.json")

@@ -24,7 +24,9 @@ mark() { jq -cn --argjson t "$1" --arg p "$2" --arg e "$3" --argjson i "$4" --ar
 
 T=1800000000
 for c in pass fail; do mkdir -p "$TMP/$c"; done
-printf '%s\n' "$(mark $T M0 start 1 1)" "$(mark $((T + 4800)) M4 start 1 5)" "$(mark $((T + 5160)) M4 end 1 9)" \
+twin() { mark "$1" M1 "applied twin-$2" 1 1 | jq -c --arg s "pod:$2" '. + {subject: $s}'; }
+printf '%s\n' "$(mark $T M0 start 1 1)" "$(twin $((T + 600)) a)" "$(twin $((T + 640)) b)" "$(mark $((T + 3000)) M1 end 1 4)" \
+    "$(mark $((T + 4800)) M4 start 1 5)" "$(mark $((T + 5160)) M4 end 1 9)" \
     "$(mark $((T + 5220)) M5 start 1 9)" | tee "$TMP/pass/phases.jsonl" >"$TMP/fail/phases.jsonl"
 jq -cn --argjson t $T '{t: $t, endpoint: "/state", status: 200, body: {pace: "base", counts: {}}}' >"$TMP/pass/capture.jsonl"
 jq -cn --argjson t $T '{t: $t, endpoint: "/state", status: 200, body: {pace: "slow", counts: {}}}' >"$TMP/fail/capture.jsonl"
@@ -33,8 +35,10 @@ journal "$TMP/pass" \
     "$(ev 1 2 $T property.declared cpu_pressure_ratio)" \
     "$(ev 1 3 $((T + 10)) property.admitted cpu_utilization@unit:di-agent)" \
     "$(ev 1 4 $((T + 60)) decision review-1.4 null '{"id":"review-1.4","kind":"review","answer":{"by":"rules","action":"confirm"}}')" \
+    "$(ev 1 5 $((T + 2400)) pace.changed attention '{"from":"base","to":"slow","reason":"calm for 10m0s"}')" \
     "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7265,"monotonic_delta_seconds":60}')" \
-    "$(ev 1 7 $((T + 5070)) clock.stepped "" '{"wall_delta_seconds":-7130,"monotonic_delta_seconds":60}')"
+    "$(ev 1 7 $((T + 5070)) clock.stepped "" '{"wall_delta_seconds":-7130,"monotonic_delta_seconds":60}')" \
+    "$(ev 1 8 $((T + 3600)) relationship.declared x '{"association":true,"from":"cpu_utilization@pod:b","to":"cpu_utilization@pod:a"}')"
 journal "$TMP/fail" \
     "$(ev 1 1 $T fact.recorded hostname)" \
     "$(ev 1 2 $T restore.failed /var/lib/di-agent/state.json)" \
@@ -55,6 +59,10 @@ for c in pass fail; do
     expect "$c" "pace base at start" "$c"
     expect "$c" "self observed" "$c"
     expect "$c" "two clock.stepped" "$c"
+    expect "$c" "twins associated by persistent-correlation" "$c"
 done
+grep -F "twins associated" "$TMP/pass/results-readout.md" | grep -q '"minute":60,"by_m1_end":false,"pace":"slow"' \
+    && echo "ok   pass: twins reading has the minute and the pace then" \
+    || { echo "FAIL pass: twins reading lacks minute 60 / pace slow"; fails=$((fails + 1)); }
 expect pass "interval: sensitivity_low" unverifiable
 exit $((fails > 0))
