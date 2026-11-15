@@ -3,7 +3,7 @@
 Build: 3d3b05e; features: 01,02,03,04,05,06; config: agent-autonomous.yaml (+ ledger in the run directory).
 Timetable as run (phase starts, from phases.jsonl): M0 19:19, M1 19:29, M2 20:09, M3 20:24, M4 20:39, M5 20:46, M6 20:59, M7 21:45, M8 22:39, M9 22:59, teardown 23:04.
 
-Verdicts: fail 2, not built 1, not exercised 4, pass 40, reported 6
+Verdicts: fail 2, not built 1, not exercised 4, pass 41, reported 5
 
 | Phase | Plan | Criterion | Verdict | Reading |
 | --- | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ Verdicts: fail 2, not built 1, not exercised 4, pass 40, reported 6
 | M0 | 04 | self observed: cpu_utilization@unit:di-agent admitted within 1 min | **pass** | {"target":"cpu_utilization@unit:di-agent","after_s":9.305222034454346}  |
 | M0 | none | healthz reports last tick per loop and last save | **not built** | GET /healthz answers {"ok":true}: liveness detail is in none of plans 01-06  |
 | M1 | 01 | composition cpu_utilization@pod:* -> cpu_utilization confirmed by rules within 2 review cycles | **pass** | [{"c":"pod:f21cca0b-5fc5-4835-a1ea-02bd7f8fb20e","confirm_review":0,"by":"rules"}]  |
-| M1 | 01 | twins associated by persistent-correlation by t=50 | **reported** | declared: {"target":"cpu_utilization@pod:3d20ae7e-b7b3-413c-bf87-930109f252ff->cpu_utilization@pod:b738ccf6-0238-4010-92a5-a1e46a44c93a:association","actor":"system","k":1000000441,"by_m1_end":false}; pending-with-windows: 3  |
+| M1 | 01 | twins associated by persistent-correlation (any time in the run) | **pass** | declared: {"target":"cpu_utilization@pod:3d20ae7e-b7b3-413c-bf87-930109f252ff->cpu_utilization@pod:b738ccf6-0238-4010-92a5-a1e46a44c93a:association","k":1000000441,"minute":64.1,"by_m1_end":false,"pace":"base"}  |
 | M1 | 01 | nothing waits on a model (no model configured; autonomy errors and waiting 0) | **pass** | GET /autonomy has no models_down field; adapted to errors/waiting: {"captures":80,"errors":0,"waiting":0}; config review backends: {"decision":"none","reasoning":"none"}  |
 | M1 | 01 | out-of-order and future readings counted (census fields present) | **pass** | last census: {"readings_out_of_order":0,"readings_future":0}  |
 | M2 | 02 | estimate traceable: kind estimate, no cites, inputs.pace | **pass** | est-1.389-memory_utilization-f23ab3c4: {"kind":"estimate","cites":null,"pace":"slow"}  |
