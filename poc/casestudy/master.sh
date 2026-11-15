@@ -284,6 +284,10 @@ m7() {
     local cyc; cyc=$(uid_of cycler)
     remove cycler; mark M7 "deleted cycler" --arg subject "pod:$cyc"
     calm_wait "$CALM_WAIT"
+    # The departed pods' readings keep falling until they go stale (~2.5 min); a probe that
+    # settles meanwhile is confounded by them. Relief's calm wait usually covers this; when
+    # relief never acted it is over at once.
+    pause 180; mark M7 "departures settled"
     local n name body accept slot
     for n in 1 2 3 4 5 6; do
         slot=$((145 + 4 * (n - 1) + 1))

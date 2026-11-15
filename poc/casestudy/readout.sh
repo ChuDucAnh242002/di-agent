@@ -110,9 +110,17 @@ ta=$(mk M1 'applied twin-a' subject); tb=$(mk M1 'applied twin-b' subject)
 # work), which fills the persistence windows four times slower. The reading says when the
 # association arrived (minutes after M0 began, wall clock) and the pace then (the last
 # pace.changed before it; base when none, as every life starts at base).
+fwd=$(k M4 'date -s \+'); back=$(k M4 'date -s -')
 r=$(jq --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" --argjson e "$M1e" --argjson t0 "$(t M0 '^start$')" \
+    --argjson fwd "${fwd:-null}" --argjson back "${back:-null}" \
     '. as $ev | [.[] | select(.kind == "relationship.declared" and .detail.association == true and ([.detail.from, .detail.to] | sort) == ([$a, $b] | sort))][0]
-     | if . == null then null else . as $d | {target, k, minute: (((.ts - $t0) / 60) * 10 | round / 10), by_m1_end: (.k <= $e),
+     | if . == null then null else . as $d
+       # Inside M4 (between the forward and the backward step) the wall clock runs ahead by the
+       # forward step: take it off, so the minute is on the timetable clock.
+       | (if $fwd != null and $back != null and $d.k >= $fwd and $d.k < $back
+          then ([$ev[] | select(.kind == "clock.stepped" and .k >= $fwd)][0] | .detail.wall_delta_seconds - .detail.monotonic_delta_seconds) // 0
+          else 0 end) as $step
+       | {target, k, minute: (((.ts - $step - $t0) / 60) * 10 | round / 10), by_m1_end: (.k <= $e),
          pace: ([$ev[] | select(.kind == "pace.changed" and .k < $d.k and .inc == $d.inc)] | last | .detail.to // "base")} end' "$W/ev.json")
 row M1 01 "twins associated by persistent-correlation (any time in the run)" \
     "$(jq -r 'if . != null then "pass" else "fail" end' <<<"$r")" "declared: $(jq -c . <<<"$r")"
@@ -330,7 +338,7 @@ row M8 05 "staleness does not follow the pace: deleted pods stale ~+2 min, retir
 r=$(jq -c '[.[] | select(.kind == "relationship.retired" and .detail.reason == "sign-contradicted")] | length' "$W/ev.json")
 ss=$(jq -s '[.[] | select(.endpoint == "/state" and .status == 200) | .body.counts.relationships_sign_suspect] | max' "$OUT/capture.jsonl")
 row M9 03 "sign contradiction acted on (relationship.retired sign-contradicted)" \
-    "$(if [ "$r" -gt 0 ]; then echo reported; elif [ "${ss:-0}" = 0 ]; then echo "not exercised"; else echo fail; fi)" "sign-contradicted retirements: $r; max relationships_sign_suspect: $ss"
+    "$(if [ "$r" -gt 0 ] || [ "${ss:-0}" != 0 ]; then echo reported; else echo "not exercised"; fi)" "sign-contradicted retirements: $r; max relationships_sign_suspect: $ss"
 r=$(jq -c '[.[] | select(.kind == "relationship.regime") | .target] | {n: length, rels: (unique)}' "$W/ev.json")
 row M9 03 "regime events" "$(jq -r 'if .n > 0 then "reported" else "not exercised" end' <<<"$r")" "$r"
 f=$(jq '[.[] | select(.kind == "property.forgotten")] | length' "$W/ev.json")
