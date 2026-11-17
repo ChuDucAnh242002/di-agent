@@ -407,7 +407,7 @@ func (s *Supervisor) runDoctor(name string, d Doctor, argv []string, why string)
 	defer cancel()
 	start := time.Now()
 	out, err := d.RunDoctor(ctx)
-	if len(out) > doctorOutputMax {
+	if len(out) > doctorOutputMax { // a Doctor other than ExecCollector may not cap it
 		out = out[:doctorOutputMax]
 	}
 	detail := map[string]any{"member": name, "command": argv, "down_because": why,

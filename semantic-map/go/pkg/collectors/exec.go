@@ -266,7 +266,22 @@ func (e *ExecCollector) RunDoctor(ctx context.Context) ([]byte, error) {
 	ownGroup(cmd)
 	cmd.Cancel = func() error { signalGroup(cmd, syscall.SIGKILL); return nil }
 	cmd.WaitDelay = time.Second
-	return cmd.CombinedOutput()
+	var out capped
+	cmd.Stdout, cmd.Stderr = &out, &out // one writer: exec serialises its writes
+	err := cmd.Run()
+	return out.b, err
+}
+
+// capped keeps the first doctorOutputMax bytes written to it and discards the rest,
+// still reporting every write as taken, so a chatty doctor is drained rather than
+// blocked and the agent holds at most the cap.
+type capped struct{ b []byte }
+
+func (c *capped) Write(p []byte) (int, error) {
+	if room := doctorOutputMax - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }
 
 // TakeDrops returns what the last Collect dropped from the plugin's reply —

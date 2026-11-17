@@ -76,3 +76,24 @@ func TestExecUnhealthyReplyAndDeclaredDoctor(t *testing.T) {
 		t.Fatalf("RunDoctor = %q, %v; want its output and exit status", out, err)
 	}
 }
+
+// TestRunDoctorKeepsAtMostTheCapAndDrains: a chatty doctor cannot make the agent hold
+// its whole output; the rest is read and discarded, so the doctor still runs to its end.
+func TestRunDoctorKeepsAtMostTheCapAndDrains(t *testing.T) {
+	d, _ := fixture(t, "chatty-doctor", 2*time.Second, nil)
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := d.Collect(); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := d.RunDoctor(ctx)
+	if err != nil {
+		t.Fatalf("RunDoctor error %v; want the doctor drained to a clean exit", err)
+	}
+	if len(out) != doctorOutputMax {
+		t.Fatalf("RunDoctor kept %d bytes; want the first %d", len(out), doctorOutputMax)
+	}
+}

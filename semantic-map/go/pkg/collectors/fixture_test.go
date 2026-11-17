@@ -84,6 +84,9 @@ func fixtureMain(mode string) {
 				reply(HelloReply{Protocol: 2})
 			case "doctor":
 				reply(HelloReply{Protocol: ProtocolVersion, Doctor: []string{"/bin/sh", "-c", "echo checked $DI_COLLECTOR_NAME; exit 3"}})
+			case "chatty-doctor":
+				// 8 MiB to stdout and stderr: more than the agent keeps, which it must still drain.
+				reply(HelloReply{Protocol: ProtocolVersion, Doctor: []string{"/bin/sh", "-c", "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2; echo done >&2"}})
 			default:
 				reply(HelloReply{Protocol: ProtocolVersion})
 			}
