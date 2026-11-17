@@ -207,6 +207,7 @@ export class Model {
         name: props.map(subjectName).find(Boolean) || null,
         properties: props.sort((a, b) => a.id.localeCompare(b.id)),
         status: props.some((p) => p.status === 'active') ? 'active'
+          : props.some((p) => p.status === 'unobservable') ? 'unobservable'
           : props.some((p) => p.status === 'stale') ? 'stale' : 'retired',
       }))
       // By what is shown: sorted by UID, named pods would come out in no visible order.

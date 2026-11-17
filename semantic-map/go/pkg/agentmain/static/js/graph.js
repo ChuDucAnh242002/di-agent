@@ -13,7 +13,7 @@
 //   midpoint dot     provenance (seeded / learned / discovered / asserted).
 //   node shape       observed (filled) vs derived (ring). Shape, not hue, so the
 //                    sign palette keeps its meaning everywhere on the canvas.
-//   node ring        lifecycle: active, stale, retired.
+//   node ring        lifecycle: active, stale, unobservable (dotted), retired.
 //   node arc         the current value within its declared range, when one was
 //                    declared. No range, no arc — an undeclared range cannot be
 //                    normalised honestly.
@@ -983,9 +983,10 @@ export class GraphView {
 
   /** Everything about a property's glyph that is not where it is. */
   paintNode(nd, p, { dimmed, highlighted, pinned }) {
-    const statusStroke = p.status === 'stale' ? 'var(--status-serious)'
+    const statusStroke = p.status === 'stale' || p.status === 'unobservable' ? 'var(--status-serious)'
       : p.status === 'retired' ? 'var(--ink-muted)' : 'var(--baseline)';
     const retired = p.status === 'retired';
+    const unobservable = p.status === 'unobservable';
     const isSel = this.selected?.type === 'property' && this.selected.id === p.id;
 
     set(nd.g, { opacity: dimmed ? 0.22 : null });
@@ -994,7 +995,7 @@ export class GraphView {
     set(nd.disc, {
       stroke: isSel ? 'var(--sign-pos)' : statusStroke,
       'stroke-width': isSel ? 3 : retired ? 1.2 : 1.6,
-      'stroke-dasharray': retired ? '3 3' : null,
+      'stroke-dasharray': retired ? '3 3' : unobservable ? '1 2' : null,
       opacity: retired ? 0.55 : 1,
     });
     if (nd.kind === 'derived') set(nd.inner, { stroke: statusStroke });

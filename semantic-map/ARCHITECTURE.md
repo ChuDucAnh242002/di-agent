@@ -837,12 +837,17 @@ outage touched. The Supervisor stamps each admitted sample with its member's nam
 loop tells the map which members are down after each tick, and a property stays
 unobservable until its next observation; once the member is back its silence counts
 from the return, not from before the outage. An HTTP producer is stamped `http`, so it
-cannot name itself after a member.
+cannot name itself after a member. With two producers of one property (two members
+emitting the same subject's property, or a member and `http`) `Source` names the one
+that reported last, since that is whose silence follows. A derived property with no
+active member is unobservable when one of its members is, stale otherwise: a summary
+of an outage is not a summary of silence.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
 stay reconstructible. It is soft for a day: an observed property retired for 24 hours
 (`forgetAfter`) is forgotten by the sweep, which deletes it, its retired relationships
-and the per-pair state keyed by them, and leaves a tombstone (id and `RetiredAt`) for
+and the per-pair state keyed by them (a relationship declared onto the retired property
+is live, and keeps the property until it is retired too, so no edge points at nothing), and leaves a tombstone (id and `RetiredAt`) for
 another day, so a decision that read it still resolves to "retired" (`GET
 /state/properties/{id}` answers 410) while the map and snapshot stop growing with pod
 churn. Derived properties are never forgotten; a re-observation after forgetting is a
@@ -877,12 +882,13 @@ A sweep that finds the wall clock stepped against the monotonic one records
 A collector member entering or leaving backoff or stuck records `collector.down` or
 `collector.up`, once per transition, with the member as target.
 The sweep deleting a property retired for 24 hours records `property.forgotten` (target
-the id; detail `retired_at`, the `relationships` removed, and `kept` for any live edge
-left in place).
+the id; detail `retired_at` and the `relationships` removed).
 Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
-when the current file is absent or unreadable; when neither is usable the map starts
-cold and its first event is `restore.failed` (target the path, detail `error` and
-`prev_error`), so a cold start is visible in the journal rather than a crash loop.
+when the current file is absent or unreadable, renaming the unreadable one to
+`<file>.corrupt` first so the reservation save does not rotate it over the good `.prev`;
+when neither is usable both are set aside the same way, the map starts cold and its
+first event is `restore.failed` (target the path, detail `error` and `prev_error`), so
+a cold start is visible in the journal rather than a crash loop.
 A version or owner mismatch is still refused outright, with no fallback.
 The map's own changes are `property.*` and `relationship.*` events:
 `relationship.declared`, `relationship.asserted`, `relationship.intervention`,

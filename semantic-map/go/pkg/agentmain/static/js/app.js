@@ -29,16 +29,17 @@ let statusFilter = 'live';
  * What each status choice asks the agent for.
  *
  * This has to travel in the request. GET /state with no status defaults to
- * active+stale server-side, so a retired property never reaches the page at all
+ * everything but retired (active, stale, unobservable) server-side, so a retired property never reaches the page at all
  * — filtering the response could only ever hide things, never reveal them, which
  * left "retired only" permanently empty and made "everything" a synonym for
  * "active + stale".
  */
 const STATUS_QUERY = {
   live: undefined,                               // the server's own default
-  all: ['active', 'stale', 'retired'],
+  all: ['active', 'stale', 'unobservable', 'retired'],
   active: ['active'],
   stale: ['stale'],
+  unobservable: ['unobservable'],
   retired: ['retired'],
 };
 
@@ -153,10 +154,11 @@ const STAT_SPECS = [
     key: 'properties',
     label: 'Properties',
     value: (c) => c.properties_total ?? 0,
-    sub: (c) => `${c.properties_active ?? 0} active · ${c.properties_stale ?? 0} stale · ${c.properties_retired ?? 0} retired`,
+    sub: (c) => `${c.properties_active ?? 0} active · ${c.properties_stale ?? 0} stale · ${c.properties_unobservable ?? 0} unobservable · ${c.properties_retired ?? 0} retired`,
     bar: (c) => [
       { label: 'active', n: c.properties_active ?? 0, color: 'var(--status-good)' },
       { label: 'stale', n: c.properties_stale ?? 0, color: 'var(--status-serious)' },
+      { label: 'unobservable', n: c.properties_unobservable ?? 0, color: 'var(--status-warning)' },
       { label: 'retired', n: c.properties_retired ?? 0, color: 'var(--ink-muted)' },
     ],
   },

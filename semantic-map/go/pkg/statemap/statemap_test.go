@@ -3468,3 +3468,116 @@ func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) 
 		t.Errorf("retired %v; want both, RetireAfter since the return", retired)
 	}
 }
+
+// TestDerivedOverUnobservableMembersIsUnobservable: a summary whose members are
+// silent because their collector is down says so, not that the system went quiet;
+// it is live again when a member is.
+func TestDerivedOverUnobservableMembersIsUnobservable(t *testing.T) {
+	m, c := outageMap(t)
+	if err := m.DeclareProperty(Property{ID: "load", Kind: Derived, Members: []string{"cpu", "cpu@pod:a"}}); err != nil {
+		t.Fatal(err)
+	}
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Fatalf("load is %s before the outage; want active", s)
+	}
+	m.SetSourceDown("netdata", true)
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Unobservable {
+		t.Errorf("load is %s with every member unobservable; want unobservable", s)
+	}
+	m.SetSourceDown("netdata", false)
+	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Errorf("load is %s with a member observed again; want active", s)
+	}
+}
+
+// TestMarkPropertyStaleLeavesUnobservableAlone: an unobservable property's silence
+// has a known cause; marking it stale would only be undone by the next sweep.
+func TestMarkPropertyStaleLeavesUnobservableAlone(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true)
+	c.advance(time.Minute)
+	m.Sweep()
+	if m.MarkPropertyStale("cpu", "test", "test") {
+		t.Error("MarkPropertyStale changed an unobservable property")
+	}
+	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
+		t.Errorf("cpu is %s; want unobservable", s)
+	}
+}
+
+// TestALiveRelationshipKeepsItsRetiredEndpoint: a relationship declared onto a
+// retired property is live; forgetting the property would leave it pointing at
+// nothing, so the property is kept until the relationship is retired too.
+func TestALiveRelationshipKeepsItsRetiredEndpoint(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Retired {
+		t.Fatalf("cpu@pod:a is %s; want retired", s)
+	}
+	id := RelationshipID("cpu@pod:a", "cpu", "")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(forgetAfter + time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); !ok {
+		t.Fatal("the endpoint of a live relationship was forgotten")
+	}
+	if r, ok := m.Relationship(id); !ok || r.Status == Retired {
+		t.Fatalf("relationship %+v (%v); want it still live", r, ok)
+	}
+	for _, rel := range m.State(Query{}).Relationships {
+		for _, end := range []string{rel.From, rel.To} {
+			if _, ok := m.Property(end); !ok {
+				t.Errorf("relationship %s points at the missing property %s", rel.ID, end)
+			}
+		}
+	}
+	if err := m.RetireRelationship(id, "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); ok {
+		t.Error("cpu@pod:a is still held after its relationship retired")
+	}
+}
+
+// TestSourceIsTheLastReporter: two producers feeding one property (two members
+// emitting the same subject's property, or a member and POST /ingest-sample) leave
+// Source naming whoever reported last. That is the attribution the silence after it
+// needs: while one keeps reporting the property is observed, whichever is down; once
+// both are silent, the outage explains the silence only if the down one spoke last.
+func TestSourceIsTheLastReporter(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+	m.SetSourceDown("netdata", true)
+	for range 3 { // http keeps reporting through the netdata outage
+		c.advance(time.Minute)
+		recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+		m.Sweep()
+		if s := statusOfProp(t, m, "cpu@pod:a"); s != Active {
+			t.Fatalf("cpu@pod:a is %s while http reports it; want active", s)
+		}
+	}
+	m.SetSourceDown("netdata", false)
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata") // netdata reports last, then goes down
+	m.SetSourceDown("netdata", true)
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
+		t.Errorf("cpu@pod:a is %s, last reported by the down netdata; want unobservable", s)
+	}
+}

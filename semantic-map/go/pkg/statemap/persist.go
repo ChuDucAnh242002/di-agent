@@ -304,6 +304,8 @@ func (m *Map) Load(path string) (Restore, error) {
 		err = m.restoreLocked(snap, prev, curErr.Error())
 	}
 	if err == nil {
+		// Set aside first, or the reservation save would rotate it over the good .prev.
+		setAside(path, curErr)
 		return m.reserveIncarnation(path, prev, snap, curErr.Error())
 	}
 	if errors.Is(err, ErrSnapshotRefused) {
@@ -314,6 +316,9 @@ func (m *Map) Load(path string) (Restore, error) {
 	if os.IsNotExist(curErr) && os.IsNotExist(prevErr) {
 		return Restore{}, nil // nothing saved yet: a first start, not a failure
 	}
+	// The next saves would overwrite both; what failed to load is kept to inspect.
+	setAside(path, curErr)
+	setAside(prev, prevErr)
 	m.mu.Lock()
 	m.bump(EventRestoreFailed, path, "restore", map[string]any{
 		"path":       path,
@@ -328,11 +333,19 @@ func (m *Map) Load(path string) (Restore, error) {
 // save cannot bring this life's number back, and with it ids this life has already
 // issued.
 func (m *Map) reserveIncarnation(path, from string, snap Snapshot, curErr string) (Restore, error) {
-	// After a fallback to .prev this save rotates the corrupt current into .prev; the freshly written current is the good generation.
 	if err := m.Save(path); err != nil {
 		return Restore{}, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
 	}
 	return Restore{Loaded: true, From: from, CurrentError: curErr}, nil
+}
+
+// setAside renames a snapshot that failed to load to file+".corrupt", so no save
+// rotates or overwrites it. An absent file has nothing to set aside; a failed rename
+// leaves the file where it was.
+func setAside(file string, loadErr error) {
+	if !os.IsNotExist(loadErr) {
+		_ = os.Rename(file, file+".corrupt")
+	}
 }
 
 // readSnapshot reads, decodes and version-checks one snapshot file. A version
