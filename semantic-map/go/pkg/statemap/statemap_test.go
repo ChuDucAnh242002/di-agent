@@ -1895,7 +1895,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 	est, asserted := 0.95, 0.7
 	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Recent: 0.9, Confidence: 1,
 		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
-		Provenance: Discovered})
+		Regime: true, RegimeSince: c.now(), Provenance: Discovered})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1904,7 +1904,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
 	}
 	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
-		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 {
+		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 || r.Regime || !r.RegimeSince.IsZero() {
 		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
 	}
 	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {

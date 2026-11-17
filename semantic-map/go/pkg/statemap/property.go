@@ -1362,6 +1362,7 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.Interventions = nil
+	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	for _, id := range []string{r.From, r.To} {
