@@ -301,10 +301,15 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		var body any
 		var from string
 		var ok bool
+		var err error
 		if r.URL.Query().Get("chain") == "1" {
-			body, from, ok = resolveChain(sm.Journal(), r.PathValue("id"))
+			body, from, ok, err = resolveChain(sm.Journal(), r.PathValue("id"))
 		} else {
-			body, from, ok = resolveDecision(sm.Journal(), r.PathValue("id"))
+			body, from, ok, err = resolveDecision(sm.Journal(), r.PathValue("id"))
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 		if !ok {
 			writeDecisionMiss(w, sm, r.PathValue("id"))
@@ -330,7 +335,11 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 	// GET /state/decisions/{id}/explain — the decision and its chain as plain text,
 	// rendered from the records alone, so a node with no model can still say why.
 	mux.HandleFunc("GET /state/decisions/{id}/explain", func(w http.ResponseWriter, r *http.Request) {
-		chain, from, ok := resolveChain(sm.Journal(), r.PathValue("id"))
+		chain, from, ok, err := resolveChain(sm.Journal(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		if !ok {
 			writeDecisionMiss(w, sm, r.PathValue("id"))
 			return
