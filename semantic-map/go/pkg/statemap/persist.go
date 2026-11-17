@@ -360,6 +360,23 @@ func (m *Map) LoopsPersistence(capture func() (json.RawMessage, error)) json.Raw
 	return append(json.RawMessage(nil), m.savedLoops...)
 }
 
+// LoopsState is the loops' state as Save would capture it now: nil with no capture
+// installed or when the capture fails. A loop's state can change without moving the
+// revision or the journal (a peer's trust), so the save loop compares this too.
+func (m *Map) LoopsState() json.RawMessage {
+	m.mu.RLock()
+	capture := m.loopsCheckpoint
+	m.mu.RUnlock()
+	if capture == nil {
+		return nil
+	}
+	raw, err := capture()
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 // DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while
 // retaining the restored map, journal, and relationships.
 func (m *Map) DiscardDiscoveryCheckpoint() {
