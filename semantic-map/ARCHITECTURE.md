@@ -1032,7 +1032,7 @@ The map changes at three rates, and each is a setting rather than an accident.
 | **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
 | **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
 
-Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active (unobservable when a member is) and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
