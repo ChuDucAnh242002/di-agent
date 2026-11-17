@@ -42,6 +42,21 @@ journal "$TMP/fail" \
     "$(ev 1 4 $((T + 60)) decision review-1.4 null '{"id":"review-1.4","kind":"review","answer":{"by":"systemone","action":"confirm"}}')" \
     "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7265,"monotonic_delta_seconds":60}')"
 
+# svc: the self subject from the unit glob fallback, unit:di-agent.service.
+# rf-ok / rf-bad: a cold start in incarnation 2 whose restore.failed line verifies, or was
+# altered after the agent digested it.
+for c in svc rf-ok rf-bad; do mkdir -p "$TMP/$c"; cp "$TMP/pass/phases.jsonl" "$TMP/pass/capture.jsonl" "$TMP/$c/"; done
+journal "$TMP/svc" \
+    "$(ev 1 1 $T fact.recorded hostname)" \
+    "$(ev 1 2 $((T + 10)) property.admitted cpu_utilization@unit:di-agent.service)"
+for c in rf-ok rf-bad; do
+    echo '{"incarnation": 2}' >"$TMP/$c/after-cold-start-journal.json"
+    journal "$TMP/$c" \
+        "$(ev 1 1 $T fact.recorded hostname)" \
+        "$(ev 2 1 $((T + 6000)) restore.failed /var/lib/di-agent/state.json '{"error":"x","prev_error":"y"}')"
+done
+sed -i.bak 's#/var/lib/di-agent/state.json#/tampered#' "$TMP/rf-bad/journal.ndjson"
+
 fails=0
 expect() { # expect <case> <criterion-substring> <verdict>
     local got
@@ -57,4 +72,8 @@ for c in pass fail; do
     expect "$c" "two clock.stepped" "$c"
 done
 expect pass "interval: sensitivity_low" unverifiable
+for c in svc rf-ok rf-bad; do "$HERE/readout.sh" "$TMP/$c" >/dev/null 2>&1; done
+expect svc "self observed" pass
+expect rf-ok "restore.failed reaches the durable log" pass
+expect rf-bad "restore.failed reaches the durable log" fail
 exit $((fails > 0))
