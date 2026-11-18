@@ -45,7 +45,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 	// filters narrow it.
 	//
 	//   ?kind=observed|derived         (repeatable, or comma-separated)
-	//   ?status=active|stale|retired   (repeatable, or comma-separated)
+	//   ?status=active|stale|unobservable|retired   (repeatable, or comma-separated)
 	//   ?min-confidence=0.5
 	//   ?related-to=<property>         one-hop neighbourhood
 	//   ?id=<property>                 (repeatable)

@@ -1277,6 +1277,20 @@ func TestSelfAsAPodKeepsThePodAndSkipsItsOwnContainerPart(t *testing.T) {
 	}
 }
 
+// TestSelfInANonLeafCgroupKeepsItsDescendants: the agent's own directory is emitted
+// once, as unit:di-agent; what lies below it is still walked, so a pod there is kept.
+func TestSelfInANonLeafCgroupKeepsItsDescendants(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	rel, _ := filepath.Rel(root, filepath.Dir(podA))
+	writeSelfCgroup(t, procRoot, "0::/"+filepath.ToSlash(rel)+"\n")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c.numCPU = 4
+	got := bySubject(collectTwice(t, c, func() { advance(t, podA, 1_040_000, 110, 15) }))
+	if got["pod:"+testUID] == nil {
+		t.Fatalf("the pod below the agent's cgroup was lost: %v", got)
+	}
+}
+
 func TestSelfCgroupPicksTheUnifiedLineOnAHybridHierarchy(t *testing.T) {
 	root, _, _, _, procRoot := fakeTree(t)
 	self := filepath.Join(root, "system.slice", "di-agent.service")

@@ -87,6 +87,9 @@ type Registry struct {
 	mu      sync.RWMutex
 	byID    map[string]*Descriptor
 	urlToID map[string]string
+	// saved is restored trust for peers not registered yet (added later via
+	// POST /peers): applied when the peer is added, kept in Trusts until then.
+	saved map[string]TrustState
 }
 
 // NewRegistry returns an empty in-memory peer registry.
@@ -119,6 +122,10 @@ func (r *Registry) Add(url, note string) (*Descriptor, error) {
 		URL:   url,
 		Trust: 0.5, // default at registration — no history yet
 		Note:  note,
+	}
+	if st, ok := r.saved[id]; ok {
+		d.Trust, d.LastPenalised = clamp01(st.Trust), st.LastPenalised
+		delete(r.saved, id)
 	}
 	r.byID[id] = d
 	r.urlToID[url] = id
@@ -257,7 +264,10 @@ type TrustState struct {
 func (r *Registry) Trusts() map[string]TrustState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make(map[string]TrustState, len(r.byID))
+	out := make(map[string]TrustState, len(r.byID)+len(r.saved))
+	for id, st := range r.saved {
+		out[id] = st
+	}
 	for id, d := range r.byID {
 		out[id] = TrustState{Trust: d.Trust, LastPenalised: d.LastPenalised}
 	}
@@ -266,7 +276,8 @@ func (r *Registry) Trusts() map[string]TrustState {
 
 // RestoreTrust sets the trust (clamped) and penalty time of each peer the
 // registry holds to the saved state. NObserved is untouched: it counts this
-// process's interactions. A saved id the registry does not hold is ignored.
+// process's interactions. A saved id the registry does not hold yet is kept
+// and applied when that peer is added.
 func (r *Registry) RestoreTrust(t map[string]TrustState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -274,7 +285,12 @@ func (r *Registry) RestoreTrust(t map[string]TrustState) {
 		if d, ok := r.byID[id]; ok {
 			d.Trust = clamp01(st.Trust)
 			d.LastPenalised = st.LastPenalised
+			continue
 		}
+		if r.saved == nil {
+			r.saved = map[string]TrustState{}
+		}
+		r.saved[id] = st
 	}
 }
 
