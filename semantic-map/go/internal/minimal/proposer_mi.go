@@ -1367,6 +1367,7 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.Candi
 	switch c.Kind {
 	case types.CandidateKindComposition:
 		prop.Description += "; composition: the source is part of the target"
+		prop.Composition = true
 	case types.CandidateKindSameMetric:
 		prop.Description += "; same metric on two subjects: a shared driver is likely"
 	case types.CandidateKindSameSubject:

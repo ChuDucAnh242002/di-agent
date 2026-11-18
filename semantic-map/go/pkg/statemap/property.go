@@ -221,6 +221,11 @@ type Relationship struct {
 	// them would make the pair unable to represent a disagreement it is observing.
 	Label string `json:"label,omitempty"`
 
+	// Composition marks From as part of To (a pod's memory and the node's). A part and
+	// its whole need not move the same way, because the other parts move too, so sign
+	// conflicts do not contradict it: the sign rule flags it and never retires it.
+	Composition bool `json:"composition,omitempty"`
+
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
 	Sign int `json:"sign"`
 

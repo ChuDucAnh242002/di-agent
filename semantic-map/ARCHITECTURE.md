@@ -776,7 +776,10 @@ This is not tidiness. Two failures were live without it, both silent:
   intervened relationship is retired with `retired_reason: "sign-contradicted"`
   (journalled by the agent with the agreement and conflict counts and the provenance it
   had), while an `asserted` one is only flagged, since an operator's claim is theirs to
-  overrule. The three windows are the substance: folds share all but one pair of a
+  overrule, and so is a `composition` one (confirmed from a composition candidate, and
+  persisted from snapshot version 11): a part and its whole need not move the same way,
+  because the other parts move too, so sign conflicts do not contradict it (issue #81:
+  a page-hog pod's memory against node memory was retired mid-reclaim). The three windows are the substance: folds share all but one pair of a
   window of smoothed values, so the 30 folds the flag needs can rest on one or two
   effective draws, and at the defaults a correctly signed but noisy relationship
   (y = 0.5x + noise) was retired on the first eligible fold in 7 of 10 seeded runs. Retirement
