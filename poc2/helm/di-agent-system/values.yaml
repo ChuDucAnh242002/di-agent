@@ -29,6 +29,8 @@ kafka:
   port: 9092
   controllerPort: 9093
   clusterId: ZGlhZ2VudC1rYWZrYS0
+  logDir: /var/lib/kafka/data
+  podSecurityContext: {}
   logRetentionHours: "168"
   logRetentionBytes: "1073741824"
   persistence:
@@ -305,6 +307,7 @@ grafana:
   resources: {}
 
 prometheus:
+  podSecurityContext: {}
   image:
     repository: prom/prometheus
     tag: latest
