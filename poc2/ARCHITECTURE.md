@@ -141,6 +141,10 @@ The writer commits Kafka offsets only after a successful InfluxDB write. Malform
 
 The chart provisions InfluxDB and Grafana and preconfigures Grafana datasources for InfluxDB telemetry and Prometheus application metrics. This allows the operator to observe system health and telemetry without separate manual config.
 
+Grafana starts one replacement pod during a rolling update and keeps the old
+pod available until the replacement passes its health check. Grafana's local
+data still uses `emptyDir` and does not survive pod replacement.
+
 The chart creates fixed, public InfluxDB and Grafana demo credentials by
 default. These are suitable only for disposable local labs; set
 `demoSecrets.enabled=false` to use external Secrets instead. See the README for
