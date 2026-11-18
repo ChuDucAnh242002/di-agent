@@ -39,9 +39,10 @@ type Pace struct {
 	logf     func(string, ...any)
 	pace     string // mirrors m.Pace(); the map is the record, this is the policy's copy
 	since    time.Time
-	calmFrom time.Time // when the current calm began; zero while any condition fails
-	wakes    uint64    // incremented by Wake; a tick whose read straddled a wake discards it
-	pinned   string    // non-empty: never slow, and why
+	calmFrom time.Time     // when the current calm began; zero while any condition fails
+	wakes    uint64        // incremented by Wake; a tick whose read straddled a wake discards it
+	pinned   string        // non-empty: never slow, and why
+	woke     chan struct{} // closed and replaced on each return to base, so a slow wait ends with it
 }
 
 // NewPace builds the pace for m, wakes it on every admission, and takes one tick so
@@ -53,7 +54,7 @@ func NewPace(m *statemap.Map, in PaceInputs, now func() time.Time, logf func(str
 	if logf == nil {
 		logf = log.Printf
 	}
-	p := &Pace{m: m, in: in, now: now, logf: logf, pace: m.Pace(), since: m.PaceSince()}
+	p := &Pace{m: m, in: in, now: now, logf: logf, pace: m.Pace(), since: m.PaceSince(), woke: make(chan struct{})}
 	m.SetAdmitHook(func(id string) { p.Wake("property admitted: " + id) })
 	p.Tick()
 	return p
@@ -170,6 +171,10 @@ func (p *Pace) set(to, reason string) {
 	if p.m.SetPace(to, reason) {
 		p.pace, p.since = to, p.now()
 		p.logf("pace: %s → %s: %s", from, to, reason)
+		if to == paceBase {
+			close(p.woke)
+			p.woke = make(chan struct{})
+		}
 	}
 }
 
@@ -187,15 +192,30 @@ func (p *Pace) Run(ctx context.Context) {
 	}
 }
 
-// wait sleeps p.Interval(base) or until ctx is done; false means stop. nil-safe.
+// wait sleeps p.Interval(base) or until ctx is done; false means stop. nil-safe. A
+// return to base during the sleep shortens it to the base interval from its start.
 func (p *Pace) wait(ctx context.Context, base time.Duration) bool {
-	t := time.NewTimer(p.Interval(base))
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
+	start := time.Now()
+	for {
+		d, woke := base, (chan struct{})(nil)
+		if p != nil {
+			p.mu.Lock()
+			if p.pace == paceSlow {
+				d = base * paceSlowFactor
+			}
+			woke = p.woke
+			p.mu.Unlock()
+		}
+		t := time.NewTimer(d - time.Since(start))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return false
+		case <-t.C:
+			return true
+		case <-woke:
+			t.Stop()
+		}
 	}
 }
 

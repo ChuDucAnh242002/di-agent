@@ -36,9 +36,9 @@ import (
 // event rather than crash-looping. A version or owner mismatch is still refused, with
 // no fallback — that is a deliberate refusal, not damage.
 
-// SnapshotVersion identifies the on-disk format. Other versions are refused rather
-// than guessed at: restoring a misread field would
-// put wrong values into a model the agent then reasons from, which is worse than cold.
+// SnapshotVersion identifies the on-disk format. A snapshot from a different version
+// is refused rather than guessed at: restoring a misread field would put wrong values
+// into a model the agent then reasons from, which is worse than starting cold.
 // Version 2 named the property and relationship fields explicitly. A version 1 file
 // would half-load under those names — Go's decoder matches "ID" to "id"
 // case-insensitively but not "NObservations" to "n_observations" — so the values would
@@ -46,7 +46,7 @@ import (
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
-// from directional relationships. Version 6 persists per-source intervention slopes.
+// from directional relationships. Version 6 persists per-pair intervention slopes.
 // Version 7 adds the journal's incarnation and sequence. Version 8 adds the
 // calibration record of the map's own predictions. Version 9 adds `retired_at` and
 // the tombstones of forgotten properties.
@@ -305,6 +305,8 @@ func (m *Map) Load(path string) (Restore, error) {
 		err = m.restoreLocked(snap, prev, curErr.Error())
 	}
 	if err == nil {
+		// Set aside first, or the reservation save would rotate it over the good .prev.
+		setAside(path, curErr)
 		return m.reserveIncarnation(path, prev, snap, curErr.Error())
 	}
 	if errors.Is(err, ErrSnapshotRefused) {
@@ -315,6 +317,9 @@ func (m *Map) Load(path string) (Restore, error) {
 	if os.IsNotExist(curErr) && os.IsNotExist(prevErr) {
 		return Restore{}, nil // nothing saved yet: a first start, not a failure
 	}
+	// The next saves would overwrite both; what failed to load is kept to inspect.
+	setAside(path, curErr)
+	setAside(prev, prevErr)
 	m.mu.Lock()
 	m.bump(EventRestoreFailed, path, "restore", map[string]any{
 		"path":       path,
@@ -329,11 +334,19 @@ func (m *Map) Load(path string) (Restore, error) {
 // save cannot bring this life's number back, and with it ids this life has already
 // issued.
 func (m *Map) reserveIncarnation(path, from string, snap Snapshot, curErr string) (Restore, error) {
-	// After a fallback to .prev this save rotates the corrupt current into .prev; the freshly written current is the good generation.
 	if err := m.Save(path); err != nil {
 		return Restore{}, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
 	}
 	return Restore{Loaded: true, From: from, CurrentError: curErr}, nil
+}
+
+// setAside renames a snapshot that failed to load to file+".corrupt", so no save
+// rotates or overwrites it. An absent file has nothing to set aside; a failed rename
+// leaves the file where it was.
+func setAside(file string, loadErr error) {
+	if !os.IsNotExist(loadErr) {
+		_ = os.Rename(file, file+".corrupt")
+	}
 }
 
 // readSnapshot reads, decodes and version-checks one snapshot file. A version
@@ -450,6 +463,23 @@ func (m *Map) LoopsPersistence(capture func() (json.RawMessage, error)) json.Raw
 	defer m.mu.Unlock()
 	m.loopsCheckpoint = capture
 	return append(json.RawMessage(nil), m.savedLoops...)
+}
+
+// LoopsState is the loops' state as Save would capture it now: nil with no capture
+// installed or when the capture fails. A loop's state can change without moving the
+// revision or the journal (a peer's trust), so the save loop compares this too.
+func (m *Map) LoopsState() json.RawMessage {
+	m.mu.RLock()
+	capture := m.loopsCheckpoint
+	m.mu.RUnlock()
+	if capture == nil {
+		return nil
+	}
+	raw, err := capture()
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while

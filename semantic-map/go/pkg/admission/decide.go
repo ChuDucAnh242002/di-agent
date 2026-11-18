@@ -220,12 +220,13 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	// Its estimate is shrunk toward zero until repeated outcomes build support.
 	// The relationships k is drawn from are read through the builder, so the record
 	// lists them and carries their caveats (a stale endpoint, a regime).
-	for _, e := range m.MeasuredEffects(d.Relieves) {
-		if strings.HasPrefix(e.From, d.Usage+"@") {
-			b.Relationship(e.Relationship)
+	for _, r := range m.Relationships("", d.Relieves) {
+		if r.Status != statemap.Retired && r.Interventions != nil && r.Interventions.EffectN > 0 &&
+			strings.HasPrefix(r.From, d.Usage+"@") {
+			b.Relationship(r.ID)
 		}
 	}
-	if e, ok := m.MeasuredDomainEffect(d.Usage, d.Relieves); ok {
+	if e, ok := m.LiveSlope(d.Usage, d.Relieves); ok {
 		k := e.Estimate()
 		l.K, l.KObservations = &k, e.N
 		l.KLastSource, l.KLastDecision = e.LastSource, e.LastDecision
