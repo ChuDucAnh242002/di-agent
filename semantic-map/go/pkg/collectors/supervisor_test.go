@@ -606,6 +606,31 @@ func TestSupervisorCapIsInclusive(t *testing.T) {
 	}
 }
 
+func TestSupervisorStampsTheMemberNameAsSource(t *testing.T) {
+	a, b := &fakeCollector{id: "a"}, &fakeCollector{id: "b"}
+	one := func(mt string) []*types.MetricSample {
+		s := sample(mt, "x")
+		s.Source = "whatever"
+		return []*types.MetricSample{s}
+	}
+	a.set(one("alpha"), nil)
+	b.set(one("beta"), nil)
+	s, _ := newTestSupervisor(t, member("a", a), member("b", b))
+	out, err := s.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("%d samples; want 2", len(out))
+	}
+	for _, smp := range out {
+		want := map[types.MetricType]string{"alpha": "a", "beta": "b"}[smp.MetricType]
+		if smp.Source != want {
+			t.Errorf("%s source %q; want %q", smp.MetricType, smp.Source, want)
+		}
+	}
+}
+
 // TestSupervisorCapBoundsInspectionNotKept: the cap bounds the samples inspected,
 // not those kept, so a flood of invalid samples is cut at the cap too, and the
 // overflow is counted in one step and logged once, whatever its metric types.
