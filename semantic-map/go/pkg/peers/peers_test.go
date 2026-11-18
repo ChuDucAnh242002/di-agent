@@ -538,3 +538,32 @@ func TestTrustRoundTrip(t *testing.T) {
 		t.Fatalf("peers %+v; the restore added an unknown one", ps)
 	}
 }
+
+// TestSavedTrustWaitsForItsPeer: a peer added after the restore (POST /peers)
+// gets the trust saved for it, and saved trust for a peer not yet added is kept
+// in the next snapshot rather than dropped.
+func TestSavedTrustWaitsForItsPeer(t *testing.T) {
+	r := NewRegistry()
+	a, _ := r.Add("http://node_1:8080", "")
+	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	if err := r.Penalise(a.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	saved := r.Trusts()
+
+	r2 := NewRegistry()
+	r2.RestoreTrust(saved)
+	if ps, _ := r2.List(); len(ps) != 0 {
+		t.Fatalf("peers %+v; the restore added one", ps)
+	}
+	if got := r2.Trusts(); got[a.ID].Trust != 0.45 {
+		t.Fatalf("trusts %v; saved trust for a peer not yet added was dropped", got)
+	}
+	got, err := r2.Add("http://node_1:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Trust != 0.45 || !got.LastPenalised.Equal(at) {
+		t.Fatalf("added %+v; want the saved trust 0.45 penalised at %v", got, at)
+	}
+}

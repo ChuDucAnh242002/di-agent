@@ -36,9 +36,9 @@ import (
 // event rather than crash-looping. A version or owner mismatch is still refused, with
 // no fallback — that is a deliberate refusal, not damage.
 
-// SnapshotVersion identifies the on-disk format. Other versions are refused rather
-// than guessed at: restoring a misread field would
-// put wrong values into a model the agent then reasons from, which is worse than cold.
+// SnapshotVersion identifies the on-disk format. A snapshot from a different version
+// is refused rather than guessed at: restoring a misread field would put wrong values
+// into a model the agent then reasons from, which is worse than starting cold.
 // Version 2 named the property and relationship fields explicitly. A version 1 file
 // would half-load under those names — Go's decoder matches "ID" to "id"
 // case-insensitively but not "NObservations" to "n_observations" — so the values would
@@ -46,7 +46,7 @@ import (
 // partial restore this field exists to prevent, so the version moved with the format.
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
-// from directional relationships. Version 6 persists per-source intervention slopes.
+// from directional relationships. Version 6 persists per-pair intervention slopes.
 // Version 7 adds the journal's incarnation and sequence. Version 8 adds the
 // calibration record of the map's own predictions. Version 9 adds `retired_at` and
 // the tombstones of forgotten properties.
@@ -462,6 +462,23 @@ func (m *Map) LoopsPersistence(capture func() (json.RawMessage, error)) json.Raw
 	defer m.mu.Unlock()
 	m.loopsCheckpoint = capture
 	return append(json.RawMessage(nil), m.savedLoops...)
+}
+
+// LoopsState is the loops' state as Save would capture it now: nil with no capture
+// installed or when the capture fails. A loop's state can change without moving the
+// revision or the journal (a peer's trust), so the save loop compares this too.
+func (m *Map) LoopsState() json.RawMessage {
+	m.mu.RLock()
+	capture := m.loopsCheckpoint
+	m.mu.RUnlock()
+	if capture == nil {
+		return nil
+	}
+	raw, err := capture()
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while

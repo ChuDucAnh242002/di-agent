@@ -1142,9 +1142,6 @@ func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
 			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
-			if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
-				iv.SlopeSum, iv.SlopeN = 0, 0
-			}
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
 				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
@@ -1497,6 +1494,7 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.Interventions = nil
+	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	for _, id := range []string{r.From, r.To} {
@@ -1749,9 +1747,6 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
-		iv.SlopeSum, iv.SlopeN = 0, 0
-	}
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 
