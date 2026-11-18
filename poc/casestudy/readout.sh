@@ -106,12 +106,24 @@ row M1 01 "composition cpu_utilization@pod:* -> cpu_utilization confirmed by rul
     "$(jq -r 'if length == 0 then "unverifiable" elif all(.confirm_at != null and .confirm_at <= 1 and .by == "rules") then "pass" else "fail" end' <<<"$r")" \
     "$(jq -c 'map({c: (.c | sub("cpu_utilization@"; "")), confirm_review: .confirm_at, by})' <<<"$r")"
 ta=$(mk M1 'applied twin-a' subject); tb=$(mk M1 'applied twin-b' subject)
-r=$(jq --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" --argjson e "$M1e" \
-    '[.[] | select(.kind == "relationship.declared" and .detail.association == true and ([.detail.from, .detail.to] | sort) == ([$a, $b] | sort))][0] | if . == null then null else {target, actor, k, by_m1_end: (.k <= $e)} end' "$W/ev.json")
-pw=$(jq -s --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" '[.[] | select(.endpoint == "/candidates?status=all" and .status == 200) | .body[]?
-    | select(([.FromID, .ToID] | sort) == ([$a, $b] | sort)) | .PersistentWindows] | last // null' "$W/cap.jsonl")
-row M1 01 "twins associated by persistent-correlation by t=50" \
-    "$(jq -r --argjson pw "$pw" 'if . != null and .by_m1_end then "pass" else "reported" end' <<<"$r")" "declared: $(jq -c . <<<"$r"); pending-with-windows: $pw"
+# Any time in the run: the pace may slow during M1 (discovery in progress is not attention
+# work), which fills the persistence windows four times slower. The reading says when the
+# association arrived (minutes after M0 began, wall clock) and the pace then (the last
+# pace.changed before it; base when none, as every life starts at base).
+fwd=$(k M4 'date -s \+'); back=$(k M4 'date -s -')
+r=$(jq --arg a "cpu_utilization@$ta" --arg b "cpu_utilization@$tb" --argjson e "$M1e" --argjson t0 "$(t M0 '^start$')" \
+    --argjson fwd "${fwd:-null}" --argjson back "${back:-null}" \
+    '. as $ev | [.[] | select(.kind == "relationship.declared" and .detail.association == true and ([.detail.from, .detail.to] | sort) == ([$a, $b] | sort))][0]
+     | if . == null then null else . as $d
+       # Inside M4 (between the forward and the backward step) the wall clock runs ahead by the
+       # forward step: take it off, so the minute is on the timetable clock.
+       | (if $fwd != null and $back != null and $d.k >= $fwd and $d.k < $back
+          then ([$ev[] | select(.kind == "clock.stepped" and .k >= $fwd)][0] | .detail.wall_delta_seconds - .detail.monotonic_delta_seconds) // 0
+          else 0 end) as $step
+       | {target, k, minute: (((.ts - $step - $t0) / 60) * 10 | round / 10), by_m1_end: (.k <= $e),
+         pace: ([$ev[] | select(.kind == "pace.changed" and .k < $d.k and .inc == $d.inc)] | last | .detail.to // "base")} end' "$W/ev.json")
+row M1 01 "twins associated by persistent-correlation (any time in the run)" \
+    "$(jq -r 'if . != null then "pass" else "fail" end' <<<"$r")" "declared: $(jq -c . <<<"$r")"
 r=$(jq -c --argjson a "$(t M1 '^start$')" --argjson b "$(t M1 '^end$')" '[.[] | select(.endpoint == "/autonomy" and .status == 200 and .t >= $a and .t <= $b) | .body]
     | {captures: length, errors: (map(.errors) | max), waiting: (map(.waiting) | max)}' "$W/cap.json")
 dec=$(jq -c '[.[] | select(.endpoint == "/config" and .status == 200) | .body][0] | .. | objects | select(has("review")) | .review | {decision: .decision.backend, reasoning: .reasoning.backend}' "$W/cap.json" 2>/dev/null | head -1)
@@ -274,12 +286,12 @@ r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" --slurpfile ev "$W/ev.json" '.
 echo "$r" >"$W/m7.json"
 row M7 02 "each accept has an outcome citing it, admission.arrived between" \
     "$(jq -r 'if length == 0 then "not exercised" elif all(.ordered) then "pass" else "fail" end' <<<"$r")" "accepts: $(jq -c 'map({name, outcome: .outcome.result, ordered})' <<<"$r"); probe verdicts: $(jq -c --argjson a "$M7s" '[.[] | select(.kind == "admission" and .k >= $a and ((.inputs.offer.name // "") | startswith("probe-"))) | "\(.inputs.offer.name) \(.answer.verdict): \(.answer.reason)"]' "$W/dec.json")"
-r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b) | .answer.lines[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
-row M7 03 "both bases recorded: usage_rise always, map_rise when a measured effect exists" \
+r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
+row M7 03 "both bases recorded on scored outcomes: usage_rise always, map_rise when a measured effect exists" \
     "$(jq -r 'if length == 0 then "not exercised" elif (all(.usage_rise) | not) then "fail" elif any(.map_rise) then "pass" else "not exercised" end' <<<"$r")" \
     "$(jq -c 'group_by(.domain) | map({domain: .[0].domain, lines: length, with_map_rise: (map(select(.map_rise)) | length)})' <<<"$r") (JSON names map_rise/usage_rise)"
 r=$(jq -c '[.[]? | select(.kind | startswith("admission."))]' <<<"$cal")
-sc=$(jq -c '[.[] | select(.kind == "admission.outcome") | .answer.lines[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
+sc=$(jq -c '[.[] | select(.kind == "admission.outcome" and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
 row M7 03 "calibration per domain: admission.memory/cpu_contention_ratio entries, n = scored outcomes" \
     "$(verdict "$(jq -nr --argjson c "$r" --argjson s "${sc:-null}" 'if $s == null and ($c | length) == 0 then "not-exercised" else ($c | map(.kind) | index("admission.memory_contention_ratio")) != null and ($c | map(.kind) | index("admission.cpu_contention_ratio")) != null and all($c[] | select(.basis == "usage"); .n == ($s[(.kind | sub("admission."; ""))] // 0)) end')")" "entries: $r; scored outcome lines by domain: $sc"
 r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")))] | last | {name: .inputs.offer.name, basis_chosen_by: .inputs.basis_chosen_by,
@@ -295,7 +307,11 @@ r=$(jq -c --argjson a "$M8s" --argjson b "$M8e" --argjson td "${td:-0}" '[.[] | 
 row M8 05 "one base->slow at 175 + 10 min (+- 1 tick), reason names calm" \
     "$(verdict "$(jq '[.[] | select(.d == "base->slow")] | length == 1 and (.[0].after_delete_min >= 9 and .[0].after_delete_min <= 12) and (.[0].reason | test("calm"))' <<<"$r")")" "$r"
 slow=$(jq '[.[] | select(.kind == "pace.changed" and .detail.to == "slow")] | last | .ts // null' "$W/ev.json")
-r=$(jq -c --argjson s "${slow:-null}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}] as $c
+# For a slow period after M5, only the captures after the last one stamped before M5 began: earlier ones include M4's
+# forward-stepped wall clock, whose stamps fall inside M8's windows, and another process's counter.
+m5t=$(t M5 '^start$')
+r=$(jq -c --argjson s "${slow:-null}" --argjson m5 "${m5t:-0}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}]
+    | (if ($s // 0) > $m5 then (([to_entries[] | select(.value.t < $m5) | .key] | last) // -1) else -1 end) as $i0 | .[$i0 + 1:] as $c
     | def rate(a; b): ([$c[] | select(.t >= a and .t <= b)]) | if length < 2 then null else ((.[-1].n - .[0].n) / (.[-1].t - .[0].t)) end;
     if $s == null then null else {base: rate($s - 300; $s - 30), slow: rate($s + 30; $s + 300)} | . + {ratio: (if .slow and .slow > 0 then .base / .slow else null end)} end' "$W/cap.json")
 row M8 05 "loops slowed: collection rate under slow ~1/4 of base (cgroup samples per second)" \
@@ -309,7 +325,9 @@ r=$(jq -c --arg s "@$sub" --argjson a "$M8s" '([.[] | select(.kind == "property.
     | {admitted_ts: $adm.ts, wake: (if $w == null then null else {reason: $w.detail.reason, after_admit_s: ($w.ts - $adm.ts)} end)}' "$W/ev.json")
 row M8 05 "wake on arrival: slow->base within a tick of noise admitted, reason property admitted" \
     "$(verdict "$(jq '.wake != null and .wake.after_admit_s <= 60 and .wake.after_admit_s >= -1 and (.wake.reason | startswith("property admitted"))' <<<"$r")")" "$r"
-subs=$(jq -c '[.[] | select(.phase == "M1" or .phase == "M6") | .subject // empty] | unique' "$W/phases.json")
+# The pods M8 deletes: M1's and M6's, less any deleted before (cycler, in M7).
+subs=$(jq -c '([.[] | select(.phase == "M7" and (.event | startswith("deleted"))) | .subject // empty]) as $gone
+    | [.[] | select(.phase == "M1" or .phase == "M6") | .subject // empty] | unique - $gone' "$W/phases.json")
 r=$(jq -c --argjson subs "$subs" --argjson td "${td:-0}" --argjson a "$M8s" '[$subs[] as $s | ([.[] | select(.k >= $a and (.target | endswith("@" + $s)))]) as $e
     | select(($e | length) > 0) | {s: ($s | .[4:12]), stale_min: ([$e[] | select(.kind == "property.stale") | .ts] | min | if . == null then null else (. - $td) / 60 end),
       retired_min: ([$e[] | select(.kind == "property.retired") | .ts] | min | if . == null then null else (. - $td) / 60 end)}]' "$W/ev.json")
@@ -320,7 +338,7 @@ row M8 05 "staleness does not follow the pace: deleted pods stale ~+2 min, retir
 r=$(jq -c '[.[] | select(.kind == "relationship.retired" and .detail.reason == "sign-contradicted")] | length' "$W/ev.json")
 ss=$(jq -s '[.[] | select(.endpoint == "/state" and .status == 200) | .body.counts.relationships_sign_suspect] | max' "$OUT/capture.jsonl")
 row M9 03 "sign contradiction acted on (relationship.retired sign-contradicted)" \
-    "$(if [ "$r" -gt 0 ]; then echo reported; elif [ "${ss:-0}" = 0 ]; then echo "not exercised"; else echo fail; fi)" "sign-contradicted retirements: $r; max relationships_sign_suspect: $ss"
+    "$(if [ "$r" -gt 0 ] || [ "${ss:-0}" != 0 ]; then echo reported; else echo "not exercised"; fi)" "sign-contradicted retirements: $r; max relationships_sign_suspect: $ss"
 r=$(jq -c '[.[] | select(.kind == "relationship.regime") | .target] | {n: length, rels: (unique)}' "$W/ev.json")
 row M9 03 "regime events" "$(jq -r 'if .n > 0 then "reported" else "not exercised" end' <<<"$r")" "$r"
 f=$(jq '[.[] | select(.kind == "property.forgotten")] | length' "$W/ev.json")

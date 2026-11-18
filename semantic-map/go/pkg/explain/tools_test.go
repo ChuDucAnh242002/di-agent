@@ -349,7 +349,7 @@ func TestGetStateDigestCountsUnobservable(t *testing.T) {
 	if err := sm.State().Record(statemap.Observation{ID: "cpu_utilization", Value: 0.5, At: time.Now(), Source: "netdata"}); err != nil {
 		t.Fatal(err)
 	}
-	sm.State().SetSourceDown("netdata", true)
+	sm.State().SetSourceDown("netdata", true, "")
 	sm.State().Sweep()
 	res, err := explain.Dispatch(r, "get_state", map[string]any{})
 	if err != nil {

@@ -3071,7 +3071,7 @@ func outageMap(t *testing.T) (*Map, *clock) {
 
 func TestSourceDownMakesPropertiesUnobservableNotRetired(t *testing.T) {
 	m, c := outageMap(t)
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	c.advance(2 * 2 * time.Minute)
 	m.Sweep()
 	_, retired := m.Sweep()
@@ -3095,11 +3095,11 @@ func TestSourceDownMakesPropertiesUnobservableNotRetired(t *testing.T) {
 
 func TestRecoveredSourceLeavesPropertiesUnobservableUntilObserved(t *testing.T) {
 	m, c := outageMap(t)
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	c.advance(2 * 2 * time.Minute)
 	m.Sweep()
 
-	m.SetSourceDown("netdata", false)
+	m.SetSourceDown("netdata", false, "")
 	if _, retired := m.Sweep(); len(retired) != 0 {
 		t.Fatalf("retired %v at recovery; silence counts from the recovery", retired)
 	}
@@ -3123,7 +3123,7 @@ func TestRecoveredSourceLeavesPropertiesUnobservableUntilObserved(t *testing.T) 
 func TestSetSourceDownJournalsEachTransitionOnce(t *testing.T) {
 	m, _ := newTestMap(t, Config{AdmitUnknown: true})
 	for _, down := range []bool{true, true, true, false, false, true} {
-		m.SetSourceDown("x", down)
+		m.SetSourceDown("x", down, "")
 	}
 	var got []EventKind
 	for _, e := range m.Journal().Events(0, 0) {
@@ -3143,11 +3143,11 @@ func TestSetSourceDownJournalsEachTransitionOnce(t *testing.T) {
 
 func TestSetSourceDownOnAnUnknownSourceIsRecordedAndHarmless(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
-	m.SetSourceDown("ghost", false)
+	m.SetSourceDown("ghost", false, "")
 	if n := len(m.Journal().Events(0, 0)); n != 0 {
 		t.Fatalf("%d events for a source that was never down", n)
 	}
-	m.SetSourceDown("ghost", true)
+	m.SetSourceDown("ghost", true, "")
 	if n := len(m.Journal().Events(0, 0)); n != 1 {
 		t.Fatalf("%d events; want one collector.down", n)
 	}
@@ -3161,12 +3161,12 @@ func TestSetSourceDownOnAnUnknownSourceIsRecordedAndHarmless(t *testing.T) {
 func TestOwnerDownMakesTheTypeUnobservableNotTheOtherMember(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, AdmitUnknown: true})
 	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
-	m.SetSourceDown("cgroup", true)
+	m.SetSourceDown("cgroup", true, "")
 	m.Sweep()
 	if s := statusOfProp(t, m, "cpu"); s != Active {
 		t.Fatalf("cpu is %s after another member went down; want active", s)
 	}
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	m.Sweep()
 	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
 		t.Errorf("cpu is %s; want unobservable", s)
@@ -3186,7 +3186,7 @@ func TestRecordUpdatesSourceOnEveryObservation(t *testing.T) {
 func TestStateDefaultViewIncludesUnobservable(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	m.Sweep()
 	if v := m.State(Query{}); len(v.Properties) != 1 || v.Properties[0].Status != Unobservable {
 		t.Errorf("default view %+v; want the unobservable property", v.Properties)
@@ -3204,7 +3204,7 @@ func TestDecisionCaveatsAnUnobservableEndpoint(t *testing.T) {
 	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
 		t.Fatal(err)
 	}
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	m.Sweep()
 	b := m.Decide("d1", "estimate", "test")
 	b.RelationshipsInto("cpu")
@@ -3218,7 +3218,7 @@ func TestDecisionCaveatsAnUnobservableEndpoint(t *testing.T) {
 func TestDecisionCaveatsAnUnobservableProperty(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
 	recordFrom(t, m, "cpu", .5, c.now(), "netdata")
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	m.Sweep()
 	b := m.Decide("d1", "estimate", "test")
 	if _, ok := b.Property("cpu"); !ok {
@@ -3514,12 +3514,12 @@ func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) 
 	if _, err := m2.Load(path); err != nil {
 		t.Fatal(err)
 	}
-	m2.SetSourceDown("netdata", true)
+	m2.SetSourceDown("netdata", true, "")
 	c.advance(3 * time.Minute) // past RetireAfter and the restore grace
 	if _, retired := m2.Sweep(); len(retired) != 0 {
 		t.Fatalf("retired %v while the source is down", retired)
 	}
-	m2.SetSourceDown("netdata", false)
+	m2.SetSourceDown("netdata", false, "")
 	if _, retired := m2.Sweep(); len(retired) != 0 {
 		t.Fatalf("retired %v at return; silence counts from the return", retired)
 	}
@@ -3541,13 +3541,13 @@ func TestDerivedOverUnobservableMembersIsUnobservable(t *testing.T) {
 	if s := statusOfProp(t, m, "load"); s != Active {
 		t.Fatalf("load is %s before the outage; want active", s)
 	}
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	c.advance(time.Minute)
 	m.Sweep()
 	if s := statusOfProp(t, m, "load"); s != Unobservable {
 		t.Errorf("load is %s with every member unobservable; want unobservable", s)
 	}
-	m.SetSourceDown("netdata", false)
+	m.SetSourceDown("netdata", false, "")
 	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
 	m.Sweep()
 	if s := statusOfProp(t, m, "load"); s != Active {
@@ -3559,7 +3559,7 @@ func TestDerivedOverUnobservableMembersIsUnobservable(t *testing.T) {
 // has a known cause; marking it stale would only be undone by the next sweep.
 func TestMarkPropertyStaleLeavesUnobservableAlone(t *testing.T) {
 	m, c := outageMap(t)
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	c.advance(time.Minute)
 	m.Sweep()
 	if m.MarkPropertyStale("cpu", "test", "test") {
@@ -3623,7 +3623,7 @@ func TestSourceIsTheLastReporter(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
 	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
 	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	for range 3 { // http keeps reporting through the netdata outage
 		c.advance(time.Minute)
 		recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
@@ -3632,9 +3632,9 @@ func TestSourceIsTheLastReporter(t *testing.T) {
 			t.Fatalf("cpu@pod:a is %s while http reports it; want active", s)
 		}
 	}
-	m.SetSourceDown("netdata", false)
+	m.SetSourceDown("netdata", false, "")
 	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata") // netdata reports last, then goes down
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	c.advance(time.Minute)
 	m.Sweep()
 	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
