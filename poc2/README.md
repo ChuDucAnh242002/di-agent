@@ -66,7 +66,36 @@ When migrating, remove the old Helm Deployment `di-agent`, if present, and the s
 
 ## Required secrets and configuration
 
-Before the chart is installed, the chart expects a namespace and credentials for the telemetry services.
+By default, the chart creates demo credentials for InfluxDB, Grafana and
+PostgreSQL. These credentials are public and fixed; **do not use them outside a
+disposable demo**. Install with:
+
+```bash
+helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+  --namespace default --create-namespace \
+  --wait --timeout 30m
+```
+
+From `poc2/`, use `make helm-install` or `make all`.
+The demo Secrets use the names configured by `influxdb.existingSecret`,
+`grafana.existingSecret` and `postgres.existingSecret`; PostgreSQL's is created
+only when PostgreSQL is enabled. The credentials are listed in
+`helm/di-agent-system/templates/secrets.yaml`.
+
+The default PostgreSQL ingestion job still requires the separate `data-url`
+Secret described below. Create it after the cluster is available and before
+installing the chart. Cloud connection strings and tokens also remain external.
+
+Demo Secrets are Helm-managed and are removed when the release is uninstalled
+or the option is disabled. Do not use the default setting over existing
+externally managed Secrets with the same names: Helm will reject ownership
+conflicts. Set `demoSecrets.enabled=false` when installing or upgrading an
+existing deployment that uses external Secrets.
+Existing PostgreSQL and InfluxDB persistent data retain their initialized
+credentials; switching Secrets does not change those database credentials.
+
+Alternatively, set `demoSecrets.enabled=false` and pre-create your own
+credentials in the release namespace:
 
 ```bash
 kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
@@ -77,12 +106,16 @@ kubectl -n default create secret generic influxdb-credentials \
 kubectl -n default create secret generic grafana-credentials \
   --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
   --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+kubectl -n default create secret generic postgres-credentials \
+  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 ```
 
-This is required because `helm/di-agent-system/values.yaml` references:
+For example, add `--set demoSecrets.enabled=false` to the Helm command above,
+or run `make helm-install HELM_ARGS="--set demoSecrets.enabled=false"` from
+`poc2/`.
 
-- `influxdb.existingSecret: influxdb-credentials`
-- `grafana.existingSecret: grafana-credentials`
+Kubernetes Secrets are not encrypted merely by being base64-encoded. Follow
+your cluster's secret-management and encryption practices for real credentials.
 
 ### PostgreSQL engine dataset
 
@@ -110,13 +143,13 @@ remain unchanged; no changes to `semantic-map/` are required.
 The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
 
 ```bash
-kubectl -n default create secret generic postgres-credentials \
-  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 kubectl -n default create secret generic data-url --from-literal=data-url="$DATA_URL"
-helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeout 30m
 ```
 
-Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
+Create this Secret before running the Helm command above. Connect in-cluster at
+`postgres:5432`, database `engine`. Set `postgres.ingest.enabled=false` to skip
+the ingestion job and its `data-url` requirement, or `postgres.enabled=false`
+and `streamer.enabled=false` to skip PostgreSQL and the dependent streamer.
 
 ### PostgreSQL replay and simulation modes
 

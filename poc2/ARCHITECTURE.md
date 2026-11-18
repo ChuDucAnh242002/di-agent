@@ -141,7 +141,10 @@ The writer commits Kafka offsets only after a successful InfluxDB write. Malform
 
 The chart provisions InfluxDB and Grafana and preconfigures Grafana datasources for InfluxDB telemetry and Prometheus application metrics. This allows the operator to observe system health and telemetry without separate manual config.
 
-The practical requirement is simple: the InfluxDB credentials must exist before `helm install` or the chart will fail to initialize the datasource.
+The chart creates fixed, public InfluxDB and Grafana demo credentials by
+default. These are suitable only for disposable local labs; set
+`demoSecrets.enabled=false` to use external Secrets instead. See the README for
+installation, the separately required dataset URL, and lifecycle considerations.
 
 ## Agent and trust architecture
 
