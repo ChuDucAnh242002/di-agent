@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -107,6 +108,9 @@ type Tracker struct {
 	mu       sync.Mutex
 	pending  []*entry // oldest first
 	outcomes []Outcome
+	// unclosed are accepts Restore could not close because the journal log could
+	// not be read: kept in Memory for the next start, never ticked.
+	unclosed []PendingAccept
 }
 
 type entry struct {
@@ -202,7 +206,7 @@ func (t *Tracker) pendingLocked() []PendingAccept {
 	for i, e := range t.pending {
 		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
 	}
-	return out
+	return append(out, t.unclosed...)
 }
 
 // Outcomes lists recent outcomes, newest first.
@@ -239,14 +243,21 @@ func (t *Tracker) Restore(mem Memory) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.outcomes = slices.Clone(mem.Outcomes)
-	t.pending = nil
+	t.pending, t.unclosed = nil, nil
 	for _, p := range mem.Pending {
 		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
 		// One id per accept: a snapshot older than the restart that closed it
 		// (state.json.prev) brings it back as pending, and the outcome already in
 		// the journal or its log closes it again without a second record.
 		id := p.AcceptID + "-restarted"
-		if d, ok := t.recorded(id); ok {
+		d, ok, err := t.recorded(id)
+		if err != nil {
+			// Unknown whether it was closed: left pending, not risked as a duplicate.
+			t.c.Logf("admission: %s left pending: %v", p.AcceptID, err)
+			t.unclosed = append(t.unclosed, p)
+			continue
+		}
+		if ok {
 			t.outcomes = append(t.outcomes, Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id,
 				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: d.At})
 			continue
@@ -489,14 +500,18 @@ func (t *Tracker) recordAs(id string, e *entry, result, reason string, lines []O
 	return o
 }
 
-// recorded finds a decision held in the journal or written to its log.
-func (t *Tracker) recorded(id string) (*statemap.Decision, bool) {
+// recorded finds a decision held in the journal or written to its log. A log
+// that cannot be read or does not verify is an error, not a miss.
+func (t *Tracker) recorded(id string) (*statemap.Decision, bool, error) {
 	j := t.c.Map.Journal()
 	if d, ok := j.Decision(id); ok {
-		return d, true
+		return d, true, nil
 	}
 	d, ok, err := j.DecisionFromLog(id)
-	return d, ok && err == nil
+	if err != nil {
+		return nil, false, fmt.Errorf("journal log: reading %s: %w", id, err)
+	}
+	return d, ok, nil
 }
 
 // rise is a basis's predicted rise over the pressure it was made from, and its
