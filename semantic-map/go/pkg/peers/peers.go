@@ -87,6 +87,9 @@ type Registry struct {
 	mu      sync.RWMutex
 	byID    map[string]*Descriptor
 	urlToID map[string]string
+	// saved is restored trust for peers not registered yet (added later via
+	// POST /peers): applied when the peer is added, kept in Trusts until then.
+	saved map[string]TrustState
 }
 
 // NewRegistry returns an empty in-memory peer registry.
@@ -119,6 +122,10 @@ func (r *Registry) Add(url, note string) (*Descriptor, error) {
 		URL:   url,
 		Trust: 0.5, // default at registration — no history yet
 		Note:  note,
+	}
+	if st, ok := r.saved[id]; ok {
+		d.Trust, d.LastPenalised = clamp01(st.Trust), st.LastPenalised
+		delete(r.saved, id)
 	}
 	r.byID[id] = d
 	r.urlToID[url] = id
@@ -243,6 +250,48 @@ func (r *Registry) SetTrust(id string, value float64) error {
 	d.LastPenalised = time.Time{} // an operator's trust is a floor that stays, not a penalty that expires
 	d.NObserved++
 	return nil
+}
+
+// TrustState is a peer's trust as the snapshot keeps it: the score, and when
+// the agent last penalised it. The time matters: a peer under the floor with no
+// penalty time reads as operator-set and is never re-probed.
+type TrustState struct {
+	Trust         float64   `json:"trust"`
+	LastPenalised time.Time `json:"last_penalised,omitempty"`
+}
+
+// Trusts is every peer's trust state, by peer id, for the snapshot.
+func (r *Registry) Trusts() map[string]TrustState {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]TrustState, len(r.byID)+len(r.saved))
+	for id, st := range r.saved {
+		out[id] = st
+	}
+	for id, d := range r.byID {
+		out[id] = TrustState{Trust: d.Trust, LastPenalised: d.LastPenalised}
+	}
+	return out
+}
+
+// RestoreTrust sets the trust (clamped) and penalty time of each peer the
+// registry holds to the saved state. NObserved is untouched: it counts this
+// process's interactions. A saved id the registry does not hold yet is kept
+// and applied when that peer is added.
+func (r *Registry) RestoreTrust(t map[string]TrustState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, st := range t {
+		if d, ok := r.byID[id]; ok {
+			d.Trust = clamp01(st.Trust)
+			d.LastPenalised = st.LastPenalised
+			continue
+		}
+		if r.saved == nil {
+			r.saved = map[string]TrustState{}
+		}
+		r.saved[id] = st
+	}
 }
 
 // MarkSeen records that a successful interaction with the peer happened at

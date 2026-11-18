@@ -1,6 +1,7 @@
 package agentmain
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -105,7 +106,7 @@ func TestSaveIfChangedSavesADecisionOnlyChange(t *testing.T) {
 		t.Fatalf("first call = (%v, %v); want (true, nil)", saved, err)
 	}
 	rev := state.Revision()
-	state.Decide("dec-1", "anything?").Commit(map[string]any{"answer": "no"})
+	state.Decide("dec-1", "estimate", "anything?").Commit(map[string]any{"answer": "no"})
 	if state.Revision() != rev {
 		t.Fatalf("precondition: a decision moved the revision")
 	}
@@ -114,6 +115,26 @@ func TestSaveIfChangedSavesADecisionOnlyChange(t *testing.T) {
 	}
 	if saved, _ := saveIfChanged(state, path, &last); saved {
 		t.Error("a quiet tick after the decision saved again")
+	}
+}
+
+// TestSaveIfChangedSavesALoopsOnlyChange: a peer's trust moves neither the revision
+// nor the journal, and a crash before shutdown must not lose it.
+func TestSaveIfChangedSavesALoopsOnlyChange(t *testing.T) {
+	state := newTestState(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	trust := `{"peers":{"p1":{"trust":0.5}}}`
+	state.LoopsPersistence(func() (json.RawMessage, error) { return json.RawMessage(trust), nil })
+	var last saveMark
+	if saved, err := saveIfChanged(state, path, &last); !saved || err != nil {
+		t.Fatalf("first call = (%v, %v); want (true, nil)", saved, err)
+	}
+	if saved, _ := saveIfChanged(state, path, &last); saved {
+		t.Fatal("an unchanged map and loops saved again")
+	}
+	trust = `{"peers":{"p1":{"trust":0.45}}}`
+	if saved, err := saveIfChanged(state, path, &last); !saved || err != nil {
+		t.Fatalf("after a trust change = (%v, %v); want (true, nil)", saved, err)
 	}
 }
 

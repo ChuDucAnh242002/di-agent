@@ -461,7 +461,7 @@ func TestDecisionRecordsTheStateThatJustifiedIt(t *testing.T) {
 
 	revAtDecision := m.Revision()
 	d := func() *Decision {
-		b := m.Decide("dec-1", "how pressured is this system?")
+		b := m.Decide("dec-1", "estimate", "how pressured is this system?")
 		p, _ := b.Property("pressure")
 		rels := b.RelationshipsInto("pressure")
 		b.Note("read pressure=%.3f from %d incoming relationships", p.Value, len(rels))
@@ -511,7 +511,7 @@ func TestDecisionReportsWhyItMightBeWrong(t *testing.T) {
 	c.advance(time.Minute)
 	m.Sweep()
 
-	b := m.Decide("dec-2", "cost now?")
+	b := m.Decide("dec-2", "estimate", "cost now?")
 	b.Property("cpu")       // stale by now
 	b.Property("unrelated") // never observed
 	b.Property("ghost")     // absent
@@ -755,7 +755,7 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b := m1.Decide("dec-before-restart", "how is b?")
+	b := m1.Decide("dec-before-restart", "estimate", "how is b?")
 	pb, _ := b.Property("b")
 	b.Commit(map[string]any{"b": pb.Value})
 
@@ -1783,7 +1783,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	c.advance(time.Minute)
 	_ = m.Observe("dst", .5, c.now())
 	m.Sweep()
-	b := m.Decide("d1", "test")
+	b := m.Decide("d1", "estimate", "test")
 	b.RelationshipsInto("dst")
 	d := b.Commit(nil)
 	var found bool
@@ -1800,7 +1800,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	// iteration happened to write last.
 	c.advance(time.Minute)
 	m.Sweep()
-	b = m.Decide("d2", "test")
+	b = m.Decide("d2", "estimate", "test")
 	b.RelationshipsInto("dst")
 	d = b.Commit(nil)
 	var stale []string
@@ -1878,7 +1878,7 @@ func TestReadPathsCopyLabelsAndMembers(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
 		Labels: map[string]string{"qos": "burstable"}})
-	b := m.Decide("d1", "what was qos when I decided")
+	b := m.Decide("d1", "estimate", "what was qos when I decided")
 	_, _ = b.Property("a@pod:1")
 	d := b.Commit(nil)
 	c.advance(time.Second)
@@ -2131,7 +2131,7 @@ func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := map[string]any{"nested": map[string]any{"k": 1.0}, "list": []any{1.0}}
-	b := m.Decide("dec-copy", "q")
+	b := m.Decide("dec-copy", "estimate", "q")
 	b.Input("evidence", in)
 	b.Facts()
 	b.Commit(map[string]any{"ok": true})
@@ -2171,7 +2171,7 @@ func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
 	labels := map[string]string{"k": "a"}
 	lines := []string{"a"}
 	o := offer{Lines: []string{"a"}, Limits: map[string]float64{"cpu": 1}}
-	b := m.Decide("dec-typed", "q")
+	b := m.Decide("dec-typed", "estimate", "q")
 	b.Input("labels", labels)
 	b.Input("wrapped", map[string]any{"lines": lines})
 	b.Input("offer", o)
@@ -2203,7 +2203,7 @@ func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
 func TestDecisionAnswerIsCopiedNotAliased(t *testing.T) {
 	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
 	answer := map[string]any{"verdict": "accept", "detail": map[string]any{"k": 1.0}, "ids": []string{"a"}}
-	b := m.Decide("dec-answer", "q")
+	b := m.Decide("dec-answer", "estimate", "q")
 	b.Commit(answer)
 
 	answer["verdict"] = "refuse"
