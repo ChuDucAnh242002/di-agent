@@ -789,21 +789,23 @@ func newServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
-// saveMark is what the last successful save covered: the map's revision and the
-// journal's total entries ever appended. A decision is journalled without moving the
-// revision, so the revision alone would skip it.
+// saveMark is what the last successful save covered: the map's revision, the
+// journal's total entries ever appended, and the loops' state. A decision is
+// journalled without moving the revision, and a peer's trust changes neither, so
+// the revision alone would skip both.
 type saveMark struct {
 	rev, entries uint64
+	loops        string
 	done         bool
 }
 
-// saveIfChanged saves the map unless neither its revision nor its journal moved since
+// saveIfChanged saves the map unless neither its revision, its journal nor the loops' state moved since
 // the last successful save. A zero mark has saved nothing, so the first tick saves once.
 // The mark is read before the save, so a change landing mid-save leaves the next tick
 // to save it.
 func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool, err error) {
 	held, dropped, _ := state.Journal().Stats()
-	now := saveMark{rev: state.Revision(), entries: uint64(held) + dropped, done: true}
+	now := saveMark{rev: state.Revision(), entries: uint64(held) + dropped, loops: string(state.LoopsState()), done: true}
 	if now == *last {
 		return false, nil
 	}

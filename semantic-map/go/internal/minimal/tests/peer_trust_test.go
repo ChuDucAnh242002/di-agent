@@ -23,6 +23,7 @@ type trustFixture struct {
 	hits *atomic.Int64
 	now  *time.Time
 	ask  func() error
+	last *types.PeerRecommendation
 }
 
 func newTrustFixture(t *testing.T) *trustFixture {
@@ -56,7 +57,8 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	f.now = &now
 	r.SetClock(func() time.Time { return *f.now })
 	f.ask = func() error {
-		_, err := r.RecommendPeer(&types.OffloadContext{TaskType: "pod-scheduling", SourceNodeID: "node_self"})
+		rec, err := r.RecommendPeer(&types.OffloadContext{TaskType: "pod-scheduling", SourceNodeID: "node_self"})
+		f.last = rec
 		return err
 	}
 	return f
@@ -205,5 +207,21 @@ func TestARestoredPenalisedPeerIsReprobed(t *testing.T) {
 	*b.now = b.now.Add(10 * time.Minute)
 	if err := b.ask(); err != nil || b.hits.Load() != 1 {
 		t.Fatalf("hits %d err %v; want the restored peer re-probed after ten minutes", b.hits.Load(), err)
+	}
+}
+
+// A re-probed peer rewarded back to the floor is ranked and reported at its
+// trust after the reward, not at the stale value read before it.
+func TestAReprobedPeerIsRankedAtItsRewardedTrust(t *testing.T) {
+	f := newTrustFixture(t)
+	f.fail.Store(true)
+	_ = f.ask() // 0.50 → 0.45
+	f.fail.Store(false)
+	*f.now = f.now.Add(10 * time.Minute)
+	if err := f.ask(); err != nil {
+		t.Fatalf("re-probe: %v", err)
+	}
+	if !strings.Contains(f.last.Rationale, "trust=0.50") {
+		t.Fatalf("rationale reports stale trust: %s", f.last.Rationale)
 	}
 }
