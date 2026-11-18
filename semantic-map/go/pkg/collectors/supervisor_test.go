@@ -3,6 +3,8 @@ package collectors
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -736,5 +738,34 @@ func TestSupervisorRunsDoctorOncePerUnhealthyEpisode(t *testing.T) {
 	s.Collect()
 	if n := reports(); n != 2 {
 		t.Fatalf("doctor reports = %d after %s, want 2", n, doctorEvery)
+	}
+}
+
+// TestSupervisorCapBoundsInspectionNotKept: the cap bounds the samples inspected,
+// not those kept, so a flood of invalid samples is cut at the cap too, and the
+// overflow is counted in one step and logged once, whatever its metric types.
+func TestSupervisorCapBoundsInspectionNotKept(t *testing.T) {
+	samples := make([]*types.MetricSample, 0, 16384+1000)
+	for i := 0; i < 16384; i++ {
+		samples = append(samples, sample("a", "")) // missing unit
+	}
+	for i := 0; i < 1000; i++ {
+		samples = append(samples, sample(fmt.Sprintf("t%d", i), "ratio"))
+	}
+	sink := &logSink{}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{member("f", &fakeCollector{id: "f", samples: samples})})
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 0 || st.ViolationKinds["flood"] != 1000 || st.ViolationKinds["missing unit"] != 16384 {
+		t.Errorf("kept %d, kinds %v; want 0, flood 1000, missing unit 16384", len(out), st.ViolationKinds)
+	}
+	n := 0
+	for _, l := range sink.lines {
+		if strings.Contains(l, "flood") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("flood logged %d times, want 1: one line per tick-overflow, not per type", n)
 	}
 }

@@ -476,3 +476,29 @@ func TestWaitStopsOnCancelAndIsNilSafe(t *testing.T) {
 		t.Fatal("wait on a cancelled context reported continue")
 	}
 }
+
+// TestWakeInterruptsASlowWait: a loop already sleeping at the slow cadence returns to
+// base with the pace: it resumes at the base interval counted from when it began
+// waiting, not after the slow timer.
+func TestWakeInterruptsASlowWait(t *testing.T) {
+	f := newPaceFixture(t)
+	f.minutes(10)
+	f.wantPace(paceSlow)
+	const base = 200 * time.Millisecond // slow: 800ms
+	done := make(chan time.Duration, 1)
+	start := time.Now()
+	go func() {
+		f.p.wait(context.Background(), base)
+		done <- time.Since(start)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	f.p.Wake("test")
+	select {
+	case took := <-done:
+		if took < base {
+			t.Fatalf("wait returned after %s; want the base interval %s", took, base)
+		}
+	case <-time.After(600 * time.Millisecond):
+		t.Fatal("a wake did not interrupt the slow wait")
+	}
+}

@@ -2,6 +2,8 @@ package explain_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,5 +339,24 @@ func TestValidatorChecksPropertyCitationsAgainstTheStateModel(t *testing.T) {
 	}
 	if v := explain.Validate(r, absent); v.IsValid {
 		t.Error("a citation of a property not in the map was accepted")
+	}
+}
+
+// TestGetStateDigestCountsUnobservable: while a collector is down its properties
+// are unobservable, and the digest's counts must still add up to the properties shown.
+func TestGetStateDigestCountsUnobservable(t *testing.T) {
+	r, sm := newTestMap(t)
+	if err := sm.State().Record(statemap.Observation{ID: "cpu_utilization", Value: 0.5, At: time.Now(), Source: "netdata"}); err != nil {
+		t.Fatal(err)
+	}
+	sm.State().SetSourceDown("netdata", true, "")
+	sm.State().Sweep()
+	res, err := explain.Dispatch(r, "get_state", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := sm.State().Census().PropertiesUnobservable
+	if n == 0 || !strings.Contains(res.Digest, fmt.Sprintf("unobservable=%d", n)) {
+		t.Errorf("digest %q does not count the unobservable property", res.Digest)
 	}
 }

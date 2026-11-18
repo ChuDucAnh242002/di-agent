@@ -92,8 +92,8 @@ row M0 01 "no review decision names a model (answer.by in rules, intervention)" 
 r=$(jq -r 'select(.endpoint == "/state" and .status == 200) | .body.pace' "$OUT/capture.jsonl" | head -1)
 row M0 05 "pace base at start (GET /state .pace)" "$( [ "$r" = base ] && echo pass || { [ -z "$r" ] && echo unverifiable || echo fail; })" "first captured pace: ${r:-none}"
 r=$(evq '([.[] | select(.inc == 1)][0].ts) as $t0 | [.[] | select(.inc == 1 and .kind == "property.admitted" and (.target == "cpu_utilization@unit:di-agent" or .target == "cpu_utilization@unit:di-agent.service"))][0] | if . == null then null else {target, after_s: (.ts - $t0)} end')
-row M0 04 "self observed: cpu_utilization@unit:di-agent admitted within 1 min" \
-    "$(verdict "$(jq '. != null and .after_s <= 60 and .target == "cpu_utilization@unit:di-agent"' <<<"$r")")" "$(jq -c . <<<"$r")"
+row M0 04 "self observed: cpu_utilization@unit:di-agent (or the unit-glob fallback unit:di-agent.service) admitted within 1 min" \
+    "$(verdict "$(jq '. != null and .after_s <= 60' <<<"$r")")" "$(jq -c . <<<"$r")"
 r=$(jq -c '[.[] | select(.endpoint == "/healthz" and .status == 200) | .body][0]' "$W/cap.json")
 row M0 none "healthz reports last tick per loop and last save" "not built" "GET /healthz answers $r: liveness detail is in none of plans 01-06"
 
@@ -226,9 +226,9 @@ inc=$(jq '.incarnation' "$OUT/after-cold-start-journal.json" 2>/dev/null || echo
 rec=$(jq -c --argjson a "$(t M5 'truncated state.json and')" '[.[] | select(.endpoint == "/relief" and .status == 200 and .t > $a) | .body | [.. | objects | select(has("reconcile_error")) | .reconcile_error]] | add | unique' "$W/cap.json")
 row M5 04 "cold start at 97 journalled: first event restore.failed with both errors (GET /state/journal); ledger reconciled" \
     "$(verdict "$(jq -n --argjson r "$r" --argjson c "${rec:-null}" 'if $r == null then null else $r.kind == "restore.failed" and ($r.error | length) > 0 and ($r.prev_error | length) > 0 and $c != null and ($c | map(select(. != "" and . != null)) | length) == 0 end')")" "incarnation $inc: $r; reconcile_error values after: $rec"
-l=$(jq -c --argjson i "${inc:-0}" '[.[] | select(.inc == $i and .kind == "restore.failed")] | length' "$W/ev.json")
+l=$(jq -c --argjson i "${inc:-0}" '[.[] | select(.inc == $i and .kind == "restore.failed" and .ok == true)] | length' "$W/ev.json")
 f=$(jq -c --argjson i "${inc:-0}" '[.[] | select(.inc == $i)] | min_by(.seq) | {seq, kind}' "$W/ev.json")
-row M5 06 "the cold start's restore.failed reaches the durable log" "$(verdict "$(jq -n --argjson l "$l" --argjson i "$inc" 'if $i == null then null else $l == 1 end')")" "restore.failed lines in journal.ndjson for incarnation $inc: $l; first logged line of it: $f"
+row M5 06 "the cold start's restore.failed reaches the durable log" "$(verdict "$(jq -n --argjson l "$l" --argjson i "$inc" 'if $i == null then null else $l == 1 end')")" "digest-verified restore.failed lines in journal.ndjson for incarnation $inc: $l; first logged line of it: $f"
 r=$(jq -c '[.actions[]? | select(.entry.state? == "applied" or .state? == "applied")] | length' "$OUT/before-kill.json" 2>/dev/null)
 row M5 02 "a cap in force at the kill is resumed, not duplicated" "$([ "${r:-0}" = 0 ] && echo "not exercised" || echo unverifiable)" "caps in force at the kill: ${r:-unread}"
 

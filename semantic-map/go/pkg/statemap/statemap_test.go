@@ -1899,7 +1899,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 	est, asserted := 0.95, 0.7
 	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Recent: 0.9, Confidence: 1,
 		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
-		Provenance: Discovered})
+		Regime: true, RegimeSince: c.now(), Provenance: Discovered})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1908,7 +1908,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
 	}
 	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
-		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 {
+		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 || r.Regime || !r.RegimeSince.IsZero() {
 		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
 	}
 	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {
@@ -2204,6 +2204,66 @@ func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
 	}
 	if again.Inputs["evidence"].(map[string]any)["nested"].(map[string]any)["k"] != 1.0 {
 		t.Fatal("returned input aliased")
+	}
+}
+
+func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	type offer struct {
+		Lines  []string
+		Limits map[string]float64
+	}
+	labels := map[string]string{"k": "a"}
+	lines := []string{"a"}
+	o := offer{Lines: []string{"a"}, Limits: map[string]float64{"cpu": 1}}
+	b := m.Decide("dec-typed", "estimate", "q")
+	b.Input("labels", labels)
+	b.Input("wrapped", map[string]any{"lines": lines})
+	b.Input("offer", o)
+	b.Commit(map[string]any{"ok": true})
+
+	labels["k"] = "b"
+	lines[0] = "b"
+	o.Lines[0] = "b"
+	o.Limits["cpu"] = 2
+
+	d, _ := m.Journal().Decision("dec-typed")
+	if d.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("typed map aliased: %v", d.Inputs["labels"])
+	}
+	if d.Inputs["wrapped"].(map[string]any)["lines"].([]string)[0] != "a" {
+		t.Errorf("typed slice nested in a map aliased: %v", d.Inputs["wrapped"])
+	}
+	got := d.Inputs["offer"].(offer)
+	if got.Lines[0] != "a" || got.Limits["cpu"] != 1 {
+		t.Errorf("struct fields aliased: %+v", got)
+	}
+	d.Inputs["labels"].(map[string]string)["k"] = "c"
+	again, _ := m.Journal().Decision("dec-typed")
+	if again.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("returned typed map aliased: %v", again.Inputs["labels"])
+	}
+}
+
+func TestDecisionAnswerIsCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	answer := map[string]any{"verdict": "accept", "detail": map[string]any{"k": 1.0}, "ids": []string{"a"}}
+	b := m.Decide("dec-answer", "estimate", "q")
+	b.Commit(answer)
+
+	answer["verdict"] = "refuse"
+	answer["detail"].(map[string]any)["k"] = 2.0
+	answer["ids"].([]string)[0] = "b"
+
+	d, _ := m.Journal().Decision("dec-answer")
+	if d.Answer["verdict"] != "accept" || d.Answer["detail"].(map[string]any)["k"] != 1.0 || d.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("caller's later write reached the journal: %v", d.Answer)
+	}
+	d.Answer["detail"].(map[string]any)["k"] = 3.0
+	d.Answer["ids"].([]string)[0] = "c"
+	again, _ := m.Journal().Decision("dec-answer")
+	if again.Answer["detail"].(map[string]any)["k"] != 1.0 || again.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("returned answer aliased: %v", again.Answer)
 	}
 }
 
@@ -3466,5 +3526,118 @@ func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) 
 	c.advance(2*time.Minute + time.Second)
 	if _, retired := m2.Sweep(); len(retired) != 2 {
 		t.Errorf("retired %v; want both, RetireAfter since the return", retired)
+	}
+}
+
+// TestDerivedOverUnobservableMembersIsUnobservable: a summary whose members are
+// silent because their collector is down says so, not that the system went quiet;
+// it is live again when a member is.
+func TestDerivedOverUnobservableMembersIsUnobservable(t *testing.T) {
+	m, c := outageMap(t)
+	if err := m.DeclareProperty(Property{ID: "load", Kind: Derived, Members: []string{"cpu", "cpu@pod:a"}}); err != nil {
+		t.Fatal(err)
+	}
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Fatalf("load is %s before the outage; want active", s)
+	}
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Unobservable {
+		t.Errorf("load is %s with every member unobservable; want unobservable", s)
+	}
+	m.SetSourceDown("netdata", false, "")
+	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Errorf("load is %s with a member observed again; want active", s)
+	}
+}
+
+// TestMarkPropertyStaleLeavesUnobservableAlone: an unobservable property's silence
+// has a known cause; marking it stale would only be undone by the next sweep.
+func TestMarkPropertyStaleLeavesUnobservableAlone(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if m.MarkPropertyStale("cpu", "test", "test") {
+		t.Error("MarkPropertyStale changed an unobservable property")
+	}
+	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
+		t.Errorf("cpu is %s; want unobservable", s)
+	}
+}
+
+// TestALiveRelationshipKeepsItsRetiredEndpoint: a relationship declared onto a
+// retired property is live; forgetting the property would leave it pointing at
+// nothing, so the property is kept until the relationship is retired too.
+func TestALiveRelationshipKeepsItsRetiredEndpoint(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Retired {
+		t.Fatalf("cpu@pod:a is %s; want retired", s)
+	}
+	id := RelationshipID("cpu@pod:a", "cpu", "")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(forgetAfter + time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); !ok {
+		t.Fatal("the endpoint of a live relationship was forgotten")
+	}
+	if r, ok := m.Relationship(id); !ok || r.Status == Retired {
+		t.Fatalf("relationship %+v (%v); want it still live", r, ok)
+	}
+	for _, rel := range m.State(Query{}).Relationships {
+		for _, end := range []string{rel.From, rel.To} {
+			if _, ok := m.Property(end); !ok {
+				t.Errorf("relationship %s points at the missing property %s", rel.ID, end)
+			}
+		}
+	}
+	if err := m.RetireRelationship(id, "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); ok {
+		t.Error("cpu@pod:a is still held after its relationship retired")
+	}
+}
+
+// TestSourceIsTheLastReporter: two producers feeding one property (two members
+// emitting the same subject's property, or a member and POST /ingest-sample) leave
+// Source naming whoever reported last. That is the attribution the silence after it
+// needs: while one keeps reporting the property is observed, whichever is down; once
+// both are silent, the outage explains the silence only if the down one spoke last.
+func TestSourceIsTheLastReporter(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+	m.SetSourceDown("netdata", true, "")
+	for range 3 { // http keeps reporting through the netdata outage
+		c.advance(time.Minute)
+		recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+		m.Sweep()
+		if s := statusOfProp(t, m, "cpu@pod:a"); s != Active {
+			t.Fatalf("cpu@pod:a is %s while http reports it; want active", s)
+		}
+	}
+	m.SetSourceDown("netdata", false, "")
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata") // netdata reports last, then goes down
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
+		t.Errorf("cpu@pod:a is %s, last reported by the down netdata; want unobservable", s)
 	}
 }

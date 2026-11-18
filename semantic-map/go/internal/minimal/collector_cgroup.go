@@ -426,7 +426,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			return nil
 		}
 		if p == c.selfDir {
-			return filepath.SkipDir // emitted once, as selfSubject
+			return nil // emitted once, as selfSubject; what lies below it is still walked
 		}
 		rel := filepath.ToSlash(strings.TrimPrefix(p, root+string(filepath.Separator)))
 		first, _, _ := strings.Cut(rel, "/")

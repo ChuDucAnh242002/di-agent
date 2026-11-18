@@ -136,7 +136,9 @@ type Property struct {
 	NObservations int `json:"n_observations"`
 
 	// Source names where an observed property's data comes from — a metric type, a
-	// collector — so a reader can find out why a property exists.
+	// collector — so a reader can find out why a property exists. With two producers
+	// of one property it names the one that reported last: that is whose silence
+	// follows, and so whether a down collector explains it (unobservable) or not.
 	Source string `json:"source,omitempty"`
 
 	// Members are the properties a derived property aggregates.
@@ -1273,9 +1275,6 @@ func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
 			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
-			if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
-				iv.SlopeSum, iv.SlopeN = 0, 0
-			}
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
 				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
@@ -1338,7 +1337,9 @@ func (m *Map) MarkPropertyStale(id, reason, actor string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.properties[id]
-	if !ok || p.Status == Retired || p.Status == Stale || p.NObservations == 0 {
+	// An unobservable property's silence has a known cause, and the next sweep
+	// would set it back without a journal event.
+	if !ok || p.Status == Retired || p.Status == Stale || p.Status == Unobservable || p.NObservations == 0 {
 		return false
 	}
 	p.Status = Stale
@@ -1451,17 +1452,20 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 }
 
 // forgetLocked deletes a long-retired observed property, its retired relationships
-// and the per-pair state keyed by them, and leaves a tombstone. A relationship that
-// is somehow still live is kept and named in the event. Caller holds the write lock.
+// and the per-pair state keyed by them, and leaves a tombstone. A relationship
+// declared onto the retired property is live; while one is, the property is kept,
+// so no relationship points at a property the map no longer holds. Caller holds
+// the write lock.
 func (m *Map) forgetLocked(p *Property, now time.Time) {
 	id := p.ID
-	var dropped, kept []string
+	for _, r := range m.relationships {
+		if (r.From == id || r.To == id) && r.Status != Retired {
+			return
+		}
+	}
+	var dropped []string
 	for rid, r := range m.relationships {
 		if r.From != id && r.To != id {
-			continue
-		}
-		if r.Status != Retired {
-			kept = append(kept, rid)
 			continue
 		}
 		delete(m.relationships, rid)
@@ -1477,12 +1481,7 @@ func (m *Map) forgetLocked(p *Property, now time.Time) {
 	delete(m.latest, id)
 	m.forgotten[id] = p.RetiredAt
 	sort.Strings(dropped)
-	detail := map[string]any{"retired_at": p.RetiredAt, "relationships": dropped}
-	if len(kept) > 0 {
-		sort.Strings(kept)
-		detail["kept"] = kept
-	}
-	m.bump(EventPropertyForgotten, id, "sweep", detail, now)
+	m.bump(EventPropertyForgotten, id, "sweep", map[string]any{"retired_at": p.RetiredAt, "relationships": dropped}, now)
 }
 
 // SetSourceDown records whether a collector member is down. A property last
@@ -1525,8 +1524,10 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 		}
 		var sum, conf float64
 		var n, obs int
+		down := false
 		for _, id := range d.Members {
 			mem, ok := m.properties[id]
+			down = down || (ok && mem.Status == Unobservable)
 			if !ok || mem.Status != Active || mem.NObservations == 0 {
 				continue
 			}
@@ -1539,9 +1540,14 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 			// A summary of nothing is stale, not current. The last value is kept so a
 			// decision made from it stays reconstructible; the count is kept so "how
 			// much did this rest on" is still answerable; confidence says none of it
-			// is supported now.
+			// is supported now. A member whose collector is down makes it
+			// unobservable instead, as its members are: the silence has a known cause.
 			d.Confidence = 0
-			if d.Status == Active && d.NObservations > 0 {
+			switch {
+			case d.NObservations == 0:
+			case down:
+				d.Status = Unobservable
+			case d.Status != Stale:
 				d.Status = Stale
 				m.bump(EventPropertyStale, d.ID, "sweep", map[string]any{
 					"reason": "no active member with observations",
@@ -1560,7 +1566,7 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 		if d.FirstObserved.IsZero() {
 			d.FirstObserved = at
 		}
-		if d.Status == Stale {
+		if d.Status == Stale || d.Status == Unobservable {
 			d.Status = Active
 			m.bump(EventPropertyRedeclared, d.ID, "system", map[string]any{
 				"revived": true, "reason": "a member is active again", "members_active": n,
@@ -1625,6 +1631,7 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.Interventions = nil
+	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	for _, id := range []string{r.From, r.To} {
@@ -1877,9 +1884,6 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 	}
 	r.Status = Retired
 	r.RetiredReason = reason
-	if iv := m.interventions[interventionKey(r.From, r.To)]; iv != nil {
-		iv.SlopeSum, iv.SlopeN = 0, 0
-	}
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 

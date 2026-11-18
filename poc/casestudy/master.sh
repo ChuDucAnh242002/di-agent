@@ -337,9 +337,11 @@ m8() {
 # the in-memory journal has long evicted (from: log).
 m9() {
     at 195; mark M9 start
-    local log="$DIR/journal.ndjson" verify first
-    verify=$(jq -r 'select(.kind == "decision" and .decision.kind == "relief.verify") | .decision.id' "$log" 2>/dev/null | tail -1)
-    first=$(jq -r 'select(.kind == "decision") | .decision.id' "$log" 2>/dev/null | head -1)
+    # Both generations, oldest first, as readout.sh merges them: after a rotation the
+    # current file alone starts mid-run.
+    local verify first
+    verify=$(cat "$DIR/journal.ndjson.1" "$DIR/journal.ndjson" 2>/dev/null | jq -r 'select(.kind == "decision" and .decision.kind == "relief.verify") | .decision.id' 2>/dev/null | tail -1)
+    first=$(cat "$DIR/journal.ndjson.1" "$DIR/journal.ndjson" 2>/dev/null | jq -r 'select(.kind == "decision") | .decision.id' 2>/dev/null | head -1)
     if [ -n "$verify" ]; then
         get "/state/decisions/$verify?chain=1" >"$OUT/m9-verify-chain.json"
         curl -s --max-time 10 -D "$OUT/m9-verify-explain.headers" "$API/state/decisions/$verify/explain" >"$OUT/m9-verify-explain.txt"
