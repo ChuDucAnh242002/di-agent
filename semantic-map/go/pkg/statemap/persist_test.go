@@ -152,7 +152,7 @@ func TestSaveKeepsOnePreviousGeneration(t *testing.T) {
 }
 
 func TestLoadFallsBackToPrevOnACorruptCurrent(t *testing.T) {
-	path, _, _ := savedTwice(t)
+	path, r1, _ := savedTwice(t)
 	blob, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +179,14 @@ func TestLoadFallsBackToPrevOnACorruptCurrent(t *testing.T) {
 	}
 	if !found {
 		t.Error("no restore event journalled")
+	}
+	// The corrupt current is set aside, not rotated over the good .prev: both
+	// generations on disk are good after the reservation save.
+	if got := snapRevision(t, path+".prev"); got != r1 {
+		t.Errorf(".prev is revision %d after the fallback; want the good %d kept", got, r1)
+	}
+	if got, err := os.ReadFile(path + ".corrupt"); err != nil || len(got) != len(blob)/2 {
+		t.Errorf("state.json.corrupt = %d bytes, %v; want the corrupt file set aside", len(got), err)
 	}
 }
 
@@ -215,6 +223,18 @@ func TestLoadStartsColdWithRestoreFailedWhenBothAreCorrupt(t *testing.T) {
 	}
 	if ev[0].Detail["error"] == "" || ev[0].Detail["prev_error"] == "" {
 		t.Errorf("detail %v lacks error / prev_error", ev[0].Detail)
+	}
+	// The next saves cannot overwrite what failed to load: both are set aside.
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path + ".corrupt", path + ".prev.corrupt"} {
+		if got, err := os.ReadFile(p); err != nil || string(got) != "{" {
+			t.Errorf("%s = %q, %v; want the unreadable snapshot kept", p, got, err)
+		}
 	}
 }
 

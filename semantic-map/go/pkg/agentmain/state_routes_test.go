@@ -984,3 +984,32 @@ func TestExplainDecisionFromTheLogSaysSo(t *testing.T) {
 		t.Fatalf("status %d, body:\n%s", code, body)
 	}
 }
+
+// A log that cannot be read is not a miss: the decision is indexed, so the route
+// answers 500 rather than the 404/410 that mean neither store holds it.
+func TestAnUnreadableLogIsAServerErrorNotAMiss(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(map[string]any{"i": i})
+		ids = append(ids, id)
+	}
+	st, ok := sm.Journal().LogStats()
+	if !ok {
+		t.Fatal("no log open")
+	}
+	if err := os.Remove(st.File); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"", "?chain=1", "/explain"} {
+		resp, err := http.Get(srv.URL + "/state/decisions/" + ids[0] + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%q with an unreadable log: status %d, want 500", path, resp.StatusCode)
+		}
+	}
+}

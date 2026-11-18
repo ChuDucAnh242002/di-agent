@@ -837,12 +837,17 @@ outage touched. The Supervisor stamps each admitted sample with its member's nam
 loop tells the map which members are down after each tick, and a property stays
 unobservable until its next observation; once the member is back its silence counts
 from the return, not from before the outage. An HTTP producer is stamped `http`, so it
-cannot name itself after a member.
+cannot name itself after a member. With two producers of one property (two members
+emitting the same subject's property, or a member and `http`) `Source` names the one
+that reported last, since that is whose silence follows. A derived property with no
+active member is unobservable when one of its members is, stale otherwise: a summary
+of an outage is not a summary of silence.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
 stay reconstructible. It is soft for a day: an observed property retired for 24 hours
 (`forgetAfter`) is forgotten by the sweep, which deletes it, its retired relationships
-and the per-pair state keyed by them, and leaves a tombstone (id and `RetiredAt`) for
+and the per-pair state keyed by them (a relationship declared onto the retired property
+is live, and keeps the property until it is retired too, so no edge points at nothing), and leaves a tombstone (id and `RetiredAt`) for
 another day, so a decision that read it still resolves to "retired" (`GET
 /state/properties/{id}` answers 410) while the map and snapshot stop growing with pod
 churn. Derived properties are never forgotten; a re-observation after forgetting is a
@@ -870,7 +875,7 @@ state a decision reads *as it reads it*, so the record cannot drift from the rea
 and inputs are copied so a decision cannot silently become a description of a later
 system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
-evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge.
+evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge; an indexed decision whose line cannot be read or does not verify answers 500, not a miss.
 `pace.changed` records every change of the agent's attention with its reason, and
 every decision's `inputs.pace` says which attention level it was taken at.
 `GET /state/decisions/{id}/explain` renders a decision and its cites as prose by a pure function of the records, so a node with no model can still say "capped X because contention stayed above 0.25 for 1m; predicted 0.08 from the intervened relationship, measured 0.6; observed 0.05; kept".
@@ -879,12 +884,13 @@ A sweep that finds the wall clock stepped against the monotonic one records
 A collector member entering or leaving backoff or stuck records `collector.down` or
 `collector.up`, once per transition, with the member as target.
 The sweep deleting a property retired for 24 hours records `property.forgotten` (target
-the id; detail `retired_at`, the `relationships` removed, and `kept` for any live edge
-left in place).
+the id; detail `retired_at` and the `relationships` removed).
 Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
-when the current file is absent or unreadable; when neither is usable the map starts
-cold and its first event is `restore.failed` (target the path, detail `error` and
-`prev_error`), so a cold start is visible in the journal rather than a crash loop.
+when the current file is absent or unreadable, renaming the unreadable one to
+`<file>.corrupt` first so the reservation save does not rotate it over the good `.prev`;
+when neither is usable both are set aside the same way, the map starts cold and its
+first event is `restore.failed` (target the path, detail `error` and `prev_error`), so
+a cold start is visible in the journal rather than a crash loop.
 A version or owner mismatch is still refused outright, with no fallback.
 The map's own changes are `property.*` and `relationship.*` events:
 `relationship.declared`, `relationship.asserted`, `relationship.intervention`,
@@ -1035,7 +1041,7 @@ The map changes at four rates, and each is a setting or a fixed constant, never 
 
 The sweep and the peer poll are not paced, and the pace is pinned at `base` when `sources.interval × 4` would reach `map.stale_after`, so neither a property nor a peer goes stale because the agent slowed: "stale" keeps one meaning at both attention levels.
 
-Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active (unobservable when a member is) and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
@@ -1557,7 +1563,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
-| GET  | `/state/decisions/{id}/explain`   | path only | text/plain | A decision and the chain it cites as prose, from the records alone; `410`/`404` as `GET /state/decisions/{id}`; a log hit ends with `source: log` |
+| GET  | `/state/decisions/{id}/explain`   | path only | text/plain | A decision and the chain it cites as prose, from the records alone; `410`/`404`/`500` as `GET /state/decisions/{id}`; a log hit ends with `source: log` |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
@@ -1889,17 +1895,18 @@ domain's capacity fact and `pressure` the current `Relieves` reading:
 
 - *map*: `pressure + k · share`, `k` the strongest effect relief has measured on this
   node by acting on workloads' `Usage@<subject>` towards `Relieves`
-  (`Map.MeasuredDomainEffect`). For each domain, the strongest verified effect from a
+  (`Map.LiveSlope`). For each domain, the strongest verified effect from a
   live directional relationship is used; retired relationships and retired or stale
-  sources cannot affect new decisions. Retiring a relationship discards its domain
-  evidence, so a later relationship must build its own evidence. One zero-effect
+  sources cannot affect new decisions. Soft retirement retains both strength and
+  slope evidence for a later revival; two null interventions reset both measurements
+  so a relationship created again on that pair builds fresh evidence. One zero-effect
   pseudo-sample shrinks the observed mean toward zero; a single outcome therefore
   contributes, but is not treated as full confidence. The decision records the
-  observation count, source and verify decision. The response slope may exceed 1, but
-  individual measurements and the estimate are capped at 4; pair-level relationship
-  strengths remain clamped to [0,1].
+  observation count, source and verify decision. The response slope may exceed 1;
+  individual measurements are capped at 4, which bounds the estimate too. Pair-level
+  relationship strengths remain clamped to [0,1].
   Slopes are stored alongside the pair's intervention counters as `SlopeSum` and
-  `SlopeN`, persisted in snapshot format 6, not in a separate evidence pool.
+  `SlopeN`, persisted in snapshot format 6.
 - *usage*: `pressure · (usage + share) / usage`, pressure proportional to node usage.
 
 The map basis decides when it exists, the usage basis otherwise; both are written into
@@ -1924,7 +1931,7 @@ sample is ingested, another memory offer can be admitted against the same headro
 per-name pending check prevents duplicate offers for one name but does not reserve
 aggregate capacity across different names.
 
-`pkg/admission/comparison_test.go` verifies behavior directly: measured slopes above 1
+`pkg/admission/decide_test.go` verifies behavior directly: measured slopes above 1
 can drive a decline, while retired-source evidence cannot affect a new decision.
 
 **The exchange.** `POST /tasks` takes a submission: the node decides locally, and on

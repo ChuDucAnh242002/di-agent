@@ -68,10 +68,11 @@
         <input type="search" id="search" placeholder="Filter properties  (/)" aria-label="filter properties" />
       </div>
       <select id="status-filter" aria-label="status filter" style="width:auto">
-        <option value="live">active + stale</option>
+        <option value="live">not retired</option>
         <option value="all">everything</option>
         <option value="active">active only</option>
         <option value="stale">stale only</option>
+        <option value="unobservable">unobservable only</option>
         <option value="retired">retired only</option>
       </select>
     </div>
@@ -109,6 +110,7 @@
             <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="var(--ink-secondary)"/></svg> observed</li>
             <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.2" fill="none" stroke="var(--ink-secondary)" stroke-width="1.6"/><circle cx="7" cy="7" r="1.8" fill="var(--ink-secondary)"/></svg> derived</li>
             <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--status-serious)" stroke-width="1.6"/></svg> stale</li>
+            <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--status-serious)" stroke-width="1.6" stroke-dasharray="1 2"/></svg> unobservable (collector down)</li>
             <li><svg class="glyph" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--ink-muted)" stroke-width="1.4" stroke-dasharray="2 2"/></svg> retired</li>
           </ul>
         </section>

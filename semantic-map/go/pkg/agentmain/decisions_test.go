@@ -35,7 +35,7 @@ func TestResolveChainWalksThroughTheLog(t *testing.T) {
 		t.Fatal("revert should be evicted")
 	}
 
-	c, from, ok := resolveChain(j, revert)
+	c, from, ok, _ := resolveChain(j, revert)
 	if !ok || from != "log" {
 		t.Fatalf("resolveChain = ok %v, from %q", ok, from)
 	}
@@ -63,10 +63,10 @@ func TestResolveChainWalksThroughTheLog(t *testing.T) {
 
 	// A held decision resolves from memory, as Journal.Chain does.
 	held := j.Decisions(1, "")[0].ID
-	if _, from, ok := resolveChain(j, held); !ok || from != "journal" {
+	if _, from, ok, _ := resolveChain(j, held); !ok || from != "journal" {
 		t.Fatalf("held chain from %q, ok %v", from, ok)
 	}
-	if _, _, ok := resolveChain(j, "never"); ok {
+	if _, _, ok, _ := resolveChain(j, "never"); ok {
 		t.Fatal("an id neither holds resolved")
 	}
 }
@@ -93,7 +93,7 @@ func TestResolveChainFillsAnEvictedAncestorFromTheLog(t *testing.T) {
 	if _, held := j.Decision(act); held {
 		t.Fatal("act should be evicted")
 	}
-	c, from, ok := resolveChain(j, verify)
+	c, from, ok, _ := resolveChain(j, verify)
 	if !ok || from != "journal" || len(c.Cites) != 2 {
 		t.Fatalf("resolveChain = %+v, from %q, ok %v", c, from, ok)
 	}
@@ -133,7 +133,7 @@ func TestResolveChainWalksAnEvictedAncestorsOwnCites(t *testing.T) {
 	if _, held := j.Decision(verify); !held {
 		t.Fatal("verify should be held")
 	}
-	c, from, ok := resolveChain(j, verify)
+	c, from, ok, _ := resolveChain(j, verify)
 	if !ok || from != "journal" || c.CitedBy == nil {
 		t.Fatalf("resolveChain = %+v, from %q, ok %v; want a held root with cited_by", c, from, ok)
 	}
