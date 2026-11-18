@@ -66,12 +66,12 @@ type OutcomeLine struct {
 
 // PredictionError is the mean absolute error of one admission prediction basis.
 type PredictionError struct {
-	N   int     `json:"n"`
 	MAE float64 `json:"mean_absolute_error"`
 }
 
 // PredictionSummary compares the two bases on outcomes still retained by the
-// tracker. Paired counts use only outcomes for which both errors were recorded.
+// tracker. Paired counts domain lines with both errors; Outcomes counts outcomes
+// containing at least one such line.
 type PredictionSummary struct {
 	Outcomes int             `json:"outcomes"`
 	Paired   int             `json:"paired"`
@@ -224,8 +224,6 @@ func (t *Tracker) PredictionSummary() PredictionSummary {
 			}
 			paired = true
 			summary.Paired++
-			summary.Map.N++
-			summary.Usage.N++
 			mapAbs += math.Abs(*line.MapErr)
 			usageAbs += math.Abs(*line.UsageErr)
 		}
@@ -233,9 +231,9 @@ func (t *Tracker) PredictionSummary() PredictionSummary {
 			summary.Outcomes++
 		}
 	}
-	if summary.Map.N > 0 {
-		summary.Map.MAE = mapAbs / float64(summary.Map.N)
-		summary.Usage.MAE = usageAbs / float64(summary.Usage.N)
+	if summary.Paired > 0 {
+		summary.Map.MAE = mapAbs / float64(summary.Paired)
+		summary.Usage.MAE = usageAbs / float64(summary.Paired)
 	}
 	return summary
 }

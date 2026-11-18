@@ -331,34 +331,13 @@ func TestARelationshipRetiredByInterventionsMeasuresAfresh(t *testing.T) {
 	if r, _ := m.Relationship(id); r.Measured == nil || !nearly(*r.Measured, 0.4) {
 		t.Fatalf("measured %v; want 0.4, the outcomes since the retirement", r.Measured)
 	}
-}
-
-func TestMeasuredEffectsListsOnlyMeasured(t *testing.T) {
-	m := interventionMap(t)
-	for _, id := range []string{"cpu_a", "cpu_b", "cpu_contention_ratio"} {
-		if err := m.DeclareProperty(Property{ID: id, Kind: Observed, Unit: "fraction",
-			Range: [2]float64{0, 1}, Source: "test"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, from := range []string{"cpu_a", "cpu_b"} {
-		if err := m.DeclareRelationship(Relationship{From: from, To: "cpu_contention_ratio", Sign: 1, Label: "drives"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, e := range []float64{0.2, 0.4} {
-		mustRecord(t, m, InterventionOutcome{From: "cpu_a", To: "cpu_contention_ratio", Agreed: true, HasEffect: true, Effect: e})
-	}
-	got := m.MeasuredEffects("cpu_contention_ratio")
-	if len(got) != 1 || got[0].From != "cpu_a" || got[0].N != 2 || got[0].Effect < 0.299 || got[0].Effect > 0.301 {
-		t.Fatalf("measured effects %+v; want only pod:a, effect 0.3 over 2 outcomes", got)
-	}
-	if got[0].Relationship == "" {
-		t.Fatal("measured effect should name its relationship")
+	iv := m.interventions[interventionKey("cpu_limit", "pressure")]
+	if iv.SlopeN != 2 || !nearly(iv.SlopeSum, 0.8) {
+		t.Fatalf("slopes %+v; want only the two outcomes since retirement", iv)
 	}
 }
 
-func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t *testing.T) {
+func TestLiveSlopeIgnoresRetiredRelationshipAndRestoresLiveEvidence(t *testing.T) {
 	m, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
 	from, to := "memory_utilization@pod:gone", "memory_contention_ratio"
 	for _, p := range []Property{
@@ -369,7 +348,6 @@ func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t
 		if err := m.DeclareProperty(p); err != nil {
 			t.Fatal(err)
 		}
-
 	}
 	for _, outcome := range []InterventionOutcome{
 		{From: from, To: to, Agreed: true, HasEffect: true, Effect: 0.4, DecisionID: "verify-1"},
@@ -380,15 +358,7 @@ func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t
 		}
 	}
 
-	assertMeasured := func(got []MeasuredEffect) {
-		t.Helper()
-		if len(got) != 1 || got[0].From != from || got[0].N != 2 ||
-			!nearly(got[0].Effect, 0.5) || got[0].DecisionID != "verify-2" {
-			t.Fatalf("measured effects %+v; want source's 0.5 over two decisions", got)
-		}
-	}
-	assertMeasured(m.MeasuredEffects(to))
-	if estimate, ok := m.MeasuredDomainEffect("memory_utilization", to); !ok ||
+	if estimate, ok := m.LiveSlope("memory_utilization", to); !ok ||
 		!nearly(estimate.Estimate(), 1.0/3) || estimate.N != 2 ||
 		estimate.LastSource != from || estimate.LastDecision != "verify-2" {
 		t.Fatalf("domain effect %+v (%v); want a shrunken estimate from the live source", estimate, ok)
@@ -396,10 +366,7 @@ func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t
 	if err := m.RetireProperty(from, "subject left", "test"); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.MeasuredEffects(to); len(got) != 0 {
-		t.Fatalf("retired relationship remains in active measured effects: %+v", got)
-	}
-	if estimate, ok := m.MeasuredDomainEffect("memory_utilization", to); ok {
+	if estimate, ok := m.LiveSlope("memory_utilization", to); ok {
 		t.Fatalf("retired source still informs new decisions: %+v", estimate)
 	}
 
@@ -411,11 +378,18 @@ func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t
 	if ok, err := m2.Load(path); err != nil || !ok {
 		t.Fatalf("load: %v %v", ok, err)
 	}
-	if got := m2.MeasuredEffects(to); len(got) != 0 {
-		t.Fatalf("restored retired relationship remains in active measured effects: %+v", got)
-	}
-	if estimate, ok := m2.MeasuredDomainEffect("memory_utilization", to); ok {
+	if estimate, ok := m2.LiveSlope("memory_utilization", to); ok {
 		t.Fatalf("restored retired source still informs new decisions: %+v", estimate)
+	}
+	if err := m2.Record(Observation{ID: from, Subject: "pod:gone", Value: 0.2, At: m2.now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.DeclareRelationship(Relationship{From: from, To: to, Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := m2.LiveSlope("memory_utilization", to); !ok ||
+		got.N != 2 || !nearly(got.Estimate(), 1.0/3) || got.LastDecision != "verify-2" {
+		t.Fatalf("freshly observed and revived source slope %+v (%t); want retained evidence", got, ok)
 	}
 
 	unsupported := m.Snapshot()
@@ -434,7 +408,94 @@ func TestMeasuredDomainEffectIgnoresRetiredRelationshipAndRestoresLiveEvidence(t
 	}
 }
 
-func TestDomainInterventionSlopeCanExceedOne(t *testing.T) {
+func TestLiveSlopeSelection(t *testing.T) {
+	const usage, target = "memory_utilization", "pressure"
+	for _, tc := range []struct {
+		name        string
+		source      string
+		status      Status
+		sign        int
+		association bool
+		retired     bool
+		effect      float64
+		wantSource  string
+		wantSlope   float64
+	}{
+		{name: "strongest live", sign: 1, effect: 1.2, wantSource: usage + "@pod:a", wantSlope: 0.6},
+		{name: "stale source", status: Stale, sign: 1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "retired source", status: Retired, sign: 1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "association", association: true, sign: 1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "negative sign", sign: -1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "prefix collision", source: usage + "_x@pod:a", sign: 1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "retired relationship", retired: true, sign: 1, effect: 1.2, wantSource: usage + "@pod:b", wantSlope: 0.2},
+		{name: "tie breaks by source", sign: 1, effect: 0.4, wantSource: usage + "@pod:a", wantSlope: 0.2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newTestMap(t, Config{})
+			from := tc.source
+			if from == "" {
+				from = usage + "@pod:a"
+			}
+			for _, id := range []string{target, from, usage + "@pod:b"} {
+				_, subject, _ := strings.Cut(id, "@")
+				if err := m.DeclareProperty(Property{ID: id, Subject: subject, Kind: Observed, Range: [2]float64{0, 1}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.Record(Observation{ID: id, Subject: subject, Value: 0.1, At: m.now()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, r := range []Relationship{
+				{From: usage + "@pod:b", To: target, Sign: 1},
+				{From: from, To: target, Sign: tc.sign, Association: tc.association},
+			} {
+				if err := m.DeclareRelationship(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustRecord(t, m, InterventionOutcome{
+				From: usage + "@pod:b", To: target, Agreed: true, HasEffect: true, Effect: 0.4,
+			})
+			mustRecord(t, m, InterventionOutcome{
+				From: from, To: target, Agreed: true, HasEffect: true, Effect: tc.effect,
+			})
+			switch tc.status {
+			case Stale:
+				if !m.MarkPropertyStale(from, "test", "test") {
+					t.Fatal("source was not marked stale")
+				}
+			case Retired:
+				if err := m.RetireProperty(from, "test", "test"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.retired {
+				if err := m.RetireRelationship(RelationshipID(from, target, ""), "test", "test"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 20 {
+				got, ok := m.LiveSlope(usage, target)
+				if !ok || got.LastSource != tc.wantSource || !nearly(got.Estimate(), tc.wantSlope) {
+					t.Fatalf("slope %+v (%t); want %s at %v", got, ok, tc.wantSource, tc.wantSlope)
+				}
+			}
+			if tc.status == Stale {
+				if err := m.Record(Observation{ID: from, Subject: "pod:a", Value: 0.2, At: m.now()}); err != nil {
+					t.Fatal(err)
+				}
+				if got, ok := m.LiveSlope(usage, target); !ok || got.LastSource != from {
+					t.Fatalf("fresh source did not restore its evidence: %+v (%t)", got, ok)
+				}
+			}
+		})
+	}
+}
+
+func TestInterventionSlopeCanExceedOne(t *testing.T) {
+	if got := (Slope{SlopeSum: 20, N: 1}).Estimate(); got != MaxInterventionSlope {
+		t.Fatalf("estimate %v; want persisted/corrupt sum capped at %v", got, MaxInterventionSlope)
+	}
 	m, _ := newTestMap(t, Config{})
 	from, to := "memory_utilization@pod:hog", "memory_contention_ratio"
 	for _, p := range []Property{
@@ -451,7 +512,7 @@ func TestDomainInterventionSlopeCanExceedOne(t *testing.T) {
 	mustRecord(t, m, InterventionOutcome{
 		From: from, To: to, Agreed: true, HasEffect: true, Effect: 4.8, DecisionID: "verify-sharp-response",
 	})
-	e, ok := m.MeasuredDomainEffect("memory_utilization", to)
+	e, ok := m.LiveSlope("memory_utilization", to)
 	if !ok || !nearly(e.Estimate(), 2) {
 		t.Fatalf("domain slope %+v (%t); want capped slope 4 shrunk to 2", e, ok)
 	}
@@ -466,24 +527,33 @@ func TestDomainInterventionSlopeCanExceedOne(t *testing.T) {
 	if ok, err := restored.Load(path); err != nil || !ok {
 		t.Fatalf("load: %t, %v", ok, err)
 	}
-	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); !ok || got != e {
+	if got, ok := restored.LiveSlope("memory_utilization", to); !ok ||
+		got.SlopeSum != e.SlopeSum || got.N != e.N || got.LastSource != e.LastSource ||
+		got.LastDecision != e.LastDecision || !got.Last.Equal(e.Last) {
 		t.Fatalf("restored slope %+v (%t); want %+v", got, ok, e)
 	}
 	id := RelationshipID(from, to, "")
 	if err := restored.RetireRelationship(id, "test", "test"); err != nil {
 		t.Fatal(err)
 	}
+	if got, ok := restored.LiveSlope("memory_utilization", to); ok {
+		t.Fatalf("retired relationship still selected: %+v", got)
+	}
 	if err := restored.DeclareRelationship(Relationship{From: from, To: to, Sign: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); ok {
-		t.Fatalf("revived relationship reused retired evidence: %+v", got)
+	if r, ok := restored.Relationship(id); !ok || r.Measured == nil || !nearly(*r.Measured, 1) {
+		t.Fatalf("revived relationship %+v (%t); want retained strength alongside slope", r, ok)
+	}
+	if got, ok := restored.LiveSlope("memory_utilization", to); !ok ||
+		got.N != e.N || !nearly(got.Estimate(), e.Estimate()) {
+		t.Fatalf("revived relationship slope %+v (%t); want retained evidence %+v", got, ok, e)
 	}
 	mustRecord(t, restored, InterventionOutcome{
 		From: from, To: to, Agreed: true, HasEffect: true, Effect: 0.4, DecisionID: "fresh",
 	})
-	if got, ok := restored.MeasuredDomainEffect("memory_utilization", to); !ok ||
-		got.N != 1 || !nearly(got.Estimate(), 0.2) || got.LastDecision != "fresh" {
-		t.Fatalf("revived relationship slope %+v (%t); want only fresh evidence", got, ok)
+	if got, ok := restored.LiveSlope("memory_utilization", to); !ok ||
+		got.N != 2 || !nearly(got.Estimate(), 4.4/3) || got.LastDecision != "fresh" {
+		t.Fatalf("revived relationship slope %+v (%t); want retained and fresh evidence", got, ok)
 	}
 }
