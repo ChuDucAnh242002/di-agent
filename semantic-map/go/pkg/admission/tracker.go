@@ -108,9 +108,6 @@ type Tracker struct {
 	mu       sync.Mutex
 	pending  []*entry // oldest first
 	outcomes []Outcome
-	// unclosed are accepts Restore could not close because the journal log could
-	// not be read: kept in Memory for the next start, never ticked.
-	unclosed []PendingAccept
 }
 
 type entry struct {
@@ -206,7 +203,7 @@ func (t *Tracker) pendingLocked() []PendingAccept {
 	for i, e := range t.pending {
 		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
 	}
-	return append(out, t.unclosed...)
+	return out
 }
 
 // Outcomes lists recent outcomes, newest first.
@@ -243,7 +240,7 @@ func (t *Tracker) Restore(mem Memory) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.outcomes = slices.Clone(mem.Outcomes)
-	t.pending, t.unclosed = nil, nil
+	t.pending = nil
 	for _, p := range mem.Pending {
 		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
 		// One id per accept: a snapshot older than the restart that closed it
@@ -252,14 +249,17 @@ func (t *Tracker) Restore(mem Memory) {
 		id := p.AcceptID + "-restarted"
 		d, ok, err := t.recorded(id)
 		if err != nil {
-			// Unknown whether it was closed: left pending, not risked as a duplicate.
-			t.c.Logf("admission: %s left pending: %v", p.AcceptID, err)
-			t.unclosed = append(t.unclosed, p)
-			continue
+			// The log errs only on an id it indexes, so the outcome was written:
+			// closed, just unreadable. Listed, not recorded a second time.
+			t.c.Logf("admission: %s: restart outcome logged but unreadable: %v", p.AcceptID, err)
 		}
-		if ok {
+		if ok || err != nil {
+			at := now
+			if d != nil {
+				at = d.At
+			}
 			t.outcomes = append(t.outcomes, Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id,
-				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: d.At})
+				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: at})
 			continue
 		}
 		t.outcomes = append(t.outcomes, t.recordAs(id, e, Confounded, "agent restarted", nil, nil, now))

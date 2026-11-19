@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -567,9 +568,9 @@ func TestAnAcceptIsClosedByARestartOnce(t *testing.T) {
 }
 
 // The restart outcome is looked up in the journal log too. Found there, it is not
-// recorded again; a log that cannot be read is an error, not a miss: the accept is
-// left pending for the next start rather than closed with a second outcome.
-func TestARestartCloseChecksTheLogAndAnUnreadableLogLeavesTheAcceptPending(t *testing.T) {
+// recorded again. A log that indexes it but cannot read it still holds it: the
+// accept is closed, listed with the outcome, and not recorded a second time.
+func TestARestartCloseChecksTheLogAndAnUnreadableLogStillClosesTheAccept(t *testing.T) {
 	dir := t.TempDir()
 	r := newRig(t)
 	d := r.accept("web")
@@ -613,25 +614,23 @@ func TestARestartCloseChecksTheLogAndAnUnreadableLogLeavesTheAcceptPending(t *te
 		t.Fatal(err)
 	}
 
-	// The log indexes the outcome but cannot read it: left pending, nothing recorded.
+	// The log indexes the outcome but cannot read it: closed and listed, nothing recorded.
 	r4 := newRig(t)
 	openLog(r4)
 	if err := os.Remove(filepath.Join(dir, statemap.JournalFileName)); err != nil {
 		t.Fatal(err)
 	}
 	r4.tr.Restore(mem)
-	if out := r4.tr.Outcomes(); len(out) != 0 || outcomes(r4) != 0 {
-		t.Fatalf("outcomes %+v, %d recorded; want none on an unreadable log", out, outcomes(r4))
+	if out := r4.tr.Outcomes(); len(out) != 1 || out[0].OutcomeID != d.ID+"-restarted" || outcomes(r4) != 0 {
+		t.Fatalf("outcomes %+v, %d recorded; want the logged one listed, none recorded", out, outcomes(r4))
 	}
-	if p := r4.tr.Memory().Pending; len(p) != 1 || p[0].AcceptID != d.ID {
-		t.Fatalf("pending %+v; want %s left for the next start", p, d.ID)
+	if p := r4.tr.Memory().Pending; len(p) != 0 {
+		t.Fatalf("pending %+v; want none", p)
 	}
-	if len(r4.logs) != 1 || !strings.Contains(r4.logs[0], d.ID+"-restarted") {
+	if !slices.ContainsFunc(r4.logs, func(l string) bool {
+		return strings.Contains(l, "logged but unreadable") && strings.Contains(l, d.ID+"-restarted")
+	}) {
 		t.Fatalf("logs %q; want the lookup error", r4.logs)
-	}
-	r4.tick(ArrivalWindow + time.Second) // not ticked: its clocks are gone
-	if p := r4.tr.PendingList(); len(p) != 1 || len(r4.tr.Outcomes()) != 0 {
-		t.Fatalf("after a tick pending %+v, outcomes %+v; want it still pending", p, r4.tr.Outcomes())
 	}
 }
 
