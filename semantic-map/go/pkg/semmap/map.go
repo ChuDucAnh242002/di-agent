@@ -469,10 +469,14 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.Candid
 		if rv.Association {
 			label = "association"
 		}
-		err := m.state.DeclareRelationship(statemap.Relationship{
+		declare := m.state.DeclareRelationship
+		if prop.Composition {
+			declare = m.state.DeclareComposition
+		}
+		err := declare(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct, Label: label, Sign: sign, Association: rv.Association,
-			Composition: prop.Composition, Provenance: statemap.Discovered,
-			Note: "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
+			Provenance: statemap.Discovered,
+			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
 		})
 		if err != nil {
 			return refused(err)

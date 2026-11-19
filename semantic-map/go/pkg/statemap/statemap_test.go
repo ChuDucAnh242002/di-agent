@@ -2655,7 +2655,11 @@ func signStreamMap(t *testing.T, rels ...Relationship) (*Map, *clock) {
 		}
 	}
 	for _, r := range rels {
-		if err := m.DeclareRelationship(r); err != nil {
+		declare := m.DeclareRelationship
+		if r.Composition {
+			declare = m.DeclareComposition
+		}
+		if err := declare(r); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2755,6 +2759,19 @@ func TestSignContradictedCompositionIsOnlyFlagged(t *testing.T) {
 	plain, _ := m.Relationship(RelationshipID("resource", "pressure", "plain"))
 	if plain.Status != Retired || plain.RetiredReason != ReasonSignContradicted {
 		t.Errorf("plain: status=%v reason=%q, want retired sign-contradicted", plain.Status, plain.RetiredReason)
+	}
+}
+
+// TestDeclareRelationshipDropsComposition: the composition mark exempts a relationship
+// from sign retirement, so a plain declaration — what POST /state/relationships
+// reaches — cannot set it; only DeclareComposition does.
+func TestDeclareRelationshipDropsComposition(t *testing.T) {
+	m, _ := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "x", Sign: 1})
+	if err := m.DeclareRelationship(Relationship{From: "pressure", To: "resource", Label: "x", Sign: 1, Composition: true}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Relationship(RelationshipID("pressure", "resource", "x")); r.Composition {
+		t.Errorf("declared relationship kept a caller-supplied composition: %+v", r)
 	}
 }
 
