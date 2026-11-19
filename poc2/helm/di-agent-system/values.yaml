@@ -51,9 +51,6 @@ pontos:
     repository: pontos-bridge
     tag: ""
   existingSecret: pontos-credentials
-  # Agent polling is independent of the source's per-sensor MQTT cadence.
-  # Integer seconds, minimum 1s. Empty polls produce no samples.
-  collectInterval: 1s
   # Empty selects all vessels, for the curated numeric signal set only.
   vessels: []
   # Empty uses the bridge's curated defaults. Override with tag -> {unit, range?}.
@@ -86,7 +83,7 @@ agent:
     reasoningBackend: none
   # Node-local: survives pod replacement, never shared between workers.
   persistence:
-    hostPath: /var/lib/di-agent-v6
+    hostPath: /var/lib/di-agent
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
   nodeSelector: {}

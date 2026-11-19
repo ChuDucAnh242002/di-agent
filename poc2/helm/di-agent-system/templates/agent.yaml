@@ -71,11 +71,7 @@ spec:
             - name: PORT
               value: {{ .Values.agent.port | quote }}
             - name: COLLECT_INTERVAL
-              {{- if .Values.pontos.enabled }}
-              value: {{ .Values.pontos.collectInterval | quote }}
-              {{- else }}
               value: {{ .Values.agent.collectInterval | quote }}
-              {{- end }}
             - name: PROPOSER
               value: {{ .Values.agent.proposer | quote }}
             - name: REVIEW_LEVEL
@@ -130,7 +126,7 @@ spec:
       volumes:
         - name: agent-state
           hostPath:
-            path: {{ dig "persistence" "hostPath" "/var/lib/di-agent-v6" .Values.agent | quote }}
+            path: {{ dig "persistence" "hostPath" "/var/lib/di-agent" .Values.agent | quote }}
             type: DirectoryOrCreate
         - name: host-cgroup
           hostPath:

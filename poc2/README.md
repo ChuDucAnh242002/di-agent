@@ -165,14 +165,14 @@ worker; do not configure multiple agents to poll the draining collector. Previou
 queued engine events may drain during a switch; PONTOS metric names and subjects
 are separate from engine names. To return to engine replay, disable `pontos.enabled`.
 
-In live mode, all worker agents poll at `pontos.collectInterval` (default `1s`,
-minimum `1s`, integer seconds). The collector averages only new arrivals per
+All worker agents use `agent.collectInterval` (default `5s`), whether or not
+PONTOS is enabled. The collector averages only new arrivals per
 vessel/sensor in that window. A faster source contributes several values; a slower
 or silent source is omitted until its next arrival. Polling does not change PONTOS's
-publisher rate or manufacture one-second readings. Engine-only mode keeps its
-existing `agent.collectInterval` default of `5s`.
+publisher rate or manufacture readings. To poll faster, set
+`--set agent.collectInterval=1s`; this also affects every agent's other collectors.
 
-To inspect availability and actual source cadence:
+To inspect availability:
 
 ```bash
 kubectl port-forward svc/pontos-bridge 8001:8000
@@ -180,12 +180,9 @@ curl -s http://localhost:8001/status
 ```
 
 `/status` reports connection/subscription errors, received/published/dropped counts,
-queue depth, and each observed vessel/parameter's min/mean/max source interval and
-last-source age. Cadence requires at least two distinct source timestamps; it is
-not a guaranteed future rate and can include transport gaps. `/ready` returns 503
+queue depth, and tracked series count. `/ready` returns 503
 until MQTT subscriptions and Kafka are ready, but a connected feed may legitimately
-have no measurements. Tune `--set pontos.collectInterval=5s`, for example, after
-observing cadence. View the designated agent pod's `/ui/` and `/state` rather than
+have no measurements. View the designated agent pod's `/ui/` and `/state` rather than
 the load-balanced agent Service.
 
 The default curated selection is main-engine RPM, power and fuel consumption,
@@ -195,7 +192,9 @@ vessels for these tags; no coverage is assumed. Narrow it with
 tag-to-`{unit, range?}` mapping to select other numeric signals. Do not include
 angles without a separate circular-aggregation implementation.
 
-Subjects are `vessel:<vessel_id>` (unrepresentable names are reversibly encoded).
+Subjects are `vessel:<vessel_id>`. Vessel IDs and sensor indices that cannot be
+represented by the collector's subject and metric-name character sets are logged
+and dropped.
 Metric names include both tag and sensor index, e.g.
 `pontos.enginemain_power_kw.i_1`; multiple engines are never merged into one sensor.
 Live events carry `origin=live`, physical units, original source timestamps and
@@ -212,10 +211,13 @@ not proof of causality. Use actual processing workloads and host cgroup readings
 to evaluate orchestration benefits.
 
 PONTOS supports MQTT QoS 0 only. The bridge reconnects with backoff, bounds its
-queue/series count, retries Kafka delivery, and visibly drops malformed, stale,
+queue/series count, and visibly drops malformed, stale,
 duplicate/out-of-order or overflow records. Source age above
 `pontos.maxSourceAgeSeconds` (default 300) is rejected, including old Kafka backlog
 and collector aggregates that expire while waiting for an agent poll.
+Inactive series are removed from the duplicate-tracking cache when space is needed.
+Kafka's producer retries deliveries, but the bridge does not re-send a record after
+a failed delivery: an error can leave its delivery outcome unknown.
 There is no exactly-once guarantee or historical backfill; restarts may lose
 pending observations. Retained old readings are not treated as fresh measurements.
 After renewing the token, run `make pontos-secret` and
@@ -387,18 +389,14 @@ Missing ranges still prevent persistence from accumulating. See the
 [persistence requirements](../semantic-map/README.md#rules-only-persistent-correlation).
 
 The agent mounts `/var/lib/di-agent` from `agent.persistence.hostPath` (default:
-`/var/lib/di-agent-v6`) on each worker. This separate host directory avoids loading
-incompatible state left at the previous default; the old directory is left untouched.
-This is state isolation, not migration: a new directory starts with no prior evidence.
-State and discovery checkpoints survive pod
+`/var/lib/di-agent`) on each worker. State and discovery checkpoints survive pod
 replacement on that worker; they are not shared across nodes and do not survive loss
 of the node's disk. Fresh evidence resumes only within `map.stale_after` and under
 matching discovery settings; stale checkpoints start a new evidence run. An unclean
 exit loses at most the last snapshot interval of progress. Existing state held only
 inside an old container is not automatically migrated by adding the host mount.
-Snapshot format 6 is current; older formats, including format 5, are rejected.
-Older binaries cannot read format 6, so back up existing state before upgrading
-if rollback is required.
+Snapshot compatibility depends on the agent version; back up existing state before
+upgrading if rollback is required.
 
 To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090/ui/` (the chart sets `agent.ui: true`; the agent is headless without it). Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 

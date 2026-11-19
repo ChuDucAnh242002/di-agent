@@ -68,16 +68,16 @@ PONTOS vessel/sensor topics over MQTT v5/TLS WebSockets. The access token is mou
 from an existing Secret, never embedded in values or images. Source measurements
 are forwarded asynchronously to the same Kafka topic with `origin=live`, original
 timestamps, physical units, vessel subjects and distinct sensor-index metric names.
-The bridge exposes observed source cadence and bounded queue/drop status; it
-reconnects and retries Kafka delivery without claiming exactly-once delivery.
+The bridge exposes bounded queue/drop status and reconnects without claiming
+exactly-once delivery; failed Kafka deliveries are not re-sent by the bridge.
 Engine replay and its CSV ingestion hook are suppressed in this mode, but
-PostgreSQL data is retained. Worker collection uses `pontos.collectInterval`,
-default/minimum `1s`; empty arrival windows return no observations.
+PostgreSQL data is retained. Worker collection uses `agent.collectInterval`,
+default `5s`; empty arrival windows return no observations.
 
 The shared collector accepts optional explicit subjects while retaining the
 engine fallback. Replay metadata still requires ranges; live rates can omit them
-rather than invent operating limits. Live declaration and subject changes are
-rejected, and stale live Kafka backlog is dropped. Vessel signals remain unrouted
+rather than invent operating limits. Conflicting declarations or subjects in a
+pending aggregate are rejected, and stale live Kafka backlog is dropped. Vessel signals remain unrouted
 and do not automatically change host RC/PS or routing. See the
 [live setup and limitations](README.md#continuous-pontos-vessel-data-live-mqtt).
 
@@ -95,11 +95,6 @@ The collector averages all new Kafka values for each `(run_id, signal)` during o
 - `scripts/04-peers.sh` discovers ready agent pods and registers their host-IP endpoints.
 
 The agent mesh and telemetry services now share one Helm lifecycle. Three agents require three eligible workers in addition to the control plane. Legacy agent Deployments must be removed before migration to avoid host-port conflicts.
-
-Worker state defaults to the host directory `/var/lib/di-agent-v6`, mounted at
-`/var/lib/di-agent` inside the container. This isolates version-6 snapshots from
-incompatible older state without changing the semantic-map loader or deleting
-the old directory. A new directory starts cold; this is not snapshot migration.
 
 ## Infrastructure architecture
 

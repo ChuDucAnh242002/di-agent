@@ -69,15 +69,23 @@ class AgentDeploymentTests(unittest.TestCase):
         self.assertIn("name: pontos-bridge", rendered)
         self.assertIn("secretName: pontos-credentials", rendered)
         self.assertIn("mountPath: /var/run/secrets/pontos", rendered)
-        self.assertIn('name: COLLECT_INTERVAL\n              value: "1s"', rendered)
+        self.assertIn('name: COLLECT_INTERVAL\n              value: "5s"', rendered)
         self.assertNotIn("name: replay-streamer", rendered)
         self.assertNotIn("name: postgres-ingest", rendered)
         self.assertNotIn("username_pw_set", rendered)
 
-    def test_live_pontos_rejects_missing_worker_or_invalid_interval(self):
+    def test_live_pontos_uses_configured_agent_interval(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART),
+             "--set", "pontos.enabled=true", "--set", "agent.datasetNodeName=worker-1",
+             "--set", "agent.collectInterval=2s"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn('name: COLLECT_INTERVAL\n              value: "2s"', rendered)
+
+    def test_live_pontos_rejects_invalid_configuration(self):
         for overrides in [
             [],
-            ["--set", "agent.datasetNodeName=worker-1", "--set", "pontos.collectInterval=0s"],
             ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.enabled=false"],
             ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.kafkaTopic=other"],
         ]:
@@ -310,7 +318,7 @@ sys.exit(1 if count == 1 else 0)
 
         baseline = render()
         self.assertIn("mountPath: /var/lib/di-agent", baseline)
-        self.assertIn('path: "/var/lib/di-agent-v6"', baseline)
+        self.assertIn('path: "/var/lib/di-agent"', baseline)
         self.assertIn("type: DirectoryOrCreate", baseline)
         self.assertNotIn("diagent.io/restartedAt:", baseline)
         self.assertNotIn("diagent.io/config-checksum:", baseline)

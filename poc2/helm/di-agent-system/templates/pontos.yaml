@@ -5,9 +5,6 @@
 {{- if ne .Values.datasetCollector.kafkaTopic .Values.streamer.kafkaTopic }}
 {{- fail "PONTOS requires datasetCollector.kafkaTopic and streamer.kafkaTopic to match for collector/writer delivery" }}
 {{- end }}
-{{- if not (regexMatch "^[1-9][0-9]*s$" .Values.pontos.collectInterval) }}
-{{- fail "pontos.collectInterval must be integer seconds, minimum 1s" }}
-{{- end }}
 {{- if not .Values.pontos.existingSecret }}
 {{- fail "pontos.existingSecret must name a Secret containing access-token" }}
 {{- end }}
