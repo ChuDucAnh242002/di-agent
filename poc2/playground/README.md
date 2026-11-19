@@ -38,5 +38,7 @@ services. The dataset tests are stubbed; they do not prove end-to-end Kafka,
 InfluxDB, or agent ingestion.
 
 The container uses nginx and the Helm chart to expose configured services.
-Dataset replay writes are unauthenticated; restrict access to trusted
-developers and networks.
+With dataset controls enabled, the playground Service is ClusterIP. Use
+`kubectl port-forward svc/playground 8080:80` for developer access. Dataset
+replay writes are unauthenticated; restrict in-cluster access to trusted
+workloads.

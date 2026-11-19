@@ -206,11 +206,11 @@ kubectl port-forward svc/playground 8080:80
 kubectl port-forward svc/grafana 3000:3000
 ```
 
-Open `http://localhost:8080`. Dataset settings can be changed without a
-password by anyone who can reach the playground; changes affect the shared
-stream. The playground NodePort and the in-cluster replay-streamer are not
-authenticated. Restrict access to trusted developers and networks, or use an
-authenticated TLS ingress. The local Vite development proxy is also
+Open `http://localhost:8080` through the port-forward. With dataset controls
+enabled, the playground Service is ClusterIP instead of NodePort. Dataset
+writes are not authenticated and affect the shared stream: limit in-cluster
+access to trusted workloads, and do not expose the Service outside the cluster
+without authentication. The local Vite development proxy is also
 unauthenticated and must not be exposed to untrusted networks.
 
 Grafana provisions an **Engine dataset telemetry** dashboard at
