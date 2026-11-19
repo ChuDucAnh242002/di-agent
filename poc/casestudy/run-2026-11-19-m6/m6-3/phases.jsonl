@@ -1,0 +1,19 @@
+{"t":1795085799.998265479,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.pre-master-20261119T125639"}
+{"t":1795085800.007891869,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.prev.pre-master-20261119T125639"}
+{"t":1795085800.016754504,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261119T125639"}
+{"t":1795085800.025185345,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T091944.pre-master-20261113T135829.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.033976647,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T135829.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.042456113,"mono":532575.2,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.054141890,"mono":532575.3,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261115T211636.pre-master-20261119T112316.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.062723773,"mono":532575.3,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261119T112316.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.071255615,"mono":532575.3,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261119T121034.pre-master-20261119T125639"}
+{"t":1795085800.088968802,"mono":532575.3,"phase":"prep","event":"ran: systemctl stop ollama.service","inc":null,"seq":null,"exit":0}
+{"t":1795085800.097129642,"mono":532575.3,"phase":"prep","event":"ready","inc":null,"seq":null}
+{"t":1795085801.147725342,"mono":532576.4,"phase":"M0","event":"start","inc":1,"seq":12,"version":{"agent_version":"0.1.0","go_version":"go1.26.5","build_commit":"7f3d3e1","semmap_constructs":0,"semmap_propositions":0}}
+{"t":1795085801.158626655,"mono":532576.4,"phase":"M6","event":"start","inc":1,"seq":12}
+{"t":1795085801.403189631,"mono":532576.6,"phase":"M6","event":"applied mem-victim","inc":1,"seq":12,"subject":"pod:7be3fe86-69de-4f39-a787-94e2118b090f"}
+{"t":1795085867.718121480,"mono":532642.9,"phase":"M6","event":"applied page-hog","inc":1,"seq":263,"subject":"pod:e2a1a1c3-90fa-48e0-b2a5-4282017dd037"}
+{"t":1795088530.356753298,"mono":535305.6,"phase":"M6","event":"end","inc":1,"seq":369}
+{"t":1795088530.409919408,"mono":535305.6,"phase":"M9","event":"read for the readout","inc":1,"seq":369,"verify":"relief-verify-memory.high-1.337","first":"review-1.278-1e9d63c0"}
+{"t":1795088530.426061568,"mono":535305.6,"phase":"teardown","event":"start","inc":1,"seq":369}
+{"t":1795088563.616992637,"mono":535338.8,"phase":"teardown","event":"end","inc":null,"seq":null}

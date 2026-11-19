@@ -1,0 +1,12 @@
+20:40:38 holding 11 GiB anonymous
+20:40:38 watching /host-cg/burstable/pod33ecd7cc-828f-4a6e-aeb7-865c634e247b
+20:41:38 files=1 (256 MiB) MemAvailable=21%
+20:42:38 files=2 (512 MiB) MemAvailable=21%
+20:43:38 files=3 (768 MiB) MemAvailable=21%
+20:44:38 files=4 (1024 MiB) MemAvailable=21%
+20:45:38 files=5 (1280 MiB) MemAvailable=21%
+20:46:38 files=6 (1536 MiB) MemAvailable=21%
+20:47:38 files=7 (1792 MiB) MemAvailable=21%
+20:48:38 files=8 (2048 MiB) MemAvailable=21%
+20:49:38 files=9 (2304 MiB) MemAvailable=21%
+20:50:39 files=10 (2560 MiB) MemAvailable=21%

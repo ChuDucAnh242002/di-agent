@@ -1,0 +1,17 @@
+{"t":1795080196.608354561,"mono":526971.8,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.pre-master-20261119T112316"}
+{"t":1795080196.653239060,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.prev.pre-master-20261119T112316"}
+{"t":1795080196.662276921,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261119T112316"}
+{"t":1795080196.671057897,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T091944.pre-master-20261113T135829.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316"}
+{"t":1795080196.680231513,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T135829.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316"}
+{"t":1795080196.688767145,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T191942.pre-master-20261115T211636.pre-master-20261119T112316"}
+{"t":1795080196.698558286,"mono":526971.9,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261115T211636.pre-master-20261119T112316"}
+{"t":1795080196.723318191,"mono":526971.9,"phase":"prep","event":"ran: systemctl stop ollama.service","inc":null,"seq":null,"exit":0}
+{"t":1795080196.732113917,"mono":526971.9,"phase":"prep","event":"ready","inc":null,"seq":null}
+{"t":1795080197.809823712,"mono":526973.0,"phase":"M0","event":"start","inc":1,"seq":12,"version":{"agent_version":"0.1.0","go_version":"go1.26.5","build_commit":"7f3d3e1","semmap_constructs":0,"semmap_propositions":0}}
+{"t":1795080197.821237625,"mono":526973.0,"phase":"M6","event":"start","inc":1,"seq":12}
+{"t":1795080198.033519749,"mono":526973.2,"phase":"M6","event":"applied mem-victim","inc":1,"seq":12,"subject":"pod:7ad13774-f9ef-4f9b-883a-89320cab647a"}
+{"t":1795080264.456334728,"mono":527039.7,"phase":"M6","event":"applied page-hog","inc":1,"seq":263,"subject":"pod:d7435930-9f37-4fdb-856f-71313fcba16c"}
+{"t":1795082925.148205993,"mono":529700.4,"phase":"M6","event":"end","inc":1,"seq":358}
+{"t":1795082925.200350806,"mono":529700.4,"phase":"M9","event":"read for the readout","inc":1,"seq":358,"verify":"relief-verify-memory.high-1.340","first":"review-1.278-6d77cb58"}
+{"t":1795082925.216117881,"mono":529700.4,"phase":"teardown","event":"start","inc":1,"seq":358}
+{"t":1795082958.694650825,"mono":529733.9,"phase":"teardown","event":"end","inc":null,"seq":null}
