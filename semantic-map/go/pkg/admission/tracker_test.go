@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -561,6 +564,73 @@ func TestAnAcceptIsClosedByARestartOnce(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d outcome decisions cite %s; want 1", n, d.ID)
+	}
+}
+
+// The restart outcome is looked up in the journal log too. Found there, it is not
+// recorded again. A log that indexes it but cannot read it still holds it: the
+// accept is closed, listed with the outcome, and not recorded a second time.
+func TestARestartCloseChecksTheLogAndAnUnreadableLogStillClosesTheAccept(t *testing.T) {
+	dir := t.TempDir()
+	r := newRig(t)
+	d := r.accept("web")
+	mem := r.tr.Memory()
+	outcomes := func(r *rig) int {
+		n := 0
+		for _, rec := range r.j.Decisions(0, "admission.outcome") {
+			if len(rec.Cites) == 1 && rec.Cites[0] == d.ID {
+				n++
+			}
+		}
+		return n
+	}
+	openLog := func(r *rig) {
+		t.Helper()
+		if err := r.m.OpenLog(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { r.m.CloseLog() })
+	}
+
+	// A miss: closed once, and the outcome goes to the log.
+	r2 := newRig(t)
+	openLog(r2)
+	r2.tr.Restore(mem)
+	if n, p := outcomes(r2), r2.tr.PendingList(); n != 1 || len(p) != 0 {
+		t.Fatalf("%d outcomes, pending %+v; want closed once", n, p)
+	}
+	if err := r2.m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Already in the log: listed, not recorded again.
+	r3 := newRig(t)
+	openLog(r3)
+	r3.tr.Restore(mem)
+	if out := r3.tr.Outcomes(); len(out) != 1 || out[0].OutcomeID != d.ID+"-restarted" || outcomes(r3) != 0 {
+		t.Fatalf("outcomes %+v, %d recorded; want the logged one, none recorded", out, outcomes(r3))
+	}
+	if err := r3.m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The log indexes the outcome but cannot read it: closed and listed, nothing recorded.
+	r4 := newRig(t)
+	openLog(r4)
+	if err := os.Remove(filepath.Join(dir, statemap.JournalFileName)); err != nil {
+		t.Fatal(err)
+	}
+	r4.tr.Restore(mem)
+	if out := r4.tr.Outcomes(); len(out) != 1 || out[0].OutcomeID != d.ID+"-restarted" || outcomes(r4) != 0 {
+		t.Fatalf("outcomes %+v, %d recorded; want the logged one listed, none recorded", out, outcomes(r4))
+	}
+	if p := r4.tr.Memory().Pending; len(p) != 0 {
+		t.Fatalf("pending %+v; want none", p)
+	}
+	if !slices.ContainsFunc(r4.logs, func(l string) bool {
+		return strings.Contains(l, "logged but unreadable") && strings.Contains(l, d.ID+"-restarted")
+	}) {
+		t.Fatalf("logs %q; want the lookup error", r4.logs)
 	}
 }
 

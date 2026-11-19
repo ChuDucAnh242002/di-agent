@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -246,9 +247,19 @@ func (t *Tracker) Restore(mem Memory) {
 		// (state.json.prev) brings it back as pending, and the outcome already in
 		// the journal or its log closes it again without a second record.
 		id := p.AcceptID + "-restarted"
-		if d, ok := t.recorded(id); ok {
+		d, ok, err := t.recorded(id)
+		if err != nil {
+			// The log errs only on an id it indexes, so the outcome was written:
+			// closed, just unreadable. Listed, not recorded a second time.
+			t.c.Logf("admission: %s: restart outcome logged but unreadable: %v", p.AcceptID, err)
+		}
+		if ok || err != nil {
+			at := now
+			if d != nil {
+				at = d.At
+			}
 			t.outcomes = append(t.outcomes, Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id,
-				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: d.At})
+				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: at})
 			continue
 		}
 		t.outcomes = append(t.outcomes, t.recordAs(id, e, Confounded, "agent restarted", nil, nil, now))
@@ -489,14 +500,18 @@ func (t *Tracker) recordAs(id string, e *entry, result, reason string, lines []O
 	return o
 }
 
-// recorded finds a decision held in the journal or written to its log.
-func (t *Tracker) recorded(id string) (*statemap.Decision, bool) {
+// recorded finds a decision held in the journal or written to its log. A log
+// that cannot be read or does not verify is an error, not a miss.
+func (t *Tracker) recorded(id string) (*statemap.Decision, bool, error) {
 	j := t.c.Map.Journal()
 	if d, ok := j.Decision(id); ok {
-		return d, true
+		return d, true, nil
 	}
 	d, ok, err := j.DecisionFromLog(id)
-	return d, ok && err == nil
+	if err != nil {
+		return nil, false, fmt.Errorf("journal log: reading %s: %w", id, err)
+	}
+	return d, ok, nil
 }
 
 // rise is a basis's predicted rise over the pressure it was made from, and its
