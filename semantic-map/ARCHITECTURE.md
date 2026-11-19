@@ -783,12 +783,12 @@ This is not tidiness. Two failures were live without it, both silent:
   windows are the substance: folds share all but one pair of a window of smoothed
   values, so the 30 folds the flag needs can rest on one or two effective draws, and at
   the defaults a correctly signed but noisy relationship (y = 0.5x + noise) was retired
-  on the first eligible fold in 7 of 10 seeded runs. Retirement happens on the transition of that combined predicate only: re-declaring the
-  relationship revives it with its counters, flag still set, and does not retire it
-  again while the predicate holds; if the conflict share then drops below the bar and
-  rises past it again, the revived relationship is retired again, and
-  `ResetRelationship` clears the counters and gives it a fresh trial. The pair's
-  intervention counters are untouched.
+  on the first eligible fold in 7 of 10 seeded runs. Retirement happens on the
+  transition of that combined predicate only: re-declaring the relationship revives it
+  with its counters, flag still set, and does not retire it again while the predicate
+  holds; if the conflict share then drops below the bar and rises past it again, the
+  revived relationship is retired again, and `ResetRelationship` clears the counters and
+  gives it a fresh trial. The pair's intervention counters are untouched.
 
 **How many observations a relationship gets.** A relationship advances on a *pair*, so
 its `n_obs` counts the times both its endpoints were observed close enough together —
