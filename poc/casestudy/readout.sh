@@ -260,12 +260,14 @@ row M6 03 "intervention learning: page-hog memory -> memory_contention_ratio pro
 if [ -s "$OUT/m9-verify-explain.txt" ]; then
     ct=$(grep -i '^content-type' "$OUT/m9-verify-explain.headers" | tr -d '\r')
     vid=$(jq -r '.decision.id' "$OUT/m9-verify-chain.json" 2>/dev/null)
-    pv=$(jq -r '"\(.decision.answer.predicted * 1000 | round / 1000) \(.decision.answer.observed * 1000 | round / 1000)"' "$OUT/m9-verify-chain.json" 2>/dev/null)
+    # The explain prints numbers to three significant digits (strconv 'g', 3 in pkg/explain), as %.3g does.
+    pv=""; for x in $(jq -r '.decision.answer | "\(.predicted) \(.observed)"' "$OUT/m9-verify-chain.json" 2>/dev/null); do
+        [[ "$x" =~ ^[-+0-9.eE]+$ ]] && x=$(LC_ALL=C printf '%.3g' "$x"); pv="${pv:+$pv }$x"; done
     sub=$(grep -o 'pod:[0-9a-f-]*' "$OUT/m9-verify-explain.txt" | head -1)
     ok=false
     [[ "$ct" == *text/plain* ]] && [ -n "$sub" ] && grep -qF "$hog" "$OUT/m9-verify-explain.txt" && grep -qF "${pv% *}" "$OUT/m9-verify-explain.txt" && grep -qF "${pv#* }" "$OUT/m9-verify-explain.txt" && ok=true
     row M6 06 "narrative: explain is text/plain, names the subject and the record's predicted and observed numbers" \
-        "$(verdict "$ok")" "$ct; verify $vid on ${sub:-no subject} (page-hog $hog); predicted/observed rounded: $pv; $(head -c 300 "$OUT/m9-verify-explain.txt")"
+        "$(verdict "$ok")" "$ct; verify $vid on ${sub:-no subject} (page-hog $hog); predicted/observed as the explain prints them: $pv; $(head -c 300 "$OUT/m9-verify-explain.txt")"
 else row M6 06 "narrative (explain)" "$([ "$(jq length <<<"$acts")" = 0 ] && echo "not exercised" || echo unverifiable)" "no explain read at M9"; fi
 ids=$(jq -r 'select(.status == 200) | (.body.decisions[]?.id // empty), (.body.decision_id? // empty)' "$OUT/capture.jsonl" 2>/dev/null | sort -u)
 ids2=$(jq -r '.. | .decision_id? // empty' "$OUT/phases.jsonl" | sort -u)

@@ -66,9 +66,11 @@ criterion fired.
 
 Neither fail is a relief defect:
 
-- **Narrative:** a readout rounding artefact. The readout rounds predicted and observed to 3 decimals
-  (0.0955 → 0.096), and the explain prints 4 (0.0955). It passes only when the 3-decimal string is a
-  prefix of the 4-decimal one.
+- **Narrative:** a readout rounding artefact. The readout rounded predicted and observed to 3 decimals
+  (0.0955 → 0.096), while the explain prints three significant digits (0.0955), so it passed only when
+  the 3-decimal string was a prefix of the explain's. The readout is fixed: it now formats both numbers
+  as the explain does (`%.3g`), with a readout_test.sh case for 0.0955; the explain excerpts above show
+  the predicted numbers (0.0896, 0.0955, 0.0843) in that form.
 - **Durable log:** a short-run artefact. In 45 min the run's first decision is still in the in-memory
   journal (`from: null`), so there is no evicted id to answer from the log. Every captured id was on a
   digest-verified line.

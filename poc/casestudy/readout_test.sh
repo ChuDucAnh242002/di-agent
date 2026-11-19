@@ -80,8 +80,15 @@ grep -F "twins associated" "$TMP/pass/results-readout.md" | grep -q '"minute":60
     && echo "ok   pass: twins reading has the minute and the pace then" \
     || { echo "FAIL pass: twins reading lacks minute 60 / pace slow"; fails=$((fails + 1)); }
 expect pass "interval: sensitivity_low" unverifiable
-for c in svc rf-ok rf-bad; do "$HERE/readout.sh" "$TMP/$c" >/dev/null 2>&1; done
+# narr: a verify whose predicted 0.0955 the explain prints to three significant digits.
+mkdir -p "$TMP/narr"; cp "$TMP/pass/capture.jsonl" "$TMP/pass/journal.ndjson" "$TMP/narr/"
+{ cat "$TMP/pass/phases.jsonl"; mark $((T + 6000)) M6 "applied page-hog" 1 9 | jq -c '. + {subject: "pod:h"}'; } >"$TMP/narr/phases.jsonl"
+echo '{"decision": {"id": "v", "answer": {"predicted": 0.0955, "observed": 0.089}}}' >"$TMP/narr/m9-verify-chain.json"
+printf 'Content-Type: text/plain; charset=utf-8\r\n' >"$TMP/narr/m9-verify-explain.headers"
+echo 'v [relief.verify]: capped pod:h (memory.high to 1.35e+10 bytes); predicted a drop of 0.0955 from x; observed 0.089; kept' >"$TMP/narr/m9-verify-explain.txt"
+for c in svc rf-ok rf-bad narr; do "$HERE/readout.sh" "$TMP/$c" >/dev/null 2>&1; done
 expect svc "self observed" pass
 expect rf-ok "restore.failed reaches the durable log" pass
 expect rf-bad "restore.failed reaches the durable log" fail
+expect narr "narrative: explain is text/plain" pass
 exit $((fails > 0))

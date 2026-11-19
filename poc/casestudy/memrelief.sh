@@ -13,7 +13,8 @@
 # the room is 2.5 GiB rather than page-hog.yaml's 1.5 GiB (sized for master.sh, which stops
 # Ollama): about what the old fixed 6 GiB of anonymous memory left beside the loaded model
 # (MemAvailable 2.4 GB, run 3 of run-2026-10-23-memrelief/results.md, which says what the runs
-# showed). The model must be loaded before page-hog starts, or the hog takes its room.
+# showed). The model must be loaded before page-hog starts, or the hog takes its room: the run
+# refuses (exit 1) when Ollama's /api/ps lists no model at that point.
 # page-hog's file set fills the room in under ten minutes.
 # Phase 2 (default 10 min; 0 skips it): mem-squeeze alone, which limits itself at its own 64Mi limit.
 # Expected: no memory action, memory_contention_ratio < 0.08 while its memory_events_high or
@@ -119,6 +120,14 @@ finish() {
 sleep 120; tick; mark "baseline taken"
 "${K[@]}" apply -f workloads/mem-victim.yaml >/dev/null && mark "applied mem-victim ($(uid mem-victim))"
 sleep 60
+# Ollama at the url agent-relief.yaml's decision backend uses.
+OLLAMA=$(grep -o 'url: "[^"]*"' agent-relief.yaml | head -1 | cut -d'"' -f2)
+if [ "$(curl -s --max-time 10 "$OLLAMA/api/ps" | jq '.models | length' 2>/dev/null)" -ge 1 ] 2>/dev/null; then
+    mark "precondition: Ollama has a model loaded ($(curl -s --max-time 10 "$OLLAMA/api/ps" | jq -r '[.models[].name] | join(",")'))"
+else
+    mark "refused: Ollama at $OLLAMA has no model loaded, and page-hog would take its room; load it and rerun"
+    "${K[@]}" delete pod mem-victim --ignore-not-found --wait=false >/dev/null; exit 1
+fi
 sed -e "s/__VICTIM_UID__/$(uid mem-victim)/" -e 's/name: ROOM_MIB, value: "1536"/name: ROOM_MIB, value: "2560"/' workloads/page-hog.yaml | "${K[@]}" apply -f - >/dev/null; sleep 5; HOG_UID=$(uid page-hog); mark "applied page-hog ($HOG_UID)"
 observe "$P1" mem-victim page-hog
 "${K[@]}" logs page-hog >"$OUT/page-hog.log" 2>/dev/null || true
