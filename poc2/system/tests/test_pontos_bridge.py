@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -40,12 +41,12 @@ def test_maps_live_topic_with_units_identity_and_source_time(pontos):
     assert all("/imo_9007128/" in topic for topic, _ in config.subscriptions())
 
 
-def test_distinct_indices_and_escaped_vessels_cannot_collide(pontos):
+def test_distinct_vessels_and_indices_cannot_collide(pontos):
     config = pontos.BridgeConfig()
     messages = [
         pontos.map_message(config, f"PONTOS_EGRESS/{vessel}/enginemain_power_kw/{index}", payload(), NOW)
-        for vessel in ["name_My Ship", "name_hex_4d792053686970"]
-        for index in ["1", "2", "shaft A", "x_73686166742041"]
+        for vessel in ["name_My_Ship", "imo_9007128"]
+        for index in ["1", "2"]
     ]
     assert len({(m["run_id"], m["signal"]) for m in messages}) == len(messages)
     assert all(pontos.SUBJECT_RE.fullmatch(m["metadata"]["subject"]) for m in messages)
@@ -56,6 +57,8 @@ def test_distinct_indices_and_escaped_vessels_cannot_collide(pontos):
     ("PONTOS_EGRESS/imo_9007128/unknown/1", payload()),
     ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw", payload()),
     ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/+", payload()),
+    ("PONTOS_EGRESS/name_My Ship/enginemain_power_kw/1", payload()),
+    ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/shaft A", payload()),
     ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1", b"not JSON"),
     ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1", b"[]"),
     ("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1", payload(value="NaN")),
@@ -71,17 +74,13 @@ def test_invalid_or_stale_measurement_is_logged_and_never_queued(pontos, caplog,
     assert "Dropping PONTOS measurement" in caplog.text
 
 
-def test_cadence_uses_source_timestamps_and_duplicates_do_not_change_it(pontos):
+def test_duplicate_or_out_of_order_measurements_are_rejected(pontos):
     bridge = pontos.PontosBridge()
     topic = "PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1"
     for offset in [0, 2, 7]:
         assert bridge.accept(topic, payload(timestamp=NOW + offset), NOW + 7)
     assert not bridge.accept(topic, payload(timestamp=NOW + 2), NOW + 7)
-    state, = bridge.status()["series"].values()
-    assert state["interval_count"] == 2
-    assert state["mean_interval_seconds"] == 3.5
-    assert state["min_interval_seconds"] == 2
-    assert state["max_interval_seconds"] == 5
+    assert bridge.status()["series_count"] == 1
     assert bridge.status()["received"] == 3
 
 
@@ -96,6 +95,16 @@ def test_queue_and_series_limits_drop_visibly_without_replacing_data(pontos, con
     assert bridge.status()["dropped"] == 1
     assert bridge._queue.get_nowait()["signal"] == "pontos.enginemain_power_kw.i_1"
     assert "Dropping PONTOS measurement" in caplog.text
+
+
+def test_expired_series_can_be_replaced_without_exhausting_limit(pontos):
+    bridge = pontos.PontosBridge(pontos.BridgeConfig(max_active_series=1))
+    assert bridge.accept("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1", payload(), NOW)
+    assert bridge.accept(
+        "PONTOS_EGRESS/imo_9007128/enginemain_power_kw/2", payload(NOW + 301), NOW + 301,
+    )
+    assert bridge.status()["series_count"] == 1
+    assert bridge.status()["dropped"] == 0
 
 
 @pytest.mark.parametrize("config", [
@@ -159,26 +168,58 @@ def test_successful_v5_callbacks_mark_ready_and_disconnect_clears_it(pontos):
     assert not bridge.status()["subscribed"]
 
 
-def test_kafka_delivery_retry_keeps_the_same_measurement(pontos, caplog):
+def test_dead_mqtt_loop_makes_health_and_readiness_fail(pontos, monkeypatch):
+    bridge = pontos.PontosBridge()
+    bridge._worker = MagicMock()
+    bridge._worker.is_alive.return_value = True
+    bridge._mqtt = pontos.mqtt.Client(protocol=pontos.mqtt.MQTTv5)
+    bridge._mqtt_connected = bridge._subscribed = bridge._kafka_connected = True
+    monkeypatch.setattr(pontos, "bridge", bridge)
+    started = threading.Event()
+    release = threading.Event()
+    failures = []
+
+    def fail_loop(**kwargs):
+        started.set()
+        release.wait(timeout=5)
+        raise RuntimeError("fixture callback failure")
+
+    monkeypatch.setattr(bridge._mqtt, "loop_forever", fail_loop)
+    monkeypatch.setattr(threading, "excepthook", lambda args: failures.append(args.exc_value))
+    from fastapi import Response
+    bridge._mqtt.loop_start()
+    try:
+        assert started.wait(timeout=5)
+        response = Response()
+        pontos.status(response)
+        assert response.status_code == 200
+        release.set()
+        bridge._mqtt._thread.join(timeout=5)
+        assert failures and str(failures[0]) == "fixture callback failure"
+        for endpoint in (pontos.health, pontos.status):
+            response = Response()
+            endpoint(response)
+            assert response.status_code == 503
+    finally:
+        release.set()
+        bridge._mqtt.loop_stop()
+
+
+def test_kafka_delivery_failure_is_not_resent(pontos, caplog):
     bridge = pontos.PontosBridge()
     now = time.time()
     assert bridge.accept("PONTOS_EGRESS/imo_9007128/enginemain_power_kw/1", payload(now), now)
     producer = MagicMock()
-    attempts = 0
-
-    def deliver(**kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise KafkaTimeoutError("fixture delivery failure")
+    def deliver():
         bridge._stop.set()
+        raise KafkaTimeoutError("fixture delivery failure")
 
     producer.send.return_value.get.side_effect = deliver
-    with patch.object(pontos, "KafkaProducer", return_value=producer), patch.object(bridge._stop, "wait", return_value=False):
+    with patch.object(pontos, "KafkaProducer", return_value=producer):
         bridge._publish()
-    assert producer.send.call_count == 2
-    assert producer.send.call_args_list[0] == producer.send.call_args_list[1]
-    assert bridge.status()["published"] == 1
-    assert bridge.status()["dropped"] == 0
+    producer.send.assert_called_once()
+    producer.send.return_value.get.assert_called_once_with()
+    assert bridge.status()["published"] == 0
+    assert bridge.status()["dropped"] == 1
     assert "Kafka delivery failed" in caplog.text
     producer.close.assert_called_once_with(timeout=5)

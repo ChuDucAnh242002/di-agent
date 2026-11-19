@@ -68,8 +68,8 @@ class BridgeConfig(BaseModel):
     @field_validator("vessels")
     @classmethod
     def validate_vessels(cls, values: list[str]) -> list[str]:
-        if any(not VESSEL_RE.fullmatch(value) or any(character in value for character in "/+#\0") for value in values):
-            raise ValueError("vessels must be literal MQTT topic segments")
+        if any(not VESSEL_RE.fullmatch(value) or not SUBJECT_RE.fullmatch(value) for value in values):
+            raise ValueError("vessels must be valid literal subject and MQTT topic segments")
         return sorted(set(values))
 
     @field_validator("signals")
@@ -94,12 +94,12 @@ def map_message(
     if len(parts) != 4 or parts[0] != "PONTOS_EGRESS" or not all(parts[1:]):
         raise ValueError("invalid PONTOS topic")
     _, vessel, tag, index = parts
-    if not VESSEL_RE.fullmatch(vessel):
+    if not VESSEL_RE.fullmatch(vessel) or not SUBJECT_RE.fullmatch(vessel):
         raise ValueError("invalid PONTOS vessel identifier")
     if tag not in config.signals or (config.vessels and vessel not in config.vessels):
         raise ValueError("measurement is outside the configured selection")
-    if any(character in vessel + index for character in "+#\0"):
-        raise ValueError("invalid vessel or sensor index")
+    if not SEGMENT_RE.fullmatch(index):
+        raise ValueError("invalid sensor index")
     raw = json.loads(payload)
     if not isinstance(raw, dict):
         raise ValueError("payload must be an object")
@@ -114,11 +114,8 @@ def map_message(
     if timestamp > received_at + 30 or received_at - timestamp > config.max_source_age_seconds:
         raise ValueError("measurement timestamp is stale or in the future")
 
-    # Disjoint prefixes keep encoded identities from colliding with literal ones.
-    identity = vessel if SUBJECT_RE.fullmatch(vessel) else "hex:" + vessel.encode().hex()
-    sensor = "i_" + index if SEGMENT_RE.fullmatch(index) else "x_" + index.encode().hex()
-    run_id = f"pontos_{identity}"
-    signal = f"pontos.{tag}.{sensor}"
+    run_id = f"pontos_{vessel}"
+    signal = f"pontos.{tag}.i_{index}"
     if len(run_id) > 200 or len(signal) > 200:
         raise ValueError("vessel or sensor identity exceeds the dataset contract")
     spec = config.signals[tag]
@@ -132,7 +129,7 @@ def map_message(
         "timestamp_ns": int(timestamp * 1_000_000_000),
         "t_source": timestamp,
         "metadata": {
-            "subject": f"vessel:{identity}",
+            "subject": f"vessel:{vessel}",
             "vessel_id": vessel,
             "parameter_id": f"{tag}_{index}",
             "provider": "PONTOS-HUB / RISE",
@@ -160,40 +157,29 @@ class PontosBridge:
         self._received = 0
         self._published = 0
         self._dropped = 0
-        self._series: dict[str, dict[str, Any]] = {}
+        self._series: dict[str, float] = {}
 
     def accept(self, topic: str, payload: bytes, received_at: float | None = None) -> bool:
         try:
+            now = time.time() if received_at is None else received_at
             message = map_message(
-                self.config, topic, payload, time.time() if received_at is None else received_at
+                self.config, topic, payload, now
             )
             key = f"{message['run_id']}/{message['signal']}"
             with self._lock:
                 previous = self._series.get(key)
                 timestamp = message["timestamp"]
                 if previous is None and len(self._series) >= self.config.max_active_series:
-                    raise ValueError("active series limit reached")
-                if previous is not None and timestamp <= previous["last_timestamp"]:
+                    self._series = {
+                        series: last for series, last in self._series.items()
+                        if now - last <= self.config.max_source_age_seconds
+                    }
+                    if len(self._series) >= self.config.max_active_series:
+                        raise ValueError("active series limit reached")
+                if previous is not None and timestamp <= previous:
                     raise ValueError("duplicate or out-of-order measurement")
                 self._queue.put_nowait(message)
-                state = self._series.setdefault(key, {
-                    "vessel_id": message["metadata"]["vessel_id"],
-                    "parameter_id": message["metadata"]["parameter_id"],
-                    "last_timestamp": timestamp,
-                    "interval_count": 0,
-                    "mean_interval_seconds": None,
-                    "min_interval_seconds": None,
-                    "max_interval_seconds": None,
-                })
-                if previous is not None:
-                    interval = timestamp - state["last_timestamp"]
-                    count = state["interval_count"] + 1
-                    mean = state["mean_interval_seconds"]
-                    state["mean_interval_seconds"] = interval if mean is None else mean + (interval - mean) / count
-                    state["min_interval_seconds"] = min(state["min_interval_seconds"] or interval, interval)
-                    state["max_interval_seconds"] = max(state["max_interval_seconds"] or interval, interval)
-                    state["interval_count"] = count
-                state["last_timestamp"] = timestamp
+                self._series[key] = timestamp
                 self._received += 1
             return True
         except (KeyError, TypeError, ValueError, OverflowError, queue.Full) as exc:
@@ -291,29 +277,28 @@ class PontosBridge:
                     message = self._queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
-                while not self._stop.is_set():
+                try:
                     if time.time() - message["timestamp"] > self.config.max_source_age_seconds:
                         with self._lock:
                             self._dropped += 1
                         logger.warning("Dropping queued PONTOS measurement: source timestamp is stale")
-                        break
-                    try:
+                    else:
                         producer.send(
                             os.environ.get("KAFKA_TOPIC", "dataset.telemetry"),
                             key=f"{message['run_id']}:{message['signal']}", value=message,
-                        ).get(timeout=10)
+                        ).get()
                         with self._lock:
                             self._published += 1
                             self._kafka_connected = True
                             self._kafka_error = None
-                        break
-                    except (KafkaError, OSError) as exc:
-                        with self._lock:
-                            self._kafka_connected = False
-                            self._kafka_error = str(exc)
-                        logger.error("Kafka delivery failed: %s; retrying in 5 seconds", exc)
-                        self._stop.wait(5)
-                self._queue.task_done()
+                except (KafkaError, OSError) as exc:
+                    with self._lock:
+                        self._kafka_connected = False
+                        self._kafka_error = str(exc)
+                        self._dropped += 1
+                    logger.error("Kafka delivery failed; delivery outcome may be unknown: %s", exc)
+                finally:
+                    self._queue.task_done()
         finally:
             with self._lock:
                 self._kafka_connected = False
@@ -329,7 +314,12 @@ class PontosBridge:
             self._worker.join(timeout=20)
 
     def healthy(self) -> bool:
-        return self._worker is not None and self._worker.is_alive()
+        # Paho 1.6 has no public API for checking its loop thread's liveness.
+        mqtt_thread = self._mqtt._thread if self._mqtt is not None else None
+        return (
+            self._worker is not None and self._worker.is_alive()
+            and mqtt_thread is not None and mqtt_thread.is_alive()
+        )
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -343,9 +333,7 @@ class PontosBridge:
                 "published": self._published,
                 "dropped": self._dropped,
                 "queued": self._queue.qsize(),
-                "series": {key: {
-                    **value, "source_age_seconds": time.time() - value["last_timestamp"],
-                } for key, value in sorted(self._series.items())},
+                "series_count": len(self._series),
             }
 
 
