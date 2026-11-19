@@ -1,7 +1,12 @@
 # The memory relief phase's culprit, past its request with no memory limit. First it takes
-# ANON_GIB GiB of anonymous memory and holds it for its whole life (one dd per GiB, each
-# holding a 1 GiB buffer it has filled, blocked writing to a pipe nobody reads): the node has
-# no swap, so that memory cannot be reclaimed and shrinks the room left for page cache. Then it
+# anonymous memory until the node's MemAvailable is down to ROOM_MIB, and holds it for its
+# whole life (256 MiB per dd, each holding a buffer it has filled, blocked writing to a pipe
+# nobody reads): the node has no swap, so that memory cannot be reclaimed and shrinks the room
+# left for page cache. The room, not a fixed amount, is what decides whether the squeeze
+# holds: with ~3 GiB left (11 GiB taken, master runs 3-4) the kernel soon protects the
+# victim's cache, which it reads every second, and evicts the hog's own instead, so the
+# victim's stall lasted 1-2 min; with 1.5 GiB left it stays squeezed while the hog holds
+# (run 2026-11-19-m6). Sizing to the room also keeps it right whatever else the node runs. Then it
 # keeps a set of 256 MiB files in an emptyDir on disk and re-reads the whole set every pass.
 # It grows the set by one file a minute until mem-victim (VICTIM_UID, read from the host's
 # cgroup tree) refaults at 0.05/s or more, five times the agent's gate, and holds while it
@@ -21,8 +26,9 @@ spec:
     - sh
     - -c
     - |
-      i=0; while [ $i -lt "$ANON_GIB" ]; do (dd if=/dev/zero bs=1G count=1 2>/dev/null | sleep 2147483647) & i=$((i + 1)); done
-      echo "$(date +%T) holding ${ANON_GIB} GiB anonymous"
+      avail() { awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo; }
+      i=0; while [ "$(avail)" -gt $((ROOM_MIB + 256)) ]; do (dd if=/dev/zero bs=256M count=1 2>/dev/null | sleep 2147483647) & i=$((i + 1)); sleep 1; done
+      echo "$(date +%T) holding $((i * 256)) MiB anonymous, MemAvailable $(avail) MiB"
       v=$(find /host-cg -maxdepth 4 -type d \( -name "pod$VICTIM_UID" -o -name "*pod$(echo "$VICTIM_UID" | tr - _).slice" \) | head -1)
       [ -n "$v" ] || { echo "no cgroup for mem-victim $VICTIM_UID"; exit 1; }
       echo "$(date +%T) watching $v"
@@ -47,7 +53,7 @@ spec:
         fi
         cat /data/f* >/dev/null 2>&1
       done
-    env: [{ name: ANON_GIB, value: "6" }, { name: VICTIM_UID, value: "__VICTIM_UID__" }]
+    env: [{ name: ROOM_MIB, value: "1536" }, { name: VICTIM_UID, value: "__VICTIM_UID__" }]
     resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: "1" } }
     volumeMounts: [{ name: data, mountPath: /data }, { name: cg, mountPath: /host-cg, readOnly: true }]
   volumes: [{ name: data, emptyDir: {} }, { name: cg, hostPath: { path: /sys/fs/cgroup/kubepods, type: Directory } }]
