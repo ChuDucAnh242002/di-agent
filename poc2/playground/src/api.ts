@@ -6,6 +6,7 @@ export interface PlaygroundConfig {
   batteryIds: string[];
   auxloadIds: string[];
   shorePower: boolean;
+  switchboard?: boolean;
   shipEnabled?: boolean;
   dataset?: {
     enabled: boolean;
@@ -129,13 +130,13 @@ export function fetchDatasetStatus(): Promise<DatasetStatus> {
 
 export async function fetchDatasetCollectorStatus(): Promise<DatasetCollectorStatus> {
   const res = await fetch("/api/dataset/collector/ready");
-  if (!res.ok && res.status !== 503) {
-    throw new Error(`Collector readiness -> ${res.status} ${await res.text()}`);
+  if ((!res.ok && res.status !== 503) || !res.headers.get("content-type")?.includes("application/json")) {
+    throw new Error(`Collector readiness -> HTTP ${res.status} (expected collector status JSON)`);
   }
   return res.json() as Promise<DatasetCollectorStatus>;
 }
 
-export function updateDatasetConfig(config: Omit<DatasetConfig, "run_id">): Promise<DatasetConfig> {
+export function updateDatasetConfig(config: Partial<Omit<DatasetConfig, "run_id">>): Promise<DatasetConfig> {
   return apiFetch("/api/dataset/config", {
     method: "PUT",
     body: JSON.stringify(config),

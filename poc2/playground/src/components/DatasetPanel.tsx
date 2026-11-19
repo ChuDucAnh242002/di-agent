@@ -18,7 +18,7 @@ function settings(config: DatasetConfig): Settings {
 
 export default function DatasetPanel({ config }: { config: NonNullable<PlaygroundConfig["dataset"]> }) {
   const [status, setStatus] = useState<DatasetStatus | null>(null);
-  const [draft, setDraft] = useState<Settings | null>(null);
+  const [edits, setEdits] = useState<Partial<Settings>>({});
   const [collector, setCollector] = useState<DatasetCollectorStatus | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [collectorError, setCollectorError] = useState<string | null>(null);
@@ -29,7 +29,6 @@ export default function DatasetPanel({ config }: { config: NonNullable<Playgroun
     try {
       const next = await fetchDatasetStatus();
       setStatus(next);
-      setDraft((current) => current ?? settings(next.config));
       setStreamError(null);
     } catch (error) {
       setStreamError(error instanceof Error ? error.message : String(error));
@@ -50,17 +49,30 @@ export default function DatasetPanel({ config }: { config: NonNullable<Playgroun
     return () => clearInterval(timer);
   }, [refresh]);
 
+  const active = status && settings(status.config);
+  const draft = active && { ...active, ...edits };
+  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    setEdits((previous) => {
+      const next = { ...previous };
+      if (value === active?.[key]) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  };
+  const hasEdits = Object.keys(edits).length > 0;
+
   const apply = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!draft || !status) return;
+    if (!status || !hasEdits || submitting || streamError) return;
     if (!window.confirm(
       "This changes the shared stream and restarts it from the beginning. Mode changes may temporarily mix origins in an agent collection window. Continue?"
     )) return;
     setSubmitting(true);
     setApplyError(null);
     try {
-      const updated = await updateDatasetConfig(draft);
-      setDraft(settings(updated));
+      const updated = await updateDatasetConfig(edits);
+      setStatus((previous) => previous && { ...previous, config: updated });
+      setEdits({});
       await refresh();
     } catch (error) {
       setApplyError(error instanceof Error ? error.message : String(error));
@@ -88,20 +100,22 @@ export default function DatasetPanel({ config }: { config: NonNullable<Playgroun
       {collector?.last_error && !collectorError && <p className="error-text" role="alert">Collector error: {collector.last_error}</p>}
       <p className="hint-text">Changes restart the shared stream. Settings are temporary and revert after a pod restart. There is no pause or seek.</p>
       {draft && (
-        <form className="dataset-controls" onSubmit={(event) => void apply(event)}>
-          <label htmlFor="dataset-mode">Mode</label>
-          <select id="dataset-mode" value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value as DatasetConfig["mode"] })}>
-            <option value="synthetic">Synthetic</option>
-            <option value="real">Recorded replay</option>
-          </select>
-          <label htmlFor="dataset-interval">Interval (ms)</label>
-          <input id="dataset-interval" type="number" min="10" max="3600000" step="1" required value={draft.interval_ms} onChange={(e) => setDraft({ ...draft, interval_ms: e.target.valueAsNumber })} />
-          <label htmlFor="dataset-points">Time steps per interval</label>
-          <input id="dataset-points" type="number" min="1" max="10000" step="1" required value={draft.points_per_interval} onChange={(e) => setDraft({ ...draft, points_per_interval: e.target.valueAsNumber })} />
-          <label htmlFor="dataset-seed">Synthetic seed</label>
-          <input id="dataset-seed" type="number" step="1" required disabled={draft.mode !== "synthetic"} value={draft.random_seed} onChange={(e) => setDraft({ ...draft, random_seed: e.target.valueAsNumber })} />
-          <label className="dataset-checkbox"><input type="checkbox" checked={draft.loop} onChange={(e) => setDraft({ ...draft, loop: e.target.checked })} /> Loop</label>
-          <button type="submit" disabled={submitting || !!streamError}>{submitting ? "Applying..." : "Apply settings"}</button>
+        <form onSubmit={(event) => void apply(event)}>
+          <fieldset className="dataset-controls" disabled={submitting} aria-label="Dataset settings">
+            <label htmlFor="dataset-mode">Mode</label>
+            <select id="dataset-mode" value={draft.mode} onChange={(e) => update("mode", e.target.value === "real" ? "real" : "synthetic")}>
+              <option value="synthetic">Synthetic</option>
+              <option value="real">Recorded replay</option>
+            </select>
+            <label htmlFor="dataset-interval">Interval (ms)</label>
+            <input id="dataset-interval" type="number" min="10" max="3600000" step="1" required value={Number.isNaN(draft.interval_ms) ? "" : draft.interval_ms} onChange={(e) => update("interval_ms", e.target.valueAsNumber)} />
+            <label htmlFor="dataset-points">Time steps per interval</label>
+            <input id="dataset-points" type="number" min="1" max="10000" step="1" required value={Number.isNaN(draft.points_per_interval) ? "" : draft.points_per_interval} onChange={(e) => update("points_per_interval", e.target.valueAsNumber)} />
+            <label htmlFor="dataset-seed">Synthetic seed</label>
+            <input id="dataset-seed" type="number" step="1" required disabled={draft.mode !== "synthetic"} value={Number.isNaN(draft.random_seed) ? "" : draft.random_seed} onChange={(e) => update("random_seed", e.target.valueAsNumber)} />
+            <label className="dataset-checkbox"><input type="checkbox" checked={draft.loop} onChange={(e) => update("loop", e.target.checked)} /> Loop</label>
+            <button type="submit" disabled={submitting || !!streamError || !hasEdits}>{submitting ? "Applying..." : "Apply settings"}</button>
+          </fieldset>
         </form>
       )}
       {applyError && <p className="error-text" role="alert">Could not apply settings: {applyError}</p>}

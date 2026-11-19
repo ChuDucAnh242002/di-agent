@@ -19,8 +19,8 @@ ENV GENSET_LOCATIONS="location /api/genset/genset/ { proxy_pass http://genset.de
     PROPULSION_LOCATIONS="location /api/propulsion/propulsion/ { proxy_pass http://propulsion.default.svc.cluster.local:8000/; proxy_set_header Host \$host; }" \
     BATTERY_LOCATIONS="location /api/battery/battery/ { proxy_pass http://battery.default.svc.cluster.local:8000/; proxy_set_header Host \$host; }" \
     AUXLOAD_LOCATIONS="location /api/auxload/auxload/ { proxy_pass http://auxload.default.svc.cluster.local:8000/; proxy_set_header Host \$host; }" \
-    SWITCHBOARD_LOCATION="location /api/switchboard/ { proxy_pass http://switchboard.default.svc.cluster.local:8000/; }" \
-    SHORE_POWER_LOCATION="location /api/shore-power/ { proxy_pass http://shore-power.default.svc.cluster.local:8000/; }" \
+    SWITCHBOARD_LOCATION="location /api/switchboard/ { proxy_pass http://switchboard.default.svc.cluster.local:8000/; proxy_set_header Host \$host; }" \
+    SHORE_POWER_LOCATION="location /api/shore-power/ { proxy_pass http://shore-power.default.svc.cluster.local:8000/; proxy_set_header Host \$host; }" \
     DATASET_LOCATIONS="" \
-    CONFIG_JSON="{\"gensetIds\":[\"genset\"],\"propulsionIds\":[\"propulsion\"],\"batteryIds\":[\"battery\"],\"auxloadIds\":[\"auxload\"],\"shorePower\":true}"
+    CONFIG_JSON="{\"gensetIds\":[\"genset\"],\"propulsionIds\":[\"propulsion\"],\"batteryIds\":[\"battery\"],\"auxloadIds\":[\"auxload\"],\"shorePower\":true,\"switchboard\":true}"
 EXPOSE 80

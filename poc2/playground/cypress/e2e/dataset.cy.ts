@@ -30,8 +30,9 @@ describe("engine dataset playground", () => {
   it("shows status without ship controls and applies replay settings after confirmation", () => {
     cy.intercept("PUT", "/api/dataset/config", (request) => {
       expect(request.body).to.deep.equal({
-        mode: "real", interval_ms: 500, points_per_interval: 2, loop: true, random_seed: 7,
+        mode: "real", interval_ms: 500, points_per_interval: 2,
       });
+
       request.reply({ body: { ...initial, ...request.body } });
     }).as("update");
     cy.visit("/");
@@ -49,6 +50,22 @@ describe("engine dataset playground", () => {
       expect(message).to.contain("restarts it from the beginning");
       return true;
     });
+    cy.contains("button", "Apply settings").click();
+    cy.wait("@update");
+  });
+
+  it("keeps local edits without overwriting another developer's changes", () => {
+    cy.intercept("PUT", "/api/dataset/config", (request) => {
+      expect(request.body).to.deep.equal({ interval_ms: 500 });
+      request.reply({ body: { ...initial, mode: "real", ...request.body } });
+    }).as("update");
+    cy.visit("/");
+    cy.get("#dataset-interval").clear().type("500");
+    cy.intercept("GET", "/api/dataset/status", {
+      body: { config: { ...initial, mode: "real" }, state: "running", published: 42, last_error: null },
+    });
+    cy.get("#dataset-mode").should("have.value", "real");
+    cy.get("#dataset-interval").should("have.value", "500");
     cy.contains("button", "Apply settings").click();
     cy.wait("@update");
   });
@@ -74,20 +91,21 @@ describe("engine dataset playground", () => {
     cy.get("#dataset-interval").clear().type("9");
     cy.contains("button", "Apply settings").click();
     cy.get("@update.all").should("have.length", 0);
-    cy.get("#dataset-interval").clear().type("1000");
+    cy.get("#dataset-interval").clear().type("500");
     cy.on("window:confirm", () => false);
     cy.contains("button", "Apply settings").click();
     cy.get("@update.all").should("have.length", 0);
   });
 
   it("reports failed writes and stream outages", () => {
-    cy.intercept("PUT", "/api/dataset/config", { statusCode: 401, body: "Unauthorized" }).as("update");
+    cy.intercept("PUT", "/api/dataset/config", { statusCode: 400, body: "Invalid config" }).as("update");
     cy.visit("/");
     cy.wait("@status");
+    cy.get("#dataset-interval").clear().type("500");
     cy.on("window:confirm", () => true);
     cy.contains("button", "Apply settings").click();
     cy.wait("@update");
-    cy.contains("Could not apply settings").should("contain", "401");
+    cy.contains("Could not apply settings").should("contain", "400");
     cy.intercept("GET", "/api/dataset/status", { statusCode: 503, body: "Unavailable" });
     cy.contains("Stream status:", { timeout: 5000 }).should("be.visible");
     cy.contains("button", "Apply settings").should("be.disabled");

@@ -122,6 +122,9 @@
   display: grid;
   gap: 0.4rem;
   max-width: 24rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .dataset-controls input[type="number"] {

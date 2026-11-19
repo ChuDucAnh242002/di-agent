@@ -46,7 +46,7 @@ export default function App() {
           <SystemPanel key={id} system="battery" id={id} />
         ))}
         {config?.shorePower && <ShorePowerPanel />}
-        <SwitchboardPanel />
+        {(config.switchboard ?? true) && <SwitchboardPanel />}
         <VoyagePanel propulsionIds={config?.propulsionIds ?? []} />
         <ConditionsPanel
           propulsionIds={config?.propulsionIds ?? []}
