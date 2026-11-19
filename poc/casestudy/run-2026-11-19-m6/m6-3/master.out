@@ -1,0 +1,19 @@
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: moved aside
+[12:56:40] prep: ran: systemctl stop ollama.service
+[12:56:40] prep: ready
+[12:56:41] M0: start
+[12:56:41] M6: start
+[12:56:41] M6: applied mem-victim
+[12:57:47] M6: applied page-hog
+[13:42:10] M6: end
+[13:42:10] M9: read for the readout
+[13:42:10] teardown: start
+[13:42:43] teardown: end

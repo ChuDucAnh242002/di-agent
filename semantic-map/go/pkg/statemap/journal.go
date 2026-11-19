@@ -1,7 +1,12 @@
 package statemap
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,11 +21,21 @@ const (
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
 	EventPropertyConflict   EventKind = "property.conflict"
-	EventHookFailed         EventKind = "hook.failed"
+
+	// EventPropertyForgotten: the sweep deleted an observed property retired for
+	// forgetAfter (Target = id; Detail retired_at, relationships removed, and kept
+	// for any live edge left in place).
+	EventPropertyForgotten EventKind = "property.forgotten"
+	EventHookFailed        EventKind = "hook.failed"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"
 	EventRelationshipRetired  EventKind = "relationship.retired"
+
+	// EventRelationshipRegime records a relationship entering or leaving a regime:
+	// its recent layer outside the established one's band for a window of folds.
+	// Detail: recent, established, band, started.
+	EventRelationshipRegime EventKind = "relationship.regime"
 
 	// EventIntervention records what an action the agent took did to a relationship's
 	// evidence, whether or not it changed the structure.
@@ -36,12 +51,55 @@ const (
 	// adjustment from two unrelated ones that happened to be adjacent in the log.
 	EventOperatorIntent EventKind = "operator.intent"
 
+	// EventPaceChanged records a change of the agent's attention level. Target is
+	// "attention"; Detail has from, to and reason.
+	EventPaceChanged EventKind = "pace.changed"
+
+	// EventCollectorDown and EventCollectorUp record a collector member going down
+	// (unhealthy, in backoff or stuck) and coming back. Target is the member; down's
+	// Detail has the reason; the properties it last produced are unobservable in
+	// between.
+	EventCollectorDown EventKind = "collector.down"
+	EventCollectorUp   EventKind = "collector.up"
+
+	// EventCollectorDoctor records a doctor the agent ran for a member that stayed
+	// down: Detail has member, command, down_because, output, seconds and error.
+	EventCollectorDoctor EventKind = "collector.doctor"
+
+	// EventClockStepped records a sweep that found the wall clock and the process's
+	// monotonic clock disagreeing by more than the pair window: the wall clock was
+	// stepped, by NTP or an operator. Silence is measured on the monotonic clock, so
+	// nothing is retired by it; the record says why a timestamp jumped.
+	EventClockStepped EventKind = "clock.stepped"
+
+	// EventRestoreFailed: no snapshot was usable (Target = path; Detail path, error,
+	// prev_error), so the map started cold. It is the first event of that life.
+	EventRestoreFailed EventKind = "restore.failed"
+
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
+
+	// Events a loop outside this package records through Map.RecordEvent.
+	EventReliefPhase      EventKind = "relief.phase"
+	EventReliefPaused     EventKind = "relief.paused"
+	EventReliefResumed    EventKind = "relief.resumed"
+	EventAdmissionArrived EventKind = "admission.arrived"
+	EventPeerUnreachable  EventKind = "peer.unreachable"
+	EventPeerRecovered    EventKind = "peer.recovered"
+
+	// EventDecisionRefused records a commit under an id the journal already holds:
+	// the second answer is not recorded, and this says that it was given.
+	EventDecisionRefused EventKind = "decision.refused"
 )
+
+// ErrDuplicateDecision is RecordDecision's refusal of an id it already holds.
+var ErrDuplicateDecision = errors.New("decision id already recorded")
 
 // Event is one entry in the journal: a structural change, or a decision.
 type Event struct {
+	// Seq is the event's place in the journal's total order, which survives a
+	// restore; with the journal's incarnation it names the event uniquely.
+	Seq      uint64         `json:"seq"`
 	Revision uint64         `json:"revision"`
 	At       time.Time      `json:"at"`
 	Kind     EventKind      `json:"kind"`
@@ -63,6 +121,15 @@ type Decision struct {
 	ID       string    `json:"id"`
 	At       time.Time `json:"at"`
 	Revision uint64    `json:"revision"`
+
+	// Kind names what sort of answer this is: estimate, admit, relief.act,
+	// relief.verify, admission, review, cost and the rest.
+	Kind string `json:"kind"`
+
+	// Cites are the earlier decisions this one rests on, in the order cited: a
+	// verdict cites its act, a revert its act and verdict. They make the chain
+	// walkable both ways, through Journal.Chain.
+	Cites []string `json:"cites,omitempty"`
 
 	// Question and Answer are the caller's terms, kept opaque so the journal does
 	// not need to know every kind of decision the agent can make.
@@ -112,11 +179,28 @@ type Journal struct {
 	capacity int
 	dropped  uint64
 
+	// seq is the last number handed out, to an event or a decision id; incarnation
+	// counts the journal's lives, advanced by every restore. Together they make an
+	// id or an event unique across restarts, a crash before a save included.
+	seq         uint64
+	incarnation uint64
+	// restoredSeq is seq as a snapshot restored it: held events at or below it
+	// came from an earlier life, and the log already has them.
+	restoredSeq uint64
+
 	decisions map[string]*Decision
+	// citedBy maps a decision id to the held decisions citing it, in seq order.
+	citedBy map[string][]string
 	// reserved holds ids claimed by decisions being built and not yet committed:
 	// a check of decisions alone leaves the window between choosing an id and
 	// recording it, in which a concurrent request can choose the same one.
 	reserved map[string]bool
+
+	// log is the append-only file beside the snapshot, set by Map.OpenLog. Every
+	// appended event is handed to it after mu is released, so a disk write never
+	// holds the journal; a decision is never mutated after commit, so encoding it
+	// outside the lock is safe.
+	log *journalFile
 }
 
 // DefaultJournalCapacity bounds the in-memory record.
@@ -128,32 +212,65 @@ func NewJournal(capacity int) *Journal {
 		capacity = DefaultJournalCapacity
 	}
 	return &Journal{
-		capacity:  capacity,
-		events:    make([]Event, 0, 64),
-		decisions: make(map[string]*Decision),
+		capacity:    capacity,
+		events:      make([]Event, 0, 64),
+		decisions:   make(map[string]*Decision),
+		citedBy:     make(map[string][]string),
+		incarnation: 1,
 	}
 }
 
 func (j *Journal) append(e Event) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
+	e, log := j.appendLocked(e)
+	j.mu.Unlock()
+	if log != nil {
+		log.Append(e)
+	}
+}
+
+// appendLocked stamps and holds e, and returns the stamped event and the log it
+// is to be written to, which the caller does after releasing j.mu.
+func (j *Journal) appendLocked(e Event) (Event, *journalFile) {
+	j.seq++
+	e.Seq = j.seq
 	j.events = append(j.events, e)
 	if len(j.events) > j.capacity {
 		drop := len(j.events) - j.capacity
 		// Copy forward rather than reslice: reslicing keeps the dropped entries
 		// alive behind the slice header, which on a memory-budgeted node is a leak
 		// that only shows up under long uptime.
-		j.events = append(j.events[:0], j.events[drop:]...)
-		j.dropped += uint64(drop)
-		for id, d := range j.decisions {
-			if d.Revision < j.events[0].Revision {
-				delete(j.decisions, id)
+		for _, old := range j.events[:drop] {
+			if old.Decision != nil {
+				delete(j.decisions, old.Decision.ID)
 			}
 		}
+		j.events = append(j.events[:0], j.events[drop:]...)
+		j.dropped += uint64(drop)
+		j.rebuildCitedByLocked()
 	}
 	if e.Decision != nil {
 		j.decisions[e.Decision.ID] = e.Decision
 		delete(j.reserved, e.Decision.ID)
+		j.indexCitesLocked(e.Decision)
+	}
+	return e, j.log
+}
+
+// indexCitesLocked adds d to the citedBy lists of the decisions it cites.
+func (j *Journal) indexCitesLocked(d *Decision) {
+	for _, c := range d.Cites {
+		j.citedBy[c] = append(j.citedBy[c], d.ID)
+	}
+}
+
+// rebuildCitedByLocked rebuilds citedBy from the decisions held, in seq order.
+func (j *Journal) rebuildCitedByLocked() {
+	j.citedBy = make(map[string][]string)
+	for _, e := range j.events {
+		if e.Decision != nil {
+			j.indexCitesLocked(e.Decision)
+		}
 	}
 }
 
@@ -174,20 +291,60 @@ func (j *Journal) reserve(id string) bool {
 	return true
 }
 
-// RecordDecision appends a decision and returns it.
-func (j *Journal) RecordDecision(d *Decision) *Decision {
-	if d == nil {
-		return nil
+// newID issues "<prefix>-<incarnation>.<n>", n a ticket from the event counter.
+// It reserves nothing: a ticket is never reissued, so a generated id cannot collide
+// with another, and an id whose decision is abandoned leaves nothing behind.
+func (j *Journal) newID(prefix string, suffix []string) string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.seq++
+	id := prefix + "-" + strconv.FormatUint(j.incarnation, 10) + "." + strconv.FormatUint(j.seq, 10)
+	if len(suffix) > 0 {
+		id += "-" + strings.Join(suffix, "-")
 	}
-	j.append(Event{
+	return id
+}
+
+// Seq is the last number handed out, to an event or a decision id.
+func (j *Journal) Seq() uint64 {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.seq
+}
+
+// Incarnation counts the journal's lives: 1 when fresh, one more on each restore.
+func (j *Journal) Incarnation() uint64 {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.incarnation
+}
+
+// RecordDecision appends a decision and returns it. An id already recorded is
+// refused with ErrDuplicateDecision, since replacing it would rewrite the trace of
+// an answer already given; a reservation is not a record.
+func (j *Journal) RecordDecision(d *Decision) (*Decision, error) {
+	if d == nil {
+		return nil, nil
+	}
+	j.mu.Lock()
+	if _, used := j.decisions[d.ID]; used {
+		j.mu.Unlock()
+		return nil, ErrDuplicateDecision
+	}
+	e, log := j.appendLocked(Event{
 		Revision: d.Revision,
 		At:       d.At,
 		Kind:     EventDecision,
 		Target:   d.ID,
 		Actor:    "agent",
+		Detail:   map[string]any{"kind": d.Kind},
 		Decision: d,
 	})
-	return d
+	j.mu.Unlock()
+	if log != nil {
+		log.Append(e)
+	}
+	return d, nil
 }
 
 // Events returns entries at or after sinceRevision, oldest first.
@@ -231,6 +388,7 @@ func (d *Decision) clone() *Decision {
 		}
 	}
 	c.Excluded = append([]string(nil), d.Excluded...)
+	c.Cites = append([]string(nil), d.Cites...)
 	c.Caveats = append([]string(nil), d.Caveats...)
 	if d.PropertiesRead != nil {
 		c.PropertiesRead = make([]Property, len(d.PropertiesRead))
@@ -252,28 +410,121 @@ func (d *Decision) clone() *Decision {
 			c.RelationshipsRead[i] = r
 		}
 	}
-	if d.Answer != nil {
-		c.Answer = make(map[string]any, len(d.Answer))
-		for k, v := range d.Answer {
-			c.Answer[k] = v
+	if d.Inputs != nil {
+		c.Inputs = make(map[string]any, len(d.Inputs))
+		for k, v := range d.Inputs {
+			c.Inputs[k] = copyAny(v)
 		}
 	}
+	if d.FactsRead != nil {
+		c.FactsRead = make([]Fact, len(d.FactsRead))
+		for i, f := range d.FactsRead {
+			if f.Number != nil {
+				n := *f.Number
+				f.Number = &n
+			}
+			c.FactsRead[i] = f
+		}
+	}
+	c.Answer = copyAnswer(d.Answer)
 	return &c
 }
 
-// Decisions returns the most recent decisions, newest first.
-func (j *Journal) Decisions(limit int) []*Decision {
+// Decisions returns the most recent decisions of a kind, newest first; kind ""
+// is every kind.
+func (j *Journal) Decisions(limit int, kind string) []*Decision {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	out := make([]*Decision, 0, len(j.decisions))
 	for i := len(j.events) - 1; i >= 0; i-- {
-		if j.events[i].Decision == nil {
+		if d := j.events[i].Decision; d == nil || (kind != "" && d.Kind != kind) {
 			continue
 		}
 		out = append(out, j.events[i].Decision.clone())
 		if limit > 0 && len(out) >= limit {
 			break
 		}
+	}
+	return out
+}
+
+// DecisionFromLog reads a decision back from the journal log by id: (nil, false,
+// nil) when no log is open or the log does not index id, an error when the line
+// it indexes does not verify or cannot be read.
+func (j *Journal) DecisionFromLog(id string) (*Decision, bool, error) {
+	j.mu.RLock()
+	log := j.log
+	j.mu.RUnlock()
+	if log == nil {
+		return nil, false, nil
+	}
+	return log.Decision(id)
+}
+
+// LogStats reports the journal log's file, size, index and skipped lines; false
+// when no log is open.
+func (j *Journal) LogStats() (LogStats, bool) {
+	j.mu.RLock()
+	log := j.log
+	j.mu.RUnlock()
+	if log == nil {
+		return LogStats{}, false
+	}
+	return log.Stats(), true
+}
+
+// ChainLink is one ancestor in a chain: the decision when it is still held, or
+// Evicted when the journal bound has dropped it.
+type ChainLink struct {
+	ID       string    `json:"id"`
+	Evicted  bool      `json:"evicted,omitempty"`
+	Decision *Decision `json:"decision,omitempty"`
+}
+
+// Chain is a decision with what it rests on and what rests on it.
+type Chain struct {
+	Decision *Decision   `json:"decision"`
+	Cites    []ChainLink `json:"cites"`
+	CitedBy  []string    `json:"cited_by"`
+}
+
+// Chain returns a decision's transitive ancestry, depth-first in cite order and
+// each id once, and the held decisions citing it directly, in seq order. False
+// when id is not held.
+func (j *Journal) Chain(id string) (Chain, bool) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	d, ok := j.decisions[id]
+	if !ok {
+		return Chain{}, false
+	}
+	c := Chain{Decision: d.clone(), Cites: []ChainLink{},
+		CitedBy: append([]string{}, j.citedBy[id]...)}
+	seen := map[string]bool{id: true}
+	// An explicit stack, not recursion: a full journal can be one long chain.
+	stack := reversed(d.Cites)
+	for len(stack) > 0 {
+		next := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		a, held := j.decisions[next]
+		if !held {
+			c.Cites = append(c.Cites, ChainLink{ID: next, Evicted: true})
+			continue
+		}
+		c.Cites = append(c.Cites, ChainLink{ID: next, Decision: a.clone()})
+		stack = append(stack, reversed(a.Cites)...)
+	}
+	return c, true
+}
+
+func reversed(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[len(ids)-1-i] = id
 	}
 	return out
 }
@@ -296,6 +547,7 @@ func (j *Journal) Stats() (held int, dropped uint64, oldest uint64) {
 type DecisionBuilder struct {
 	m           *Map
 	id          string
+	kind        string
 	question    string
 	at          time.Time
 	revision    uint64
@@ -309,16 +561,19 @@ type DecisionBuilder struct {
 	excluded    []string
 	inputs      map[string]any
 	facts       []Fact
+	cites       []string
 }
 
-// Decide starts a decision record pinned to the map's current revision.
-func (m *Map) Decide(id, question string) *DecisionBuilder {
+// Decide starts a decision record of a kind, pinned to the map's current revision.
+func (m *Map) Decide(id, kind, question string) *DecisionBuilder {
 	m.mu.RLock()
 	rev := m.revision
 	now := m.now()
+	pace := m.pace
 	m.mu.RUnlock()
 	return &DecisionBuilder{
-		m: m, id: id, question: question, at: now, revision: rev,
+		m: m, id: id, kind: kind, question: question, at: now, revision: rev,
+		inputs:   map[string]any{"pace": pace},
 		seenProp: map[string]bool{}, seenRel: map[string]bool{},
 		assumptions: map[string]float64{},
 	}
@@ -367,6 +622,9 @@ func (b *DecisionBuilder) read(id string, retiredValueUsed bool) (Property, bool
 	case Stale:
 		b.caveats = append(b.caveats,
 			fmt.Sprintf("property %s is stale: last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
+	case Unobservable:
+		b.caveats = append(b.caveats,
+			fmt.Sprintf("property %s is unobservable: its collector is down, last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
 	}
 	if copied.NObservations == 0 {
 		b.caveats = append(b.caveats,
@@ -388,15 +646,15 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	var out []Relationship
 	// Both endpoints can be stale at once, and both are the reader's business: a
 	// single slot per relationship silently kept whichever was checked last.
-	staleEnds := map[string][]string{}
+	staleEnds := map[string][]endStatus{}
 	for _, r := range b.m.relationships {
 		if r.To != propertyID || r.Status == Retired || r.Association {
 			continue
 		}
 		out = append(out, b.m.relationshipViewLocked(r))
 		for _, end := range []string{r.From, r.To} {
-			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
-				staleEnds[r.ID] = append(staleEnds[r.ID], end)
+			if p, ok := b.m.properties[end]; ok && (p.Status == Stale || p.Status == Unobservable) {
+				staleEnds[r.ID] = append(staleEnds[r.ID], endStatus{end, p.Status})
 			}
 		}
 	}
@@ -408,11 +666,67 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 			b.seenRel[r.ID] = true
 			b.rels = append(b.rels, r)
 		}
-		for _, end := range staleEnds[r.ID] {
-			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
-		}
+		b.relationshipCaveats(r, staleEnds[r.ID])
 	}
 	return out
+}
+
+// Relationship reads one relationship by id and records it as an input, with the
+// same caveats RelationshipsInto gives (stale endpoint, regime).
+func (b *DecisionBuilder) Relationship(id string) (Relationship, bool) {
+	b.m.mu.RLock()
+	r, ok := b.m.relationships[id]
+	var out Relationship
+	var staleEnds []endStatus
+	if ok {
+		out = b.m.relationshipViewLocked(r)
+		for _, end := range []string{r.From, r.To} {
+			if p, ok := b.m.properties[end]; ok && (p.Status == Stale || p.Status == Unobservable) {
+				staleEnds = append(staleEnds, endStatus{end, p.Status})
+			}
+		}
+	}
+	b.m.mu.RUnlock()
+	if !ok {
+		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s is not in the map", id))
+		return Relationship{}, false
+	}
+	if !b.seenRel[id] {
+		b.seenRel[id] = true
+		b.rels = append(b.rels, out)
+	}
+	b.relationshipCaveats(out, staleEnds)
+	return out, true
+}
+
+// endStatus is a relationship endpoint whose reading is not current, with why.
+type endStatus struct {
+	id     string
+	status Status
+}
+
+func (b *DecisionBuilder) relationshipCaveats(r Relationship, staleEnds []endStatus) {
+	for _, e := range staleEnds {
+		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has an endpoint %s that is %s", r.ID, e.id, e.status))
+	}
+	if r.Regime {
+		established := 0.0
+		if r.Established != nil {
+			established = *r.Established
+		}
+		b.caveats = append(b.caveats, fmt.Sprintf(
+			"relationship %s: present differs from established (recent %.3f, established %.3f)",
+			r.ID, r.Recent, established))
+	}
+}
+
+// Cite records an earlier decision this one rests on. An empty id or one already
+// cited is ignored; the order of first citation is kept.
+func (b *DecisionBuilder) Cite(id string) {
+	if id == "" || slices.Contains(b.cites, id) {
+		return
+	}
+	b.cites = append(b.cites, id)
 }
 
 // Note adds a rationale line.
@@ -434,13 +748,83 @@ func (b *DecisionBuilder) Assume(id string, v float64) {
 // Exclude records a subject or property taken to its floor.
 func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
-// Input records something else the decision read, under a name. v must be a value
-// the caller will not change afterwards: a copy, a string, a number.
+// Input records something else the decision read, under a name. v is deep-copied,
+// so a later change by the caller does not reach the record.
 func (b *DecisionBuilder) Input(name string, v any) {
 	if b.inputs == nil {
 		b.inputs = map[string]any{}
 	}
-	b.inputs[name] = v
+	b.inputs[name] = copyAny(v)
+}
+
+// copyAny deep-copies v: maps, slices, pointers, arrays, interfaces and the
+// exported fields of structs, of any element type, are copied rather than shared.
+// Unexported struct fields are assigned. v must not contain a pointer cycle.
+func copyAny(v any) any {
+	if v == nil {
+		return nil
+	}
+	return deepCopy(reflect.ValueOf(v)).Interface()
+}
+
+func copyAnswer(a map[string]any) map[string]any {
+	if a == nil {
+		return nil
+	}
+	return copyAny(a).(map[string]any)
+}
+
+func deepCopy(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for it := v.MapRange(); it.Next(); {
+			c.SetMapIndex(it.Key(), deepCopy(it.Value()))
+		}
+		return c
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type().Elem())
+		c.Elem().Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type()).Elem()
+		c.Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Array:
+		c := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Struct:
+		c := reflect.New(v.Type()).Elem()
+		c.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if c.Field(i).CanSet() {
+				c.Field(i).Set(deepCopy(v.Field(i)))
+			}
+		}
+		return c
+	}
+	return v
 }
 
 // Commit records the decision in the journal and returns it.
@@ -469,8 +853,10 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		ID:                b.id,
 		At:                b.at,
 		Revision:          b.revision,
+		Kind:              b.kind,
+		Cites:             b.cites,
 		Question:          b.question,
-		Answer:            answer,
+		Answer:            copyAnswer(answer),
 		PropertiesRead:    b.props,
 		RelationshipsRead: b.rels,
 		Assumptions:       assumptions,
@@ -480,7 +866,15 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
-	return b.m.journal.RecordDecision(d)
+	rec, err := b.m.journal.RecordDecision(d)
+	if errors.Is(err, ErrDuplicateDecision) {
+		b.m.journal.append(Event{
+			Revision: b.revision, At: b.at, Kind: EventDecisionRefused,
+			Target: b.id, Actor: "agent", Detail: map[string]any{"reason": "duplicate id"},
+		})
+		return nil
+	}
+	return rec
 }
 
 func joinNonEmpty(parts []string, sep string) string {

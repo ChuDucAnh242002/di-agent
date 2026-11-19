@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -92,7 +93,6 @@ type TrackerConfig struct {
 	// Acted says whether relief acted in the action's domain since the time given,
 	// and the highest contention it acted at.
 	Acted func(action string, since time.Time) (peak float64, acted bool)
-	IDs   *IDs
 	Now   func() time.Time
 	Logf  func(string, ...any)
 }
@@ -194,6 +194,11 @@ type PendingAccept struct {
 func (t *Tracker) PendingList() []PendingAccept {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.pendingLocked()
+}
+
+// pendingLocked is PendingList; the caller holds mu.
+func (t *Tracker) pendingLocked() []PendingAccept {
 	out := make([]PendingAccept, len(t.pending))
 	for i, e := range t.pending {
 		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
@@ -208,6 +213,58 @@ func (t *Tracker) Outcomes() []Outcome {
 	out := slices.Clone(t.outcomes)
 	slices.Reverse(out)
 	return out
+}
+
+// Memory is the tracker's state for the snapshot: outcomes oldest first, and
+// the accepts still awaiting one.
+type Memory struct {
+	Outcomes []Outcome       `json:"outcomes"`
+	Pending  []PendingAccept `json:"pending"`
+}
+
+// Memory is the tracker's state, for the snapshot.
+// Both are read under one lock, so an accept judged meanwhile is in one or the
+// other, never both.
+func (t *Tracker) Memory() Memory {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return Memory{Outcomes: slices.Clone(t.outcomes), Pending: t.pendingLocked()}
+}
+
+// Restore replaces the outcomes with mem's and closes each accept that was
+// pending as confounded: its arrival and settle clocks ran in a process that is
+// gone, so nothing re-enters pending on this one's clock. Called before the
+// tracker ticks.
+func (t *Tracker) Restore(mem Memory) {
+	now := t.c.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.outcomes = slices.Clone(mem.Outcomes)
+	t.pending = nil
+	for _, p := range mem.Pending {
+		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
+		// One id per accept: a snapshot older than the restart that closed it
+		// (state.json.prev) brings it back as pending, and the outcome already in
+		// the journal or its log closes it again without a second record.
+		id := p.AcceptID + "-restarted"
+		d, ok, err := t.recorded(id)
+		if err != nil {
+			// The log errs only on an id it indexes, so the outcome was written:
+			// closed, just unreadable. Listed, not recorded a second time.
+			t.c.Logf("admission: %s: restart outcome logged but unreadable: %v", p.AcceptID, err)
+		}
+		if ok || err != nil {
+			at := now
+			if d != nil {
+				at = d.At
+			}
+			t.outcomes = append(t.outcomes, Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id,
+				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: at})
+			continue
+		}
+		t.outcomes = append(t.outcomes, t.recordAs(id, e, Confounded, "agent restarted", nil, nil, now))
+	}
+	t.trimOutcomes()
 }
 
 // PredictionSummary describes prediction errors over the outcomes currently
@@ -267,6 +324,8 @@ func (t *Tracker) Tick(ctx context.Context) {
 				t.mu.Lock()
 				e.subject, e.snap = s, snap
 				t.mu.Unlock()
+				t.c.Map.RecordEvent(statemap.EventAdmissionArrived, e.name, "agent",
+					map[string]any{"name": e.name, "subject": s, "accept": e.acceptID})
 			} else if now.Sub(e.at) > ArrivalWindow {
 				done = append(done, t.record(e, NotArrived, "", nil, nil, now))
 				finished = append(finished, e)
@@ -368,19 +427,22 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	}
 
 	var stale []string
+	var why statemap.Status
 	for _, d := range e.domains {
-		if p, ok := t.c.Map.Property(d.Relieves); ok && p.Status == statemap.Stale {
+		if p, ok := t.c.Map.Property(d.Relieves); ok && p.Status != statemap.Active && p.Status != statemap.Retired {
 			stale = append(stale, d.Relieves)
+			why = p.Status
 		}
 	}
 	if len(stale) > 0 {
 		inputs["stale"] = stale
-		return t.record(e, Confounded, "stale reading: "+strings.Join(stale, ", "), lines, inputs, now)
+		return t.record(e, Confounded, string(why)+" reading: "+strings.Join(stale, ", "), lines, inputs, now)
 	}
 
 	result := Held
 	settled := make([]float64, len(e.domains))
 	baseline := make([]float64, len(e.domains))
+	fed := map[string]statemap.Calibration{}
 	for i, d := range e.domains {
 		l, a := &lines[i], e.lines[i]
 		v := value(t.c.Map, d.Relieves)
@@ -393,6 +455,20 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 		}
 		l.MapRise, l.MapErr = rise(a.MapPred, a.Pressure, observed)
 		l.UsageRise, l.UsageErr = rise(a.UsagePred, a.Pressure, observed)
+
+		// Each basis is judged on whether its predicted level fell on the same side of
+		// the exit as the settled one.
+		kind := "admission." + d.Relieves
+		for basis, pred := range map[string]*float64{"map": a.MapPred, "usage": a.UsagePred} {
+			if pred == nil {
+				continue
+			}
+			t.c.Map.RecordPrediction(kind, basis, *pred, v, (*pred <= d.Exit) == (v <= d.Exit))
+			fed[kind+"/"+basis] = t.c.Map.Calibration()[statemap.CalibrationKey{Kind: kind, Basis: basis}]
+		}
+	}
+	if len(fed) > 0 {
+		inputs["calibration"] = fed
 	}
 	inputs["relieves_at_accept"], inputs["relieves_now"] = baseline, settled
 	return t.record(e, result, "", lines, inputs, now)
@@ -400,10 +476,17 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 
 // record commits the outcome decision, linked to the accept.
 func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
-	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.IDs.Next(), Subject: e.subject,
+	return t.recordAs(t.c.Map.NewDecisionID("admit"), e, result, reason, lines, inputs, now)
+}
+
+// recordAs is record under a given outcome id.
+func (t *Tracker) recordAs(id string, e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
+	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id, Subject: e.subject,
 		Result: result, Reason: reason, Lines: lines, At: now}
-	b := t.c.Map.Decide(o.OutcomeID, "outcome of "+e.name+"?")
+	b := t.c.Map.Decide(o.OutcomeID, "admission.outcome", "outcome of "+e.name+"?")
+	b.Input("name", e.name)
 	b.Input("accept", e.acceptID)
+	b.Cite(e.acceptID)
 	b.Input("subject", e.subject)
 	b.Input("lines", slices.Clone(lines))
 	for k, v := range inputs {
@@ -415,6 +498,20 @@ func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, i
 	}
 	b.Commit(answer)
 	return o
+}
+
+// recorded finds a decision held in the journal or written to its log. A log
+// that cannot be read or does not verify is an error, not a miss.
+func (t *Tracker) recorded(id string) (*statemap.Decision, bool, error) {
+	j := t.c.Map.Journal()
+	if d, ok := j.Decision(id); ok {
+		return d, true, nil
+	}
+	d, ok, err := j.DecisionFromLog(id)
+	if err != nil {
+		return nil, false, fmt.Errorf("journal log: reading %s: %w", id, err)
+	}
+	return d, ok, nil
 }
 
 // rise is a basis's predicted rise over the pressure it was made from, and its

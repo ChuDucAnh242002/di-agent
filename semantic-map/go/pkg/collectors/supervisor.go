@@ -4,9 +4,11 @@
 package collectors
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -33,10 +35,32 @@ const (
 	stateStarting = "starting"
 	stateOK       = "ok"
 	stateBackoff  = "backoff"
+	// stateUnhealthy is a member whose call succeeded but whose source did not
+	// answer (contracts.CollectorContract.Health). It is not backed off: asking a
+	// source that is down costs one refused request, and a source that comes back
+	// is heard on the next tick.
+	stateUnhealthy = "unhealthy"
 	// stateStuck is a member whose call outlived its timeout and has not returned:
 	// it is skipped until the call ends, whatever its backoff says.
 	stateStuck = "stuck"
+
+	// A member down (unhealthy, in backoff or stuck) for doctorAfter has the doctor
+	// it declared run once for that episode, and never twice within doctorEvery;
+	// doctorTimeout bounds one run and doctorOutputMax what is kept of its output.
+	doctorAfter     = time.Minute
+	doctorEvery     = 10 * time.Minute
+	doctorTimeout   = 30 * time.Second
+	doctorOutputMax = 4 << 10
 )
+
+// Doctor is implemented by a member whose plugin declared a doctor command: what
+// the agent runs, once per episode, when the member stays down.
+type Doctor interface {
+	// DoctorCommand is the declared argv, nil when the plugin declared none.
+	DoctorCommand() []string
+	// RunDoctor runs it until it exits or ctx ends and returns its combined output.
+	RunDoctor(ctx context.Context) ([]byte, error)
+}
 
 // Member is one configured source as the Supervisor sees it.
 type Member struct {
@@ -49,17 +73,23 @@ type Member struct {
 	Timeout time.Duration
 }
 
+// maxSamplesPerTick is the most samples one member may deliver in one Collect; the
+// excess is dropped as a "flood" violation.
+const maxSamplesPerTick = 16384
+
 // MemberStatus is one member's entry in GET /collectors.
 type MemberStatus struct {
-	Name             string             `json:"name"`
-	Kind             string             `json:"kind"`
-	Type             string             `json:"type"`
-	State            string             `json:"state"`
-	LastSuccessUnix  int64              `json:"last_success_unix"`
-	LastError        string             `json:"last_error"`
-	LastErrorUnix    int64              `json:"last_error_unix"`
-	Samples          int64              `json:"samples"`
-	Violations       int64              `json:"violations"`
+	Name            string `json:"name"`
+	Kind            string `json:"kind"`
+	Type            string `json:"type"`
+	State           string `json:"state"`
+	LastSuccessUnix int64  `json:"last_success_unix"`
+	LastError       string `json:"last_error"`
+	LastErrorUnix   int64  `json:"last_error_unix"`
+	Samples         int64  `json:"samples"`
+	Violations      int64  `json:"violations"`
+	// ViolationKinds breaks Violations down by reason, e.g. {"flood": 3616}.
+	ViolationKinds   map[string]int64   `json:"violation_kinds,omitempty"`
 	OwnershipDrops   int64              `json:"ownership_drops"`
 	Restarts         int64              `json:"restarts"`
 	BackoffUntilUnix int64              `json:"backoff_until_unix"`
@@ -93,7 +123,14 @@ type memberState struct {
 	// goroutine records how it ended once it does.
 	abandoned bool
 
+	// downSince is when the member last left ok (zero while ok); doctored says the
+	// doctor has run in this episode, lastDoctor when it last ran.
+	downSince  time.Time
+	doctored   bool
+	lastDoctor time.Time
+
 	samples, violations, ownershipDrops int64
+	violationKinds                      map[string]int64
 
 	// available is the member's AvailableMetrics answer, read in the member's own
 	// goroutine right after a successful Collect. Asking it from elsewhere could run
@@ -118,6 +155,8 @@ type callResult struct {
 	// drops are what the member discarded from its own source's batch.
 	drops []contracts.SampleDrop
 	err   error
+	// health is the member's Health after a call that returned no error.
+	health error
 }
 
 // Supervisor collects from every member each tick and implements
@@ -127,6 +166,12 @@ type callResult struct {
 //   - A member's error, panic or timeout costs only that member's samples for the
 //     tick; Collect still returns the others with a nil error. The faulting member
 //     backs off exponentially and is reported through Status and the log.
+//   - A member whose call succeeded but whose Health is not nil is "unhealthy",
+//     with the reason as its last error. It is not backed off: it is asked again
+//     every tick and is "ok" on the first healthy answer.
+//   - A member down (unhealthy, backoff or stuck) for doctorAfter that declares a
+//     Doctor has it run once for the episode, at most once per doctorEvery, bounded
+//     by doctorTimeout; what ran and how it ended goes to Env.OnDoctor and the log.
 //   - At most one call per member is in flight. A Go member cannot be cancelled,
 //     so a call that outlives its timeout is abandoned, the member's state is
 //     "stuck", and it is skipped until the call returns; its ending is then
@@ -149,6 +194,9 @@ type Supervisor struct {
 	mu      sync.Mutex
 	members []*memberState
 	owner   map[types.MetricType]int
+
+	onDoctor func(member string, detail map[string]any)
+	doctors  sync.WaitGroup // running doctors; tests wait on it
 }
 
 // NewSupervisor wraps members, in configuration order, for the node env.NodeID.
@@ -165,6 +213,8 @@ func NewSupervisor(env Env, members []Member) *Supervisor {
 		logf:   logf,
 		now:    time.Now,
 		owner:  make(map[types.MetricType]int),
+
+		onDoctor: env.OnDoctor,
 	}
 	names := make([]string, len(members))
 	for i, m := range members {
@@ -203,6 +253,9 @@ func safeAvailable(m Member, logf func(string, ...any)) (out []types.MetricType)
 	}()
 	return append([]types.MetricType(nil), m.C.AvailableMetrics()...)
 }
+
+// Health is nil: each member's health is its own, in Status.
+func (s *Supervisor) Health() error { return nil }
 
 // SourceID is "supervisor:" followed by the member names in list order.
 func (s *Supervisor) SourceID() string { return s.sid }
@@ -302,14 +355,70 @@ func (s *Supervisor) Collect() ([]*types.MetricSample, error) {
 			ms.backoffUntil = time.Time{}
 			ms.state = stateOK
 			ms.lastSuccessUnix = now.Unix()
+			if h := results[i].health; h != nil {
+				ms.state = stateUnhealthy
+				ms.lastError = h.Error()
+				ms.lastErrorUnix = now.Unix()
+			}
 			ms.available = results[i].available
 			for _, d := range results[i].drops {
 				s.violate(ms, d.Kind, d.MetricType)
 			}
 			out = s.admit(i, ms, results[i].samples, out)
 		}
+		s.checkDoctor(ms, now)
 	}
 	return out, nil
+}
+
+// checkDoctor follows a member's down episodes and, once one has lasted
+// doctorAfter, starts the doctor the member declared: once per episode, never
+// twice within doctorEvery. Called with mu held.
+func (s *Supervisor) checkDoctor(ms *memberState, now time.Time) {
+	if ms.state == stateOK || ms.state == stateStarting {
+		ms.downSince, ms.doctored = time.Time{}, false
+		return
+	}
+	if ms.downSince.IsZero() {
+		ms.downSince = now
+	}
+	d, ok := ms.m.C.(Doctor)
+	if !ok || ms.doctored || now.Sub(ms.downSince) < doctorAfter ||
+		(!ms.lastDoctor.IsZero() && now.Sub(ms.lastDoctor) < doctorEvery) {
+		return
+	}
+	argv := d.DoctorCommand()
+	if len(argv) == 0 {
+		return
+	}
+	ms.doctored, ms.lastDoctor = true, now
+	why := ms.lastError
+	s.doctors.Add(1)
+	go func() {
+		defer s.doctors.Done()
+		s.runDoctor(ms.m.Name, d, argv, why)
+	}()
+}
+
+// runDoctor runs one doctor and reports what ran and how it ended, through the
+// log and Env.OnDoctor.
+func (s *Supervisor) runDoctor(name string, d Doctor, argv []string, why string) {
+	ctx, cancel := context.WithTimeout(context.Background(), doctorTimeout)
+	defer cancel()
+	start := time.Now()
+	out, err := d.RunDoctor(ctx)
+	if len(out) > doctorOutputMax { // a Doctor other than ExecCollector may not cap it
+		out = out[:doctorOutputMax]
+	}
+	detail := map[string]any{"member": name, "command": argv, "down_because": why,
+		"output": string(out), "seconds": time.Since(start).Seconds()}
+	if err != nil {
+		detail["error"] = err.Error()
+	}
+	s.logf("collector[%s]: ran doctor %q: %v", name, argv, detail["error"])
+	if s.onDoctor != nil {
+		s.onDoctor(name, detail)
+	}
 }
 
 // call runs one Collect in the member's goroutine. A panic becomes a fault rather
@@ -330,6 +439,7 @@ func (s *Supervisor) call(ms *memberState, ch chan<- callResult) {
 		}
 		if r.err == nil {
 			r.available = append([]types.MetricType(nil), ms.m.C.AvailableMetrics()...)
+			r.health = ms.m.C.Health()
 		}
 	}()
 	s.mu.Lock()
@@ -373,6 +483,21 @@ func (s *Supervisor) fault(ms *memberState, now time.Time, msg string) {
 // Members are admitted in list order, so within a tick an earlier member claims a
 // type before a later one is checked against it.
 func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSample, out []*types.MetricSample) []*types.MetricSample {
+	if over := len(samples) - maxSamplesPerTick; over > 0 {
+		// Only the first maxSamplesPerTick are inspected, valid or not; one producer
+		// cannot make the tick's admission, and the lock it holds, unbounded. The
+		// rest are counted in one step and logged once per member.
+		ms.violations += int64(over)
+		if ms.violationKinds == nil {
+			ms.violationKinds = map[string]int64{}
+		}
+		ms.violationKinds["flood"] += int64(over)
+		if k := (violationKey{"flood", ""}); !ms.loggedViol[k] {
+			ms.loggedViol[k] = true
+			s.logf("collector[%s]: dropped %d samples over the per-tick cap of %d: flood (further floods are counted, not logged)", ms.m.Name, over, maxSamplesPerTick)
+		}
+		samples = samples[:maxSamplesPerTick]
+	}
 	for _, smp := range samples {
 		if kind := s.violation(ms, smp); kind != "" {
 			mt := types.MetricType("")
@@ -390,6 +515,9 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 			}
 			continue
 		}
+		// The member's name is the sample's source, whatever the member wrote: it is
+		// how the map knows which properties a down member last produced.
+		smp.Source = ms.m.Name
 		ms.samples++
 		out = append(out, smp)
 	}
@@ -400,6 +528,10 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 // and logs the first of each kind and type.
 func (s *Supervisor) violate(ms *memberState, kind string, mt types.MetricType) {
 	ms.violations++
+	if ms.violationKinds == nil {
+		ms.violationKinds = map[string]int64{}
+	}
+	ms.violationKinds[kind]++
 	k := violationKey{kind, mt}
 	if ms.loggedViol[k] {
 		return
@@ -472,6 +604,7 @@ func (s *Supervisor) Status() []MemberStatus {
 			LastErrorUnix:   ms.lastErrorUnix,
 			Samples:         ms.samples,
 			Violations:      ms.violations,
+			ViolationKinds:  maps.Clone(ms.violationKinds),
 			OwnershipDrops:  ms.ownershipDrops,
 			Available:       append([]types.MetricType{}, ms.available...),
 		}

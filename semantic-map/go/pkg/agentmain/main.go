@@ -232,18 +232,36 @@ func Main() {
 			log.Fatalf("persist.file %s cannot be written: %v. Set persist.file to a writable "+
 				"path, or to \"\" to keep the map in memory only", cfg.Persist.File, err)
 		}
-		loaded, err := state.Load(cfg.Persist.File)
+		r, err := state.Load(cfg.Persist.File)
 		if err != nil {
 			log.Fatalf("restoring state from %s: %v", cfg.Persist.File, err)
 		}
-		if loaded {
+		switch {
+		case r.Loaded:
+			if r.From != cfg.Persist.File {
+				log.Printf("state model: %s unreadable (%s); restored the previous generation %s",
+					cfg.Persist.File, r.CurrentError, r.From)
+			}
 			c := state.Census()
 			log.Printf("state model: restored %d properties and %d relationships from %s "+
-				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, cfg.Persist.File,
+				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, r.From,
 				state.Revision())
-		} else {
+		case r.CurrentError != "":
+			log.Printf("state model: %s unreadable (%s) and %s unreadable (%s): starting cold, "+
+				"journalled as restore.failed", cfg.Persist.File, r.CurrentError,
+				cfg.Persist.File+".prev", r.PrevError)
+		default:
 			log.Printf("state model: no snapshot at %s, starting cold", cfg.Persist.File)
 		}
+		// After Load, so its lines carry this life's incarnation. The log is on
+		// whenever persist.file is set: it keeps the decisions the journal evicts.
+		dir := filepath.Dir(cfg.Persist.File)
+		if err := state.OpenLog(dir); err != nil {
+			log.Fatalf("journal log at %s: %v", dir, err)
+		}
+		stats, _ := state.Journal().LogStats()
+		log.Printf("journal log: %s (%d decisions indexed, %d corrupt, %d foreign lines)",
+			stats.File, stats.Indexed, stats.CorruptLines, stats.ForeignLines)
 	}
 
 	if err := checkCanRecord(dom != nil, !cfg.Map.Admit, state.Census().PropertiesTotal); err != nil {
@@ -279,7 +297,9 @@ func Main() {
 	// by the refresh started once the runtime is built, read by the cgroup collector.
 	requests := &minimal.Requests{}
 	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf,
-		Requests: requests}, cfg.Sources.Collectors)
+		Requests: requests, OnDoctor: func(member string, detail map[string]any) {
+			state.RecordEvent(statemap.EventCollectorDoctor, member, "collector", detail)
+		}}, cfg.Sources.Collectors)
 	if err != nil {
 		log.Fatalf("collectors: %v", err)
 	}
@@ -318,6 +338,7 @@ func Main() {
 		registry: sm.Peers(),
 		client:   peers.NewClient(5 * time.Second),
 		store:    peerState,
+		state:    state,
 	}
 
 	mux := http.NewServeMux()
@@ -351,6 +372,12 @@ func Main() {
 	}
 	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
 	admit := buildAdmission(cfg, state, rt, reliefLoops, sm.Peers())
+	// Before any loop starts: what they learned is handed back, and the save loop
+	// captures it from here on.
+	if err := restoreLoops(state.LoopsPersistence(captureLoops(cfg.Node.ID, reliefLoops, admit.tracker, sm.Peers())),
+		cfg.Node.ID, reliefLoops, admit.tracker, sm.Peers(), log.Printf); err != nil {
+		log.Printf("loops: restoring: %v; starting the loops fresh", err)
+	}
 	registerAdmissionRoutes(mux, admit)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
@@ -367,7 +394,30 @@ func Main() {
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	registerConsole(mux, cfg.Node.UI)
 
-	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
+	pace := NewPace(state, PaceInputs{
+		LeverPhases: func() []string {
+			phases := make([]string, 0, len(reliefLoops))
+			for _, l := range reliefLoops {
+				phases = append(phases, string(l.Status().Phase))
+			}
+			return phases
+		},
+		PendingAccepts: func() int { return len(admit.tracker.PendingList()) },
+		ReviewDue: func() int {
+			if reviewer == nil {
+				return 0
+			}
+			return reviewer.Status().Due
+		},
+		LastAdmitted: state.LastAdmitted,
+	}, time.Now, log.Printf)
+	// Before Run: Pin does not move a pace that is already slow back to base.
+	paceOK, paceWhy := paceAllowed(cfg.Sources.Interval, state.StaleAfter())
+	if !paceOK {
+		pace.Pin(paceWhy)
+	}
+
+	srv := newServer(cfg.Node.Addr, pace.Wakeful(mux))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -409,7 +459,12 @@ func Main() {
 		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
-	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
+	if paceOK {
+		log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, groups)",
+			paceCalmFor, paceSlowFactor)
+	}
+	go pace.Run(ctx)
+	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
@@ -419,12 +474,14 @@ func Main() {
 	if sup != nil {
 		collector = sup
 	}
-	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval, headroomMu)
-	if reviewer != nil {
-		go reviewer.Run(ctx)
+	var status func() []collectors.MemberStatus
+	if sup != nil {
+		status = sup.Status
 	}
+	startCollectionLoop(ctx, sm, collector, status, state, cfg.Sources.Interval, headroomMu, pace)
+	startReviewLoop(ctx, reviewer, cfg.Loops.Review.Interval, pace)
 	if cfg.Groups.Interval > 0 {
-		go grp.run(ctx, cfg.Groups.Interval)
+		go grp.run(ctx, cfg.Groups.Interval, pace)
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -438,13 +495,18 @@ func Main() {
 	// write, so the shutdown snapshot was usually lost and a clean restart silently
 	// dropped everything since the last periodic save.
 	if cfg.Persist.File != "" {
-		if err := state.Save(cfg.Persist.File); err != nil {
+		err := state.Save(cfg.Persist.File)
+		// The log closes either way: decisions are already synced, and closing
+		// flushes the last second of other events.
+		if cerr := state.CloseLog(); cerr != nil {
+			log.Printf("journal log: closing: %v", cerr)
+		}
+		if err != nil {
 			// Exits non-zero, so a supervisor sees what the log says: what changed
 			// since the last periodic save may be lost.
 			log.Fatalf("state model: shutdown save failed: %v", err)
-		} else {
-			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 		}
+		log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 	}
 }
 
@@ -494,8 +556,11 @@ func startCollectionLoop(
 	ctx context.Context,
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
+	status func() []collectors.MemberStatus,
+	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
+	p *Pace,
 ) {
 	switch {
 	case collector == nil:
@@ -507,7 +572,7 @@ func startCollectionLoop(
 	}
 
 	log.Printf("collection loop started: source=%s interval=%s", collector.SourceID(), interval)
-	go runCollectionLoop(ctx, sm, collector, interval, headroomMu)
+	go runCollectionLoop(ctx, sm, collector, status, state, interval, headroomMu, p)
 }
 
 // runCollectionLoop is the body of the scheduler goroutine. Errors from the
@@ -519,19 +584,31 @@ func runCollectionLoop(
 	ctx context.Context,
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
+	status func() []collectors.MemberStatus,
+	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
+	p *Pace,
 ) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if !p.wait(ctx, interval) {
 			log.Printf("collection loop exiting: %v", ctx.Err())
 			return
-		case <-t.C:
-			collectAndIngest(collector, headroomMu, sm.IngestSample)
 		}
+		collectAndIngest(collector, headroomMu, sm.IngestSample)
+		// After the ingest, so a member whose first good tick carries samples
+		// revives its properties before it is marked up.
+		syncSources(state, status())
+	}
+}
+
+// syncSources tells the map which collector members are down: one unhealthy, in
+// backoff or stuck cannot be heard from, so what it last produced is unobservable
+// rather than silent. The map journals only transitions.
+func syncSources(state *statemap.Map, members []collectors.MemberStatus) {
+	for _, ms := range members {
+		down := ms.State == "unhealthy" || ms.State == "backoff" || ms.State == "stuck"
+		state.SetSourceDown(ms.Name, down, ms.LastError)
 	}
 }
 
@@ -771,7 +848,45 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 	}()
 }
 
-// startSaveLoop snapshots the map on a ticker and once more when the context ends.
+// newServer bounds how long a client may take to send its request, so a connection
+// that opens and says nothing cannot be held forever. There is no WriteTimeout: the
+// explain endpoints stream answers from a model that may think for minutes.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr: addr, Handler: h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+	}
+}
+
+// saveMark is what the last successful save covered: the map's revision, the
+// journal's total entries ever appended, and the loops' state. A decision is
+// journalled without moving the revision, and a peer's trust changes neither, so
+// the revision alone would skip both.
+type saveMark struct {
+	rev, entries uint64
+	loops        string
+	done         bool
+}
+
+// saveIfChanged saves the map unless neither its revision, its journal nor the loops' state moved since
+// the last successful save. A zero mark has saved nothing, so the first tick saves once.
+// The mark is read before the save, so a change landing mid-save leaves the next tick
+// to save it.
+func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool, err error) {
+	held, dropped, _ := state.Journal().Stats()
+	now := saveMark{rev: state.Revision(), entries: uint64(held) + dropped, loops: string(state.LoopsState()), done: true}
+	if now == *last {
+		return false, nil
+	}
+	if err := state.Save(path); err != nil {
+		return false, err
+	}
+	*last = now
+	return true, nil
+}
+
+// startSaveLoop snapshots the map every interval of the pace when its revision moved.
 //
 // This loop only does the periodic saves, which bound what an UNCLEAN exit costs. The
 // save that makes a clean restart lossless is done synchronously by main after the
@@ -779,7 +894,7 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 // enough to be useless. A failed save is logged rather than fatal — an agent that
 // cannot write its snapshot should keep answering questions about the system it can
 // still see.
-func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every time.Duration) {
+func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every time.Duration, p *Pace) {
 	if state == nil || path == "" {
 		return
 	}
@@ -788,20 +903,20 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 	}
 	log.Printf("state model: persisting to %s every %s", path, every)
 	go func() {
-		t := time.NewTicker(every)
-		defer t.Stop()
+		var lastSaved saveMark
 		for {
-			select {
-			case <-ctx.Done():
+			if !p.wait(ctx, every) {
 				// The shutdown save is main's job, done synchronously so the process
 				// cannot exit before it lands.
 				return
-			case <-t.C:
-				if err := state.Save(path); err != nil {
-					log.Printf("state model: periodic save failed: %v", err)
-					continue
-				}
-				log.Printf("state model: saved at revision %d (periodic)", state.Revision())
+			}
+			saved, err := saveIfChanged(state, path, &lastSaved)
+			if err != nil {
+				log.Printf("state model: periodic save failed: %v", err)
+				continue
+			}
+			if saved {
+				log.Printf("state model: saved at revision %d (periodic)", lastSaved.rev)
 			}
 		}
 	}()

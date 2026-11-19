@@ -3,6 +3,7 @@ package relief
 import (
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -457,7 +458,7 @@ func (h *harness) firstVerify(limit time.Duration, p float64) *statemap.Decision
 // resumeWithPrediction puts a change on pod:a whose act the journal holds, for
 // the loop to take up at its first tick.
 func resumeWithPrediction(h *harness) {
-	b := h.m.Decide("relief-act-1-1", "earlier act")
+	b := h.m.Decide("relief-act-1-1", "relief.act", "earlier act")
 	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, From: 1.6, To: 1.2, Basis: BasisMap})
 	b.Commit(nil)
 	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
@@ -748,5 +749,79 @@ func TestMovedReportsArrivalAndExcludes(t *testing.T) {
 	got := Moved(m, nodeUsage, map[string]float64{"pod:a": 0.4}, "pod:c", 0.25, t0)
 	if len(got) != 1 || got[0] != "pod:b" {
 		t.Fatalf("moved %v; want [pod:b]", got)
+	}
+}
+
+// TestMemoryRoundTripsEffectsAndCounters: what a loop has learned about a
+// workload, and its tally, are handed to the loop a restarted agent builds.
+func TestMemoryRoundTripsEffectsAndCounters(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, noRelate: true, evidence: true})
+	h.judged("pod:a", 0.44)
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
+		t.Fatalf("action %+v; want kept", a)
+	}
+	mem := h.l.Memory()
+	if v, ok := mem.Effects["pod:a"][BasisUsage]; !ok || v == 1 {
+		t.Fatalf("effects %v; want pod:a's usage effect learned", mem.Effects)
+	}
+	if mem.Kept != 1 || mem.Acts != 1 {
+		t.Fatalf("memory %+v; want one act, kept", mem)
+	}
+	l2 := h.newLoop(h.l.Lever())
+	l2.Restore(mem)
+	if st := l2.Status(); st.Kept != 1 || st.Actions != 1 {
+		t.Fatalf("restored status %+v; want one act, kept", st)
+	}
+	if got := l2.Memory(); !reflect.DeepEqual(got, mem) {
+		t.Fatalf("restored memory %+v; want %+v", got, mem)
+	}
+}
+
+func TestAKeptOutcomeFeedsTheCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	h.judged("pod:a", 0.44) // predicted 0.1, observed 0.06, kept
+	got := h.m.Calibration()[statemap.CalibrationKey{Kind: "relief.cpu.limit", Basis: BasisMap}]
+	if got.N != 1 || !near(got.MeanErr, 0.04) || !near(got.MeanAbsErr, 0.04) || got.HitRate != 1 {
+		t.Fatalf("calibration %+v", got)
+	}
+	in, _ := h.lastVerify().Inputs["calibration"].(map[string]statemap.Calibration)
+	if in["relief.cpu.limit/map"].N != 1 {
+		t.Fatalf("calibration input %v", h.lastVerify().Inputs["calibration"])
+	}
+}
+
+func TestARevertedOutcomeFeedsAMiss(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	h.judged("pod:a", 0.49) // observed 0.01: reverted
+	got := h.m.Calibration()[statemap.CalibrationKey{Kind: "relief.cpu.limit", Basis: BasisMap}]
+	if got.N != 1 || got.HitRate != 0 || !near(got.MeanErr, 0.09) {
+		t.Fatalf("calibration %+v", got)
+	}
+}
+
+func TestAConfoundedOutcomeFeedsNoCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1}, noRelate: true, evidence: true})
+	h.act("pod:a")
+	record(t, h.m, usage("pod:b"), "pod:b", 0.2, h.now)
+	h.run(2*time.Minute, 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	record(t, h.m, usage("pod:b"), "pod:b", 0.3, h.now)
+	h.run(2*time.Minute, 0.40)
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
+		t.Fatalf("second step %+v; want kept", a)
+	}
+	if n := len(h.m.Calibration()); n != 0 {
+		t.Fatalf("calibration %v; a confounded outcome feeds nothing", h.m.Calibration())
+	}
+	if h.lastVerify().Inputs["calibration"] != nil {
+		t.Fatalf("confounded verify carries calibration %v", h.lastVerify().Inputs["calibration"])
+	}
+}
+
+func TestDryRunFeedsNoCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: false})
+	h.judged("pod:a", 0.44)
+	if n := len(h.m.Calibration()); n != 0 {
+		t.Fatalf("calibration %v; a dry run feeds nothing", h.m.Calibration())
 	}
 }

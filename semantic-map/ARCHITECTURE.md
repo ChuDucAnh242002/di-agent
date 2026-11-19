@@ -692,13 +692,17 @@ Each `MetricSample` carries:
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
 | `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
 | `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Declared where the quantity has one (a share, a percentage), absent for a rate or a count; the same on every sample of a type. Without one the map assumes [0,1] and says so |
-| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
+| `source`         | `str`        | Set by the Supervisor to the member name (`http` for `/ingest-sample`); a producer's own value is overwritten |
 | `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
+
+**Health is part of the contract.** Every collector answers `Health()` after each `Collect`: nil when its source answered, or why it did not (`http://localhost:19999 is unreachable: … connection refused`). A source that is down is not a fault of the collector — `Collect` still returns `([], nil)` — so it is not backed off: the Supervisor shows the member `unhealthy` with the reason, asks it again every tick, and the loop marks it down like one in backoff or stuck, so `collector.down`/`collector.up` are journalled and what it last produced is `unobservable`. Without this a refused connection read as an empty success and an outage looked like silence. On the wire, a collect reply's `unhealthy` field carries the reason. A plugin MAY declare a `doctor` command in its hello reply; when its member stays down (unhealthy, backoff or stuck) for one minute the agent runs it once for that episode — never twice within ten minutes, 30 s at most, in the plugin's directory and environment — and journals what ran and how it ended as `collector.doctor`. Only an exec plugin's doctor runs: the agent already runs that plugin's command, and an http endpoint does not name commands for this node. No doctor declared, nothing runs; nothing in the agent knows which collector is which.
 
 **`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
 **`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
+
+At most 16384 samples per member per tick are admitted; the excess is a counted violation, so one producer cannot make the tick's lock hold unbounded.
 
 ### MetricType catalogue
 
@@ -767,7 +771,24 @@ This is not tidiness. Two failures were live without it, both silent:
   relationship on a quiet system. `Relationship.SignConflicts` and `SignSuspect()` are
   what make the difference visible, and `relationships_sign_suspect` carries it into
   the census so an aggregate reader cannot miss it. Polarity is what gives that check
-  a fixed reference to test against.
+  a fixed reference to test against. The flag is acted on, not only shown: once it
+  holds over `signRetireWindows` (3) windows of pairs, a seeded, learned, discovered or
+  intervened relationship is retired with `retired_reason: "sign-contradicted"`
+  (journalled by the agent with the agreement and conflict counts and the provenance it
+  had), while an `asserted` one is only flagged, since an operator's claim is theirs to
+  overrule, and so is a `composition` one (confirmed from a composition candidate, and
+  persisted from snapshot version 11): a part and its whole need not move the same way,
+  because the other parts move too, so sign conflicts do not contradict it (issue #81:
+  a page-hog pod's memory against node memory was retired mid-reclaim). The three
+  windows are the substance: folds share all but one pair of a window of smoothed
+  values, so the 30 folds the flag needs can rest on one or two effective draws, and at
+  the defaults a correctly signed but noisy relationship (y = 0.5x + noise) was retired
+  on the first eligible fold in 7 of 10 seeded runs. Retirement happens on the
+  transition of that combined predicate only: re-declaring the relationship revives it
+  with its counters, flag still set, and does not retire it again while the predicate
+  holds; if the conflict share then drops below the bar and rises past it again, the
+  revived relationship is retired again, and `ResetRelationship` clears the counters and
+  gives it a fresh trial. The pair's intervention counters are untouched.
 
 **How many observations a relationship gets.** A relationship advances on a *pair*, so
 its `n_obs` counts the times both its endpoints were observed close enough together —
@@ -814,9 +835,34 @@ the machine as it was when it was written.
 journals the admission, so the map follows a system that changes rather than a schema
 someone wrote down. Silence marks a property stale and can retire it, because a model
 that keeps reporting a departed metric's last value asserts what it cannot support.
+A property whose collector is down (unhealthy, backoff or stuck) is `unobservable`, not stale,
+and is never retired while the collector stays down: silence with a known cause is not
+evidence of departure, and retiring on it would cascade away every relationship the
+outage touched. The Supervisor stamps each admitted sample with its member's name, the
+loop tells the map which members are down after each tick, and a property stays
+unobservable until its next observation; once the member is back its silence counts
+from the return, not from before the outage. An HTTP producer is stamped `http`, so it
+cannot name itself after a member. With two producers of one property (two members
+emitting the same subject's property, or a member and `http`) `Source` names the one
+that reported last, since that is whose silence follows. A derived property with no
+active member is unobservable when one of its members is, stale otherwise: a summary
+of an outage is not a summary of silence.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
-stay reconstructible.
+stay reconstructible. It is soft for a day: an observed property retired for 24 hours
+(`forgetAfter`) is forgotten by the sweep, which deletes it, its retired relationships
+and the per-pair state keyed by them (a relationship declared onto the retired property
+is live, and keeps the property until it is retired too, so no edge points at nothing), and leaves a tombstone (id and `RetiredAt`) for
+another day, so a decision that read it still resolves to "retired" (`GET
+/state/properties/{id}` answers 410) while the map and snapshot stop growing with pod
+churn. Derived properties are never forgotten; a re-observation after forgetting is a
+new admission.
+
+`Record` refuses a reading older than the property's last reading, judged on the agent's monotonic clock (the anchor silence runs on, so a wall-clock step cannot make every correct reading look old; a property restored from a snapshot and not yet seen by this process accepts), or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record; `RecordAccepted` reports the refusal so ingestion keeps the reading from the proposer too. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup. So "older" means by a whole second, which also absorbs the two clocks being read one after the other; such a reading does not move the silence anchor back.
+
+Silence is the reading's age at receipt (receipt time minus its stamp) plus the monotonic time since then, never a wall-clock difference taken later, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
+
+After a restore nothing retires until `retire_after` of this process's time has passed: a snapshot's last observations are hours old by definition, and retiring on that would cascade every relationship away on the first sweep.
 
 The ordering in `IngestSample` matters: the state model records a sample BEFORE the
 routing table is consulted. The table says what the agent knows how to summarise, not
@@ -834,8 +880,84 @@ state a decision reads *as it reads it*, so the record cannot drift from the rea
 and inputs are copied so a decision cannot silently become a description of a later
 system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
-evidence that nothing happened, and a decision evicted by that bound answers 410
-rather than 404.
+evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge; an indexed decision whose line cannot be read or does not verify answers 500, not a miss.
+`pace.changed` records every change of the agent's attention with its reason, and
+every decision's `inputs.pace` says which attention level it was taken at.
+`GET /state/decisions/{id}/explain` renders a decision and its cites as prose by a pure function of the records, so a node with no model can still say "capped X because contention stayed above 0.25 for 1m; predicted 0.08 from the intervened relationship, measured 0.6; observed 0.05; kept".
+A sweep that finds the wall clock stepped against the monotonic one records
+`clock.stepped` with both deltas, so a timestamp that jumped is explained.
+A collector member going down (unhealthy, backoff or stuck) or coming back records
+`collector.down` (detail `reason`) or `collector.up`, once per transition, with the
+member as target; a doctor run for a member that stayed down records `collector.doctor`.
+The sweep deleting a property retired for 24 hours records `property.forgotten` (target
+the id; detail `retired_at` and the `relationships` removed).
+Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
+when the current file is absent or unreadable, renaming the unreadable one to
+`<file>.corrupt` first so the reservation save does not rotate it over the good `.prev`;
+when neither is usable both are set aside the same way, the map starts cold and its
+first event is `restore.failed` (target the path, detail `error` and `prev_error`), so
+a cold start is visible in the journal rather than a crash loop.
+A version or owner mismatch is still refused outright, with no fallback.
+The map's own changes are `property.*` and `relationship.*` events:
+`relationship.declared`, `relationship.asserted`, `relationship.intervention`,
+`relationship.retired` (with a `reason`, `sign-contradicted` when the agent retires
+one the machine keeps refuting) and `relationship.regime` (a relationship entering or
+leaving a regime, with `recent`, `established`, `band` and `started`).
+Loops outside the map journal what would otherwise be silent, through `Map.RecordEvent`:
+`relief.phase` (a lever's phase change, with `from` and `to`), `relief.paused` and
+`relief.resumed` (the operator's pause, only when the state changed),
+`admission.arrived` (an accepted workload appeared, with its subject and accept id),
+`peer.unreachable` and `peer.recovered` (a peer's first failure and its first success
+after, never a repeat). A redeclared group's `property.redeclared` carries
+`members_before` beside `members`.
+Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnation>.<n>`
+with `n` drawn from the same counter, so no crash and no restart can reissue an id,
+and order is total across restarts. The incarnation advances on every restore and is
+written back at once; opening the journal log also counts the log's highest incarnation
+for this owner, so a cold start over a surviving log takes the one after it. A commit under an id already recorded is not recorded; it is
+journalled as `decision.refused`. The loops' learned state survives a restart with the
+map (§ Persistence), and an accept left pending by the restart is closed by an
+`admission.outcome` citing it, so its chain is never left open.
+A decision carries a `kind` (`estimate`, `admit`, `relief.act`, `relief.verify`,
+`admission`, `review`, `cost`, …) and `cites`, the earlier decisions it rests on: a
+verdict cites its act, a revert its act and verdict, an admission outcome its accept,
+a review the review or verdict before it. The journal indexes cites both ways, so the
+chain act → verify → revert → intervention is walkable from any link, back through
+its ancestry and forward to what cites it (`?chain=1`). An ancestor the bound has
+evicted is reported as `{id, evicted}` rather than left out.
+
+**Reflective.** The map keeps a record of how its own predictions have fared: a
+`Calibration` per `(kind, basis)` holding the outcome count, the mean signed error
+(predicted − observed), the mean absolute error and the hit rate, folded as a running
+mean so no history is kept. Relief feeds it from `relief.<action>` verdicts on the
+prediction basis the plan used (hit when the verdict agreed), and admission from each
+settled outcome as `admission.<relieves>` on the `map` and `usage` bases (hit when the
+predicted level fell on the same side of the exit as the settled one). A dry run, an
+unbound cap, a confounded outcome or an accept relief acted on feeds nothing. The
+verify and outcome decisions carry the updated records as a `calibration` input. It is
+persisted in its own snapshot field and `GET /state` carries it as `calibration`.
+Admission reads it back: when both its predictions exist and each basis has at least
+`calibrationMinN` (5) outcomes, the one with the lower mean absolute error decides.
+It also judges the map's own relationships: one whose declared sign the machine keeps
+contradicting retires itself (`relationship.retired`, actor `agent`, reason
+`sign-contradicted`) once the sign-suspect flag holds over three windows of pairs,
+rather than waiting for an operator to read the flag.
+And it says when the present differs from what it has established: a relationship is
+in `regime` once its recent layer has sat outside the established layer's band for a
+full window of consecutive folds (as many as the pair window holds), and leaves it
+after a window inside. The band is two standard errors of Fisher's z, as
+`CandidateReview.Outdated` uses, but at the window's effective size rather than its
+count: the paired values are EMA-smoothed at `Alpha`, an AR(1) with φ = 1 − α, so n
+pairs carry n_eff = n·(1 − φ²)/(1 + φ²) independent ones and the band is
+`2 / sqrt(max(n_eff − 3, 1))` (at α = 1, n_eff = n). Consecutive folds share all but
+one pair, so a run shorter than a window is one draw seen several times; with the
+independent-pair band and a three-fold run a stationary stream at the defaults went in
+and out of regime 314 times in 6000 pairs. A relationship retired on a fold
+does not enter or leave a regime on it. Entering and leaving are journalled as
+`relationship.regime`, and `regime_since` dates the entry. The precedence in
+`Effective()` is unchanged, so what a reader sees is the caveat: any decision that reads the
+relationship (an estimate, or an admission through the measured effects behind `k`)
+carries `relationship <id>: present differs from established (recent …, established …)`.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
@@ -856,7 +978,7 @@ telemetry arrived. Note what this no longer buys: with no seeded magnitudes the 
 *empty* on a fresh agent rather than approximate, so a cold-start agent cannot answer a
 counterfactual at all — which is an honest report, and the gap §"What the artefact
 contains" accepts in exchange for never reporting an unmeasured number.
-`/state/estimate` reports both, and calls the value-weighted one a contribution.
+`/state/estimate` reports both, and calls the value-weighted one a contribution. It also reports the sensitivity and each contribution as an interval; admission still decides on the point.
 
 **Details.** `CostOfAction` reads the cost constructs' levels and
 their incoming relationships through a DecisionBuilder, so the properties that reach
@@ -887,7 +1009,19 @@ already watched for a week, and "why did you do that yesterday" stays answerable
 without this the audit trail is an artefact of one process lifetime rather than of the
 agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
 cancelling the context and returning let the process exit mid-write, so a clean restart
-silently dropped everything since the last periodic save.
+silently dropped everything since the last periodic save. The journal log (`journal.ndjson`)
+is the second file in `persist.file`'s directory, opened after the restore so its lines
+carry the new incarnation; a write failure there is logged at most once a minute and
+never stops the agent, since the journal and the snapshot still hold the events.
+
+The snapshot also holds `loops`, what the acting loops learned: each relief lever's
+effect EMAs and its tally (acts, kept, reverted, refused), the admission outcomes, and
+the trust extended to each peer with the time the agent last penalised it (without
+it, a peer under the floor would read as operator-set and never be re-probed). It is stamped with the node id and restored, before
+any loop starts, only on the same `node.id`; another node's is logged and ignored. An
+accept still awaiting its outcome is not resumed — its arrival and settle clocks ran in
+the process that is gone — but closed with a journalled `admission.outcome`,
+`confounded: agent restarted`, citing the accept.
 
 What is deliberately not persisted: the estimator's pair windows. Restoring them would
 restore a claim of simultaneity between observations taken before a restart and after
@@ -900,17 +1034,20 @@ observations as this one's history at full confidence. A relationship serialises
 recent layer as `recent` and adds the derived `effective` and `basis`, so a reader is
 handed the answer rather than three layers and a precedence rule.
 
-#### The three paces
+#### The four paces
 
-The map changes at three rates, and each is a setting rather than an accident.
+The map changes at four rates, and each is a setting or a fixed constant, never an accident.
 
 | Pace | Appears | Disappears |
 |---|---|---|
 | **Property** | one observation, at confidence 0 | stale after `map.stale_after` (2 m) → retired after `map.retire_after` (10 m), cascading to incident relationships |
 | **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
 | **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+| **Attention** | `base` from start; at once on an offer, an operator mutation other than a pushed sample or an admitted property; at the next one-minute check on a lever leaving calm, a pending accept or a due review | `slow` after `paceCalmFor` (10 m) of calm: collection, review, persist and group refresh at ×4; journalled `pace.changed`; every decision carries `inputs.pace` |
 
-Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
+The sweep and the peer poll are not paced, and the pace is pinned at `base` when `sources.interval × 4` would reach `map.stale_after`, so neither a property nor a peer goes stale because the agent slowed: "stale" keeps one meaning at both attention levels.
+
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active (unobservable when a member is) and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
@@ -962,6 +1099,11 @@ not spend its first thousand pairs reporting the zero it started from. The pairi
 makes the two comparable; nothing interpolates between them, because `Effective()` chooses
 by authority rather than by arithmetic.
 
+The window's Fisher-z standard error is carried on the relationship as `strength_se`,
+mapped to the r scale as `tanh(atanh(r) + 1/√(n−3)) − r` (the whole range `1` under 4
+pairs, where z has no standard error). It is the same arithmetic `CandidateReview.Outdated`
+uses to decide whether evidence moved.
+
 Two properties follow:
 
 - **Conflict pairs separate.** P2 and P3 share `RC→PS` with opposite directions. Evidence
@@ -970,7 +1112,10 @@ Two properties follow:
   sibling at 0.995 and the negative one at 0.000.
 - **The learned sign can contradict the backbone.** A proposition asserts a direction;
   when the system shows the opposite sign, that is evidence against *that* proposition
-  rather than evidence of a weaker relation.
+  rather than evidence of a weaker relation. Each fold counts as a sign agreement or a
+  conflict; `SignSuspect()` flags 60% conflict over at least 30 folds, and the agent
+  retires a non-asserted relationship only once that holds over three windows of pairs,
+  because early folds share a still-filling window and are not independent evidence.
 
 **What it replaced.** The other reading was endpoint EMA: every sample updated every edge
 incident to its construct, and the edge's weight tracked that construct's magnitude. It was
@@ -1087,7 +1232,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; when runtime requests are known, emits node memory admission headroom from `MemAvailable` after reserving each pod's unused request; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, memory\_admission\_headroom\_ratio, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; when runtime requests are known, emits node memory admission headroom from `MemAvailable` after reserving each pod's unused request; the agent's own cgroup, read from `/proc/self/cgroup` (the `0::` line) and resolved under `config.root`, is always the subject `unit:di-agent` (label `self: "true"`), outside `config.max_subjects` and `config.subjects`, never listed in `config.units`, and never counted twice: the directory equal to it is skipped by the walk and as a container part, so a pod running the agent keeps its `pod:<uid>` and a configured `di-agent.service` yields no second subject; an unreadable or `0::`-less file, the root itself, or a path absent under the root is logged once and self is not collected; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, memory\_admission\_headroom\_ratio, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript` — built-in `type: script` | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1423,8 +1568,9 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/confirm`        | optional `ConfirmRequest{from}`; required for an undirected candidate  | `204 No Content`; `400` when the orientation is missing or wrong | Promote a proposer candidate: a Discovered relationship between properties, or a validated proposition between constructs |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
-| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
-| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`, plus a hypothesis digest when `assume`/`without` are given; a repeat at the same revision takes `-2`, `-3`, …, reserved in the journal as for admission ids; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
+| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| GET  | `/state/decisions/{id}/explain`   | path only | text/plain | A decision and the chain it cites as prose, from the records alone; `410`/`404`/`500` as `GET /state/decisions/{id}`; a log hit ends with `source: log` |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
 Errors on the new endpoints follow a single shape:
@@ -1629,18 +1775,21 @@ This section covers the registry and the trust mechanics that decide *where work
 
 In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
-- SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
+- SQLite-backed registry for the edge-standard / cloud-full profile, keeping full trust history (today each peer's trust and penalty time survive a restart in the snapshot's `loops`, §5 Persistence, and its observation count starts again);
 - gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
 
 ### Trust mechanics
 
-`Descriptor.Trust` is a float in `[0, 1]`. Three forces move it:
+`Descriptor.Trust` is a float in `[0, 1]`. Four forces move it:
 
 1. **Default at registration** = `0.5`. We neither blanket-trust nor pre-distrust an operator-supplied URL.
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
-3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
+3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `Registry.Penalise` takes `−0.05` per failed `/cost` query, clamped at 0, and stamps `LastPenalised`.
+4. **Reward** on a successful `/cost` query — `Registry.Reward` adds `+0.05`, capped at 1. Without it trust could only fall, and a peer that had a bad minute would never recover.
+
+The trust floor expires for the agent's own penalty only. A peer under `min_trust` with a `LastPenalised` stamp is queried again after `trustRetryAfter` (10 minutes), so a recovered peer climbs back by rewards — and is ranked only once its trust after the reward is back at the floor, since a re-probe tests reachability, not trust; a peer whose trust an operator set under the floor has no stamp and stays excluded until the operator says otherwise (the PoC's `trust 0.15` exclusion relies on this).
 
 Outcome-driven trust updates (boost on an accepted offer, penalty on a declined one) are designed but not wired. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after an accepted offer, but `peers.Client.Offer` never touches trust and neither does an admission outcome: an answer moves trust only when its caller applies `UpdateTrust`. Admission does not read trust either; a submission walks peers in registry-id order.
 
@@ -1698,6 +1847,12 @@ no domains and every offer declines: a node never admits blind.
 6. Prediction, per domain: the pressure the domain would reach with the workload
    added must be at or below `Exit`, the level relief releases caps at. Admitting up
    to `Enter` would hold pressure in the band where caps never release.
+   Two predictions exist when they can be made (`map`: the measured response slope;
+   `usage`: pressure scaled by the usage the workload adds). The basis with the lower
+   `MeanAbsErr` in the calibration record decides, once both have `calibrationMinN`
+   (5) outcomes; a tie, a missing prediction or too few outcomes keeps the default,
+   the map basis when it exists, else usage. The record carries `basis_chosen_by`
+   (`calibration` or `default`, per domain) and the `calibration` read.
 
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent
@@ -1800,7 +1955,7 @@ and nobody is reported as accepting. Asking on could make two nodes accept one
 workload. A failed dial (refused, no such host) never reached the peer and goes on. Each hop carries the
 URL it was asked at and its decision id, so `<url>/state/decisions/<id>` resolves on
 the node that decided; traceability is per node, and the submitter keeps the chain,
-not the peers' decisions. Ids are `admit-<agent start epoch>-<seq>` for accepts,
+not the peers' decisions. Ids are `admit-<incarnation>.<n>` from the map for accepts,
 declines and outcomes alike.
 
 **The outcome check.** An accept is a prediction, and the accepting node checks it
@@ -2059,6 +2214,8 @@ make -C poc teardown                   # delete VMs and purge
 `pkg/explain` adds an operator-facing surface that lets a human ask questions in natural language and get a grounded, cited answer. It exists to make the semantic map talk-to-able: *"Why is my ResourceCost higher than my peers?"*, *"Which propositions are driving the recommendation?"*, *"Should I deprecate P7?"*
 
 The design follows the framing in §8: our graph is the **world model** for an LLM operator agent, and every anchor property (real-world outcomes, frozen rules, human judgment) is preserved because the LLM is a **consumer** of the graph, never a mutator.
+
+The narrative route `GET /state/decisions/{id}/explain` is not this layer: it is `explain.Narrate`, a pure function of a decision's records, needs no model and answers on a node with none.
 
 ### Position in the architecture
 
@@ -2351,11 +2508,11 @@ Candidate review is the one place the map waits on a person, and the first decis
 agent takes on its own authority. How much authority is an operator setting
 (`loops.review.level`); what the agent does with it is always a decision record.
 
-**Tiers, cheapest first.** A candidate goes up only as far as it has to.
+**Tiers, cheapest first.** A candidate goes up only as far as it has to. Tiers 1 and 2 are off by default (`backend: none`); a model is something an operator adds, and a default naming a model the node does not run would retry every cycle with no record.
 
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
-| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
+| 0 | rules in the daemon | `composition` confirms a directed part against its whole. `persistent-correlation` (on by default) approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
 | 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
 | — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
@@ -2378,7 +2535,7 @@ reviewed again, which is what keeps the models from being asked the same questio
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
-**Persistent correlation (opt-in).** The proposer tracks fresh paired observations,
+**Persistent correlation (default).** The proposer tracks fresh paired observations,
 checkpointing only after a full buffer has been replaced. Every intervening update
 must meet its correlation threshold, evidence-count and variation gates, have no
 missing-range caveats, and pass both a Fisher p-value limit of 0.05 and the configured
@@ -2409,7 +2566,7 @@ starting. Pending reviews survive restart, and restore reconciles a candidate ag
 an association already present in the map because the two are captured under separate
 locks. The state estimator's own raw windows remain cold after restart. There is no new
 probation or retirement policy. See the
-[rules-only configuration](README.md#rules-only-persistent-correlation).
+[default review](README.md#the-default-review-rules-only).
 
 **Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
 costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits
@@ -2538,11 +2695,11 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node (`measuredEffect`; none when the share fell by no more than 0.02). Pair-level relationship strength clamps this measurement to [0, 1]. The admission domain effect retains the slope above 1 because it projects a node response per unit workload share, not a relationship strength. The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. That run measured CPU contention as any stall, which counted `hog`'s waiting on its own threads; under owed contention the same pair owes nothing (above), and no CPU intervention has been shown on the VM since. The verify decision records the outcome's `effect`.
 
-**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It survives a restart in the snapshot's `loops` (§5, Persistence). An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
 
 **Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how undecided candidates settle without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
 
-**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
 
 ### The Kubernetes runtime (`pkg/runtime/kubernetes`)
 

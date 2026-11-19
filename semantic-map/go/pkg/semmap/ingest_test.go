@@ -754,3 +754,74 @@ func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) 
 		t.Error("the confirmed negative edge is not covered, so it would be proposed again")
 	}
 }
+
+// TestConfirmCandidate_CompositionMarksTheRelationship: a pod's metric against the
+// node total of the same metric is a composition, and the relationship it becomes
+// carries that, so the sign rule flags it rather than retiring it.
+func TestConfirmCandidate_CompositionMarksTheRelationship(t *testing.T) {
+	spec := mustSpec()
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: 0.5*x + 0.1, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Kind != types.CandidateKindComposition {
+		t.Fatalf("candidates %+v; want one composition", cs)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{}); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_utilization", "discovered"))
+	if !ok || !r.Composition {
+		t.Errorf("relationship %+v ok=%v; want composition", r, ok)
+	}
+}
+
+// spyProposer records which readings reached the proposer.
+type spyProposer struct {
+	*minimal.DisabledProposer
+	seen []types.PropertyReading
+}
+
+func (s *spyProposer) ObserveProperty(r types.PropertyReading) error {
+	s.seen = append(s.seen, r)
+	return nil
+}
+
+// TestIngestSample_ARefusedReadingDoesNotReachTheProposer: the map refused it, so
+// discovery must not learn from it either — a future-stamped reading would otherwise
+// hold the proposer's view of that property in the future.
+func TestIngestSample_ARefusedReadingDoesNotReachTheProposer(t *testing.T) {
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	now := time.Unix(1_700_000_000, 0)
+	state.SetClock(func() time.Time { return now })
+	spy := &spyProposer{DisabledProposer: minimal.NewDisabledProposer()}
+	sm := semmap.New(minimal.NewOntologyFromSpec(mustSpec()), minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil),
+		spy, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	for _, s := range []types.MetricSample{
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Unix(), EventID: "a"},
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Add(time.Hour).Unix(), EventID: "b"},    // future
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Add(-time.Minute).Unix(), EventID: "c"}, // older
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Unix(), EventID: "a"},                   // duplicate
+	} {
+		if err := sm.IngestSample(&s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(spy.seen) != 1 {
+		t.Errorf("%d readings reached the proposer; want 1, the accepted one", len(spy.seen))
+	}
+}

@@ -632,7 +632,7 @@ function node(html) {
   return t.content;
 }
 
-const statusGlyph = (s) => (s === 'active' ? '●' : s === 'stale' ? '◐' : '○');
+const statusGlyph = (s) => (s === 'active' ? '●' : s === 'stale' ? '◐' : s === 'unobservable' ? '◌' : '○');
 
 function valueOf(model, id) {
   const p = model.property(id);

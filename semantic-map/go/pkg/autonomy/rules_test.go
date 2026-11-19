@@ -41,6 +41,13 @@ func TestPersistentCorrelationRule(t *testing.T) {
 			}
 			cfg.Level = tc.level
 			run(t, m, cfg)
+			if tc.wantAction == types.ReviewUndecided {
+				// With no model tier, what no rule answers is not reviewed at all.
+				if c.Review != nil {
+					t.Fatalf("review %+v; want none: no rule answers and no model is configured", c.Review)
+				}
+				return
+			}
 			if c.Review == nil || c.Review.Action != tc.wantAction || c.Review.Applied != tc.applied {
 				t.Fatalf("review %+v; want %s applied=%v", c.Review, tc.wantAction, tc.applied)
 			}
@@ -98,21 +105,20 @@ func TestPersistentCorrelationIsReviewedWhenWindowsAdvance(t *testing.T) {
 
 	cfg.Level = autonomy.Rules
 	r := run(t, m, cfg)
-	first := c.Review.DecisionID
 	for i := 0; i < 10; i++ {
 		r.Cycle(context.Background())
 	}
-	if c.Review.DecisionID != first || c.Status != types.Pending {
-		t.Fatal("repeated review cycles changed unchanged evidence")
+	if c.Review != nil || c.Status != types.Pending {
+		t.Fatal("a candidate no rule answers was reviewed with no model tier")
 	}
 	c.PersistentWindows = 2
 	r.Cycle(context.Background())
-	if c.Review.DecisionID != first || c.Status != types.Pending {
-		t.Fatal("ordinary persistence progress reopened the review or approved too soon")
+	if c.Review != nil || c.Status != types.Pending {
+		t.Fatal("ordinary persistence progress was reviewed or approved too soon")
 	}
 	c.PersistentWindows = 3
 	r.Cycle(context.Background())
-	if c.Status != types.Confirmed || c.Review.PersistentWindows != 3 || c.Review.DecisionID == first {
+	if c.Status != types.Confirmed || c.Review.PersistentWindows != 3 {
 		t.Fatalf("unchanged r with new windows was not confirmed: %+v", c)
 	}
 }
@@ -154,8 +160,8 @@ func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing
 		t.Fatal(err)
 	}
 	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
-	if ok, err := state.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := state.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	m, p = build(state)
 	cs, err := m.PendingCandidates()
@@ -198,8 +204,8 @@ func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing
 		t.Fatal(err)
 	}
 	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
-	if ok, err := state.Load(path); err != nil || !ok {
-		t.Fatalf("load confirmed association: %v %v", ok, err)
+	if r, err := state.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load confirmed association: %v %v", r.Loaded, err)
 	}
 	m, p = build(state)
 	if cs, err := m.PendingCandidates(); err != nil || len(cs) != 0 || !state.Associated(from, to, 1) {
@@ -297,7 +303,7 @@ func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T
 	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
 		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
 	}
-	if ds := state.Journal().Decisions(0); len(ds) != 0 {
+	if ds := state.Journal().Decisions(0, ""); len(ds) != 0 {
 		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
 	}
 	cfg.Level = autonomy.Full
@@ -393,12 +399,12 @@ func TestARefusedWithdrawnCandidateIsReviewedOnce(t *testing.T) {
 		t.Fatalf("after the refusal the candidate is %v/%q review %+v; want deferred as weakened, its undecided review kept",
 			h[0].Status, h[0].Reason, h[0].Review)
 	}
-	decisions, errs := len(state.Journal().Decisions(0)), r.Status().Errors
+	decisions, errs := len(state.Journal().Decisions(0, "")), r.Status().Errors
 	if decisions == 0 {
 		t.Fatal("the refused confirmation journaled no decision")
 	}
 	r.Cycle(context.Background())
-	if n := len(state.Journal().Decisions(0)); n != decisions {
+	if n := len(state.Journal().Decisions(0, "")); n != decisions {
 		t.Errorf("the second cycle journaled %d more decisions for a candidate whose evidence did not move", n-decisions)
 	}
 	if e := r.Status().Errors; e != errs {

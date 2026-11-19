@@ -203,7 +203,8 @@ func TestSnapshotFromAnotherSystemIsRefused(t *testing.T) {
 
 	// The file lands on node-1 — copied with a config directory, or baked into an image.
 	local, _ := newTestMap(t, Config{Owner: "node-1"})
-	ok, err := local.Load(path)
+	r, err := local.Load(path)
+	ok := r.Loaded
 	if err == nil {
 		t.Fatal("a snapshot describing node-2 loaded into node-1's map; another machine's " +
 			"observations would now be this one's history, at full confidence")
@@ -227,7 +228,7 @@ func TestSnapshotFromAnotherSystemIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh, _ := newTestMap(t, Config{Owner: "node-1"})
-	if ok, err := fresh.Load(unowned); err != nil || !ok {
+	if r, err := fresh.Load(unowned); err != nil || !r.Loaded {
 		t.Errorf("a snapshot written before owners were recorded failed to load: %v", err)
 	}
 }
@@ -235,5 +236,5 @@ func TestSnapshotFromAnotherSystemIsRefused(t *testing.T) {
 // replaceOwner strips the owner field from a snapshot, standing in for a file written
 // by an older build.
 func replaceOwner(s string) string {
-	return strings.Replace(s, `"owner": "node-2",`, "", 1)
+	return strings.Replace(s, `"owner":"node-2",`, "", 1)
 }

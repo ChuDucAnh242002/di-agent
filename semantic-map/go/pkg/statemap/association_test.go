@@ -49,7 +49,7 @@ func TestAssociationsNeverBecomeCausalInfluences(t *testing.T) {
 		t.Fatalf("association described as a causal edge: %s %v", explanation, err)
 	}
 	for _, target := range []string{"a", "b"} {
-		d := m.Decide("test-"+target, "check influence")
+		d := m.Decide("test-"+target, "estimate", "check influence")
 		if len(d.RelationshipsInto(target)) != 0 {
 			t.Fatal("association entered a decision as a directional influence")
 		}
@@ -75,8 +75,8 @@ func TestAssociationsNeverBecomeCausalInfluences(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("restore: %v %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("restore: %v %v", r.Loaded, err)
 	}
 	r, _ = restored.Relationship(id)
 	if !r.Association {

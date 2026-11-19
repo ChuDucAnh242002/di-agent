@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Query selects part of the map. A zero Query returns the active state, which is
@@ -16,7 +17,7 @@ type Query struct {
 	// Kinds restricts to observed or derived properties. Empty means both.
 	Kinds []Kind
 
-	// Statuses restricts by lifecycle. Empty means active and stale but NOT
+	// Statuses restricts by lifecycle. Empty means active, stale and unobservable but NOT
 	// retired: a retired property is not part of the current system, and returning
 	// it by default would put withdrawn state into an agent's answers.
 	Statuses []Status
@@ -49,10 +50,17 @@ type StateView struct {
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
 
+	// Calibration is how the map's own predictions have fared, by kind and basis.
+	Calibration []CalibrationEntry `json:"calibration"`
+
 	// Facts are the machine the properties belong to: its OS, CPU, memory, disk. Every
 	// view carries them, whatever the filter, since they are the frame its values are
 	// read in.
 	Facts []Fact `json:"facts,omitempty"`
+
+	// Pace is the attention level the agent runs at and when it last changed.
+	Pace      string    `json:"pace"`
+	PaceSince time.Time `json:"pace_since"`
 
 	// Counts summarises the whole map, not just the selection, so a caller can see
 	// what the filter excluded.
@@ -61,20 +69,23 @@ type StateView struct {
 
 // StateCounts is a census of the map.
 type StateCounts struct {
-	PropertiesTotal    int `json:"properties_total"`
-	PropertiesActive   int `json:"properties_active"`
-	PropertiesStale    int `json:"properties_stale"`
-	PropertiesRetired  int `json:"properties_retired"`
-	Observed           int `json:"observed"`
-	Derived            int `json:"derived"`
-	RelationshipsTotal int `json:"relationships_total"`
-	RelationshipsLive  int `json:"relationships_live"`
-	Seeded             int `json:"seeded"`
-	Learned            int `json:"learned"`
-	Asserted           int `json:"asserted"`
-	Discovered         int `json:"discovered"`
-	Intervened         int `json:"intervened"`
-	Unobserved         int `json:"properties_unobserved"`
+	PropertiesTotal  int `json:"properties_total"`
+	PropertiesActive int `json:"properties_active"`
+	PropertiesStale  int `json:"properties_stale"`
+	// PropertiesUnobservable counts properties whose collector is down: silent for
+	// a known cause, neither stale nor retired.
+	PropertiesUnobservable int `json:"properties_unobservable"`
+	PropertiesRetired      int `json:"properties_retired"`
+	Observed               int `json:"observed"`
+	Derived                int `json:"derived"`
+	RelationshipsTotal     int `json:"relationships_total"`
+	RelationshipsLive      int `json:"relationships_live"`
+	Seeded                 int `json:"seeded"`
+	Learned                int `json:"learned"`
+	Asserted               int `json:"asserted"`
+	Discovered             int `json:"discovered"`
+	Intervened             int `json:"intervened"`
+	Unobserved             int `json:"properties_unobserved"`
 
 	// Subjects is the number of distinct non-empty subjects across non-retired
 	// properties: how many things narrower than the node the map currently models.
@@ -87,6 +98,12 @@ type StateCounts struct {
 	// system" wherever it is summarised. A non-zero count here says the graph carries
 	// a claim the machine keeps refuting.
 	RelationshipsSignSuspect int `json:"relationships_sign_suspect"`
+
+	// ReadingsOutOfOrder counts readings of an existing property stamped older than
+	// its last, and ReadingsFuture those stamped more than the pair window ahead of
+	// the agent's clock. Both were refused and changed nothing.
+	ReadingsOutOfOrder int `json:"readings_out_of_order"`
+	ReadingsFuture     int `json:"readings_future"`
 }
 
 // State answers a Query.
@@ -98,6 +115,7 @@ func (m *Map) State(q Query) StateView {
 	if len(q.Statuses) == 0 {
 		wantStatus[Active] = true
 		wantStatus[Stale] = true
+		wantStatus[Unobservable] = true
 	} else {
 		for _, s := range q.Statuses {
 			wantStatus[s] = true
@@ -128,8 +146,8 @@ func (m *Map) State(q Query) StateView {
 	// Empty, not nil: a filter that matches nothing is an answer, and it should
 	// serialise as [] rather than null, which a client has to special-case.
 	view := StateView{
-		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(), Facts: m.factsLocked(),
-		Properties: []Property{}, Relationships: []Relationship{},
+		Owner: m.owner, Revision: m.revision, Pace: m.pace, PaceSince: m.paceSince, Counts: m.censusLocked(), Facts: m.factsLocked(),
+		Calibration: m.calibrationListLocked(), Properties: []Property{}, Relationships: []Relationship{},
 	}
 	selected := map[string]bool{}
 	for _, p := range m.properties {
@@ -181,6 +199,15 @@ func (m *Map) Property(id string) (Property, bool) {
 		return Property{}, false
 	}
 	return p.clone(), true
+}
+
+// Forgotten reports whether id is a tombstone: a property retired and then deleted
+// by the sweep, with the time it was retired.
+func (m *Map) Forgotten(id string) (retiredAt time.Time, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	retiredAt, ok = m.forgotten[id]
+	return retiredAt, ok
 }
 
 // Relationship returns one relationship.
@@ -248,7 +275,7 @@ func (m *Map) Census() StateCounts {
 }
 
 func (m *Map) censusLocked() StateCounts {
-	var c StateCounts
+	c := StateCounts{ReadingsOutOfOrder: m.readingsOutOfOrder, ReadingsFuture: m.readingsFuture}
 	subjects := map[string]struct{}{}
 	for _, p := range m.properties {
 		c.PropertiesTotal++
@@ -257,6 +284,8 @@ func (m *Map) censusLocked() StateCounts {
 			c.PropertiesActive++
 		case Stale:
 			c.PropertiesStale++
+		case Unobservable:
+			c.PropertiesUnobservable++
 		case Retired:
 			c.PropertiesRetired++
 		}

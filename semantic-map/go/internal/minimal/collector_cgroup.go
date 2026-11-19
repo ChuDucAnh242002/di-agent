@@ -3,6 +3,7 @@ package minimal
 import (
 	"bufio"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -124,12 +125,50 @@ type CgroupCollector struct {
 	// changes): a collector that goes silent is the failure this project treats as
 	// worse than an error, because nothing about an empty map looks wrong.
 	rootWarned   bool
+	rootErr      error // the last Collect's root read, for Health
 	noPodsWarned bool
 	lastSkipped  int
 
 	podNames map[string][2]string // pod UID → namespace, name; from PodLogRoot
 	// containerNames is container ID → name, from ContainerLogRoot.
 	containerNames map[string]string
+
+	// selfDir is this process's own cgroup (from <proc>/self/cgroup), absolute under
+	// cgroupRoot; "" means it is not collected. It is emitted as selfSubject and no
+	// other subject.
+	selfDir     string
+	selfRel     string
+	selfLogged  bool
+	selfChecked bool
+}
+
+// selfSubject is the agent's own cgroup: the system the agent runs is made of
+// workloads, and the agent is one of them.
+const selfSubject = "unit:di-agent"
+
+// readSelfCgroup returns the path after "0::" (the unified hierarchy) in
+// <procRoot>/self/cgroup. A missing file is ("", nil): a host without it, or a test.
+func readSelfCgroup(procRoot string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(procRoot, "self", "cgroup"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rel, ok := strings.CutPrefix(line, "0::"); ok {
+			return strings.TrimSpace(rel), nil
+		}
+	}
+	return "", errors.New("no 0:: line (not a cgroup v2 hierarchy)")
+}
+
+func (c *CgroupCollector) selfLogOnce(format string, args ...any) {
+	if !c.selfLogged {
+		c.selfLogged = true
+		c.log(format, args...)
+	}
 }
 
 func (c *CgroupCollector) log(format string, args ...any) {
@@ -278,6 +317,16 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 	if c.memTotal == 0 {
 		c.memTotal = readMemTotal(filepath.Join(opts.ProcRoot, "meminfo"))
 	}
+	if rel, err := readSelfCgroup(opts.ProcRoot); err != nil {
+		c.selfLogOnce("cgroup collector: %s unreadable (%v): the agent's own cgroup will not be observed",
+			filepath.Join(opts.ProcRoot, "self/cgroup"), err)
+	} else if rel == "/" {
+		c.selfLogOnce("cgroup collector: %s names the root of its cgroup namespace; self is not collected",
+			filepath.Join(opts.ProcRoot, "self/cgroup"))
+	} else if rel != "" {
+		c.selfRel = strings.TrimPrefix(rel, "/")
+		c.selfDir = filepath.Join(cgroupRoot, c.selfRel)
+	}
 	c.recognise = []recogniser{recogniseKubepods}
 	// A malformed pattern is dropped here with a line (Build refuses it earlier
 	// through ValidUnitGlobs); path.Match would otherwise report the error on every
@@ -307,6 +356,17 @@ func (c *CgroupCollector) now() time.Time {
 func (c *CgroupCollector) SourceID() string                     { return c.sid }
 func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupAvailMetrics }
 
+// Health is unhealthy while the root cgroup could not be read: no node property
+// is produced then. A subject that cannot be read is not a fault of the source.
+func (c *CgroupCollector) Health() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rootErr != nil {
+		return fmt.Errorf("cgroup root %s unreadable: %w", c.cgroupRoot, c.rootErr)
+	}
+	return nil
+}
+
 // Collect reads the root and, when enabled, every recognised subject, at one instant.
 // A subject exists iff its directory is present, recognised, within the depth bound and
 // the subject cap, and readable this tick; nothing is emitted for one that has gone, and
@@ -324,10 +384,25 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
+	c.rootErr = rootErr
 	if rootErr != nil && !c.rootWarned {
 		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at its config.root?",
 			c.cgroupRoot, rootErr)
 		c.rootWarned = true
+	}
+	// The agent's own cgroup: always a subject, outside the cap and the Subjects switch.
+	if c.selfDir != "" && !c.selfChecked {
+		c.selfChecked = true
+		if _, err := os.Stat(c.selfDir); err != nil {
+			c.selfLogOnce("cgroup collector: the agent's cgroup %q from %s does not exist under %s (%v): it will not be observed",
+				c.selfRel, filepath.Join(c.opts.ProcRoot, "self/cgroup"), c.cgroupRoot, err)
+			c.selfDir = ""
+		}
+	}
+	if c.selfDir != "" {
+		samples, _ := c.collectOneLocked(selfSubject, c.selfDir, map[string]string{
+			"kind": "unit", "unit": filepath.Base(c.selfRel), "cgroup": c.selfRel, "self": "true"}, now)
+		out = append(out, samples...)
 	}
 	if !c.opts.Subjects {
 		return out, nil
@@ -349,6 +424,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
+		}
+		if p == c.selfDir {
+			return nil // emitted once, as selfSubject; what lies below it is still walked
 		}
 		rel := filepath.ToSlash(strings.TrimPrefix(p, root+string(filepath.Separator)))
 		first, _, _ := strings.Cut(rel, "/")
@@ -406,6 +484,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 			// A pod's parts are not counted again in the node's contention: the pod's
 			// own reading already holds them.
 			for _, pt := range c.containerPartsLocked(p, &rescanned) {
+				if pt.dir == c.selfDir {
+					continue
+				}
 				sub := "container:" + labels["pod_uid"] + "." + sanitizeContainer(pt.name)
 				if len(seen) >= c.opts.MaxSubjects {
 					skipped++
@@ -488,7 +569,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		}
 	}
 	for subject := range c.prev {
-		if subject != "" && !seen[subject] {
+		if subject != "" && subject != selfSubject && !seen[subject] {
 			delete(c.prev, subject)
 		}
 	}

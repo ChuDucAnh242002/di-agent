@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -62,7 +65,6 @@ func newRig(t *testing.T) *rig {
 		Acted: func(action string, _ time.Time) (float64, bool) {
 			return r.peak, action != "" && action == r.actedOn
 		},
-		IDs: NewIDs(t0),
 		Now: func() time.Time { return r.now },
 		Logf: func(f string, a ...any) {
 			r.mu.Lock()
@@ -296,6 +298,7 @@ func TestRiseFromAcceptBaseline(t *testing.T) {
 func TestStaleReadingConfounds(t *testing.T) {
 	r := arrived(t)
 	r.m.SetClock(func() time.Time { return t0.Add(2 * r.m.StaleAfter()) })
+	r.m.SetMonotonic(func() time.Duration { return time.Second + 2*r.m.StaleAfter() })
 	r.m.Sweep()
 	r.tick(time.Minute)
 	o := r.result("confounded")
@@ -306,6 +309,21 @@ func TestStaleReadingConfounds(t *testing.T) {
 		if l.MapRise != nil || l.UsageErr != nil {
 			t.Fatalf("stale outcome scored: %+v", l)
 		}
+	}
+}
+
+func TestUnobservableReadingConfounds(t *testing.T) {
+	r := arrived(t)
+	// The Relieves reading comes from a source that is now down.
+	if err := r.m.Record(statemap.Observation{ID: "cpu_contention_ratio", Value: 0.02, At: t0, Source: "cgroup", Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+	r.m.SetSourceDown("cgroup", true, "")
+	r.m.Sweep()
+	r.tick(time.Minute)
+	o := r.result("confounded")
+	if !strings.Contains(o.Reason, "unobservable reading") {
+		t.Fatalf("reason %q", o.Reason)
 	}
 }
 
@@ -397,7 +415,7 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	r := arrived(t)
 	r.tick(time.Minute)
 	o := r.result("held")
-	if o.AcceptID != "admit-1-web" || !strings.HasPrefix(o.OutcomeID, fmt.Sprintf("admit-%d-", t0.Unix())) {
+	if o.AcceptID != "admit-1-web" || o.OutcomeID == "" {
 		t.Fatalf("ids %q %q", o.AcceptID, o.OutcomeID)
 	}
 	rec, ok := r.j.Decision(o.OutcomeID)
@@ -406,6 +424,27 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	}
 	if rec.Inputs["accept"] != o.AcceptID || rec.Answer["outcome"] != "held" {
 		t.Fatalf("record inputs %v answer %v", rec.Inputs, rec.Answer)
+	}
+}
+
+func TestOutcomeCitesTheAccept(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	o := r.result("held")
+	rec, ok := r.j.Decision(o.OutcomeID)
+	if !ok {
+		t.Fatal("outcome decision not recorded")
+	}
+	if rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != o.AcceptID {
+		t.Fatalf("outcome kind %q cites %v; want admission.outcome citing %s", rec.Kind, rec.Cites, o.AcceptID)
+	}
+}
+
+func TestOutcomeIdsComeFromTheMap(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	if o := r.result("held"); !strings.HasPrefix(o.OutcomeID, "admit-1.") {
+		t.Fatalf("outcome id %q; want prefix admit-1.", o.OutcomeID)
 	}
 }
 
@@ -436,5 +475,233 @@ func TestOutcomesNewestFirst(t *testing.T) {
 	out := r.tr.Outcomes()
 	if len(out) != 2 || out[0].Name != "a2" || out[1].Name != "a1" {
 		t.Fatalf("outcomes %+v", out)
+	}
+}
+
+func TestArrivalIsJournalled(t *testing.T) {
+	r := newRig(t)
+	r.accept("web")
+	r.arrive("web")
+	r.tick(time.Second)
+	var got []statemap.Event
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("arrival events %v; want one", got)
+	}
+	if e := got[0]; e.Target != "web" || e.Detail["subject"] != "pod:web" || e.Detail["accept"] != "admit-1-web" {
+		t.Errorf("event %+v", e)
+	}
+	r.tick(time.Second)
+	n := 0
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d arrival events after another tick; want still one", n)
+	}
+}
+
+// TestRestoreKeepsOutcomesAndClosesPendingAccepts: a restarted agent keeps the
+// outcomes, and closes each accept still awaiting one as confounded — its
+// arrival and settle clocks did not survive the restart — citing the accept.
+func TestRestoreKeepsOutcomesAndClosesPendingAccepts(t *testing.T) {
+	r := newRig(t)
+	r.accept("gone")
+	r.tick(ArrivalWindow + time.Second)
+	d := r.accept("web")
+	r.arrive("web")
+	r.tick(10 * time.Second)
+	mem := r.tr.Memory()
+	if len(mem.Outcomes) != 1 || len(mem.Pending) != 1 || mem.Pending[0].AcceptID != d.ID {
+		t.Fatalf("memory %+v; want one outcome and web pending", mem)
+	}
+
+	r2 := newRig(t)
+	r2.tr.Restore(mem)
+	out := r2.tr.Outcomes()
+	if len(out) != 2 || out[1].Name != "gone" {
+		t.Fatalf("outcomes %+v; want web's newest, then gone", out)
+	}
+	o := out[0]
+	if o.Name != "web" || o.Result != Confounded || o.Reason != "agent restarted" || o.Subject != "pod:web" {
+		t.Fatalf("restart outcome %+v; want web confounded by the restart", o)
+	}
+	rec, ok := r2.j.Decision(o.OutcomeID)
+	if !ok || rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != d.ID {
+		t.Fatalf("decision %+v (found %v); want admission.outcome citing %s", rec, ok, d.ID)
+	}
+	if p := r2.tr.PendingList(); len(p) != 0 {
+		t.Fatalf("pending %+v; nothing resumes after a restart", p)
+	}
+}
+
+// A snapshot older than the restart that closed an accept (state.json.prev) brings
+// the accept back as pending; it is closed once, by the outcome already recorded.
+func TestAnAcceptIsClosedByARestartOnce(t *testing.T) {
+	r := newRig(t)
+	d := r.accept("web")
+	mem := r.tr.Memory()
+
+	r2 := newRig(t)
+	r2.tr.Restore(mem)
+	first := r2.tr.Outcomes()[0].OutcomeID
+	r2.tr.Restore(mem) // the same map, restored again from the older generation
+	out := r2.tr.Outcomes()
+	if len(out) != 1 || out[0].OutcomeID != first {
+		t.Fatalf("outcomes %+v; want the one restart outcome %s", out, first)
+	}
+	n := 0
+	for _, rec := range r2.j.Decisions(0, "admission.outcome") {
+		if len(rec.Cites) == 1 && rec.Cites[0] == d.ID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d outcome decisions cite %s; want 1", n, d.ID)
+	}
+}
+
+// The restart outcome is looked up in the journal log too. Found there, it is not
+// recorded again. A log that indexes it but cannot read it still holds it: the
+// accept is closed, listed with the outcome, and not recorded a second time.
+func TestARestartCloseChecksTheLogAndAnUnreadableLogStillClosesTheAccept(t *testing.T) {
+	dir := t.TempDir()
+	r := newRig(t)
+	d := r.accept("web")
+	mem := r.tr.Memory()
+	outcomes := func(r *rig) int {
+		n := 0
+		for _, rec := range r.j.Decisions(0, "admission.outcome") {
+			if len(rec.Cites) == 1 && rec.Cites[0] == d.ID {
+				n++
+			}
+		}
+		return n
+	}
+	openLog := func(r *rig) {
+		t.Helper()
+		if err := r.m.OpenLog(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { r.m.CloseLog() })
+	}
+
+	// A miss: closed once, and the outcome goes to the log.
+	r2 := newRig(t)
+	openLog(r2)
+	r2.tr.Restore(mem)
+	if n, p := outcomes(r2), r2.tr.PendingList(); n != 1 || len(p) != 0 {
+		t.Fatalf("%d outcomes, pending %+v; want closed once", n, p)
+	}
+	if err := r2.m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Already in the log: listed, not recorded again.
+	r3 := newRig(t)
+	openLog(r3)
+	r3.tr.Restore(mem)
+	if out := r3.tr.Outcomes(); len(out) != 1 || out[0].OutcomeID != d.ID+"-restarted" || outcomes(r3) != 0 {
+		t.Fatalf("outcomes %+v, %d recorded; want the logged one, none recorded", out, outcomes(r3))
+	}
+	if err := r3.m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The log indexes the outcome but cannot read it: closed and listed, nothing recorded.
+	r4 := newRig(t)
+	openLog(r4)
+	if err := os.Remove(filepath.Join(dir, statemap.JournalFileName)); err != nil {
+		t.Fatal(err)
+	}
+	r4.tr.Restore(mem)
+	if out := r4.tr.Outcomes(); len(out) != 1 || out[0].OutcomeID != d.ID+"-restarted" || outcomes(r4) != 0 {
+		t.Fatalf("outcomes %+v, %d recorded; want the logged one listed, none recorded", out, outcomes(r4))
+	}
+	if p := r4.tr.Memory().Pending; len(p) != 0 {
+		t.Fatalf("pending %+v; want none", p)
+	}
+	if !slices.ContainsFunc(r4.logs, func(l string) bool {
+		return strings.Contains(l, "logged but unreadable") && strings.Contains(l, d.ID+"-restarted")
+	}) {
+		t.Fatalf("logs %q; want the lookup error", r4.logs)
+	}
+}
+
+func TestHeldFeedsBothBases(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	o := r.result("held")
+	cal := r.m.Calibration()
+	key := func(k, b string) statemap.CalibrationKey { return statemap.CalibrationKey{Kind: k, Basis: b} }
+	cm := cal[key("admission.cpu_contention_ratio", "map")]
+	cu := cal[key("admission.cpu_contention_ratio", "usage")]
+	mu := cal[key("admission.memory_contention_ratio", "usage")]
+	if cm.N != 1 || !near(cm.MeanErr, 0.025) || !near(cm.MeanAbsErr, 0.025) || cm.HitRate != 1 {
+		t.Errorf("cpu map %+v", cm)
+	}
+	if cu.N != 1 || !near(cu.MeanErr, -0.02) || !near(cu.MeanAbsErr, 0.02) || cu.HitRate != 1 {
+		t.Errorf("cpu usage %+v", cu)
+	}
+	if mu.N != 1 || !near(mu.MeanErr, 0.01) || mu.HitRate != 1 {
+		t.Errorf("memory usage %+v", mu)
+	}
+	if len(cal) != 3 {
+		t.Errorf("calibration %v; want three keys", cal)
+	}
+	rec, _ := r.j.Decision(o.OutcomeID)
+	in, _ := rec.Inputs["calibration"].(map[string]statemap.Calibration)
+	if len(in) != 3 || in["admission.cpu_contention_ratio/map"].N != 1 ||
+		in["admission.cpu_contention_ratio/usage"].N != 1 || in["admission.memory_contention_ratio/usage"].N != 1 {
+		t.Errorf("calibration input %v", rec.Inputs["calibration"])
+	}
+}
+
+func TestBreachedOnAReadingFeedsAMiss(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.26)
+	r.tick(time.Minute)
+	r.result("breached")
+	c := r.m.Calibration()[statemap.CalibrationKey{Kind: "admission.cpu_contention_ratio", Basis: "map"}]
+	if c.N != 1 || c.HitRate != 0 {
+		t.Fatalf("cpu map %+v; predicted under the exit, observed over it", c)
+	}
+}
+
+func TestConfoundedAndReliefActedFeedNothing(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_utilization@pod:a", "pod:a", 0.4)
+	record(t, r.m, "cpu_contention_ratio", "", 0.26)
+	r.tick(time.Minute)
+	r.result("confounded")
+	if len(r.m.Calibration()) != 0 {
+		t.Fatalf("confounded outcome fed %v", r.m.Calibration())
+	}
+
+	r = arrived(t)
+	r.actedOn, r.peak = cpuDom.Action, 0.31
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	r.result("breached")
+	if len(r.m.Calibration()) != 0 {
+		t.Fatalf("relief-acted outcome fed %v", r.m.Calibration())
+	}
+}
+
+func TestOutcomeRecordsTheName(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	o := r.only()
+	rec, ok := r.j.Decision(o.OutcomeID)
+	if !ok || rec.Inputs["name"] != "web" {
+		t.Fatalf("outcome inputs %v; want name web", rec.Inputs)
 	}
 }

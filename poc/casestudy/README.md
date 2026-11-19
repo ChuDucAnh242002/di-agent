@@ -59,7 +59,7 @@ node memory `without=group:memory`.
 | `hog` | CPU, steady, six busy loops, limit 4.5 cores | none | P4 only: waits on its own threads past its share; not relieved |
 | `victim` | CPU, three busy loops, limit 6 cores, never throttled, frozen by policy | none | P4 only: gets its CPU share from the kernel beside `hog`, so nothing is owed |
 | `mem-victim` | page cache: a 1 GiB file in an emptyDir re-read every second, within its 1280Mi request | none | memory relief only: the protected pod whose memory stall is `memory_contention_ratio` |
-| `page-hog` | 6 GiB anonymous held, then a file set growing 256 MiB/min, re-read whole, no memory limit; holds once a pass refaults a tenth of the set | none | memory relief only: the candidate for `memory.high` |
+| `page-hog` | anonymous memory held until MemAvailable is 1.5 GiB, then a file set growing 256 MiB/min, re-read whole, no memory limit; holds once a pass refaults a tenth of the set | none | memory relief only: the candidate for `memory.high` |
 
 The relationships marked with a node quantity that has several drivers (node CPU pressure, node I/O
 pressure) were missed in earlier runs: no single pair reaches the threshold.
@@ -124,3 +124,33 @@ anything but `page-hog`, or k0s, Ollama or the agent going unhealthy, deletes `p
 The VM has no swap, so `memory.high` can only reclaim file pages: both workloads live on page cache, and
 `page-hog`'s anonymous block only shrinks the room left for it. What the runs showed is in
 `run-2026-10-23-memrelief/results.md`.
+
+## Master run
+
+`master.sh <out-dir>` (on the node, as root) is the acceptance run for the Semantic Map plans 01–06
+(`docs/superpowers/plans/2026-11-10-sm-07-master-scenario.md` in the research repository): about 3 h 20 min on a fresh
+map from `agent-autonomous.yaml`, with no model and no person. Review decides by rules alone, Ollama is
+stopped for the run (`page-hog` sizes its anonymous block to the room left, so it takes the
+model's 6–9 GB too), and the harness only reads, submits offers and injects the planned faults:
+
+| Phase | t (min) | What happens |
+|---|---|---|
+| M0 | 0–10 | cold start, k0s system pods only |
+| M1 | 10–50 | the seven discovery pods, 41 s apart |
+| M2 | 50–65 | node memory estimated without `mem-wave`; `mem-wave` deleted |
+| M3 | 65–80 | Netdata stopped at 65, an offer at 72, Netdata started at 78 |
+| M4 | 80–86 | the wall clock stepped +2 h at 80 and back at 84 (NTP off, then on); `noise` deleted at 86 |
+| M5 | 87–100 | `kill -9` of the agent at 87; `state.json` truncated at 94; both generations truncated at 97 |
+| M6 | 100–145 | `mem-victim`, then `page-hog`: memory relief; the memrelief kill criteria apply |
+| M7 | 145–175 | `page-hog` deleted; six offers `probe-1..6` four minutes apart, each applied when accepted |
+| M8 | 175–200 | every planted pod deleted; an estimate at 188; `noise` at 190 |
+
+`PHASES=M6 master.sh <out-dir>` runs M6 alone on a fresh map (about 45 min, with M9's reads and the
+teardown), to check the memory squeeze without the whole run; only `readout.sh`'s M6 rows apply.
+
+Timing runs on `/proc/uptime`, since M4 steps the wall clock, and every mark in `phases.jsonl` carries
+the agent's journal position (`inc`, `seq`). `capture.sh` runs alongside with the journal's tail and
+`/collectors`, `/autonomy`, `/healthz`, `/tasks`, `/peers`. At teardown the snapshot, its previous
+generation and `journal.ndjson` are copied into the run directory, and `readout.sh <out-dir> --features
+01,...` computes every criterion from the agent's own records into `results-readout.md`
+(`readout_test.sh` checks it on two hand-written runs).

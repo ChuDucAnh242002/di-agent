@@ -240,6 +240,25 @@ func TestAnUnsureModelGoesUpATierAndThenWaitsForEvidence(t *testing.T) {
 	}
 }
 
+func TestReviewCitesThePriorReview(t *testing.T) {
+	const id = "cpu_utilization@pod:a->cpu_pressure"
+	c := directed(id, "")
+	c.Review = &types.CandidateReview{DecisionID: "verify-1"}
+	m := newFakeMap(t, c)
+	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: confident(types.ReviewConfirm)}})
+	got := m.cands[id].Review
+	if got == nil || got.DecisionID == "verify-1" {
+		t.Fatalf("review %+v; want a new review", got)
+	}
+	dec, ok := m.st.Journal().Decision(got.DecisionID)
+	if !ok {
+		t.Fatalf("decision %s is not in the journal", got.DecisionID)
+	}
+	if dec.Kind != "review" || len(dec.Cites) != 1 || dec.Cites[0] != "verify-1" {
+		t.Errorf("review kind %q cites %v; want review citing verify-1", dec.Kind, dec.Cites)
+	}
+}
+
 func TestAnUndirectedConfirmationNeedsADriver(t *testing.T) {
 	const id = "cpu_pressure<->io_pressure"
 	und := func() *types.CandidateEdge {
@@ -403,7 +422,7 @@ func TestTier0LeavesAClosedCandidateAlone(t *testing.T) {
 	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
 		t.Errorf("reviewed %d, errors %d; want neither", s.Reviewed, s.Errors)
 	}
-	if ds := m.st.Journal().Decisions(0); len(ds) != 0 {
+	if ds := m.st.Journal().Decisions(0, ""); len(ds) != 0 {
 		t.Errorf("%d decisions journaled for closed candidates", len(ds))
 	}
 }
@@ -466,4 +485,43 @@ func (refusingMap) ConfirmCandidate(string, string, types.CandidateReview) error
 
 func (refusingMap) AnnotateCandidate(string, types.CandidateReview) error {
 	return errors.New("the operator closed the candidate")
+}
+
+// TestStatusDueCountsActiveDueCandidates: Due is the due work a cycle could act on.
+// A candidate waiting for an inactive end is not due work, so it is in Waiting only.
+func TestStatusDueCountsActiveDueCandidates(t *testing.T) {
+	const a, b = "cpu_utilization@pod:a->cpu_pressure", "cpu_utilization@pod:b->cpu_pressure"
+	const gone = "cpu_utilization@pod:gone->cpu_pressure"
+	m := newFakeMap(t, directed(a, ""), directed(b, ""), directed(gone, ""))
+	if err := m.st.RetireProperty("cpu_utilization@pod:gone", "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, m, autonomy.Config{Level: autonomy.Suggest, Decider: &fixed{actions: map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}}})
+	if s := r.Status(); s.Due != 2 || s.Waiting != 1 {
+		t.Errorf("status due=%d waiting=%d; want 2 due and 1 waiting", s.Due, s.Waiting)
+	}
+}
+
+// TestRulesOnlyDueIsWhatARuleCanSettle: with no model tier, a candidate no rule
+// answers cannot be settled by reviewing it again, so it is neither due nor
+// reviewed; only what a rule answers is.
+func TestRulesOnlyDueIsWhatARuleCanSettle(t *testing.T) {
+	const comp, plain = "cpu_utilization@pod:a->cpu_utilization", "cpu_utilization@pod:b->cpu_pressure"
+	m := newFakeMap(t, directed(comp, types.CandidateKindComposition), directed(plain, ""))
+	r := run(t, m, autonomy.Config{Level: autonomy.Full})
+	if s := r.Status(); s.Due != 0 || s.Reviewed != 1 || s.Undecided != 0 {
+		t.Errorf("status due=%d reviewed=%d undecided=%d; want the composition reviewed and nothing left due", s.Due, s.Reviewed, s.Undecided)
+	}
+}
+
+// TestDueLeavesOutWhatTheCycleSettled: Due is read by the pace until the next cycle,
+// which at the slow pace is minutes away; a candidate the cycle's rules settled is
+// not work left, so it must not count, or the pace returns to base for work done.
+func TestDueLeavesOutWhatTheCycleSettled(t *testing.T) {
+	const comp = "cpu_utilization@pod:a->cpu_utilization"
+	m := newFakeMap(t, directed(comp, types.CandidateKindComposition))
+	r := run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}}})
+	if s := r.Status(); s.Due != 0 || s.Applied != 1 {
+		t.Errorf("status due=%d applied=%d; want the composition confirmed by its rule and nothing due", s.Due, s.Applied)
+	}
 }

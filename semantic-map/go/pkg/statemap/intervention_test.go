@@ -126,8 +126,8 @@ func TestInterventionsSurviveARestart(t *testing.T) {
 	}
 	// Load needs an empty map.
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
-	if ok, err := m2.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	_, changed := mustRecord(t, m2, outcome(true, false, "d3"))
 	if changed != "created" {
@@ -272,8 +272,8 @@ func TestAMeasuredEffectReachesAPromotedRelationshipAndSurvivesARestart(t *testi
 		t.Fatal(err)
 	}
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
-	if ok, err := m2.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	r, _ := m2.Relationship("cpu_limit->pressure")
 	if r.Measured == nil || !nearly(*r.Measured, 0.5) || r.Basis() != "measured" {
@@ -375,8 +375,8 @@ func TestLiveSlopeIgnoresRetiredRelationshipAndRestoresLiveEvidence(t *testing.T
 		t.Fatal(err)
 	}
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
-	if ok, err := m2.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	if estimate, ok := m2.LiveSlope("memory_utilization", to); ok {
 		t.Fatalf("restored retired source still informs new decisions: %+v", estimate)
@@ -403,8 +403,8 @@ func TestLiveSlopeIgnoresRetiredRelationshipAndRestoresLiveEvidence(t *testing.T
 		t.Fatal(err)
 	}
 	m3, _ := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 0.5})
-	if ok, err := m3.Load(oldPath); err == nil || ok || !strings.Contains(err.Error(), "snapshot is version 5") {
-		t.Fatalf("load version 5 snapshot = %t, %v; want explicit refusal", ok, err)
+	if r, err := m3.Load(oldPath); err == nil || r.Loaded || !strings.Contains(err.Error(), "is version 5") {
+		t.Fatalf("load version 5 snapshot = %t, %v; want explicit refusal", r.Loaded, err)
 	}
 }
 
@@ -524,8 +524,8 @@ func TestInterventionSlopeCanExceedOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := newTestMap(t, Config{})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("load: %t, %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %t, %v", r.Loaded, err)
 	}
 	if got, ok := restored.LiveSlope("memory_utilization", to); !ok ||
 		got.SlopeSum != e.SlopeSum || got.N != e.N || got.LastSource != e.LastSource ||

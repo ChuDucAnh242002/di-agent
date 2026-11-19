@@ -82,6 +82,11 @@ func fixtureMain(mode string) {
 				return
 			case "bad-protocol":
 				reply(HelloReply{Protocol: 2})
+			case "doctor":
+				reply(HelloReply{Protocol: ProtocolVersion, Doctor: []string{"/bin/sh", "-c", "echo checked $DI_COLLECTOR_NAME; exit 3"}})
+			case "chatty-doctor":
+				// 8 MiB to stdout and stderr: more than the agent keeps, which it must still drain.
+				reply(HelloReply{Protocol: ProtocolVersion, Doctor: []string{"/bin/sh", "-c", "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2; echo done >&2"}})
 			default:
 				reply(HelloReply{Protocol: ProtocolVersion})
 			}
@@ -117,6 +122,9 @@ func fixtureMain(mode string) {
 				for i := 0; i < 100; i++ {
 					fmt.Fprintf(os.Stderr, "noise line %d\n", i)
 				}
+			case "unhealthy":
+				reply(CollectReply{Seq: req.Seq, Unhealthy: "fixture source refused"})
+				continue
 			case "huge":
 				out.WriteString(`{"seq":` + fmt.Sprint(req.Seq) + `,"error":"` + strings.Repeat("x", 5<<20) + "\"}\n")
 				out.Flush()

@@ -119,7 +119,7 @@ var toolSchemas = []ToolSchema{
 		Description: "The properties this system currently exhibits, with each one's " +
 			"value, confidence, lifecycle status and source. This is the model the agent " +
 			"reasons from: prefer it over get_graph. Optional filters: kind " +
-			"(observed|derived), status (active|stale|retired), min_confidence.",
+			"(observed|derived), status (active|stale|unobservable|retired), min_confidence.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -453,9 +453,9 @@ func dispatchGetState(r SemanticMapReader, args map[string]any) (*ToolResult, er
 	}
 	return &ToolResult{
 		Payload: payload,
-		Digest: fmt.Sprintf("state rev=%d properties=%d active=%d stale=%d retired=%d",
+		Digest: fmt.Sprintf("state rev=%d properties=%d active=%d stale=%d unobservable=%d retired=%d",
 			view.Revision, len(view.Properties), view.Counts.PropertiesActive,
-			view.Counts.PropertiesStale, view.Counts.PropertiesRetired),
+			view.Counts.PropertiesStale, view.Counts.PropertiesUnobservable, view.Counts.PropertiesRetired),
 	}, nil
 }
 

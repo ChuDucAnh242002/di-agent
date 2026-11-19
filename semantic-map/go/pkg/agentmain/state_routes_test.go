@@ -5,6 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,11 +21,29 @@ import (
 // rather than the package API underneath it.
 func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(0), false)
+}
+
+// stateFixtureWithLog is stateFixture with a journal of two and a journal log,
+// so a decision is evicted from memory after two more and answered from the log.
+func stateFixtureWithLog(t *testing.T) (*statemap.Map, *httptest.Server) {
+	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(2), true)
+}
+
+func stateFixtureWith(t *testing.T, j *statemap.Journal, withLog bool) (*statemap.Map, *httptest.Server) {
+	t.Helper()
 	spec := mustSpec(t)
 	sm := statemap.New(statemap.Config{
 		ConvergenceObservations: 4,
 		AdmitUnknown:            true,
-	}, statemap.NewJournal(0))
+	}, j)
+	if withLog {
+		if err := sm.OpenLog(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sm.CloseLog() })
+	}
 	// Seeded without a calibration file: relationships take the neutral placeholder,
 	// which is what these tests are about. The calibrated path is covered in
 	// pkg/profiles, where the priors live.
@@ -169,6 +190,88 @@ func TestUndeclaredMetricBecomesAPropertyAndIsJournalled(t *testing.T) {
 	}
 }
 
+// TestJournalRouteShowsRestoreFailedFirst: a map that found no usable snapshot says
+// so as the first thing its journal holds.
+func TestJournalRouteShowsRestoreFailedFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	for _, p := range []string{path, path + ".prev"} {
+		if err := os.WriteFile(p, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sm := statemap.New(statemap.Config{ConvergenceObservations: 4, AdmitUnknown: true}, statemap.NewJournal(0))
+	if r, err := sm.Load(path); err != nil || r.Loaded {
+		t.Fatalf("Load = %+v, %v; want a cold start", r, err)
+	}
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	var journal struct {
+		Events []statemap.Event `json:"events"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != 200 {
+		t.Fatalf("GET /state/journal returned %d", code)
+	}
+	if len(journal.Events) == 0 || journal.Events[0].Kind != "restore.failed" {
+		t.Fatalf("events %v; want restore.failed first", journal.Events)
+	}
+}
+
+// TestJournalEventsCarrySeqAcrossRestore: every event the journal route returns
+// carries a seq, strictly increasing across a save and restore, and the body names
+// the incarnation and the counter.
+func TestJournalEventsCarrySeqAcrossRestore(t *testing.T) {
+	sm, _ := stateFixture(t)
+	for _, id := range []string{"a_metric", "b_metric", "c_metric"} {
+		if err := sm.Observe(id, 0.5, timeZero()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := sm.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	sm2 := statemap.New(statemap.Config{ConvergenceObservations: 4, AdmitUnknown: true}, statemap.NewJournal(0))
+	if _, err := sm2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"d_metric", "e_metric"} {
+		if err := sm2.Observe(id, 0.5, timeZero()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm2, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var journal struct {
+		Events      []statemap.Event `json:"events"`
+		Incarnation uint64           `json:"incarnation"`
+		Seq         *uint64          `json:"seq"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != 200 {
+		t.Fatalf("GET /state/journal returned %d", code)
+	}
+	if journal.Incarnation != 2 {
+		t.Errorf("incarnation %d; want 2", journal.Incarnation)
+	}
+	var prev uint64
+	for i, e := range journal.Events {
+		if e.Seq <= prev {
+			t.Fatalf("event %d (%s %s) has seq %d after %d; want strictly increasing", i, e.Kind, e.Target, e.Seq, prev)
+		}
+		prev = e.Seq
+	}
+	if journal.Seq == nil || *journal.Seq != prev {
+		t.Errorf("body seq %v; want the last event's %d", journal.Seq, prev)
+	}
+	if last := journal.Events[len(journal.Events)-1]; last.Target != "e_metric" {
+		t.Errorf("last event targets %q; want the post-restore e_metric", last.Target)
+	}
+}
+
 // TestRetirementRequiresAReason keeps the audit trail meaningful: a withdrawal with
 // no stated basis records that something happened without recording why.
 func TestRetirementRequiresAReason(t *testing.T) {
@@ -249,7 +352,7 @@ func TestDecisionIsRetrievableByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := sm.Decide("d-http-1", "how loaded is this system?")
+	b := sm.Decide("d-http-1", "estimate", "how loaded is this system?")
 	p, _ := b.Property("cpu_utilization")
 	b.Note("read cpu_utilization=%.3f", p.Value)
 	b.Commit(map[string]any{"load": p.Value})
@@ -270,6 +373,46 @@ func TestDecisionIsRetrievableByID(t *testing.T) {
 	// different answers to an auditor.
 	if code := getState(t, srv.URL+"/state/decisions/never-happened", nil); code != http.StatusNotFound {
 		t.Errorf("unknown decision returned %d, want 404", code)
+	}
+}
+
+// TestDecisionChainOverHTTP: ?chain=1 walks a decision's ancestry, and ?kind=
+// filters the list.
+func TestDecisionChainOverHTTP(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.Decide("act", "relief.act", "cap?").Commit(nil)
+	v := sm.Decide("verify", "relief.verify", "did it help?")
+	v.Cite("act")
+	v.Commit(nil)
+	r := sm.Decide("revert", "relief.revert", "give it back?")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+
+	var chain struct {
+		Decision *statemap.Decision `json:"decision"`
+		Cites    []struct {
+			ID      string `json:"id"`
+			Evicted bool   `json:"evicted"`
+		} `json:"cites"`
+		CitedBy []string `json:"cited_by"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions/revert?chain=1", &chain); code != 200 {
+		t.Fatalf("GET chain returned %d", code)
+	}
+	if chain.Decision == nil || chain.Decision.ID != "revert" || len(chain.Cites) != 2 ||
+		chain.Cites[0].ID != "verify" || chain.Cites[1].ID != "act" || chain.CitedBy == nil || len(chain.CitedBy) != 0 {
+		t.Errorf("chain %+v; want revert citing verify then act, cited by none", chain)
+	}
+
+	var list struct {
+		Decisions []statemap.Decision `json:"decisions"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions?kind=relief.verify", &list); code != 200 {
+		t.Fatalf("GET decisions returned %d", code)
+	}
+	if len(list.Decisions) != 1 || list.Decisions[0].ID != "verify" {
+		t.Errorf("relief.verify decisions %+v; want verify alone", list.Decisions)
 	}
 }
 
@@ -503,6 +646,370 @@ func TestOnlyTheMapMayClaimIntervened(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("provenance %q: status %d, want 400", prov, resp.StatusCode)
+		}
+	}
+}
+
+func TestStateCarriesCalibration(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.RecordPrediction("admission.cpu_contention_ratio", "map", 0.09, 0.07, true)
+	var body map[string]any
+	if code := getState(t, srv.URL+"/state", &body); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	list, _ := body["calibration"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("calibration %v; want one entry", body["calibration"])
+	}
+	e, _ := list[0].(map[string]any)
+	for _, k := range []string{"kind", "basis", "n", "mean_err", "mean_abs_err", "hit_rate"} {
+		if _, ok := e[k]; !ok {
+			t.Errorf("entry %v lacks %q", e, k)
+		}
+	}
+	if e["n"] != float64(1) {
+		t.Errorf("n %v", e["n"])
+	}
+}
+
+// driveRegime feeds correlated, then opposed pairs on from -> to until the
+// relationship id is in regime.
+func driveRegime(t *testing.T, sm *statemap.Map, now *time.Time, from, to, id string, limit int) {
+	t.Helper()
+	unit := [2]float64{0, 1}
+	obs := func(prop string, v float64, ev string) {
+		*now = now.Add(time.Second)
+		if err := sm.Record(statemap.Observation{ID: prop, Value: v, At: *now, Range: &unit, EventID: ev}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; ; i++ {
+		if i == limit {
+			t.Fatalf("no regime after %d pairs", limit)
+		}
+		x := float64(i%10) / 10
+		y := x
+		if i >= 60 {
+			y = 1 - x // against the declared sign: strength folds as zero
+		}
+		obs(from, x, "x"+strconv.Itoa(i))
+		obs(to, y, "y"+strconv.Itoa(i))
+		if r, _ := sm.Relationship(id); r.Regime {
+			return
+		}
+	}
+}
+
+func TestEstimate_RegimeCaveatIsServed(t *testing.T) {
+	sm := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1, Learn: true,
+		LearnConfig: statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 10}}, statemap.NewJournal(0))
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	sm.SetClock(func() time.Time { return now })
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	const from, to = "resource", "pressure"
+	unit := [2]float64{0, 1}
+	for _, id := range []string{from, to} {
+		if err := sm.DeclareProperty(statemap.Property{ID: id, Range: unit}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.DeclareRelationship(statemap.Relationship{From: from, To: to, Sign: 1, Label: "raises"}); err != nil {
+		t.Fatal(err)
+	}
+	driveRegime(t, sm, &now, from, to, statemap.RelationshipID(from, to, "raises"), 400)
+
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target="+to, &res); code != 200 {
+		t.Fatalf("estimate: %d", code)
+	}
+	for _, c := range res.Caveats {
+		if strings.Contains(c, "present differs from established") {
+			return
+		}
+	}
+	t.Fatalf("caveats %q; want the regime caveat", res.Caveats)
+}
+
+func TestStateRouteAcceptsStatusUnobservable(t *testing.T) {
+	sm, srv := stateFixture(t)
+	if err := sm.Record(statemap.Observation{ID: "q_depth", Value: 1, At: time.Now(), Source: "netdata"}); err != nil {
+		t.Fatal(err)
+	}
+	sm.SetSourceDown("netdata", true, "")
+	sm.Sweep()
+
+	var out struct {
+		Properties []struct{ ID string }
+		Counts     map[string]any
+	}
+	if code := getState(t, srv.URL+"/state?status=unobservable", &out); code != http.StatusOK {
+		t.Fatalf("status %d; want 200", code)
+	}
+	if n, ok := out.Counts["properties_unobservable"].(float64); !ok || n != 1 {
+		t.Errorf("counts %v; want properties_unobservable 1", out.Counts)
+	}
+	if len(out.Properties) != 1 || out.Properties[0].ID != "q_depth" {
+		t.Errorf("properties %+v; want only q_depth", out.Properties)
+	}
+	var bad map[string]any
+	if code := getState(t, srv.URL+"/state?status=bogus", &bad); code != http.StatusBadRequest {
+		t.Errorf("status %d for ?status=bogus; want 400", code)
+	}
+}
+
+func TestForgottenPropertyAnswers410(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	mono := time.Second
+	sm.SetClock(func() time.Time { return now })
+	sm.SetMonotonic(func() time.Duration { return mono })
+	if err := sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.5, At: now, Subject: "pod:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.RetireProperty("cpu@pod:a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	now, mono = now.Add(25*time.Hour), mono+25*time.Hour
+	sm.Sweep()
+
+	resp, err := http.Get(srv.URL + "/state/properties/cpu@pod:a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status %d, want 410", resp.StatusCode)
+	}
+	var body struct {
+		ID        string    `json:"id"`
+		RetiredAt time.Time `json:"retired_at"`
+		Forgotten bool      `json:"forgotten"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ID != "cpu@pod:a" || !body.Forgotten || body.RetiredAt.IsZero() {
+		t.Errorf("body %+v", body)
+	}
+	if code := getState(t, srv.URL+"/state/properties/never-seen", nil); code != http.StatusNotFound {
+		t.Errorf("unknown id answered %d, want 404", code)
+	}
+}
+
+// TestStateCarriesThePace: GET /state says the attention level and since when, and a
+// decision records the pace it was taken at.
+func TestStateCarriesThePace(t *testing.T) {
+	sm, srv := stateFixture(t)
+	var view struct {
+		Pace      string `json:"pace"`
+		PaceSince string `json:"pace_since"`
+	}
+	if code := getState(t, srv.URL+"/state", &view); code != 200 || view.Pace != "base" {
+		t.Fatalf("GET /state: code=%d pace=%q, want 200 and base", code, view.Pace)
+	}
+	if at, err := time.Parse(time.RFC3339, view.PaceSince); err != nil || at.IsZero() {
+		t.Fatalf("pace_since %q does not parse as a non-zero RFC3339 time: %v", view.PaceSince, err)
+	}
+	sm.SetPace(statemap.PaceSlow, "test")
+	if code := getState(t, srv.URL+"/state", &view); code != 200 || view.Pace != "slow" {
+		t.Fatalf("GET /state after SetPace: code=%d pace=%q, want slow", code, view.Pace)
+	}
+	if err := sm.Observe("cpu_pressure_ratio", 0.3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &res); code != 200 || res.DecisionID == "" {
+		t.Fatalf("estimate: code=%d decision_id=%q", code, res.DecisionID)
+	}
+	var d struct {
+		Inputs map[string]any `json:"inputs"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || d.Inputs["pace"] != "slow" {
+		t.Fatalf("decision %s: code=%d inputs.pace=%v, want slow", res.DecisionID, code, d.Inputs["pace"])
+	}
+}
+
+// GET /state/decisions/{id} falls through to the log once the bounded journal has
+// evicted a decision; 410 still means neither holds it.
+func TestDecisionFallsThroughToTheLogOverHTTP(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(map[string]any{"i": i})
+		ids = append(ids, id)
+	}
+	var first map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0], &first); code != http.StatusOK {
+		t.Fatalf("evicted decision: status %d", code)
+	}
+	if first["from"] != "log" || first["id"] != ids[0] {
+		t.Fatalf("evicted decision body: from %v, id %v", first["from"], first["id"])
+	}
+	var third map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[2], &third); code != http.StatusOK {
+		t.Fatalf("held decision: status %d", code)
+	}
+	if _, has := third["from"]; has || third["id"] != ids[2] {
+		t.Fatalf("held decision body: %v", third)
+	}
+	var chain map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0]+"?chain=1", &chain); code != http.StatusOK {
+		t.Fatalf("evicted chain: status %d", code)
+	}
+	if d, _ := chain["decision"].(map[string]any); chain["from"] != "log" || d["id"] != ids[0] {
+		t.Fatalf("evicted chain body: %v", chain)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/never", nil); code != http.StatusGone {
+		t.Fatalf("unknown id: status %d, want 410", code)
+	}
+	var journal struct {
+		Log *statemap.LogStats `json:"log"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != http.StatusOK {
+		t.Fatalf("journal: status %d", code)
+	}
+	if journal.Log == nil || journal.Log.Indexed != 3 || !strings.HasSuffix(journal.Log.File, "journal.ndjson") {
+		t.Fatalf("journal log = %+v", journal.Log)
+	}
+
+	// Without a log the journal route carries no "log" key.
+	_, plain := stateFixture(t)
+	var body map[string]any
+	getState(t, plain.URL+"/state/journal", &body)
+	if _, has := body["log"]; has {
+		t.Fatal("journal without a log reports one")
+	}
+}
+
+func TestEstimateReportsBoundsOverHTTP(t *testing.T) {
+	sm, srv := stateFixture(t)
+	rng := [2]float64{0, 100}
+	_ = sm.Record(statemap.Observation{ID: "queue@pod:a", Value: 50, At: time.Now(), Subject: "pod:a", Range: &rng})
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	_ = sm.DeclareRelationship(statemap.Relationship{From: "queue@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	_ = sm.AssertRelationshipStrength(statemap.RelationshipID("queue@pod:a", "cpu_pressure_ratio", "discovered"), 0.8, "op", "t")
+
+	var body struct {
+		Answer     map[string]any   `json:"answer"`
+		Influences []map[string]any `json:"influences"`
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &body); code != 200 {
+		t.Fatalf("code %d", code)
+	}
+	for _, k := range []string{"sensitivity_low", "sensitivity_high"} {
+		if _, ok := body.Answer[k]; !ok {
+			t.Errorf("answer lacks %s: %v", k, body.Answer)
+		}
+	}
+	if len(body.Influences) == 0 {
+		t.Fatal("no influences")
+	}
+	for _, inf := range body.Influences {
+		for _, k := range []string{"contribution_low", "contribution_high"} {
+			if _, ok := inf[k]; !ok {
+				t.Errorf("influence lacks %s: %v", k, inf)
+			}
+		}
+	}
+}
+
+func getText(t *testing.T, url string) (int, string, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), string(b)
+}
+
+func TestExplainDecisionIsReadableInATerminal(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.Decide("act", "relief.act", "cap?").Commit(nil)
+	v := sm.Decide("verify", "relief.verify", "did it help?")
+	v.Cite("act")
+	v.Commit(nil)
+	r := sm.Decide("revert", "relief.revert", "give it back?")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+
+	code, ct, body := getText(t, srv.URL+"/state/decisions/revert/explain")
+	if code != 200 || !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("status %d, content-type %q", code, ct)
+	}
+	if first := strings.SplitN(body, "\n", 2)[0]; !strings.HasPrefix(first, "revert [relief.revert]") {
+		t.Errorf("first line %q", first)
+	}
+	for _, want := range []string{"  rests on verify", "  rests on act"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "source: log") {
+		t.Errorf("a journal hit claims the log:\n%s", body)
+	}
+}
+
+func TestExplainDecisionMissesLikeTheJSONRoute(t *testing.T) {
+	_, srv := stateFixture(t)
+	if code, _, _ := getText(t, srv.URL+"/state/decisions/never/explain"); code != http.StatusNotFound {
+		t.Errorf("never-dropped journal: %d, want 404", code)
+	}
+	sm, small := stateFixtureWith(t, statemap.NewJournal(2), false)
+	for i := 0; i < 3; i++ {
+		sm.Decide(sm.NewDecisionID("est"), "estimate", "q").Commit(nil)
+	}
+	if code, _, _ := getText(t, small.URL+"/state/decisions/never/explain"); code != http.StatusGone {
+		t.Errorf("after eviction: %d, want 410", code)
+	}
+}
+
+func TestExplainDecisionFromTheLogSaysSo(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(nil)
+		ids = append(ids, id)
+	}
+	code, _, body := getText(t, srv.URL+"/state/decisions/"+ids[0]+"/explain")
+	if code != 200 || !strings.HasSuffix(strings.TrimRight(body, "\n"), "source: log") {
+		t.Fatalf("status %d, body:\n%s", code, body)
+	}
+}
+
+// A log that cannot be read is not a miss: the decision is indexed, so the route
+// answers 500 rather than the 404/410 that mean neither store holds it.
+func TestAnUnreadableLogIsAServerErrorNotAMiss(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(map[string]any{"i": i})
+		ids = append(ids, id)
+	}
+	st, ok := sm.Journal().LogStats()
+	if !ok {
+		t.Fatal("no log open")
+	}
+	if err := os.Remove(st.File); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"", "?chain=1", "/explain"} {
+		resp, err := http.Get(srv.URL + "/state/decisions/" + ids[0] + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%q with an unreadable log: status %d, want 500", path, resp.StatusCode)
 		}
 	}
 }

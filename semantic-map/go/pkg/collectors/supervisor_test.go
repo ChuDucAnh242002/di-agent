@@ -1,7 +1,10 @@
 package collectors
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,8 +27,21 @@ type fakeCollector struct {
 	delay   time.Duration
 	panics  bool
 	avail   []types.MetricType
+	health  error
 	release chan struct{}
 	calls   atomic.Int64
+}
+
+func (f *fakeCollector) Health() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.health
+}
+
+func (f *fakeCollector) setHealth(err error) {
+	f.mu.Lock()
+	f.health = err
+	f.mu.Unlock()
 }
 
 func (f *fakeCollector) Collect() ([]*types.MetricSample, error) {
@@ -208,6 +224,7 @@ func TestSupervisorAvailablePanicIsLogged(t *testing.T) {
 type panickyAvailable struct{ fakeCollector }
 
 func (*panickyAvailable) AvailableMetrics() []types.MetricType { panic("no types yet") }
+func (*panickyAvailable) Health() error                        { return nil }
 
 func TestSupervisorBackoffGrowsAndResets(t *testing.T) {
 	f := &fakeCollector{id: "f", err: errors.New("down")}
@@ -556,5 +573,199 @@ func TestSupervisorHandBuiltMemberTimeoutFollowsInterval(t *testing.T) {
 	}
 	if w := s.members[1].wait; w != time.Second+outOfProcessGrace {
 		t.Errorf("exec member waits %s, want 1s plus the grace", w)
+	}
+}
+
+func manySamples(n int) []*types.MetricSample {
+	out := make([]*types.MetricSample, n)
+	for i := range out {
+		out[i] = sample("cpu_utilization", "ratio")
+	}
+	return out
+}
+
+// TestSupervisorCapsSamplesPerTick: one producer cannot make a tick's admission
+// unbounded; the excess is a counted "flood" violation.
+func TestSupervisorCapsSamplesPerTick(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(20000)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	if len(out) != 16384 {
+		t.Fatalf("len(out) = %d; want 16384", len(out))
+	}
+	st := statusOf(t, s, "f")
+	if st.Samples != 16384 || st.Violations != 3616 || st.ViolationKinds["flood"] != 3616 {
+		t.Errorf("samples %d, violations %d, kinds %v; want 16384, 3616, flood 3616", st.Samples, st.Violations, st.ViolationKinds)
+	}
+}
+
+// TestSupervisorCapIsInclusive: the 16384th sample passes; the 16385th is the flood.
+func TestSupervisorCapIsInclusive(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(16384)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 16384 || st.Violations != 0 {
+		t.Errorf("16384 samples: kept %d, violations %d; want 16384, 0", len(out), st.Violations)
+	}
+	if _, ok := st.ViolationKinds["flood"]; ok {
+		t.Error("flood key present at exactly the cap")
+	}
+
+	f = &fakeCollector{id: "g", samples: manySamples(16385)}
+	s, _ = newTestSupervisor(t, member("g", f))
+	out, _ = s.Collect()
+	st = statusOf(t, s, "g")
+	if len(out) != 16384 || st.Violations != 1 {
+		t.Errorf("16385 samples: kept %d, violations %d; want 16384, 1", len(out), st.Violations)
+	}
+}
+
+func TestSupervisorStampsTheMemberNameAsSource(t *testing.T) {
+	a, b := &fakeCollector{id: "a"}, &fakeCollector{id: "b"}
+	one := func(mt string) []*types.MetricSample {
+		s := sample(mt, "x")
+		s.Source = "whatever"
+		return []*types.MetricSample{s}
+	}
+	a.set(one("alpha"), nil)
+	b.set(one("beta"), nil)
+	s, _ := newTestSupervisor(t, member("a", a), member("b", b))
+	out, err := s.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("%d samples; want 2", len(out))
+	}
+	for _, smp := range out {
+		want := map[types.MetricType]string{"alpha": "a", "beta": "b"}[smp.MetricType]
+		if smp.Source != want {
+			t.Errorf("%s source %q; want %q", smp.MetricType, smp.Source, want)
+		}
+	}
+}
+
+func TestSupervisorUnhealthyMemberIsDownButPolledEveryTick(t *testing.T) {
+	a := &fakeCollector{id: "a", health: errors.New("connection refused")}
+	s, clk := newTestSupervisor(t, member("a", a))
+
+	s.Collect()
+	st := statusOf(t, s, "a")
+	if st.State != "unhealthy" || st.LastError != "connection refused" || st.BackoffUntilUnix != 0 {
+		t.Fatalf("status = %+v, want unhealthy with the reason and no backoff", st)
+	}
+	// No backoff: the next tick, at the same instant, calls it again.
+	s.Collect()
+	if got := a.calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2: an unhealthy source is asked every tick", got)
+	}
+	a.setHealth(nil)
+	clk.Advance(5 * time.Second)
+	s.Collect()
+	if st := statusOf(t, s, "a"); st.State != "ok" {
+		t.Fatalf("state = %q after a healthy collect, want ok", st.State)
+	}
+}
+
+// doctorCollector is a fake member that declares a doctor command.
+type doctorCollector struct {
+	fakeCollector
+	argv []string
+	runs atomic.Int64
+}
+
+func (d *doctorCollector) DoctorCommand() []string { return d.argv }
+
+func (d *doctorCollector) RunDoctor(ctx context.Context) ([]byte, error) {
+	d.runs.Add(1)
+	return []byte("netdata.service: inactive"), errors.New("exit status 3")
+}
+
+func TestSupervisorRunsDoctorOncePerUnhealthyEpisode(t *testing.T) {
+	d := &doctorCollector{fakeCollector: fakeCollector{id: "d", health: errors.New("refused")}, argv: []string{"./doctor.sh"}}
+	plain := &fakeCollector{id: "p", health: errors.New("refused")}
+	var mu sync.Mutex
+	var got []map[string]any
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: t.Logf, OnDoctor: func(member string, detail map[string]any) {
+		mu.Lock()
+		got = append(got, detail)
+		mu.Unlock()
+	}}, []Member{{Name: "d", Kind: "type", Type: "fake", C: d, Timeout: time.Second}, member("p", plain)})
+	s.now = clk.Now
+	reports := func() int {
+		s.doctors.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got)
+	}
+
+	s.Collect()
+	clk.Advance(doctorAfter - time.Second)
+	s.Collect()
+	if n := reports(); n != 0 {
+		t.Fatalf("doctor ran %d times before the member was down %s", n, doctorAfter)
+	}
+	clk.Advance(time.Second)
+	s.Collect()
+	clk.Advance(time.Minute)
+	s.Collect()
+	if n := reports(); n != 1 || d.runs.Load() != 1 {
+		t.Fatalf("doctor reports = %d, runs = %d; want one per episode", n, d.runs.Load())
+	}
+	mu.Lock()
+	r := got[0]
+	mu.Unlock()
+	if r["member"] != "d" || r["output"] != "netdata.service: inactive" || r["error"] != "exit status 3" {
+		t.Fatalf("doctor report = %v", r)
+	}
+	if cmd, _ := r["command"].([]string); len(cmd) != 1 || cmd[0] != "./doctor.sh" {
+		t.Fatalf("doctor report command = %v", r["command"])
+	}
+
+	// A new episode soon after is rate-limited; one after doctorEvery runs again.
+	d.setHealth(nil)
+	s.Collect()
+	d.setHealth(errors.New("refused"))
+	s.Collect()
+	clk.Advance(doctorAfter)
+	s.Collect()
+	if n := reports(); n != 1 {
+		t.Fatalf("doctor ran again within %s of the last run", doctorEvery)
+	}
+	clk.Advance(doctorEvery)
+	s.Collect()
+	if n := reports(); n != 2 {
+		t.Fatalf("doctor reports = %d after %s, want 2", n, doctorEvery)
+	}
+}
+
+// TestSupervisorCapBoundsInspectionNotKept: the cap bounds the samples inspected,
+// not those kept, so a flood of invalid samples is cut at the cap too, and the
+// overflow is counted in one step and logged once, whatever its metric types.
+func TestSupervisorCapBoundsInspectionNotKept(t *testing.T) {
+	samples := make([]*types.MetricSample, 0, 16384+1000)
+	for i := 0; i < 16384; i++ {
+		samples = append(samples, sample("a", "")) // missing unit
+	}
+	for i := 0; i < 1000; i++ {
+		samples = append(samples, sample(fmt.Sprintf("t%d", i), "ratio"))
+	}
+	sink := &logSink{}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{member("f", &fakeCollector{id: "f", samples: samples})})
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 0 || st.ViolationKinds["flood"] != 1000 || st.ViolationKinds["missing unit"] != 16384 {
+		t.Errorf("kept %d, kinds %v; want 0, flood 1000, missing unit 16384", len(out), st.ViolationKinds)
+	}
+	n := 0
+	for _, l := range sink.lines {
+		if strings.Contains(l, "flood") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("flood logged %d times, want 1: one line per tick-overflow, not per type", n)
 	}
 }

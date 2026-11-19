@@ -210,12 +210,17 @@ type Status struct {
 	// Cumulative counts of reviews by outcome. Applied and Suggested are actions a
 	// tier was sure of, taken or reserved by the level; Undecided is what no tier
 	// was sure of. Waiting is the last cycle's count of due candidates passed over
-	// because an end is not active, so the evidence is not moving.
+	// because an end is not active, so the evidence is not moving. Due is the last
+	// cycle's count of due candidates whose ends are active (due less Waiting): work a
+	// cycle could act on, which is what the review pace follows. With no decision
+	// model a candidate is due only when a rule answers it now. A candidate the cycle's
+	// rules settled is not counted.
 	Reviewed  int    `json:"reviewed"`
 	Applied   int    `json:"applied"`
 	Suggested int    `json:"suggested"`
 	Undecided int    `json:"undecided"`
 	Waiting   int    `json:"waiting"`
+	Due       int    `json:"due"`
 	Errors    int    `json:"errors"`
 	LastError string `json:"last_error,omitempty"`
 }
@@ -231,7 +236,6 @@ type Reviewer struct {
 	down   struct{ decider, reasoner bool }
 	mu     sync.Mutex
 	status Status
-	seq    uint64
 }
 
 // New builds a reviewer.
@@ -279,21 +283,6 @@ func (r *Reviewer) Status() Status {
 	return r.status
 }
 
-// Run reviews every Interval until ctx ends.
-func (r *Reviewer) Run(ctx context.Context) {
-	r.cfg.Logf("autonomy: reviewing candidates every %s at level %s", r.cfg.Interval, r.cfg.Level)
-	t := time.NewTicker(r.cfg.Interval)
-	defer t.Stop()
-	for {
-		r.Cycle(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
-}
-
 // Cycle reviews the candidates that are due: never reviewed, or with evidence that
 // has moved since their last review. Tier 0 runs over every open candidate
 // (types.CandidateEdge.Open), pending or withdrawn by the proposer; the models then
@@ -307,11 +296,20 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 		r.failed(err)
 		return
 	}
+	// Due is what the configured tiers could settle. With no model tier only a rule
+	// can, so a candidate no rule answers is not due however its evidence moves:
+	// reviewing it again would record another undecided and keep the pace from calm.
 	var due []*types.CandidateEdge
 	for _, c := range pending {
-		if c.Review.Outdated(c) {
-			due = append(due, c)
+		if !c.Review.Outdated(c) {
+			continue
 		}
+		if r.cfg.Decider == nil {
+			if _, ok := r.rules(Evidence{Candidate: *c}); !ok {
+				continue
+			}
+		}
+		due = append(due, c)
 	}
 	sort.SliceStable(due, func(i, j int) bool {
 		return due[i].MIScore*float64(due[i].NObservations) > due[j].MIScore*float64(due[j].NObservations)
@@ -349,6 +347,14 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 			settled[c.CandidateID] = true
 		}
 	}
+	// Due is reported until the next cycle, minutes away at the slow pace, so what the
+	// rules settled just now is not counted: it is work done, not work waiting.
+	done := 0
+	for _, c := range due {
+		if settled[c.CandidateID] {
+			done++
+		}
+	}
 	for _, c := range due {
 		if reviewed >= r.cfg.MaxPer || ctx.Err() != nil {
 			break
@@ -372,6 +378,7 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	}
 	r.mu.Lock()
 	r.status.Waiting = waiting
+	r.status.Due = len(due) - waiting - done
 	r.status.Cycles++
 	r.status.LastCycle = r.cfg.Now()
 	r.mu.Unlock()
@@ -398,8 +405,13 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 		r.failed(fmt.Errorf("the map has no state model to record decisions in"))
 		return false, nil
 	}
-	id := r.decisionID(c)
-	b := st.Decide(id, "review candidate "+c.CandidateID)
+	// The candidate's hash lets a reader group a candidate's reviews.
+	h := sha256.Sum256([]byte(c.CandidateID))
+	id := st.NewDecisionID("review", hex.EncodeToString(h[:])[:8])
+	b := st.Decide(id, "review", "review candidate "+c.CandidateID)
+	if c.Review != nil {
+		b.Cite(c.Review.DecisionID)
+	}
 	from, _ := b.Property(c.FromID)
 	to, _ := b.Property(c.ToID)
 	ev := Evidence{Candidate: *c, From: from, To: to, Neighbours: neighbours(c, pending), Facts: b.Facts()}
@@ -579,17 +591,6 @@ func (r *Reviewer) apply(c *types.CandidateEdge, o outcome, id string) (bool, er
 func (r *Reviewer) reviewOf(o outcome, id string) types.CandidateReview {
 	return types.CandidateReview{By: o.by, Model: o.model, Tier: o.tier, Action: o.action,
 		DecisionID: id, At: r.cfg.Now(), Association: o.association}
-}
-
-// decisionID names a review's decision record: the candidate's hash, so a reader can
-// group a candidate's reviews, and a sequence number, so two never share an id.
-func (r *Reviewer) decisionID(c *types.CandidateEdge) string {
-	r.mu.Lock()
-	r.seq++
-	n := r.seq
-	r.mu.Unlock()
-	h := sha256.Sum256([]byte(c.CandidateID))
-	return fmt.Sprintf("review-%s-%d-%d", hex.EncodeToString(h[:4]), r.cfg.Now().Unix(), n)
 }
 
 func (r *Reviewer) failed(err error) {

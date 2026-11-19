@@ -2,8 +2,10 @@ package statemap
 
 import (
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,10 +15,18 @@ import (
 
 // clock is a controllable time source: lifecycle transitions depend on elapsed
 // time, and a test that slept for them would be slow and flaky.
-type clock struct{ t time.Time }
+//
+// t is the wall clock and m the process's monotonic reading. advance moves both, as
+// time passing does; stepWall moves only the wall clock, as an NTP step does.
+type clock struct {
+	t time.Time
+	m time.Duration
+}
 
-func (c *clock) now() time.Time          { return c.t }
-func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time           { return c.t }
+func (c *clock) mono() time.Duration      { return c.m }
+func (c *clock) advance(d time.Duration)  { c.t = c.t.Add(d); c.m += d }
+func (c *clock) stepWall(d time.Duration) { c.t = c.t.Add(d) }
 
 // near compares floats that arrive via EMA arithmetic, where an exact literal is
 // not reachable: 0.2*0.8 + 0.8*0.8 is 0.8000000000000001.
@@ -27,9 +37,10 @@ func near(got, want float64) bool {
 
 func newTestMap(t *testing.T, cfg Config) (*Map, *clock) {
 	t.Helper()
-	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), m: time.Second}
 	m := New(cfg, NewJournal(0))
 	m.SetClock(c.now)
+	m.SetMonotonic(c.mono)
 	return m, c
 }
 
@@ -452,7 +463,7 @@ func TestDecisionRecordsTheStateThatJustifiedIt(t *testing.T) {
 
 	revAtDecision := m.Revision()
 	d := func() *Decision {
-		b := m.Decide("dec-1", "how pressured is this system?")
+		b := m.Decide("dec-1", "estimate", "how pressured is this system?")
 		p, _ := b.Property("pressure")
 		rels := b.RelationshipsInto("pressure")
 		b.Note("read pressure=%.3f from %d incoming relationships", p.Value, len(rels))
@@ -502,7 +513,7 @@ func TestDecisionReportsWhyItMightBeWrong(t *testing.T) {
 	c.advance(time.Minute)
 	m.Sweep()
 
-	b := m.Decide("dec-2", "cost now?")
+	b := m.Decide("dec-2", "estimate", "cost now?")
 	b.Property("cpu")       // stale by now
 	b.Property("unrelated") // never observed
 	b.Property("ghost")     // absent
@@ -746,7 +757,7 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b := m1.Decide("dec-before-restart", "how is b?")
+	b := m1.Decide("dec-before-restart", "estimate", "how is b?")
 	pb, _ := b.Property("b")
 	b.Commit(map[string]any{"b": pb.Value})
 
@@ -760,7 +771,8 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 	}
 
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 20, Learn: true})
-	loaded, err := m2.Load(path)
+	r, err := m2.Load(path)
+	loaded := r.Loaded
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +817,8 @@ func TestLoadRefusesAmbiguity(t *testing.T) {
 	dir := t.TempDir()
 
 	m, _ := newTestMap(t, Config{})
-	loaded, err := m.Load(dir + "/absent.json")
+	r, err := m.Load(dir + "/absent.json")
+	loaded := r.Loaded
 	if err != nil || loaded {
 		t.Errorf("a missing snapshot should be a quiet first start; got loaded=%v err=%v", loaded, err)
 	}
@@ -865,7 +878,8 @@ func TestSaveIsAtomicUnderConcurrentWriters(t *testing.T) {
 
 	// The destination is a complete snapshot, not a half-written one.
 	fresh, _ := newTestMap(t, Config{Owner: "node-x"})
-	loaded, err := fresh.Load(path)
+	r, err := fresh.Load(path)
+	loaded := r.Loaded
 	if err != nil || !loaded {
 		t.Fatalf("after concurrent saves the snapshot did not load cleanly: loaded=%v err=%v", loaded, err)
 	}
@@ -1073,29 +1087,69 @@ func TestSignSuspectIgnoresARegimeDependentSign(t *testing.T) {
 func feedPairs(t *testing.T, m *Map, c *clock, n int, assoc float64, tag string) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		c.advance(time.Second)
-		x := float64(i%10) / 10.0
-		// Alternating perturbation breaks the correlation when assoc < 1 without
-		// changing either series' range, so the two cases differ in association only.
-		y := assoc*x + (1-assoc)*float64((i*7)%10)/10.0
-		if err := m.ObserveEvent("resource", x, c.now(), tag+"r"+itoa(i)); err != nil {
-			t.Fatal(err)
-		}
-		c.advance(time.Second)
-		if err := m.ObserveEvent("pressure", y, c.now(), tag+"p"+itoa(i)); err != nil {
-			t.Fatal(err)
-		}
+		feedPair(t, m, c, i, assoc, tag)
 	}
 }
 
+// feedPair feeds the i-th pair of feedPairs' sequence.
+func feedPair(t *testing.T, m *Map, c *clock, i int, assoc float64, tag string) {
+	t.Helper()
+	c.advance(time.Second)
+	x := float64(i%10) / 10.0
+	// Alternating perturbation breaks the correlation when assoc < 1 without
+	// changing either series' range, so the two cases differ in association only.
+	y := assoc*x + (1-assoc)*float64((i*7)%10)/10.0
+	if err := m.ObserveEvent("resource", x, c.now(), tag+"r"+itoa(i)); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	if err := m.ObserveEvent("pressure", y, c.now(), tag+"p"+itoa(i)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// observeHalf makes the k-th observation of a pair sequence: resource on even k,
+// pressure (y of resource's x) on odd k. Each one folds a pair once the window is
+// full, so a test can check what each fold did.
+func observeHalf(t *testing.T, m *Map, c *clock, k int, y func(x float64) float64, tag string) {
+	t.Helper()
+	j := k / 2
+	x := float64(j%10) / 10.0
+	c.advance(time.Second)
+	id, v, ev := "resource", x, tag+"r"+itoa(j)
+	if k%2 == 1 {
+		id, v, ev = "pressure", y(x), tag+"p"+itoa(j)
+	}
+	if err := m.ObserveEvent(id, v, c.now(), ev); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func opposed(x float64) float64 { return 1 - x }
+func same(x float64) float64    { return x }
+
+// feedOpposed feeds the i-th pair with pressure moving against resource: the declared
+// sign contradicted, so the strength that folds is zero. Over a window of 10 an
+// assoc-0 stretch still shows |r| near 0.5, inside the band; this one is outside it.
+func feedOpposed(t *testing.T, m *Map, c *clock, i int, tag string) {
+	t.Helper()
+	observeHalf(t, m, c, 2*i, opposed, tag)
+	observeHalf(t, m, c, 2*i+1, opposed, tag)
+}
+
 func newLearningPair(t *testing.T, alphaSlow float64) (*Map, *clock, string) {
+	t.Helper()
+	return newLearningPairWindow(t, alphaSlow, 60)
+}
+
+func newLearningPairWindow(t *testing.T, alphaSlow float64, window int) (*Map, *clock, string) {
 	t.Helper()
 	m, c := newTestMap(t, Config{
 		ConvergenceObservations: 500,
 		Alpha:                   0.2,
 		AlphaSlow:               alphaSlow,
 		Learn:                   true,
-		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 60},
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: window},
 	})
 	for _, id := range []string{"resource", "pressure"} {
 		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
@@ -1477,8 +1531,8 @@ func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 	}
 
 	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("Load = %v, %v; want a restored snapshot", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("Load = %v, %v; want a restored snapshot", r.Loaded, err)
 	}
 	for _, id := range []string{"a", "b@pod:1"} {
 		if p, _ := restored.Property(id); p.RangeDeclared {
@@ -1601,6 +1655,7 @@ func TestSweepReleasesTheLockWhenItPanics(t *testing.T) {
 		}
 		return at
 	})
+	m.SetMonotonic(func() time.Duration { return c.m + time.Minute })
 
 	m.Sweep() // first call: x falls silent past RetireAfter, so this runs retireLocked
 	if p, ok := m.Property("x"); !ok || p.Status != Retired {
@@ -1773,12 +1828,12 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	c.advance(time.Minute)
 	_ = m.Observe("dst", .5, c.now())
 	m.Sweep()
-	b := m.Decide("d1", "test")
+	b := m.Decide("d1", "estimate", "test")
 	b.RelationshipsInto("dst")
 	d := b.Commit(nil)
 	var found bool
 	for _, cv := range d.Caveats {
-		if strings.Contains(cv, "stale endpoint src") {
+		if strings.Contains(cv, "has an endpoint src that is stale") {
 			found = true
 		}
 	}
@@ -1790,12 +1845,12 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	// iteration happened to write last.
 	c.advance(time.Minute)
 	m.Sweep()
-	b = m.Decide("d2", "test")
+	b = m.Decide("d2", "estimate", "test")
 	b.RelationshipsInto("dst")
 	d = b.Commit(nil)
 	var stale []string
 	for _, cv := range d.Caveats {
-		if strings.Contains(cv, "stale endpoint") {
+		if strings.Contains(cv, "that is stale") {
 			stale = append(stale, cv)
 		}
 	}
@@ -1805,7 +1860,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	var named int
 	for _, end := range []string{"src", "dst"} {
 		for _, cv := range stale {
-			if strings.HasSuffix(cv, "stale endpoint "+end) {
+			if strings.Contains(cv, "has an endpoint "+end+" that is stale") {
 				named++
 			}
 		}
@@ -1844,7 +1899,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 	est, asserted := 0.95, 0.7
 	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Recent: 0.9, Confidence: 1,
 		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
-		Provenance: Discovered})
+		Regime: true, RegimeSince: c.now(), Provenance: Discovered})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1853,7 +1908,7 @@ func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
 		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
 	}
 	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
-		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 {
+		r.SignConflicts != 0 || r.Recent != 0 || r.Confidence != 0 || r.Regime || !r.RegimeSince.IsZero() {
 		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
 	}
 	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {
@@ -1868,7 +1923,7 @@ func TestReadPathsCopyLabelsAndMembers(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
 		Labels: map[string]string{"qos": "burstable"}})
-	b := m.Decide("d1", "what was qos when I decided")
+	b := m.Decide("d1", "estimate", "what was qos when I decided")
 	_, _ = b.Property("a@pod:1")
 	d := b.Commit(nil)
 	c.advance(time.Second)
@@ -2111,5 +2166,1536 @@ func TestStaleAfterIsTheConfiguredSilence(t *testing.T) {
 	}
 	if got := New(Config{StaleAfter: 30 * time.Second}, nil).StaleAfter(); got != 30*time.Second {
 		t.Errorf("configured %s; want 30s", got)
+	}
+}
+
+func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: time.Minute})
+	_ = c
+	if err := m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores")}); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]any{"nested": map[string]any{"k": 1.0}, "list": []any{1.0}}
+	b := m.Decide("dec-copy", "estimate", "q")
+	b.Input("evidence", in)
+	b.Facts()
+	b.Commit(map[string]any{"ok": true})
+
+	in["nested"].(map[string]any)["k"] = 2.0
+	in["list"].([]any)[0] = 9.0
+
+	d, ok := m.Journal().Decision("dec-copy")
+	if !ok {
+		t.Fatal("decision not found")
+	}
+	ev := d.Inputs["evidence"].(map[string]any)
+	if ev["nested"].(map[string]any)["k"] != 1.0 || ev["list"].([]any)[0] != 1.0 {
+		t.Fatalf("caller's later write reached the journal: %v", ev)
+	}
+	if len(d.FactsRead) == 0 || d.FactsRead[0].Number == nil {
+		t.Fatalf("facts not read: %+v", d.FactsRead)
+	}
+	*d.FactsRead[0].Number = 99
+	ev["nested"].(map[string]any)["k"] = 3.0
+
+	again, _ := m.Journal().Decision("dec-copy")
+	if *again.FactsRead[0].Number != 4 {
+		t.Fatalf("returned fact aliased: %v", *again.FactsRead[0].Number)
+	}
+	if again.Inputs["evidence"].(map[string]any)["nested"].(map[string]any)["k"] != 1.0 {
+		t.Fatal("returned input aliased")
+	}
+}
+
+func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	type offer struct {
+		Lines  []string
+		Limits map[string]float64
+	}
+	labels := map[string]string{"k": "a"}
+	lines := []string{"a"}
+	o := offer{Lines: []string{"a"}, Limits: map[string]float64{"cpu": 1}}
+	b := m.Decide("dec-typed", "estimate", "q")
+	b.Input("labels", labels)
+	b.Input("wrapped", map[string]any{"lines": lines})
+	b.Input("offer", o)
+	b.Commit(map[string]any{"ok": true})
+
+	labels["k"] = "b"
+	lines[0] = "b"
+	o.Lines[0] = "b"
+	o.Limits["cpu"] = 2
+
+	d, _ := m.Journal().Decision("dec-typed")
+	if d.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("typed map aliased: %v", d.Inputs["labels"])
+	}
+	if d.Inputs["wrapped"].(map[string]any)["lines"].([]string)[0] != "a" {
+		t.Errorf("typed slice nested in a map aliased: %v", d.Inputs["wrapped"])
+	}
+	got := d.Inputs["offer"].(offer)
+	if got.Lines[0] != "a" || got.Limits["cpu"] != 1 {
+		t.Errorf("struct fields aliased: %+v", got)
+	}
+	d.Inputs["labels"].(map[string]string)["k"] = "c"
+	again, _ := m.Journal().Decision("dec-typed")
+	if again.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("returned typed map aliased: %v", again.Inputs["labels"])
+	}
+}
+
+func TestDecisionAnswerIsCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	answer := map[string]any{"verdict": "accept", "detail": map[string]any{"k": 1.0}, "ids": []string{"a"}}
+	b := m.Decide("dec-answer", "estimate", "q")
+	b.Commit(answer)
+
+	answer["verdict"] = "refuse"
+	answer["detail"].(map[string]any)["k"] = 2.0
+	answer["ids"].([]string)[0] = "b"
+
+	d, _ := m.Journal().Decision("dec-answer")
+	if d.Answer["verdict"] != "accept" || d.Answer["detail"].(map[string]any)["k"] != 1.0 || d.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("caller's later write reached the journal: %v", d.Answer)
+	}
+	d.Answer["detail"].(map[string]any)["k"] = 3.0
+	d.Answer["ids"].([]string)[0] = "c"
+	again, _ := m.Journal().Decision("dec-answer")
+	if again.Answer["detail"].(map[string]any)["k"] != 1.0 || again.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("returned answer aliased: %v", again.Answer)
+	}
+}
+
+// ── A reading must be newer than the last, and not from the future ─────────────
+
+func TestAReadingOlderThanTheLastIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	counter := func() int { return m.State(Query{}).Counts.ReadingsOutOfOrder }
+
+	if err := m.Observe("cpu", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	rev := m.Revision()
+	// Unix-second stamps: a sub-second producer legitimately repeats an instant.
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 || counter() != 0 || m.Revision() == rev {
+		t.Errorf("equal-instant reading: n=%d counter=%d; want 2 and 0, revision advanced", p.NObservations, counter())
+	}
+
+	rev = m.Revision()
+	if err := m.Observe("cpu", 0.5, c.now().Add(-time.Second)); err != nil {
+		t.Fatalf("a refused reading is not an error: %v", err)
+	}
+	q, _ := m.Property("cpu")
+	if q.NObservations != 2 || q.Value != p.Value || !q.LastObserved.Equal(c.now()) || counter() != 1 {
+		t.Errorf("older reading changed the property or was not counted: %+v counter=%d", q, counter())
+	}
+	if m.Revision() != rev {
+		t.Error("a refused reading advanced the revision")
+	}
+
+	c.advance(time.Second)
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	q, _ = m.Property("cpu")
+	if q.NObservations != 3 || counter() != 1 || m.Revision() == rev {
+		t.Errorf("newer reading: n=%d counter=%d; want 3 and 1", q.NObservations, counter())
+	}
+}
+
+func TestAFutureReadingIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(16*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Property("gpu"); ok {
+		t.Error("a future-stamped reading admitted a property")
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want 1", got)
+	}
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(15*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := m.Property("gpu")
+	if !ok || p.NObservations != 1 {
+		t.Errorf("a reading at the tolerance edge was not admitted: %+v ok=%v", p, ok)
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want still 1", got)
+	}
+}
+
+func TestARefusedReadingDoesNotConsumeItsEventID(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	t0 := c.now()
+
+	if err := m.ObserveEvent("cpu", 0.1, t0, "e1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ObserveEvent("cpu", 0.5, t0.Add(-time.Second), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	if err := m.ObserveEvent("cpu", 0.5, c.now(), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 {
+		t.Errorf("n = %d; want 2: the refused reading consumed event id e2", p.NObservations)
+	}
+}
+
+// ── Silence runs on the process's monotonic clock ─────────────────────────────
+
+func clockSteps(m *Map) []Event {
+	var out []Event
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventClockStepped {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func observedDiskIO(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	return m, c
+}
+
+func TestAWallClockStepForwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(2 * time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a 2h wall step made stale=%v retired=%v; 5s of real silence is neither", stale, retired)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active {
+		t.Errorf("status %s after a wall step, want active", p.Status)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); math.Abs(w-7205) > 1 {
+		t.Errorf("wall_delta_seconds %v, want about 7205", steps[0].Detail["wall_delta_seconds"])
+	}
+
+	c.advance(time.Second)
+	m.Sweep()
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events after a quiet sweep, want still 1: one event per step", n)
+	}
+}
+
+func TestAWallClockStepBackwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(-time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a backward wall step made stale=%v retired=%v", stale, retired)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); w >= 0 {
+		t.Errorf("wall_delta_seconds %v, want negative", w)
+	}
+}
+
+func TestAnOldStampedReadingIsAlreadyStale(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now().Add(-31*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stale, retired := m.Sweep()
+	if len(stale) != 1 || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; a reading stamped 31s ago is stale on arrival", stale, retired)
+	}
+	// A wall step does not change that, nor un-stale it.
+	c.stepWall(time.Hour)
+	if _, retired = m.Sweep(); len(retired) != 0 {
+		t.Errorf("retired=%v after a wall step", retired)
+	}
+}
+
+func TestOrdinarySilenceStillRetires(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(3 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "disk_io" {
+		t.Fatalf("retired=%v after 3m of silence, want disk_io", retired)
+	}
+	if n := len(clockSteps(m)); n != 0 {
+		t.Errorf("%d clock.stepped events with both clocks agreeing, want 0", n)
+	}
+}
+
+func TestRelationshipsSurviveAClockStep(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	for _, id := range []string{"a", "b"} {
+		if err := m.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Observe(id, 0.5, c.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(5 * time.Second)
+	c.stepWall(48 * time.Hour)
+	m.Sweep()
+	r, _ := m.Relationship(RelationshipID("a", "b", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired by a wall-clock step: %s", r.RetiredReason)
+	}
+}
+
+// ── A restored map gets retire_after of grace ─────────────────────────────────
+
+// restoredMap saves a map holding two observed properties and a relationship, and
+// loads it into a second map whose clock is three days later.
+func restoredMap(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	cfg := Config{Owner: "n", StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute}
+	a, cA := newTestMap(t, cfg)
+	for _, id := range []string{"cpu", "mem"} {
+		if err := a.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Observe(id, 0.5, cA.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.DeclareRelationship(Relationship{From: "cpu", To: "mem", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/state.json"
+	if err := a.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	b, cB := newTestMap(t, cfg)
+	cB.t = cA.t.Add(72 * time.Hour)
+	cB.m = time.Second
+	if r, err := b.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
+	}
+	return b, cB
+}
+
+func TestRestoreGraceMarksStaleButDoesNotRetire(t *testing.T) {
+	m, _ := restoredMap(t)
+	stale, retired := m.Sweep()
+	if len(stale) != 2 || stale[0] != "cpu" || stale[1] != "mem" || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; want both stale, none retired during grace", stale, retired)
+	}
+	r, _ := m.Relationship(RelationshipID("cpu", "mem", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired during grace: %s", r.RetiredReason)
+	}
+	if n := m.State(Query{}).Counts.RelationshipsLive; n != 1 {
+		t.Errorf("RelationshipsLive %d, want 1", n)
+	}
+}
+
+func TestRestoreGraceEndsAfterRetireAfter(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(2*time.Minute + time.Second)
+	_, retired := m.Sweep()
+	if len(retired) != 2 || retired[0] != "cpu" || retired[1] != "mem" {
+		t.Fatalf("retired=%v after grace, want cpu and mem", retired)
+	}
+	if r, _ := m.Relationship(RelationshipID("cpu", "mem", "")); r.Status != Retired {
+		t.Errorf("relationship %s after grace, want retired", r.Status)
+	}
+}
+
+func TestAnObservationDuringGraceRevivesNormally(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(10 * time.Second)
+	if err := m.Observe("cpu", 0.6, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Active {
+		t.Fatalf("cpu %s after an observation, want active", p.Status)
+	}
+	c.advance(2 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "mem" {
+		t.Fatalf("retired=%v, want mem only", retired)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Stale {
+		t.Errorf("cpu %s, want stale", p.Status)
+	}
+}
+
+func TestAClockStepDuringGraceRetiresNothing(t *testing.T) {
+	m, c := restoredMap(t)
+	c.advance(5 * time.Second)
+	c.stepWall(6 * time.Hour)
+	_, retired := m.Sweep()
+	if len(retired) != 0 {
+		t.Fatalf("retired=%v after a wall step during grace", retired)
+	}
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events, want 1", n)
+	}
+	c.advance(2 * time.Minute)
+	if _, retired = m.Sweep(); len(retired) != 2 {
+		t.Errorf("retired=%v once grace elapsed, want both", retired)
+	}
+}
+
+// ── Reading order is judged on the monotonic clock ────────────────────────────
+
+func TestReadingsAfterABackwardWallStepKeepThePropertyLive(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(10 * time.Second)
+	c.stepWall(-time.Hour)
+	// The producer stamps with the stepped clock: every reading is an hour older
+	// than LastObserved by wall time, yet each is newer than the last.
+	for i := 0; i < 20; i++ { // 200 s, past retire_after
+		if err := m.Observe("disk_io", 0.2, c.now()); err != nil {
+			t.Fatal(err)
+		}
+		m.Sweep()
+		c.advance(10 * time.Second)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active || p.NObservations != 21 {
+		t.Errorf("after a backward step: status %s, n=%d; want active and 21", p.Status, p.NObservations)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+func TestARestoredPropertyAcceptsReadingsStampedBeforeItsLastObserved(t *testing.T) {
+	m, c := restoredMap(t)
+	// A board whose RTC came up in 1970: its readings predate the snapshot.
+	c.t = time.Unix(1000, 0).UTC()
+	if err := m.Observe("cpu", 0.7, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(10 * time.Second)
+	c.stepWall(56 * 365 * 24 * time.Hour) // NTP fixes the clock
+	if err := m.Observe("cpu", 0.8, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 3 || p.Status != Active {
+		t.Errorf("cpu n=%d status %s; want 3 and active", p.NObservations, p.Status)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+// Two clocks read one after the other never agree to the nanosecond, so a repeated
+// stamp lands a hair before the last anchor; it is still the same instant.
+func TestARepeatedStampAcrossClockReadJitterIsAccepted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	at := c.now()
+	if err := m.Observe("cpu", 0.1, at); err != nil {
+		t.Fatal(err)
+	}
+	c.stepWall(time.Millisecond) // wall read later than mono, relative to the last record
+	if err := m.Observe("cpu", 0.2, at); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 2 {
+		t.Errorf("n=%d; a repeated stamp was refused as out of order", p.NObservations)
+	}
+}
+
+// signStreamMap builds the sign-suspect setup: two relationships over resource ->
+// pressure, "backwards" declared with the wrong sign for a stream that rises together.
+func signStreamMap(t *testing.T, rels ...Relationship) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 20,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rels == nil {
+		rels = []Relationship{
+			{From: "resource", To: "pressure", Label: "backwards", Sign: -1},
+			{From: "resource", To: "pressure", Label: "correct", Sign: 1},
+		}
+	}
+	for _, r := range rels {
+		declare := m.DeclareRelationship
+		if r.Composition {
+			declare = m.DeclareComposition
+		}
+		if err := declare(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return m, c
+}
+
+// feedSignPairs feeds n pairs; pressure rises with resource, or falls with it if inverse.
+func feedSignPairs(t *testing.T, m *Map, c *clock, from, n int, inverse bool) {
+	t.Helper()
+	for i := from; i < from+n; i++ {
+		c.advance(5 * time.Second)
+		x := float64(i%10) / 10.0
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(2 * time.Second)
+		y := 0.9*x + 0.02
+		if inverse {
+			y = 0.9 * (1 - x)
+		}
+		if err := m.ObserveEvent("pressure", y, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func retiredEventsFor(m *Map, id string) []Event {
+	var out []Event
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventRelationshipRetired && e.Target == id {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestSignContradictedSeededRelationshipIsRetired(t *testing.T) {
+	m, c := signStreamMap(t)
+	feedSignPairs(t, m, c, 0, 120, false)
+	id := RelationshipID("resource", "pressure", "backwards")
+	backwards, _ := m.Relationship(id)
+	correct, _ := m.Relationship(RelationshipID("resource", "pressure", "correct"))
+	if backwards.Status != Retired || backwards.RetiredReason != ReasonSignContradicted || !backwards.SignSuspectFlag {
+		t.Fatalf("backwards = %v %q flag=%v", backwards.Status, backwards.RetiredReason, backwards.SignSuspectFlag)
+	}
+	if correct.Status != Active {
+		t.Errorf("correct status = %v", correct.Status)
+	}
+	evs := retiredEventsFor(m, id)
+	if len(evs) != 1 {
+		t.Fatalf("retired events = %d, want 1", len(evs))
+	}
+	e := evs[0]
+	if e.Actor != "agent" || e.Detail["reason"] != "sign-contradicted" ||
+		e.Detail["conflicts"].(int) < 30 || e.Detail["agreements"] != 0 || e.Detail["provenance"] != "learned" {
+		t.Errorf("event = %+v", e)
+	}
+	if got := m.Census().RelationshipsLive; got != 1 {
+		t.Errorf("live = %d, want 1", got)
+	}
+}
+
+func TestSignContradictedAssertedRelationshipIsOnlyFlagged(t *testing.T) {
+	m, c := signStreamMap(t)
+	id := RelationshipID("resource", "pressure", "backwards")
+	if err := m.AssertRelationshipStrength(id, 0.5, "op", "test"); err != nil {
+		t.Fatal(err)
+	}
+	feedSignPairs(t, m, c, 0, 120, false)
+	backwards, _ := m.Relationship(id)
+	if backwards.Status != Active || !backwards.SignSuspectFlag {
+		t.Fatalf("asserted: status=%v flag=%v, want active and flagged", backwards.Status, backwards.SignSuspectFlag)
+	}
+	if n := len(retiredEventsFor(m, id)); n != 0 {
+		t.Errorf("%d retired events for an asserted relationship", n)
+	}
+}
+
+// TestSignContradictedCompositionIsOnlyFlagged: a part and its whole need not move
+// the same way, because the other parts move too, so sign conflicts do not
+// contradict a composition. It is flagged and stays; a plain relationship with the
+// same evidence still retires.
+func TestSignContradictedCompositionIsOnlyFlagged(t *testing.T) {
+	m, c := signStreamMap(t,
+		Relationship{From: "resource", To: "pressure", Label: "part", Sign: -1, Composition: true},
+		Relationship{From: "resource", To: "pressure", Label: "plain", Sign: -1},
+	)
+	feedSignPairs(t, m, c, 0, 120, false)
+	part, _ := m.Relationship(RelationshipID("resource", "pressure", "part"))
+	if part.Status != Active || !part.SignSuspectFlag || !part.Composition {
+		t.Fatalf("composition: status=%v flag=%v composition=%v, want active, flagged, composition",
+			part.Status, part.SignSuspectFlag, part.Composition)
+	}
+	if n := len(retiredEventsFor(m, part.ID)); n != 0 {
+		t.Errorf("%d retired events for a composition relationship", n)
+	}
+	plain, _ := m.Relationship(RelationshipID("resource", "pressure", "plain"))
+	if plain.Status != Retired || plain.RetiredReason != ReasonSignContradicted {
+		t.Errorf("plain: status=%v reason=%q, want retired sign-contradicted", plain.Status, plain.RetiredReason)
+	}
+}
+
+// TestDeclareRelationshipDropsComposition: the composition mark exempts a relationship
+// from sign retirement, so a plain declaration — what POST /state/relationships
+// reaches — cannot set it; only DeclareComposition does.
+func TestDeclareRelationshipDropsComposition(t *testing.T) {
+	m, _ := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "x", Sign: 1})
+	if err := m.DeclareRelationship(Relationship{From: "pressure", To: "resource", Label: "x", Sign: 1, Composition: true}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Relationship(RelationshipID("pressure", "resource", "x")); r.Composition {
+		t.Errorf("declared relationship kept a caller-supplied composition: %+v", r)
+	}
+}
+
+// TestCompositionSurvivesSaveLoad: the composition mark is a fact about the pair and
+// must outlive a restart, or a restored map would retire what it used to keep.
+func TestCompositionSurvivesSaveLoad(t *testing.T) {
+	m, _ := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "part", Sign: 1, Composition: true})
+	path := filepath.Join(t.TempDir(), "map.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{})
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
+	}
+	if r, _ := m2.Relationship(RelationshipID("resource", "pressure", "part")); !r.Composition {
+		t.Errorf("restored relationship lost composition: %+v", r)
+	}
+}
+
+func TestSignContradictedIntervenedIsRetiredAndKeepsInterventions(t *testing.T) {
+	m, c := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "backwards", Sign: 1})
+	id := RelationshipID("resource", "pressure", "backwards")
+	for i := 0; i < 2; i++ {
+		if _, _, err := m.RecordIntervention(InterventionOutcome{
+			From: "resource", To: "pressure", Agreed: true, HasEffect: true, Effect: 0.6,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r, _ := m.Relationship(id); r.Provenance != Intervened {
+		t.Fatalf("precondition: provenance = %v", r.Provenance)
+	}
+	feedSignPairs(t, m, c, 0, 120, true)
+	r, _ := m.Relationship(id)
+	if r.Status != Retired || r.RetiredReason != ReasonSignContradicted {
+		t.Fatalf("status=%v reason=%q", r.Status, r.RetiredReason)
+	}
+	evs := retiredEventsFor(m, id)
+	if len(evs) != 1 || evs[0].Detail["provenance"] != "intervened" {
+		t.Fatalf("events = %+v", evs)
+	}
+	if r.Interventions == nil || r.Interventions.EffectN != 2 {
+		t.Errorf("interventions = %+v, want EffectN 2", r.Interventions)
+	}
+}
+
+func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
+	m, c := signStreamMap(t)
+	feedSignPairs(t, m, c, 0, 120, false)
+	id := RelationshipID("resource", "pressure", "backwards")
+	before, _ := m.Relationship(id)
+	if before.Status != Retired {
+		t.Fatalf("precondition: status = %v", before.Status)
+	}
+	if err := m.DeclareRelationship(Relationship{From: "resource", To: "pressure", Label: "backwards", Sign: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship(id)
+	if r.Status != Active || r.SignConflicts != before.SignConflicts || !r.SignSuspectFlag {
+		t.Fatalf("redeclared: status=%v conflicts=%d (was %d) flag=%v",
+			r.Status, r.SignConflicts, before.SignConflicts, r.SignSuspectFlag)
+	}
+	feedSignPairs(t, m, c, 120, 10, false)
+	if r, _ = m.Relationship(id); r.Status != Active {
+		t.Fatalf("re-retired on a repeat: status = %v", r.Status)
+	}
+	if err := m.ResetRelationship(id, "op", "fresh trial"); err != nil {
+		t.Fatal(err)
+	}
+	feedSignPairs(t, m, c, 130, 120, false)
+	if r, _ = m.Relationship(id); r.Status != Retired {
+		t.Fatalf("after reset and a fresh trial: status = %v, want retired", r.Status)
+	}
+	if n := len(retiredEventsFor(m, id)); n != 2 {
+		t.Errorf("retired events = %d, want 2", n)
+	}
+}
+
+// ── A relationship says when the present differs from what is established ─────
+
+// effectiveBand is two standard errors of Fisher's z at the effective window of n
+// pairs smoothed with EMA weight alpha: n_eff = n·(1 − φ²)/(1 + φ²), φ = 1 − alpha.
+func effectiveBand(n int, alpha float64) float64 {
+	phi := 1 - alpha
+	nEff := float64(n) * (1 - phi*phi) / (1 + phi*phi)
+	return 2 / math.Sqrt(math.Max(nEff-3, 1))
+}
+
+// regimeOutside is the regime rule recomputed from a relationship as a reader sees
+// it: the recent layer more than effectiveBand away from the established one.
+func regimeOutside(m *Map, r Relationship) bool {
+	if r.Established == nil {
+		return false
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	return math.Abs(z(r.Recent)-z(*r.Established)) > effectiveBand(m.PairSupport(r.ID), m.cfg.Alpha)
+}
+
+// driveRegime feeds opposed pairs one at a time until the relationship's Regime
+// flips, and returns how many it took.
+func driveRegime(t *testing.T, m *Map, c *clock, id string, limit int) int {
+	t.Helper()
+	r, _ := m.Relationship(id)
+	start := r.Regime
+	tag := "drive" + itoa(int(c.now().Unix())) + "-" // unique per call: the clock only advances
+	for i := 0; i < limit; i++ {
+		feedOpposed(t, m, c, i, tag)
+		if r, _ := m.Relationship(id); r.Regime != start {
+			return i + 1
+		}
+	}
+	t.Fatalf("regime still %v after %d pairs", start, limit)
+	return 0
+}
+
+func lastEvent(m *Map) Event {
+	ev := m.Journal().Events(0, 0)
+	return ev[len(ev)-1]
+}
+
+// stepRegime makes observations one at a time — each folds one pair — and checks the
+// run rule stepwise: Regime flips exactly on the fold that completes a full window of
+// consecutive folds on the new side.
+func stepRegime(t *testing.T, m *Map, c *clock, id string, y func(float64) float64, tag string) {
+	t.Helper()
+	r0, _ := m.Relationship(id)
+	want := !r0.Regime
+	run := 0
+	for i := 0; i < 400; i++ {
+		observeHalf(t, m, c, i, y, tag)
+		r, _ := m.Relationship(id)
+		if regimeOutside(m, r) == want {
+			run++
+		} else {
+			run = 0
+		}
+		window := m.PairSupport(id)
+		if run < window {
+			if r.Regime != r0.Regime {
+				t.Fatalf("observation %d: regime flipped after %d folds on the new side; want %d", i, run, window)
+			}
+			continue
+		}
+		if r.Regime != want {
+			t.Fatalf("observation %d: %d folds on the new side and regime is still %v", i, run, r.Regime)
+		}
+		if want && !r.RegimeSince.Equal(c.now()) {
+			t.Fatalf("regime since %v; want the fold that started it, %v", r.RegimeSince, c.now())
+		}
+		if !want && !r.RegimeSince.IsZero() {
+			t.Fatalf("regime ended but since is %v", r.RegimeSince)
+		}
+		e := lastEvent(m)
+		if e.Kind != EventRelationshipRegime || e.Target != id || e.Detail["started"] != want {
+			t.Fatalf("last event %+v; want relationship.regime started=%v", e, want)
+		}
+		for _, k := range []string{"recent", "established", "band"} {
+			if _, ok := e.Detail[k]; !ok {
+				t.Fatalf("regime event lacks %s: %v", k, e.Detail)
+			}
+		}
+		// Window 40 at alpha 0.2: n_eff = 40·0.36/1.64 ≈ 8.78, band 2/sqrt(n_eff − 3).
+		if b, _ := e.Detail["band"].(float64); math.Abs(b-2/math.Sqrt(40*0.36/1.64-3)) > 1e-9 {
+			t.Fatalf("band %v; want 2/sqrt(n_eff − 3) at window 40, alpha 0.2", e.Detail["band"])
+		}
+		return
+	}
+	t.Fatalf("regime never flipped to %v", want)
+}
+
+func TestRegimeStartsAfterAWindowOfFoldsOutsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	if r, _ := m.Relationship(id); r.Regime {
+		t.Fatal("regime set during the stretch that established the layer")
+	}
+	stepRegime(t, m, c, id, opposed, "opposed")
+}
+
+func TestRegimeEndsAfterAWindowOfFoldsInsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	stepRegime(t, m, c, id, opposed, "opposed")
+	stepRegime(t, m, c, id, same, "back")
+}
+
+// TestResetClearsTheRegime: a reset discards the evidence a regime rests on, so it
+// clears Regime and RegimeSince, and no regime starts on the pairs right after it.
+func TestResetClearsTheRegime(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	driveRegime(t, m, c, id, 200)
+	if err := m.ResetRelationship(id, "op", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Relationship(id); r.Regime || !r.RegimeSince.IsZero() {
+		t.Fatalf("a reset relationship keeps its regime: %v since %v", r.Regime, r.RegimeSince)
+	}
+	since := m.Journal().Seq()
+	feedPairs(t, m, c, 20, 0.0, "after")
+	if r, _ := m.Relationship(id); r.Regime {
+		t.Fatal("regime set on the pairs right after the reset")
+	}
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Seq > since && e.Kind == EventRelationshipRegime {
+			t.Fatalf("regime event after the reset: %+v", e)
+		}
+	}
+}
+
+func TestRegimeSurvivesRestart(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	driveRegime(t, m, c, id, 200)
+	before, _ := m.Relationship(id)
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := newTestMap(t, Config{Learn: true})
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
+	}
+	after, _ := restored.Relationship(id)
+	if !after.Regime || !after.RegimeSince.Equal(before.RegimeSince) {
+		t.Fatalf("restored regime %v since %v; had %v since %v", after.Regime, after.RegimeSince, before.Regime, before.RegimeSince)
+	}
+}
+
+// ── Default-config regressions: noise is not evidence ──────────────────────────
+
+// noisyMap is a default-config learning map with one relationship resource ->
+// pressure declared sign +1. Every learning and smoothing parameter takes its default,
+// which is what these regressions are about.
+func noisyMap(t *testing.T) (*Map, *clock, string) {
+	t.Helper()
+	m, c := newTestMap(t, Config{Learn: true})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "resource", To: "pressure", Label: "noisy", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return m, c, RelationshipID("resource", "pressure", "noisy")
+}
+
+// feedNoisy feeds n pairs of x uniform on [0,1) and y = coef·x + Gaussian noise, from
+// a seeded source so the stream is the same on every run.
+func feedNoisy(t *testing.T, m *Map, c *clock, rng *rand.Rand, n int, coef float64) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		x := rng.Float64()
+		y := coef*x + 0.3*rng.NormFloat64()
+		c.advance(time.Second)
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(time.Second)
+		if err := m.ObserveEvent("pressure", y, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestSignRetirementIgnoresNoiseOnACorrectSign: a correctly signed but noisy
+// relationship is never retired at the defaults. The first folds share all but one
+// pair of a still-filling window of smoothed values, so a conflict share over them
+// rests on one or two effective draws; retirement must wait for independent evidence.
+func TestSignRetirementIgnoresNoiseOnACorrectSign(t *testing.T) {
+	for seed := int64(1); seed <= 10; seed++ {
+		m, c, id := noisyMap(t)
+		feedNoisy(t, m, c, rand.New(rand.NewSource(seed)), 2000, 0.5)
+		if r, _ := m.Relationship(id); r.Status != Active {
+			t.Errorf("seed %d: a correctly signed noisy relationship is %v (%q) after %d agreements, %d conflicts",
+				seed, r.Status, r.RetiredReason, r.SignAgreements, r.SignConflicts)
+		}
+	}
+}
+
+// TestRegimeIgnoresAStationaryNoisyStream: a stream whose association never changes
+// produces no regime event at the defaults. Consecutive folds share all but one pair of
+// EMA-smoothed values, so the band must be the effective window's, and a run must last
+// a window.
+func TestRegimeIgnoresAStationaryNoisyStream(t *testing.T) {
+	m, c, id := noisyMap(t)
+	feedNoisy(t, m, c, rand.New(rand.NewSource(7)), 6000, 0.5)
+	n := 0
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventRelationshipRegime && e.Target == id {
+			n++
+		}
+	}
+	if r, _ := m.Relationship(id); n != 0 || r.Status != Active {
+		t.Fatalf("stationary stream: %d regime events, status %v (%q); want none, active", n, r.Status, r.RetiredReason)
+	}
+}
+
+// TestRegimeIsNotUpdatedOnARetiredRelationship: a relationship retired on a fold has
+// no present to differ from, so the same fold does not journal a regime for it.
+func TestRegimeIsNotUpdatedOnARetiredRelationship(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	r := m.relationships[id]
+	// z(0.999) ≈ 3.8 against recent 0: outside the band (2 at window 10, alpha 0.2).
+	est := 0.999
+	r.Status, r.Established, r.Recent, r.regimeRun = Retired, &est, 0, 9 // one fold short of a run
+	since := m.Journal().Seq()
+	m.updateRegimeLocked(r, 10, c.now())
+	if r.Regime {
+		t.Fatal("a retired relationship entered a regime")
+	}
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Seq > since && e.Kind == EventRelationshipRegime {
+			t.Fatalf("regime event for a retired relationship: %+v", e)
+		}
+	}
+}
+
+// ── A down source makes its properties unobservable, not departed ─────────────
+
+func recordFrom(t *testing.T, m *Map, id string, v float64, at time.Time, source string) {
+	t.Helper()
+	o := Observation{ID: id, Value: v, At: at, Source: source}
+	if i := strings.Index(id, "@"); i >= 0 {
+		o.Subject = id[i+1:]
+	}
+	if err := m.Record(o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func statusOfProp(t *testing.T, m *Map, id string) Status {
+	t.Helper()
+	p, ok := m.Property(id)
+	if !ok {
+		t.Fatalf("property %s missing", id)
+	}
+	return p.Status
+}
+
+// outageMap is a map with cpu@pod:a and cpu from "netdata" and a relationship
+// between them.
+func outageMap(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return m, c
+}
+
+func TestSourceDownMakesPropertiesUnobservableNotRetired(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true, "")
+	c.advance(2 * 2 * time.Minute)
+	m.Sweep()
+	_, retired := m.Sweep()
+	for _, id := range []string{"cpu@pod:a", "cpu"} {
+		if s := statusOfProp(t, m, id); s != Unobservable {
+			t.Errorf("%s is %s; want unobservable", id, s)
+		}
+	}
+	if len(retired) != 0 {
+		t.Errorf("retired %v while the source was down", retired)
+	}
+	rels := m.State(Query{}).Relationships
+	if len(rels) != 1 || rels[0].Status != Active {
+		t.Errorf("relationships %+v; want the one still active", rels)
+	}
+	cs := m.Census()
+	if cs.PropertiesUnobservable != 2 || cs.PropertiesRetired != 0 {
+		t.Errorf("census %+v; want 2 unobservable, 0 retired", cs)
+	}
+}
+
+func TestRecoveredSourceLeavesPropertiesUnobservableUntilObserved(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true, "")
+	c.advance(2 * 2 * time.Minute)
+	m.Sweep()
+
+	m.SetSourceDown("netdata", false, "")
+	if _, retired := m.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v at recovery; silence counts from the recovery", retired)
+	}
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
+		t.Fatalf("cpu@pod:a is %s; want unobservable until observed", s)
+	}
+
+	// cpu is observed again within the window; cpu@pod:a is not.
+	c.advance(time.Minute)
+	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
+	if p, _ := m.Property("cpu"); p.Status != Active || p.NObservations != 2 {
+		t.Fatalf("cpu %s with %d observations; want active, 2", p.Status, p.NObservations)
+	}
+	c.advance(time.Minute + time.Second)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "cpu@pod:a" {
+		t.Errorf("retired %v; want only cpu@pod:a, silent RetireAfter since recovery", retired)
+	}
+}
+
+func TestSetSourceDownJournalsEachTransitionOnce(t *testing.T) {
+	m, _ := newTestMap(t, Config{AdmitUnknown: true})
+	for _, down := range []bool{true, true, true, false, false, true} {
+		m.SetSourceDown("x", down, "")
+	}
+	var got []EventKind
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind != EventCollectorDown && e.Kind != EventCollectorUp {
+			continue
+		}
+		got = append(got, e.Kind)
+		if e.Target != "x" || e.Detail["member"] != "x" || e.Actor != "collector" {
+			t.Errorf("event %+v; want target x, member x, actor collector", e)
+		}
+	}
+	want := []EventKind{EventCollectorDown, EventCollectorUp, EventCollectorDown}
+	if !slices.Equal(got, want) {
+		t.Errorf("events %v; want %v", got, want)
+	}
+}
+
+func TestSetSourceDownOnAnUnknownSourceIsRecordedAndHarmless(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	m.SetSourceDown("ghost", false, "")
+	if n := len(m.Journal().Events(0, 0)); n != 0 {
+		t.Fatalf("%d events for a source that was never down", n)
+	}
+	m.SetSourceDown("ghost", true, "")
+	if n := len(m.Journal().Events(0, 0)); n != 1 {
+		t.Fatalf("%d events; want one collector.down", n)
+	}
+	recordFrom(t, m, "late", 1, c.now(), "ghost")
+	m.Sweep()
+	if s := statusOfProp(t, m, "late"); s != Unobservable {
+		t.Errorf("late is %s; want unobservable", s)
+	}
+}
+
+func TestOwnerDownMakesTheTypeUnobservableNotTheOtherMember(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	m.SetSourceDown("cgroup", true, "")
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu"); s != Active {
+		t.Fatalf("cpu is %s after another member went down; want active", s)
+	}
+	m.SetSourceDown("netdata", true, "")
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
+		t.Errorf("cpu is %s; want unobservable", s)
+	}
+}
+
+func TestRecordUpdatesSourceOnEveryObservation(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "a")
+	c.advance(time.Second)
+	recordFrom(t, m, "cpu", 0.5, c.now(), "b")
+	if p, _ := m.Property("cpu"); p.Source != "b" {
+		t.Errorf("source %q; want b", p.Source)
+	}
+}
+
+func TestStateDefaultViewIncludesUnobservable(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	m.SetSourceDown("netdata", true, "")
+	m.Sweep()
+	if v := m.State(Query{}); len(v.Properties) != 1 || v.Properties[0].Status != Unobservable {
+		t.Errorf("default view %+v; want the unobservable property", v.Properties)
+	}
+	recordFrom(t, m, "mem", 0.5, c.now(), "other")
+	if v := m.State(Query{Statuses: []Status{Unobservable}}); len(v.Properties) != 1 || v.Properties[0].ID != "cpu" {
+		t.Errorf("unobservable view %+v; want only cpu", v.Properties)
+	}
+}
+
+func TestDecisionCaveatsAnUnobservableEndpoint(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", .5, c.now(), "netdata")
+	recordFrom(t, m, "cpu", .5, c.now(), "other")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	m.SetSourceDown("netdata", true, "")
+	m.Sweep()
+	b := m.Decide("d1", "estimate", "test")
+	b.RelationshipsInto("cpu")
+	d := b.Commit(nil)
+	want := "relationship cpu@pod:a->cpu has an endpoint cpu@pod:a that is unobservable"
+	if !slices.Contains(d.Caveats, want) {
+		t.Errorf("caveats %v; want %q", d.Caveats, want)
+	}
+}
+
+func TestDecisionCaveatsAnUnobservableProperty(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu", .5, c.now(), "netdata")
+	m.SetSourceDown("netdata", true, "")
+	m.Sweep()
+	b := m.Decide("d1", "estimate", "test")
+	if _, ok := b.Property("cpu"); !ok {
+		t.Fatal("property missing")
+	}
+	d := b.Commit(nil)
+	var found bool
+	for _, cv := range d.Caveats {
+		if strings.HasPrefix(cv, "property cpu is unobservable: its collector is down, last observed ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caveats %v; want one naming the unobservable property", d.Caveats)
+	}
+}
+
+// ── Retired properties are forgotten, leaving a tombstone ─────────────────────
+
+func lastEventOf(m *Map, kind EventKind) (Event, bool) {
+	evs := m.Journal().Events(0, 0)
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind == kind {
+			return evs[i], true
+		}
+	}
+	return Event{}, false
+}
+
+func observeScoped(m *Map, id string, v float64, at time.Time) error {
+	_, subject, _ := strings.Cut(id, "@")
+	return m.Record(Observation{ID: id, Value: v, At: at, Subject: subject})
+}
+
+func forgetCfg() Config {
+	return Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true}
+}
+
+func TestRetiredPropertyIsForgottenAfterADayWithATombstone(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	p, _ := m.Property("cpu@pod:a")
+	if p.Status != Retired || !p.RetiredAt.Equal(c.now()) {
+		t.Fatalf("status %s retired_at %v, want retired now", p.Status, p.RetiredAt)
+	}
+	retiredAt := c.now()
+	before := m.Census().PropertiesTotal
+	c.advance(forgetAfter - time.Second)
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); !ok {
+		t.Fatal("forgotten before forgetAfter")
+	}
+	c.advance(2 * time.Second)
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); ok {
+		t.Fatal("still present after forgetAfter")
+	}
+	at, ok := m.Forgotten("cpu@pod:a")
+	if !ok || !at.Equal(retiredAt) {
+		t.Errorf("tombstone %v %v, want %v", at, ok, retiredAt)
+	}
+	forgotEvent := false // cpu is forgotten in the same sweep, in no fixed order
+	for _, e := range m.Journal().Events(0, 0) {
+		forgotEvent = forgotEvent || (e.Kind == EventPropertyForgotten && e.Target == "cpu@pod:a")
+	}
+	if !forgotEvent {
+		t.Errorf("no property.forgotten event for the id")
+	}
+	if got := m.Census().PropertiesTotal; got != before-2 { // cpu is forgotten too, being silent
+		t.Errorf("properties_total %d, want %d", got, before-2)
+	}
+}
+
+func TestForgettingDropsTheRetiredRelationshipsToo(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	_ = m.Observe("cpu", 0.5, c.now()) // revived, so only the pod is forgotten
+	m.Sweep()
+	id := RelationshipID("cpu@pod:a", "cpu", "")
+	if _, ok := m.Relationship(id); ok {
+		t.Error("the retired relationship outlived its endpoint")
+	}
+	found := false
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyForgotten && e.Target == "cpu@pod:a" {
+			rels, _ := e.Detail["relationships"].([]string)
+			found = slices.Contains(rels, id)
+		}
+	}
+	if !found {
+		t.Error("the forgotten event does not list the relationship it removed")
+	}
+}
+
+func TestForgetFiresNoRetireHookAndReobservationIsANewAdmission(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	n := 0
+	m.SetRetireHook(func(string) { n++ })
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now().Add(time.Second))
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if n != 1 {
+		t.Errorf("retire hook fired %d times, want 1", n)
+	}
+	if err := observeScoped(m, "cpu@pod:a", 0.4, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := m.Property("cpu@pod:a")
+	if !ok || p.Status != Active || p.NObservations != 1 {
+		t.Errorf("after re-observation: %+v ok=%v, want active with 1 observation", p, ok)
+	}
+	if _, gone := m.Forgotten("cpu@pod:a"); gone {
+		t.Error("tombstone survived re-admission")
+	}
+	e, _ := lastEventOf(m, EventPropertyAdmitted)
+	if e.Detail["after_forgotten"] != true {
+		t.Errorf("admission detail %v lacks after_forgotten", e.Detail)
+	}
+}
+
+func TestTombstoneExpiresAfterTwiceForgetAfter(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); !ok {
+		t.Fatal("no tombstone after forgetting")
+	}
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); ok {
+		t.Error("tombstone outlived twice forgetAfter")
+	}
+}
+
+func TestDerivedPropertiesAreNeverForgotten(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	if err := m.DeclareProperty(Property{ID: "RC", Kind: Derived, Members: []string{"cpu"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.Observe("cpu", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	d, ok := m.Property("RC")
+	if !ok {
+		t.Fatal("derived property was forgotten")
+	}
+	if _, ok := m.Property("cpu"); ok {
+		t.Fatal("the member should have been forgotten")
+	}
+	if d.Confidence != 0 || !slices.Contains(d.Members, "cpu") {
+		t.Errorf("derived %+v: want confidence 0 and the member id kept", d)
+	}
+}
+
+func TestForgottenSurvivesASnapshot(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:b", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	c.advance(forgetAfter - time.Minute)
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	m.Sweep() // a and b not yet forgotten? they are retired 1 minute short of a day
+	c.advance(2 * time.Minute)
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); !ok {
+		t.Fatal("setup: a not forgotten")
+	}
+	path := filepath.Join(t.TempDir(), "s.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, forgetCfg())
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.Forgotten("cpu@pod:a"); !ok {
+		t.Error("tombstone lost across a restore")
+	}
+}
+
+func TestRetiredAtSurvivesASnapshot(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	want := c.now()
+	path := filepath.Join(t.TempDir(), "s.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, forgetCfg())
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m2.Property("cpu@pod:a")
+	if !p.RetiredAt.Equal(want) {
+		t.Errorf("retired_at %v, want %v", p.RetiredAt, want)
+	}
+}
+
+func TestForgettingDropsPerPairStateKeyedByTheProperty(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	m.mu.Lock()
+	m.interventions[interventionKey("cpu@pod:a", "cpu")] = &Interventions{}
+	m.interventions[interventionKey("x", "y")] = &Interventions{}
+	m.mu.Unlock()
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.interventions[interventionKey("cpu@pod:a", "cpu")]; ok {
+		t.Error("intervention counters for a forgotten property remain")
+	}
+	if _, ok := m.interventions[interventionKey("x", "y")]; !ok {
+		t.Error("an unrelated pair's counters were dropped")
+	}
+}
+
+func TestChurnedPodsDoNotGrowTheMap(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	for i := 0; i < 100; i++ {
+		n := strconv.Itoa(i)
+		_ = observeScoped(m, "cpu@pod:"+n, 0.5, c.now())
+		_ = observeScoped(m, "memory@pod:"+n, 0.5, c.now())
+	}
+	live := func() {
+		_ = m.Observe("cpu", 0.5, c.now())
+		_ = m.Observe("memory", 0.5, c.now())
+	}
+	tombstones := func() int {
+		n := 0
+		for i := 0; i < 100; i++ {
+			for _, k := range []string{"cpu@pod:", "memory@pod:"} {
+				if _, ok := m.Forgotten(k + strconv.Itoa(i)); ok {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	step := func(d time.Duration, total time.Duration) {
+		for el := time.Duration(0); el < total; el += d {
+			c.advance(d)
+			live()
+			m.Sweep()
+		}
+	}
+	step(time.Minute, 3*time.Minute)
+	step(time.Hour, forgetAfter+time.Hour)
+	if got := m.Census().PropertiesTotal; got != 2 {
+		t.Errorf("properties_total %d after the pods churned away, want 2", got)
+	}
+	if got := tombstones(); got != 200 {
+		t.Errorf("%d tombstones, want 200", got)
+	}
+	step(time.Hour, 2*forgetAfter)
+	if got := tombstones(); got != 0 {
+		t.Errorf("%d tombstones after twice forgetAfter, want 0", got)
+	}
+}
+
+func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) {
+	m1, _ := outageMap(t)
+	path := t.TempDir() + "/state.json"
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	m2.SetSourceDown("netdata", true, "")
+	c.advance(3 * time.Minute) // past RetireAfter and the restore grace
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v while the source is down", retired)
+	}
+	m2.SetSourceDown("netdata", false, "")
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v at return; silence counts from the return", retired)
+	}
+	c.advance(2*time.Minute + time.Second)
+	if _, retired := m2.Sweep(); len(retired) != 2 {
+		t.Errorf("retired %v; want both, RetireAfter since the return", retired)
+	}
+}
+
+// TestDerivedOverUnobservableMembersIsUnobservable: a summary whose members are
+// silent because their collector is down says so, not that the system went quiet;
+// it is live again when a member is.
+func TestDerivedOverUnobservableMembersIsUnobservable(t *testing.T) {
+	m, c := outageMap(t)
+	if err := m.DeclareProperty(Property{ID: "load", Kind: Derived, Members: []string{"cpu", "cpu@pod:a"}}); err != nil {
+		t.Fatal(err)
+	}
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Fatalf("load is %s before the outage; want active", s)
+	}
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Unobservable {
+		t.Errorf("load is %s with every member unobservable; want unobservable", s)
+	}
+	m.SetSourceDown("netdata", false, "")
+	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
+	m.Sweep()
+	if s := statusOfProp(t, m, "load"); s != Active {
+		t.Errorf("load is %s with a member observed again; want active", s)
+	}
+}
+
+// TestMarkPropertyStaleLeavesUnobservableAlone: an unobservable property's silence
+// has a known cause; marking it stale would only be undone by the next sweep.
+func TestMarkPropertyStaleLeavesUnobservableAlone(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if m.MarkPropertyStale("cpu", "test", "test") {
+		t.Error("MarkPropertyStale changed an unobservable property")
+	}
+	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
+		t.Errorf("cpu is %s; want unobservable", s)
+	}
+}
+
+// TestALiveRelationshipKeepsItsRetiredEndpoint: a relationship declared onto a
+// retired property is live; forgetting the property would leave it pointing at
+// nothing, so the property is kept until the relationship is retired too.
+func TestALiveRelationshipKeepsItsRetiredEndpoint(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Retired {
+		t.Fatalf("cpu@pod:a is %s; want retired", s)
+	}
+	id := RelationshipID("cpu@pod:a", "cpu", "")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(forgetAfter + time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); !ok {
+		t.Fatal("the endpoint of a live relationship was forgotten")
+	}
+	if r, ok := m.Relationship(id); !ok || r.Status == Retired {
+		t.Fatalf("relationship %+v (%v); want it still live", r, ok)
+	}
+	for _, rel := range m.State(Query{}).Relationships {
+		for _, end := range []string{rel.From, rel.To} {
+			if _, ok := m.Property(end); !ok {
+				t.Errorf("relationship %s points at the missing property %s", rel.ID, end)
+			}
+		}
+	}
+	if err := m.RetireRelationship(id, "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); ok {
+		t.Error("cpu@pod:a is still held after its relationship retired")
+	}
+}
+
+// TestSourceIsTheLastReporter: two producers feeding one property (two members
+// emitting the same subject's property, or a member and POST /ingest-sample) leave
+// Source naming whoever reported last. That is the attribution the silence after it
+// needs: while one keeps reporting the property is observed, whichever is down; once
+// both are silent, the outage explains the silence only if the down one spoke last.
+func TestSourceIsTheLastReporter(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+	m.SetSourceDown("netdata", true, "")
+	for range 3 { // http keeps reporting through the netdata outage
+		c.advance(time.Minute)
+		recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "http")
+		m.Sweep()
+		if s := statusOfProp(t, m, "cpu@pod:a"); s != Active {
+			t.Fatalf("cpu@pod:a is %s while http reports it; want active", s)
+		}
+	}
+	m.SetSourceDown("netdata", false, "")
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata") // netdata reports last, then goes down
+	m.SetSourceDown("netdata", true, "")
+	c.advance(time.Minute)
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
+		t.Errorf("cpu@pod:a is %s, last reported by the down netdata; want unobservable", s)
 	}
 }

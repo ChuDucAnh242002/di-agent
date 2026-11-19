@@ -82,7 +82,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. The agent is headless by default; the console is served only when the spec sets `node.ui: true`. On the canvas each workload is folded into one glyph and its relationships bundled, the count on each bundle; click a workload or a bundle to open it, *fold −* on an open box folds it again, and *Fold workloads* turns folding off and on for all of them. Nothing is folded while the filter box holds a search. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, before → after, in the action's unit, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the actuator keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. The agent is headless by default; the console is served only when the spec sets `node.ui: true`. On the canvas each workload is folded into one glyph and its relationships bundled, the count on each bundle; click a workload or a bundle to open it, *fold −* on an open box folds it again, and *Fold workloads* turns folding off and on for all of them. Nothing is folded while the filter box holds a search. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, before → after, in the action's unit, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the actuator keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent's decision model (the agent itself is always `unit:di-agent`, with no `config.units` entry) — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -192,7 +192,7 @@ semantic-map/
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
     │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
-    │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
+    │   │   ├── autonomy.go     Levels, thresholds, the review cycle, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
     │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
@@ -426,6 +426,8 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 Admission. `POST /tasks` submits a workload to any node: it decides from its own map, and on a decline offers it to each registered peer in id order through their `POST /offers` until one accepts. The submitter starts the workload on `accepted_by` under `name`; the agent never starts it.
 
+When a domain has both a map and a usage prediction, the one with the better calibration record decides once each has 5 outcomes, else the map prediction; the decision records this as `basis_chosen_by` (`calibration` or `default`) per domain.
+
 ```json
 // POST /tasks request (also the POST /offers body, which adds "chain")
 {
@@ -496,12 +498,14 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 Feed one typed `MetricSample` to the facade's `IngestSample`. The daemon records
 the observation as a property, recomputes whatever derives from it, and folds it
 into every relationship incident to that property — the same path an in-process
-collector uses.
+collector uses. A body over 1 MiB answers `413`.
 
 ```json
 {"node_id":"master","metric_type":"cpu_utilization","value":0.71,
  "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
 ```
+
+`timestamp_unix` omitted or `0` is the time the request arrived.
 
 Five more fields are optional and let a producer describe what it is reporting:
 
@@ -510,7 +514,6 @@ Five more fields are optional and let a producer describe what it is reporting:
 | `subject` | `str`         | Empty for a node-level reading; `<kind>:<identity>` (e.g. `pod:1234`) to scope it to something other than the node itself |
 | `unit`    | `str`         | The unit the value is expressed in                                       |
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
-| `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
 | `chart`   | `str`         | The series the producer computes together from one reading, as parts of one whole (a stacked Netdata chart, one `/proc/stat` line) — not series that are merely drawn together, such as received and sent. Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
 | `part_of` | `str`         | On a sample with a subject: the node-level metric type the subject's quantity is summed into (a physical disk's `disk.io.writes` into `system.io.out`). A candidate from it to that type is marked `composition`, as one against the node metric of the same name already is. Send it on every sample it applies to: a sample without it withdraws the declaration. `400` without a subject or when it is not a metric type |
 
@@ -553,7 +556,7 @@ def push(base, node, subject, source, metric, unit, rng, value):
     at = int(time.time())
     eid = hashlib.sha256(f"{source}|{node}|{subject}|{metric}|{at}".encode()).hexdigest()[:16]
     body = json.dumps({"node_id": node, "metric_type": metric, "value": value, "timestamp_unix": at,
-                       "event_id": eid, "subject": subject, "unit": unit, "range": rng, "source": source}).encode()
+                       "event_id": eid, "subject": subject, "unit": unit, "range": rng}).encode()
     req = urllib.request.Request(base + "/ingest-sample", body, {"Content-Type": "application/json"})
     urllib.request.urlopen(req, timeout=5).read()
 ```
@@ -568,13 +571,15 @@ Read-only: collectors are configured in the spec, not over HTTP.
  "collectors":[
   {"name":"cgroup","kind":"type","type":"cgroup","state":"ok",
    "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
-   "samples":51234,"violations":0,"ownership_drops":0,"restarts":0,
+   "samples":51234,"violations":12,"violation_kinds":{"flood":12},"ownership_drops":0,"restarts":0,
    "backoff_until_unix":0,"available":["cpu_utilization","..."]}]}
 ```
 
 `kind` is `type` (a built-in), `exec` or `http`; `type` is the built-in's name and empty
-otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
-`backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
+otherwise. `state` is `starting` until the first successful collect, `ok` after one,
+`unhealthy` when the call succeeded but the collector's source did not answer (its
+`Health`; `last_error` is the reason; no backoff, it is asked every tick and is `ok` on
+the first healthy answer), and `backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
 5 min, reset by a success), and `stuck` while a call that outlived its timeout has not
 returned — the member is skipped until it does, and its return is then recorded as a
 fault at that moment (`backoff`, a fresh `backoff_until_unix`, `last_error` saying how it
@@ -584,6 +589,7 @@ malformed or duplicate sample in a plugin's reply, an invalid metric type, subje
 `available` entry); `ownership_drops` counts node-level samples dropped because an earlier
 collector in the list owns that type; `restarts` counts an exec plugin's process restarts,
 after a fault or after the plugin exited on its own between ticks.
+`violation_kinds` breaks `violations` down by reason; `flood` counts samples beyond the 16384 a member may deliver in one tick — the first 16384 are kept, the rest dropped.
 With no collectors configured the list is `[]`.
 
 ### `GET /candidates`
@@ -724,10 +730,10 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/relief`                           | — `{"levers": [...]}`, one relief loop per lever in `loops.relief.levers` order, each with its `action`, `phase`, `paused`, `runtime`, `dry_run` (true when the lever decides and records and its actuator changes nothing: `loops.relief.dry_run`, or `runtime.kind: dry-run`), `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the actuator has refused, or whose setting it cannot read; absent when none), `unread` (the ledger's changes whose setting the actuator could not read at the latest reconcile, including the pending entry of a change in flight that has not read back, and a step that never took whose setting cannot be read again before it is settled (with `reconcile_error` set and nothing new applied to that workload until it reads; the lever goes on with the others), each `entry`, `error` and `attempts`: kept untouched, never stepped, retried every tick, and given back from the ledger's record once expired and closed once that reads back as the original, `given_back` true meanwhile; a given-back change that goes through and still does not read back as its original is set again at most 3 more times, waiting twice, four and eight times the loop's interval, then left for an operator, still listed, its `error` saying so (a Set refused outright backs off the same way without counting); one that reads back as another writer's value is closed as `gone`, saying so; absent when none), `reconcile_error` (why the latest reconcile failed — the listing failed or held no workload while this node holds changes, or the ledger could not be saved; while it lasts every change of the lever is listed under `unread` with it, nothing new is applied, and one past its expiry is still given back through its subject; or, with the reconcile otherwise done, why a step that never took could not be read again — only that workload is held; absent otherwise), `cooling` (workloads this lever will not act on before the time given, whichever lever's cooldown that is) | relief   |
 | GET  | `/relief/actions`                   | — every lever's actions, newest first by `acted_at` (at most 200 per lever; `entry.action` says which lever), each with its `plan` (`subject, from, to, unit, predicted, estimate_id, basis, rule, effect`: usage `from` and the setting `to`, in `unit`; `effect` the learned factor the prediction was scaled by), `entry` (the ledger's record, as in `/actuators`: `original` is the setting before the agent's first step), `verify_id` (the decision that judged it; absent until verified), observed drop, `outcome` (`kept`, `reverted`, `released`, `expired`, `floored` (the workload's floor rose above the cap, which was given back), `gone`, `manual`, or `not_applied`: the change still read as before once `settle` had passed, never took, and its hourly action was given back), `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the actuator has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force, on whichever lever holds it, and cool its workload down; outcome `manual`; `404` for an id no lever holds in force | relief   |
-| POST | `/relief/pause`                     | JSON content type — every lever stops making changes; verifying, reverting a failed action and expiry go on; answers as `GET /relief` | relief   |
+| POST | `/relief/pause`                     | JSON content type — every lever stops making changes; verifying, reverting a failed action and expiry go on; journalled as `relief.paused` (and `/relief/resume` as `relief.resumed`) with actor `operator`; answers as `GET /relief` | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause, on every lever            | relief   |
 | GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
-| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
+| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts (`waiting`: due candidates passed over for an inactive end; `due`: those with active ends, the work a cycle can act on); `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
@@ -737,18 +743,19 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
-| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` (`active`, `stale`, `unobservable`, `retired`) repeat or take a comma list; an unknown value is `400`. `pace` and `pace_since` say the attention level (`base` or `slow`) and when it last changed. Counts carry `properties_unobservable`, the properties whose collector is down. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
+| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood; `410` with `{id, retired_at, forgotten: true}` for a property forgotten after 24 h retired | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
-| GET  | `/state/relationships`              | `?from=&to=`                                             | State model |
-| POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
+| GET  | `/state/relationships`              | `?from=&to=` — each relationship carries `regime` and `regime_since` when its recent layer differs from its established one | State model |
+| POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused and `composition` is ignored (only a confirmed composition candidate sets it); relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
-| GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
-| GET  | `/state/decisions`                  | `?limit=`                                                | State model |
-| GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id; `answer.sensitivity_low/high` and each influence's `contribution_low/high` are the point ± one Fisher-z standard error of each learned strength at its window size (whole range under 4 pairs; none for an assertion) | State model |
+| GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq`; carries `log: {file, bytes, indexed, corrupt_lines, foreign_lines}` when `persist.file` is set | State model |
+| GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
+| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` only when neither the journal nor the log holds it; `500` when the log indexes it but cannot be read or the line does not verify; a log hit carries `from: "log"` (and `cited_by: null` on a chain: the log has no reverse index). `inputs.pace` is the pace the decision was taken at | State model |
+| GET  | `/state/decisions/{id}/explain`     | path only — the decision and the chain it cites as plain text, rendered from the records alone (no model); `410`/`404`/`500` as the JSON route; a log hit ends with `source: log` | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
@@ -790,6 +797,8 @@ printf 'domain:\n  path: ../domain_spec.json\npersist:\n  file: /tmp/di-agent/st
 go run ./cmd/agent -config /tmp/agent.yaml
 ```
 
+The HTTP server reads a request header within 10 s and the whole request within 30 s.
+
 ### The agent is described by `agent.yaml`
 
 The agent takes its whole configuration from one YAML document. There are two flags and no others:
@@ -804,7 +813,7 @@ The file overlays the defaults, so it names only what it changes. A key the agen
 `agent -print-config` prints every setting with its default, and [`agent.example.yaml`](agent.example.yaml) is that output. Copy it and delete what you do not change. A running agent shows the spec it runs on, secrets redacted, at `GET /config`.
 
 ```yaml
-# agent.yaml: a k0s node polling its local Netdata, with the review loop on
+# agent.yaml: a k0s node polling its local Netdata
 node:
   id: node_1
 profile:
@@ -909,6 +918,7 @@ every sample, queryable and traceable.
 
 ```bash
 # what is this system doing right now
+# (counts carry properties_active, properties_stale, properties_unobservable, properties_retired, ...)
 curl -s localhost:8080/state | jq '.counts'
 
 # what the machine is: OS, CPU, memory, disk, read at startup
@@ -917,6 +927,10 @@ curl -s localhost:8080/state | jq -r '.facts[] | "\(.key)\t\(.value) \(.unit // 
 # how many property pairs discovery is testing, of how many it could
 curl -s localhost:8080/state | jq '.discovery'
 
+# how the map's own predictions have fared, per kind and basis: n outcomes, mean
+# signed error (predicted - observed), mean absolute error, share of verdicts right
+curl -s localhost:8080/state | jq '.calibration'
+
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 
@@ -924,6 +938,9 @@ curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 curl -s 'localhost:8080/cost?task=placement' | jq '.ResourceCost, .DecisionID, .Caveats'
 curl -s localhost:8080/state/decisions/$(curl -s 'localhost:8080/cost?task=placement' | jq -r .DecisionID) \
   | jq '.revision, .properties_read, .relationships_read'
+
+# the same decision and the chain it rests on, as prose (no model)
+curl -s localhost:8080/state/decisions/<id>/explain
 
 # or ask about any property
 curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .influences, .caveats'
@@ -947,7 +964,7 @@ agent reasons with, and `basis` naming which layer that came from — assertion,
 measured, then established, then recent. Read `effective`: `recent` is the fastest-moving
 layer and answers only when none of the others exists. `effective` and the pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
-nothing and absence is not that claim.
+nothing and absence is not that claim. `strength_se` is a half-width: one Fisher-z standard error of the learned strength at its window size, mapped back to the strength scale (1, the whole range, under 4 pairs; none for an assertion); the interval is the point ± `strength_se`.
 
 ```bash
 # what each relationship is worth, and on what basis
@@ -973,15 +990,33 @@ bug. `sign_conflicts`, `sign_agreements` and `sign_suspect` on each relationship
 relationship is flagged when at least 30 pairs have been folded in and 60% or more of
 them contradicted its sign; a sign that is merely regime-dependent lands near 50% and
 is not flagged, because that is a fact about the system rather than a wrong
-declaration. Investigate a flagged relationship as a defect in the specification —
+declaration. Flagging is not the only effect: once the flag holds over three windows of
+pairs (`map.pair_history` each, 180 at the default 60), the agent retires a non-asserted
+relationship with `retired_reason` `sign-contradicted`; an asserted one is only flagged,
+and so is one with `composition: true` (confirmed from a composition candidate: a part and
+its whole need not move the same way, because the other parts move too).
+Investigate a flagged relationship as a defect in the specification —
 usually a direction inherited from a framework that phrased its outcome in the opposite
 polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
+
+Beside `persist.file` the agent keeps `journal.ndjson`: one line per journal event, each with the node id, incarnation, sequence and a sha256 digest; decisions are flushed to disk as they are recorded, everything else within a second; it rotates at 64 MiB keeping one previous generation. A decision the bounded journal has evicted is still answered from it.
+
+`counts.readings_out_of_order` and `counts.readings_future` count readings the map refused: one older than the property's last reading, judged on the agent's monotonic clock, and one more than `map.pair_window` ahead of the agent's clock. A refused reading changes nothing, does not reach discovery, and is not an error to the producer.
 
 A metric the specification never declared still becomes a property: `/ingest-sample`
 answers 202 with `routed:false` rather than rejecting it, because a reading the system
 produced is not a typo to discard, and the journal records the admission. Silence
 marks a property stale (`map.stale_after`) and optionally retires it (`map.retire_after`);
-`map.admit: false` closes the model for a deployment that wants that.
+a property whose collector is in backoff or stuck is `unobservable` instead, not stale,
+and is never retired while the collector is down; it becomes active on its next
+observation. A derived property with no active member is `unobservable` when a member
+is, stale otherwise. A property retired for 24 hours is forgotten (kept while a live
+relationship still references it): removed from the map and the
+snapshot, with a tombstone kept a day more, so an old decision id still resolves to
+"retired" and the snapshot stops growing with pod churn. `map.admit: false` closes the
+model for a deployment that wants that.
+
+**The pace.** The agent has two attention levels and no setting for them. After ten minutes in which every relief lever is calm, no accept awaits its outcome, no candidate is due for review and no property was admitted, it goes `slow`: collection, review, persist and group refresh run at a quarter of their cadence. An offer (`POST /tasks`, `/offers`), an operator mutation (any request other than GET, HEAD or OPTIONS, a pushed sample `POST /ingest-sample` excepted: that is telemetry) or a newly admitted property returns it to `base` at once, and a loop already sleeping at the slow cadence is woken and resumes at its base interval; a lever leaving calm, a pending accept or a due review does so at the next one-minute check. The change is journalled as `pace.changed` with its reason, and every decision records the pace it was taken at. The sweep keeps wall-clock time, so staleness means the same at both paces; relief, admission tracking and peer polling keep their own cadence. If `sources.interval × 4` would reach `map.stale_after`, the agent logs once at start and never slows. A restart starts at `base`. An unclean exit under `slow` can lose up to four `persist.interval`s; a clean shutdown saves as before.
 
 ### One agent per machine
 
@@ -1055,6 +1090,11 @@ bias-corrected). `Effective()` picks between them by authority rather than by ar
 — an operator assertion first, else what the agent's interventions measured, else the
 established baseline, else the recent estimate, else `unknown` — and `basis` on every
 edge names which one answered.
+When the recent estimate sits outside the established one's band (two standard errors
+of Fisher's z at the pair window's effective size, since the paired values are
+smoothed) for a full window of folds running, the edge reports `regime: true` and
+`regime_since`, and every decision that reads it carries a "present differs from
+established" caveat; a window of folds back inside clears it.
 
 ```bash
 # agent.yaml
@@ -1078,7 +1118,10 @@ Two consequences worth knowing before reading a number off `/edges`:
   each one rejected at the gate, and holds a strength of zero — which is also what a
   relationship on a quiet system holds. Every relationship therefore carries
   `sign_agreements` and `sign_conflicts`, exposes a conflict share, and is flagged
-  `sign_suspect` past 30 pairs at 60% conflict; the census of every view reports how many
+  `sign_suspect` past 30 pairs at 60% conflict. Once that holds over three windows of
+  pairs the agent retires it (`retired_reason` `sign-contradicted`) unless an operator
+  asserted it or it is a composition (`composition: true`), in which case it stays active and flagged; a re-declared relationship is
+  not retired again while the flag holds, but is if the flag clears and returns; the census of every view reports how many
   relationships the machine persistently refutes. This is not hypothetical: two of the
   four propositions an earlier specification carried sat in that state on every cluster,
   and nothing in the aggregate metrics showed it.
@@ -1193,7 +1236,7 @@ the shape of the real thing.
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
 | `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`; at least `1s`, since timestamps are whole seconds. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello (an exec plugin has 30 s, or its `timeout` if longer, to start and answer it, and the same again at each restart) — is refused at startup, naming the entry. |
+| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A member in backoff or stuck marks the properties it last produced `unobservable`; every admitted sample carries the member name as its source. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello (an exec plugin has 30 s, or its `timeout` if longer, to start and answer it, and the same again at each restart) — is refused at startup, naming the entry. |
 | `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
 | `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
 | `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |
@@ -1247,8 +1290,8 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `map.pair_window`   | `15s`   | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `map.pair_support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `map.pair_history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
-| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal, plus the proposer's discovery checkpoint. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
-| `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero. |
+| `persist.file`            | `/var/lib/di-agent/state.json` | Path to persist the map and its journal, plus the proposer's discovery checkpoint and the loops' learned state (relief effects and counters, admission outcomes, peer trust and penalty time), restored only on the same `node.id`. The agent checks at start that it can write there and refuses to start if not; `""` keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. The agent keeps the previous snapshot as `state.json.prev`, falls back to it when `state.json` is unreadable or absent, and starts cold with `restore.failed` as the first journal event when neither is usable; a version or owner mismatch still refuses (the agent exits). To start cold on purpose, delete both `state.json` and `state.json.prev`. Loading a snapshot at start rewrites it at once, to reserve the next incarnation. A file that fails to load is renamed to `<file>.corrupt` (`state.json.corrupt`, `state.json.prev.corrupt`), so no save rotates it over the good `.prev` or overwrites it before it can be inspected. |
+| `persist.interval`         | `1m`    | Snapshot cadence when `persist.file` is set. A tick writes only when the map's revision or its journal (a decision is journalled without moving the revision) moved since the last successful save; the shutdown save always writes (synchronously, so this bounds what an unclean exit loses; a shutdown save that fails exits non-zero). The file is compact JSON (`jq` to read it). |
 | `map.journal_size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
 | `facts[].kind`                 | `[{kind: host}]` | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `facts: []` reads none. A fact read again with a different value is journalled as `fact.changed`. |
 | `facts[].root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |
@@ -1271,7 +1314,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `explain.sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
 | `explain.api_key`         | `""`                             | Bearer token for the backend. Write `${EXPLAIN_API_KEY}` to read it from the environment; the agent no longer reads that variable on its own. |
 
-**Autonomous review** (off by default). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
+**Autonomous review** (rules alone by default: both model backends are `none`; `decision.backend` turns tier 1 on, `reasoning.backend` tier 2). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
 
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
@@ -1281,14 +1324,14 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
+| `loops.review.rules`           | `composition, persistent-correlation` | Tier 0 rules, a list, first match decides; `[composition]` drops the correlation rule; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
-| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
+| `loops.review.decision.backend` | `none`               | Tier 1 (off by default): `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
 | `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
-| `loops.review.reasoning.backend` | `openai-tools`      | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. Unreachable, it skips only what needs it, each cycle. |
+| `loops.review.reasoning.backend` | `none`              | Tier 2 (off by default): `openai-tools` (any OpenAI-compatible server with tool calling) turns it on, or `none`. Unreachable, it skips only what needs it, each cycle. |
 | `loops.review.decision.timeout`  | `5m`                | How long one tier-1 call may take. A decision model on the node's own CPUs scoring a candidate with tier 2's analysis takes minutes; a call past this fails and the candidate waits for the next cycle. |
 | `loops.review.reasoning.timeout` | `10m`               | How long one tier-2 analysis may take, tool calls included. |
 | `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
@@ -1496,7 +1539,7 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 
 | Verb | Path | Body / Params | Response |
 | --- | --- | --- | --- |
-| `GET` | `/peers` | — | `[]PeerDTO{id,url,trust,n_observed,last_seen,note}` |
+| `GET` | `/peers` | — | `[]PeerDTO{id,url,trust,n_observed,last_seen,last_penalised,note}` |
 | `POST` | `/peers` | `{url,note?}` | `200 PeerDTO` (idempotent on URL) |
 | `DELETE` | `/peers/{id}` | — | `204` |
 | `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
@@ -1529,12 +1572,12 @@ go run ./cmd/mapctl peers remove a1b2c3d4e5f6
 For every call, the reasoner:
 
 1. Lists peers from the registry. Empty → `ErrInsufficientTrust` ("no peers registered").
-2. Skips any peer below `--min-trust` (default `0.5`).
-3. For each survivor: `GET /cost` on the peer URL; on success `MarkSeen` + record `savings = my ResourceCost − peer ResourceCost`; on failure log + nudge trust down by `0.05` (clamped at 0).
+2. Skips any peer below `--min-trust` (default `0.5`), unless the agent itself penalised it under the floor 10 or more minutes ago; a peer an operator set under the floor is not queried again.
+3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and `Penalise` (−0.05, clamped at 0), stamped with the time.
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
 5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 
@@ -1741,18 +1784,19 @@ A missing planner or critic prompt disables that stage with a log line rather th
 
 ## 9. Autonomous Candidate Review (`loops.review.level`)
 
-The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, with a
-decision model and a reasoning model, and every review is a decision record. `suggest` and `off` are
-the manual modes, for an operator who wants to decide.
+The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, and every
+review is a decision record. By default it runs on rules alone: both model backends are `none`, and
+`decision.backend` (tier 1) and `reasoning.backend` (tier 2) turn the model tiers on. `suggest` and
+`off` are the manual modes, for an operator who wants to decide.
 
 ```bash
 # A node (8 GB): a decision model only; what it is unsure of waits for its evidence to move.
-# agent.yaml: loops.review: {reasoning: {backend: none}}
+# agent.yaml: loops.review: {decision: {backend: systemone}}
 ollama pull tev1:4b
 ./agent -config agent.yaml
 
 # A machine with memory to spare: a stronger decision model and a reasoning tier.
-# agent.yaml: loops.review: {decision: {model: "nimble-v3:9b-nvfp4"}}  (the reasoning tier is on by default)
+# agent.yaml: loops.review: {decision: {backend: systemone, model: "nimble-v3:9b-nvfp4"}, reasoning: {backend: openai-tools}}
 ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
 ./agent -config agent.yaml
 
@@ -1769,7 +1813,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
+| 0 | rules | `composition` confirms a directed part against its whole. `persistent-correlation` (on by default) accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1783,22 +1827,30 @@ The level decides who may act:
 | `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
 | `full` (3), the default | yes | yes |
 
-### Rules-only persistent correlation
+### The default review: rules only
 
-Merge this into the agent configuration to approve unfamiliar metric pairs without
-an allowlist or model calls. The default rule list remains `composition` only.
+`decision.backend` and `reasoning.backend` are `none` by default, and the rule list is
+`composition, persistent-correlation`, so the review loop runs on rules alone: a candidate
+no rule settles is recorded `undecided` and reviewed again when its evidence moves. A model
+is something an operator adds. Turn a tier on by setting its backend; its URL, model,
+timeout and tools already carry values:
 
 ```yaml
 loops:
   review:
-    level: rules
+    decision:
+      backend: systemone          # tier 1
+    reasoning:
+      backend: openai-tools       # tier 2
+```
+
+To run without the correlation rule, list only `composition`:
+
+```yaml
+loops:
+  review:
     rules:
       - composition
-      - persistent-correlation
-    decision:
-      backend: none
-    reasoning:
-      backend: none
 ```
 
 `persistent-correlation` requires `PersistentWindows >= 3` and no evidence caveats.
@@ -1843,17 +1895,17 @@ of progress. This checkpoint is separate from the state estimator's raw windows,
 still restart cold. Snapshot format 6 is current. Older versions, including format 5,
 are rejected; older binaries cannot load format 6.
 
-This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
+This is a statistical acceptance policy, on by default, **not proof of causation**. Directed
 confirmations still participate in estimates; associations do not. This feature does
 not add probation or automatic retirement of accepted edges. `level: suggest`
 records proposed approvals without applying them. `level: rules` alone does not disable
-model calls: set both model backends to `none` as above for rules-only operation.
+model calls: both model backends are `none` by default, which is rules-only operation.
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
 returns to pending, to be reviewed again, once its evidence moves materially or crosses
 the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
 until then, so the models are not asked the same question every cycle.
-A candidate whose end is stale waits. The decision record holds the candidate, both
+A candidate whose end is stale waits, and is counted in the status's `waiting`, not in `due`. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
 a reader of the map can see the level it was shaped under.
