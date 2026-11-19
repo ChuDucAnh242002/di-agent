@@ -144,6 +144,9 @@ type Proposition struct {
 	// are never structurally removed.
 	Deprecated       bool
 	DeprecatedReason string
+	// Composition is set when the confirmed candidate was a composition: the source
+	// is part of the target. The relationship it becomes carries it.
+	Composition bool `json:",omitempty"`
 }
 
 type ValidationResult struct {

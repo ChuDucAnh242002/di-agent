@@ -748,7 +748,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
 | GET  | `/state/relationships`              | `?from=&to=` — each relationship carries `regime` and `regime_since` when its recent layer differs from its established one | State model |
-| POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
+| POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused and `composition` is ignored (only a confirmed composition candidate sets it); relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
 | GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id; `answer.sensitivity_low/high` and each influence's `contribution_low/high` are the point ± one Fisher-z standard error of each learned strength at its window size (whole range under 4 pairs; none for an assertion) | State model |
@@ -992,7 +992,9 @@ them contradicted its sign; a sign that is merely regime-dependent lands near 50
 is not flagged, because that is a fact about the system rather than a wrong
 declaration. Flagging is not the only effect: once the flag holds over three windows of
 pairs (`map.pair_history` each, 180 at the default 60), the agent retires a non-asserted
-relationship with `retired_reason` `sign-contradicted`; an asserted one is only flagged.
+relationship with `retired_reason` `sign-contradicted`; an asserted one is only flagged,
+and so is one with `composition: true` (confirmed from a composition candidate: a part and
+its whole need not move the same way, because the other parts move too).
 Investigate a flagged relationship as a defect in the specification —
 usually a direction inherited from a framework that phrased its outcome in the opposite
 polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
@@ -1118,7 +1120,7 @@ Two consequences worth knowing before reading a number off `/edges`:
   `sign_agreements` and `sign_conflicts`, exposes a conflict share, and is flagged
   `sign_suspect` past 30 pairs at 60% conflict. Once that holds over three windows of
   pairs the agent retires it (`retired_reason` `sign-contradicted`) unless an operator
-  asserted it, in which case it stays active and flagged; a re-declared relationship is
+  asserted it or it is a composition (`composition: true`), in which case it stays active and flagged; a re-declared relationship is
   not retired again while the flag holds, but is if the flag clears and returns; the census of every view reports how many
   relationships the machine persistently refutes. This is not hypothetical: two of the
   four propositions an earlier specification carried sat in that state on every cluster,

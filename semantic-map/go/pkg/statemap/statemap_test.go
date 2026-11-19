@@ -2655,7 +2655,11 @@ func signStreamMap(t *testing.T, rels ...Relationship) (*Map, *clock) {
 		}
 	}
 	for _, r := range rels {
-		if err := m.DeclareRelationship(r); err != nil {
+		declare := m.DeclareRelationship
+		if r.Composition {
+			declare = m.DeclareComposition
+		}
+		if err := declare(r); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2731,6 +2735,60 @@ func TestSignContradictedAssertedRelationshipIsOnlyFlagged(t *testing.T) {
 	}
 	if n := len(retiredEventsFor(m, id)); n != 0 {
 		t.Errorf("%d retired events for an asserted relationship", n)
+	}
+}
+
+// TestSignContradictedCompositionIsOnlyFlagged: a part and its whole need not move
+// the same way, because the other parts move too, so sign conflicts do not
+// contradict a composition. It is flagged and stays; a plain relationship with the
+// same evidence still retires.
+func TestSignContradictedCompositionIsOnlyFlagged(t *testing.T) {
+	m, c := signStreamMap(t,
+		Relationship{From: "resource", To: "pressure", Label: "part", Sign: -1, Composition: true},
+		Relationship{From: "resource", To: "pressure", Label: "plain", Sign: -1},
+	)
+	feedSignPairs(t, m, c, 0, 120, false)
+	part, _ := m.Relationship(RelationshipID("resource", "pressure", "part"))
+	if part.Status != Active || !part.SignSuspectFlag || !part.Composition {
+		t.Fatalf("composition: status=%v flag=%v composition=%v, want active, flagged, composition",
+			part.Status, part.SignSuspectFlag, part.Composition)
+	}
+	if n := len(retiredEventsFor(m, part.ID)); n != 0 {
+		t.Errorf("%d retired events for a composition relationship", n)
+	}
+	plain, _ := m.Relationship(RelationshipID("resource", "pressure", "plain"))
+	if plain.Status != Retired || plain.RetiredReason != ReasonSignContradicted {
+		t.Errorf("plain: status=%v reason=%q, want retired sign-contradicted", plain.Status, plain.RetiredReason)
+	}
+}
+
+// TestDeclareRelationshipDropsComposition: the composition mark exempts a relationship
+// from sign retirement, so a plain declaration — what POST /state/relationships
+// reaches — cannot set it; only DeclareComposition does.
+func TestDeclareRelationshipDropsComposition(t *testing.T) {
+	m, _ := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "x", Sign: 1})
+	if err := m.DeclareRelationship(Relationship{From: "pressure", To: "resource", Label: "x", Sign: 1, Composition: true}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Relationship(RelationshipID("pressure", "resource", "x")); r.Composition {
+		t.Errorf("declared relationship kept a caller-supplied composition: %+v", r)
+	}
+}
+
+// TestCompositionSurvivesSaveLoad: the composition mark is a fact about the pair and
+// must outlive a restart, or a restored map would retire what it used to keep.
+func TestCompositionSurvivesSaveLoad(t *testing.T) {
+	m, _ := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "part", Sign: 1, Composition: true})
+	path := filepath.Join(t.TempDir(), "map.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{})
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
+	}
+	if r, _ := m2.Relationship(RelationshipID("resource", "pressure", "part")); !r.Composition {
+		t.Errorf("restored relationship lost composition: %+v", r)
 	}
 }
 

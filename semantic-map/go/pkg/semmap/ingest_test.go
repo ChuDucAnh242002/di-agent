@@ -755,6 +755,39 @@ func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) 
 	}
 }
 
+// TestConfirmCandidate_CompositionMarksTheRelationship: a pod's metric against the
+// node total of the same metric is a composition, and the relationship it becomes
+// carries that, so the sign rule flags it rather than retiring it.
+func TestConfirmCandidate_CompositionMarksTheRelationship(t *testing.T) {
+	spec := mustSpec()
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: 0.5*x + 0.1, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Kind != types.CandidateKindComposition {
+		t.Fatalf("candidates %+v; want one composition", cs)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{}); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_utilization", "discovered"))
+	if !ok || !r.Composition {
+		t.Errorf("relationship %+v ok=%v; want composition", r, ok)
+	}
+}
+
 // spyProposer records which readings reached the proposer.
 type spyProposer struct {
 	*minimal.DisabledProposer
