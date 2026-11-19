@@ -1,0 +1,26 @@
+20:53:16 holding 12544 MiB anonymous, MemAvailable 2121 MiB
+20:53:16 watching /host-cg/burstable/podd833d46a-6877-4d14-a69c-d843448e1f38
+20:54:16 files=1 (256 MiB) MemAvailable=13%
+20:55:16 files=2 (512 MiB) MemAvailable=13%
+20:56:16 files=3 (768 MiB) MemAvailable=13%
+20:57:16 files=4 (1024 MiB) MemAvailable=13%
+20:58:16 files=5 (1280 MiB) MemAvailable=13%
+20:59:16 holding files=5 victim refaults=0.48/s MemAvailable=13%
+21:00:16 holding files=5 victim refaults=0.48/s MemAvailable=13%
+21:01:16 holding files=5 victim refaults=0.51/s MemAvailable=13%
+21:02:16 holding files=5 victim refaults=0.51/s MemAvailable=13%
+21:03:16 holding files=5 victim refaults=0.52/s MemAvailable=13%
+21:04:16 holding files=5 victim refaults=0.52/s MemAvailable=13%
+21:05:16 holding files=5 victim refaults=0.52/s MemAvailable=13%
+21:06:16 holding files=5 victim refaults=0.53/s MemAvailable=13%
+21:07:16 holding files=5 victim refaults=0.53/s MemAvailable=13%
+21:08:16 holding files=5 victim refaults=0.56/s MemAvailable=13%
+21:09:16 holding files=5 victim refaults=0.56/s MemAvailable=13%
+21:10:16 holding files=5 victim refaults=0.58/s MemAvailable=13%
+21:11:16 holding files=5 victim refaults=0.58/s MemAvailable=13%
+21:12:16 holding files=5 victim refaults=0.56/s MemAvailable=13%
+21:13:16 holding files=5 victim refaults=0.55/s MemAvailable=13%
+21:14:16 holding files=5 victim refaults=0.54/s MemAvailable=13%
+21:15:16 holding files=5 victim refaults=0.55/s MemAvailable=13%
+21:16:16 holding files=5 victim refaults=0.56/s MemAvailable=13%
+21:17:16 holding files=5 victim refaults=0.56/s MemAvailable=13%

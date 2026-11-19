@@ -15,6 +15,7 @@
 # window the journal without trusting the wall clock. Timing runs on mono. SCALE=0.05
 # runs the timetable at a twentieth of its length. capture.sh runs alongside.
 set -uo pipefail
+case "${PHASES:-}" in "" | M6) ;; *) echo "$0: PHASES=${PHASES} is not supported; leave it empty or set M6" >&2; exit 1 ;; esac
 cd "$(dirname "$0")"
 HERE="$PWD"
 OUT="$(realpath -m "${1:?usage: $0 <out-dir> [--phase M0..M9]}")"
@@ -134,6 +135,8 @@ prepare() {
     managed=$(find /sys/fs/cgroup/kubepods -name memory.high -exec sh -c 'v=$(cat "$1"); [ "$v" != max ] && echo "$1 $v"' _ {} \;)
     [ -n "$managed" ] && { mark prep "refused: memory.high is set under kubepods" --arg managed "$managed"; exit 1; }
     [ "$(timedatectl show -p NTPSynchronized --value)" = yes ] || { mark prep "refused: NTP not synchronised"; exit 1; }
+    # From here on the node is changed: any exit (an interrupt, agent_start || exit 1) tears down.
+    trap teardown EXIT; trap 'exit 130' INT TERM
     agent_stop
     remove "${PLANTED[@]}"
     local stamp f
@@ -354,8 +357,10 @@ m9_read() {
     mark M9 "read for the readout" --arg verify "$verify" --arg first "$first"
 }
 
-# teardown: planted pods deleted, faults undone, ollama restored, files copied out.
+# teardown: planted pods deleted, faults undone, ollama restored, files copied out. Runs once
+# (it clears the EXIT trap prepare set) and copes with a prepare that stopped part way.
 teardown() {
+    trap - EXIT
     mark teardown start
     remove "${PLANTED[@]}"
     systemctl is-active --quiet netdata.service || run teardown systemctl start netdata.service

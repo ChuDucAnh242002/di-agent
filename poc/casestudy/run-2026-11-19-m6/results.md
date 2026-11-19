@@ -23,6 +23,11 @@ agent) shows this:
 The memrelief run 2026-11-04d also held steady, at 14% MemAvailable (about 2.1 GiB). The fixed 11 GiB
 left about 3 GiB, and how much that was depended on whatever else the node ran.
 
+Each run's directory (`m6-1/`, `m6-2/`, `m6-3/`) holds its `phases.jsonl`, `results-readout.md`
+(the full readout; the M6 rows are summarised below) and `master.out`. `standalone/` holds page-hog's
+log from each row of the table above: `page-hog-anon11gib.log`, `page-hog-room2048.log` and
+`page-hog-room1536.log`.
+
 ## Change
 
 - `page-hog` takes anonymous memory in 256 MiB pieces until MemAvailable is `ROOM_MIB` (1536). It no
@@ -62,8 +67,8 @@ criterion fired.
 Neither fail is a relief defect:
 
 - **Narrative:** a readout rounding artefact. The readout rounds predicted and observed to 3 decimals
-  (0.0896 → 0.09, 0.0955 → 0.096), and the explain prints 4 (0.0896, 0.0955). It passes only when
-  the 3-decimal string is a prefix of the 4-decimal one.
+  (0.0955 → 0.096), and the explain prints 4 (0.0955). It passes only when the 3-decimal string is a
+  prefix of the 4-decimal one.
 - **Durable log:** a short-run artefact. In 45 min the run's first decision is still in the in-memory
   journal (`from: null`), so there is no evicted id to answer from the log. Every captured id was on a
   digest-verified line.
