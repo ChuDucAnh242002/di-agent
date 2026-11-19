@@ -152,11 +152,11 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 		strength = 0
 	}
 	r.SignSuspectFlag = r.SignSuspect()
-	if !wasEligible && m.signRetireEligible(r) && r.Provenance != Asserted {
+	if !wasEligible && m.signRetireEligible(r) && r.Provenance != Asserted && !r.Composition {
 		// On the transition only: a relationship an operator re-declares keeps its
 		// counters and its flag, and is not retired again until the predicate drops
-		// and rises once more. An asserted one is the operator's claim to overrule; it
-		// stays flagged.
+		// and rises once more. An asserted one is the operator's claim to overrule,
+		// and a composition holds by definition; both stay flagged.
 		m.retireSignContradictedLocked(r, at)
 	}
 

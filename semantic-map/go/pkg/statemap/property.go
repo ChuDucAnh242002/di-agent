@@ -221,6 +221,11 @@ type Relationship struct {
 	// them would make the pair unable to represent a disagreement it is observing.
 	Label string `json:"label,omitempty"`
 
+	// Composition marks From as part of To (a pod's memory and the node's). A part and
+	// its whole need not move the same way, because the other parts move too, so sign
+	// conflicts do not contradict it: the sign rule flags it and never retires it.
+	Composition bool `json:"composition,omitempty"`
+
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
 	Sign int `json:"sign"`
 
@@ -1589,13 +1594,23 @@ func RelationshipID(from, to, label string) string {
 func (m *Map) DeclareRelationship(r Relationship) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.declareRelationshipLocked(r, false)
+	return m.declareRelationshipLocked(r, false, false)
+}
+
+// DeclareComposition is DeclareRelationship for a confirmed composition candidate: the
+// new relationship is marked Composition. DeclareRelationship drops the mark, so a
+// caller of POST /state/relationships cannot exempt an edge from sign retirement.
+func (m *Map) DeclareComposition(r Relationship) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.declareRelationshipLocked(r, false, true)
 }
 
 // declareRelationshipLocked is DeclareRelationship under the write lock. The public
 // path refuses Intervened; RecordIntervention passes allowIntervened, because that
-// provenance is a claim only the map's own evidence may make.
-func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) error {
+// provenance is a claim only the map's own evidence may make. composition is the
+// Composition mark, which only DeclareComposition sets.
+func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened, composition bool) error {
 	if r.From == "" || r.To == "" {
 		return fmt.Errorf("relationship needs both endpoints")
 	}
@@ -1632,6 +1647,7 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.Interventions = nil
 	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
+	r.Composition = composition
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	for _, id := range []string{r.From, r.To} {
@@ -1681,8 +1697,8 @@ func (m *Map) declareRelationshipLocked(r Relationship, allowIntervened bool) er
 	m.relationships[nr.ID] = &nr
 	m.bump(EventRelationshipDeclared, nr.ID, "system", map[string]any{
 		"from": nr.From, "to": nr.To, "label": nr.Label, "sign": nr.Sign,
-		"association": nr.Association,
-		"provenance":  string(nr.Provenance), "basis": nr.Basis(),
+		"association": nr.Association, "composition": nr.Composition,
+		"provenance": string(nr.Provenance), "basis": nr.Basis(),
 	}, now)
 	return nil
 }

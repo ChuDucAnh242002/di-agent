@@ -50,8 +50,8 @@ import (
 // Version 7 adds the journal's incarnation and sequence. Version 8 adds the
 // calibration record of the map's own predictions. Version 9 adds `retired_at` and
 // the tombstones of forgotten properties.
-// Version 10 added `strength_se` on relationships.
-const SnapshotVersion = 10
+// Version 10 added `strength_se` on relationships. Version 11 adds `composition`.
+const SnapshotVersion = 11
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
