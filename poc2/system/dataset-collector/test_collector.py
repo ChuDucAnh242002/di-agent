@@ -7,7 +7,8 @@ from fastapi import HTTPException
 
 from conftest import load_component_modules
 
-DatasetCollector = load_component_modules("dataset-collector", ["main"])["main"].DatasetCollector
+collector_module = load_component_modules("dataset-collector", ["main"])["main"]
+DatasetCollector = collector_module.DatasetCollector
 
 
 class DatasetCollectorTests(unittest.TestCase):
@@ -104,7 +105,7 @@ class DatasetCollectorTests(unittest.TestCase):
         self.assertEqual(reply["samples"][0]["value"], 1000)
         self.assertEqual(reply["samples"][0]["range"], [0, 6000])
 
-    def test_live_subject_and_declarations_cannot_change_after_a_poll(self):
+    def test_live_declarations_cannot_change_after_a_poll(self):
         message = {
             "run_id": "pontos_vessel", "signal": "pontos.power.i_1", "source": "pontos",
             "origin": "live", "value": 12,
@@ -117,19 +118,39 @@ class DatasetCollectorTests(unittest.TestCase):
         self.assertTrue(self.collector.ingest_json(json.dumps(message)))
         sample, = self.collector.collect({"seq": 1, "now_unix": 1761200000})["samples"]
         self.assertNotIn("range", sample)
-        for change in ["subject", "unit", "range"]:
+        for change in ["unit", "range"]:
             with self.subTest(change=change):
                 changed = json.loads(json.dumps(message))
-                if change == "subject":
-                    changed["metadata"]["subject"] = "vessel:another"
-                else:
-                    changed["metadata"]["signals"]["pontos.power.i_1"][change] = (
-                        "W" if change == "unit" else [0, 100]
-                    )
+                changed["metadata"]["signals"]["pontos.power.i_1"][change] = (
+                    "W" if change == "unit" else [0, 100]
+                )
                 with self.assertLogs("dataset-collector", level="WARNING"):
                     self.assertFalse(self.collector.ingest_json(json.dumps(changed)))
-        self.assertEqual(self.collector.status()["dropped"], 3)
+        self.assertEqual(self.collector.status()["dropped"], 2)
         self.assertEqual(self.collector.collect({"seq": 2, "now_unix": 1761200001})["samples"], [])
+
+    def test_drained_runs_do_not_exhaust_subject_limit(self):
+        with patch.object(collector_module, "MAX_ACTIVE_SERIES", 3):
+            for run in ("a", "b", "c"):
+                self.assertTrue(self.add(run_id=run))
+            samples = self.collector.collect({"seq": 1, "now_unix": 1761200000})["samples"]
+            self.assertEqual(len(samples), 3)
+            self.assertTrue(self.add(run_id="d"))
+            sample, = self.collector.collect({"seq": 2, "now_unix": 1761200001})["samples"]
+            self.assertEqual(sample["subject"], "engine:d")
+
+    def test_conflicting_subject_within_pending_aggregate_is_rejected(self):
+        message = {
+            "run_id": "vessel", "signal": "power", "source": "pontos",
+            "origin": "live", "value": 12, "timestamp": time.time(),
+            "metadata": {"subject": "vessel:first", "signals": {"power": {"unit": "kW"}}},
+        }
+        self.assertTrue(self.collector.ingest_json(json.dumps(message)))
+        message["metadata"]["subject"] = "vessel:second"
+        with self.assertLogs("dataset-collector", level="WARNING"):
+            self.assertFalse(self.collector.ingest_json(json.dumps(message)))
+        sample, = self.collector.collect({"seq": 1, "now_unix": int(time.time())})["samples"]
+        self.assertEqual(sample["subject"], "vessel:first")
 
     def test_invalid_explicit_subject_is_not_replaced_by_engine_fallback(self):
         message = {

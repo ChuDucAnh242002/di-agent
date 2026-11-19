@@ -32,6 +32,7 @@ if not math.isfinite(LIVE_MAX_SOURCE_AGE_SECONDS) or LIVE_MAX_SOURCE_AGE_SECONDS
 
 @dataclass
 class Aggregate:
+    subject: str
     unit: str
     value_range: tuple[float, float] | None
     oldest_live_timestamp: float | None = None
@@ -114,7 +115,6 @@ class DatasetCollector:
         self._lock = threading.Lock()
         self._pending: dict[tuple[str, str], Aggregate] = {}
         self._available: set[str] = set()
-        self._subjects: dict[str, str] = {}
         self._live_declarations: dict[str, tuple[str, tuple[float, float] | None]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -213,14 +213,6 @@ class DatasetCollector:
                     self._dropped += 1
                     logger.warning("Dropping changed live declaration for signal %r", signal)
                     return False
-            if run_id in self._subjects and self._subjects[run_id] != subject:
-                self._dropped += 1
-                logger.warning("Dropping conflicting subject for run %r", run_id)
-                return False
-            if run_id not in self._subjects and len(self._subjects) >= MAX_ACTIVE_SERIES:
-                self._dropped += 1
-                logger.warning("Dropping dataset message: subject limit reached")
-                return False
             aggregate = self._pending.get(key)
             if aggregate is None:
                 if (
@@ -233,14 +225,14 @@ class DatasetCollector:
                     self._dropped += 1
                     logger.warning("Dropping dataset message: active series limit reached")
                     return False
-                aggregate = Aggregate(unit=unit, value_range=value_range)
+                aggregate = Aggregate(subject=subject, unit=unit, value_range=value_range)
                 self._pending[key] = aggregate
-            elif aggregate.unit != unit or aggregate.value_range != value_range:
+            elif (aggregate.subject != subject or aggregate.unit != unit
+                  or aggregate.value_range != value_range):
                 self._dropped += 1
                 logger.warning("Dropping conflicting metadata for signal %r within run %r", signal, run_id)
                 return False
             self._available.add(signal)
-            self._subjects[run_id] = subject
             if origin == "live":
                 self._live_declarations[signal] = (unit, value_range)
             aggregate.add(value, source, origin, timestamp if origin == "live" else None)
@@ -289,7 +281,7 @@ class DatasetCollector:
                 "metric_type": signal,
                 "value": aggregate.mean,
                 "timestamp_unix": now_unix,
-                "subject": self._subjects[run_id],
+                "subject": aggregate.subject,
                 "unit": aggregate.unit,
                 "labels": labels,
             }
