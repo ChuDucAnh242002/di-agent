@@ -50,7 +50,7 @@ working share link changes. Never commit or print private share links.
 The deployment consists of two separate layers:
 
 1. Infrastructure and cluster layer
-   - VM creation via Terraform in `main.tf`
+   - VM creation via Terraform in [infra/libvirt/](infra/libvirt/)
    - Kubernetes bootstrap via `scripts/02-k8s.sh`
    - one cluster for the VM fleet
 
@@ -63,6 +63,28 @@ The deployment consists of two separate layers:
 The default `make all` workflow deploys the entire stack through Helm, including the worker agent DaemonSet (`agent.enabled=true`). Nodes labeled `node-role.kubernetes.io/control-plane` or `node-role.kubernetes.io/master` are excluded. Three eligible worker nodes produce three agents; the control plane is additional. `agent.nodeSelector` and `global.nodeSelector` can further restrict placement. Agents use host networking and listen on each worker's port 9090 by default.
 
 When migrating, remove the old Helm Deployment `di-agent`, if present, and the script-created Deployments named `di-agent-<worker>` before installing the DaemonSet. List them with `kubectl get deployments -l app=di-agent`, then delete only those legacy Deployments by name. Do not run the old deployment script alongside the DaemonSet: both would claim the same node identity and host port.
+
+### Moving an existing libvirt lab to `infra/libvirt/`
+
+The libvirt Terraform root moved from `poc2/` to `poc2/infra/libvirt/`.
+Fresh labs need no migration. For an existing lab, stop any Terraform runs,
+back up the local state securely, and move `terraform.tfstate` and
+`terraform.tfstate.backup` (if present) to the new root. Move
+`terraform.tfstate.d/` if you use named workspaces, along with any local
+`.tfvars` files and `.terraform.lock.hcl`. Do not overwrite state already
+present at the destination, commit state, or reuse old saved plans.
+
+From `poc2/`, verify the migration before applying:
+
+```bash
+terraform -chdir=infra/libvirt init
+terraform -chdir=infra/libvirt state list
+terraform -chdir=infra/libvirt plan
+```
+
+Make sure Terraform sees the existing lab and does not propose unexpected
+creations or replacements. `make provision` and `make teardown` use the new
+root automatically.
 
 ## Required secrets and configuration
 
@@ -388,7 +410,7 @@ The demo is the proof-of-value. It does the following:
 
 The files that matter for understanding or running the PoC are:
 
-- `main.tf`: libvirt VM definition and disk layout
+- [infra/libvirt/main.tf](infra/libvirt/main.tf): libvirt VM definition and disk layout
 - `variables.tf`: VM and image configuration
 - `providers.tf`: libvirt provider setup
 - `scripts/01-provision.sh`: creates the VM fleet

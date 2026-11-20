@@ -1,5 +1,5 @@
 # EKS cluster backend for poc2 — an alternative to the local libvirt/kubeadm
-# lab (see ../../main.tf) for running the di-agent-system Helm chart and the
+# lab (see ../../infra/libvirt/main.tf) for running the di-agent-system Helm chart and the
 # di-agent DaemonSet on a managed AWS Kubernetes cluster. Uses the widely
 # used terraform-aws-modules building blocks instead of hand-rolled VPC/EKS
 # resources to keep this module small and reviewable.

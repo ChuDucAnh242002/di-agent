@@ -79,7 +79,7 @@ The agent mesh and telemetry services now share one Helm lifecycle. Three agents
 
 ## Infrastructure architecture
 
-`main.tf` creates the VM fleet. The important responsibilities are:
+[infra/libvirt/main.tf](infra/libvirt/main.tf) creates the VM fleet. The important responsibilities are:
 
 - create a libvirt storage pool
 - download the Ubuntu 22.04 cloud image
@@ -225,7 +225,7 @@ That makes this PoC valuable as a local testbed for distributed trust-aware rout
 
 ## Key files to understand the architecture
 
-- `main.tf`: VM lifecycle and node shape
+- [infra/libvirt/](infra/libvirt/): Terraform root for VM lifecycle and node shape
 - `scripts/02-k8s.sh`: cluster construction
 - `helm/di-agent-system/templates/agent.yaml`: per-worker agent deployment
 - `scripts/04-peers.sh`: peer + trust registration
