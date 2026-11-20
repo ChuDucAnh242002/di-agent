@@ -111,7 +111,7 @@ peers:
 	@HELM_NAMESPACE="$(HELM_NAMESPACE)" HELM_RELEASE="$(HELM_RELEASE)" \
 		bash $(SCRIPTS)/04-peers.sh
 
-provision-aks provision-eks teardown-aks teardown-eks:
+provision-eks teardown-eks:
 	@bash "$(SCRIPTS)/$@.sh"
 
 deploy-cloud:
@@ -198,7 +198,7 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
-	provision-aks provision-eks teardown-aks teardown-eks deploy-cloud \
+	provision-eks teardown-eks deploy-cloud \
 	workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target
@@ -216,9 +216,9 @@ help:
 	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID"
 	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
-	@echo "  provision-aks / provision-eks - Create a managed cluster and fetch kubeconfig"
+	@echo "  provision-eks - Create an EKS cluster and fetch kubeconfig"
 	@echo "  deploy-cloud - Deploy via Helm and register peers (requires KUBECONFIG and CLOUD_STORAGE_CLASS)"
-	@echo "  teardown-aks / teardown-eks - Destroy the corresponding Terraform resources"
+	@echo "  teardown-eks - Destroy the EKS Terraform resources"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"

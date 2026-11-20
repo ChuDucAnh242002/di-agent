@@ -240,22 +240,11 @@ make helm-install REGISTRY=ghcr.io/your-org TAG=v1
 
 The chart also expects the enabled service build contexts under `system/` and `playground/` to exist and to be buildable with Docker.
 
-## Manual deployment on AKS or EKS
+## Manual deployment on EKS
 
-The managed clusters are alternatives to the libvirt lab. Run the following
-commands from `poc2/`. You need Terraform, Helm, kubectl, and the authenticated
-cloud CLI for your provider. Provisioning creates billable resources.
-
-**AKS:** Run `az login`, select the intended subscription, and export
-`ARM_SUBSCRIPTION_ID` with its ID.
-
-```bash
-make provision-aks
-export KUBECONFIG="$HOME/.kube/config-poc2-aks"
-export CLOUD_STORAGE_CLASS=managed-csi
-```
-
-**EKS:** Authenticate with the AWS CLI and set `TF_VAR_api_access_cidrs`
+EKS is an alternative to the libvirt lab. Run these commands from `poc2/`.
+You need Terraform, Helm, kubectl and the AWS CLI. Provisioning creates
+billable resources. Authenticate with the AWS CLI and set `TF_VAR_api_access_cidrs`
 to a JSON list of the public IPv4 CIDRs your operators or VPN use:
 
 ```bash
@@ -267,15 +256,11 @@ kubectl apply -f cloud/eks/storage-class.yaml
 export CLOUD_STORAGE_CLASS=di-agent-gp3
 ```
 
-The provisioning scripts accept Terraform overrides through `TF_VAR_*` (for
+The provisioning script accepts Terraform overrides through `TF_VAR_*` (for
 example, `TF_VAR_node_count`), and `LOCAL_KUBECONFIG` to change the output path.
-They keep Terraform state under `cloud/aks/` or `cloud/eks/` by default. To use
-an existing remote backend, set `TF_BACKEND_MODE=remote` and:
-
-- AKS: `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER`
-  and optionally `TFSTATE_KEY`.
-- EKS: `TFSTATE_BUCKET`, `TFSTATE_REGION` (or an AWS region environment
-  variable), and optionally `TFSTATE_KEY` and `TFSTATE_DYNAMODB_TABLE`.
+EKS selects its default Kubernetes version unless `TF_VAR_kubernetes_version`
+is set to a version supported in your region. Terraform uses local state in
+`cloud/eks/`. Keep that state safe: teardown needs it. Do not commit it.
 
 Confirm the selected cluster with `kubectl config current-context`. In the
 release namespace, create the external InfluxDB, Grafana and PostgreSQL
@@ -296,8 +281,8 @@ storage profile; existing PVC storage classes cannot be changed in place.
 
 To clean up, uninstall the chart with `make helm-uninstall` and remove its
 PVCs only after backing up any data you want to keep. Then run
-`make teardown-aks` or `make teardown-eks` with the same Terraform variables
-and backend settings used to provision the cluster. Review the destroy plan
+`make teardown-eks` with the same local state and Terraform variables used
+to provision the cluster. Review the destroy plan
 before approving it.
 
 ## End-to-end workflow

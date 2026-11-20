@@ -1,86 +1,23 @@
 #!/usr/bin/env bash
-# provision-eks.sh — terraform apply the cloud/eks module and fetch its
-#                    kubeconfig locally.
-#
-# Requires: aws CLI authenticated (`aws sts get-caller-identity` works),
-#           Terraform >= 1.5.
-# Usage: ./provision-eks.sh
-#   Override any cloud/eks variable via TF_VAR_<name>, e.g.
-#   TF_VAR_node_count=5 TF_VAR_region=eu-west-1 ./provision-eks.sh
-
 set -euo pipefail
-
-GREEN=$(tput setaf 2 2>/dev/null || echo "")
-YELLOW=$(tput setaf 3 2>/dev/null || echo "")
-RED=$(tput setaf 1 2>/dev/null || echo "")
-RESET=$(tput sgr0 2>/dev/null || echo "")
-
-info() { echo "${YELLOW}[eks] $*${RESET}"; }
-ok()   { echo "${GREEN}[eks] $*${RESET}"; }
-err()  { echo "${RED}[eks] $*${RESET}" >&2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="$(dirname "$SCRIPT_DIR")/cloud/eks"
 LOCAL_KUBECONFIG="${LOCAL_KUBECONFIG:-$HOME/.kube/config-poc2-eks}"
-TF_BACKEND_MODE="${TF_BACKEND_MODE:-local}"
-TFSTATE_BUCKET="${TFSTATE_BUCKET:-}"
-TFSTATE_KEY="${TFSTATE_KEY:-poc2-eks.tfstate}"
-TFSTATE_REGION="${TFSTATE_REGION:-${TF_VAR_region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}}"
-TFSTATE_DYNAMODB_TABLE="${TFSTATE_DYNAMODB_TABLE:-}"
-TERRAFORM_DIR="$TF_DIR"
-LOCAL_TF_DIR=""
-BACKEND_ARGS=()
 
-command -v aws >/dev/null 2>&1 || { err "aws CLI not found"; exit 1; }
-command -v terraform >/dev/null 2>&1 || { err "terraform not found"; exit 1; }
-aws sts get-caller-identity >/dev/null 2>&1 || { err "Not authenticated with AWS. Run: aws configure (or aws sso login)"; exit 1; }
+for tool in aws terraform; do
+    command -v "$tool" >/dev/null || { echo "[eks] Missing $tool" >&2; exit 1; }
+done
+aws sts get-caller-identity >/dev/null
 
-info "Initializing Terraform with '$TF_BACKEND_MODE' state ..."
-case "$TF_BACKEND_MODE" in
-	local)
-		LOCAL_TF_DIR=$(mktemp -d)
-		trap 'rm -rf "$LOCAL_TF_DIR"' EXIT
-		cp "$TF_DIR"/*.tf "$LOCAL_TF_DIR"/
-		sed -i 's/backend "s3" {}/backend "local" {}/' "$LOCAL_TF_DIR/providers.tf"
-		TERRAFORM_DIR="$LOCAL_TF_DIR"
-		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false \
-			-backend-config="path=$TF_DIR/terraform.tfstate")
-		;;
-	remote)
-		if [ -z "$TFSTATE_BUCKET" ] || [ -z "$TFSTATE_KEY" ] || [ -z "$TFSTATE_REGION" ]; then
-			err "Remote state requires TFSTATE_BUCKET, TFSTATE_KEY, and TFSTATE_REGION"
-			exit 1
-		fi
-		BACKEND_ARGS=(
-			"-backend-config=bucket=$TFSTATE_BUCKET"
-			"-backend-config=key=$TFSTATE_KEY"
-			"-backend-config=region=$TFSTATE_REGION"
-		)
-		if [ -n "$TFSTATE_DYNAMODB_TABLE" ]; then
-			BACKEND_ARGS+=("-backend-config=dynamodb_table=$TFSTATE_DYNAMODB_TABLE")
-		fi
-		(cd "$TERRAFORM_DIR" && terraform init -reconfigure -input=false "${BACKEND_ARGS[@]}")
-		;;
-	*)
-		err "TF_BACKEND_MODE must be 'local' or 'remote'"
-		exit 1
-		;;
-esac
+terraform -chdir="$TF_DIR" init -input=false
+terraform -chdir="$TF_DIR" apply
 
-info "Running terraform apply in $TERRAFORM_DIR ..."
-(cd "$TERRAFORM_DIR" && terraform apply)
-
-CLUSTER=$(cd "$TERRAFORM_DIR" && terraform output -raw cluster_name)
-REGION=$(cd "$TERRAFORM_DIR" && terraform output -raw region)
-ok "EKS cluster ready: $CLUSTER ($REGION)"
-
-info "Fetching kubeconfig ..."
-aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$LOCAL_KUBECONFIG"
+cluster=$(terraform -chdir="$TF_DIR" output -raw cluster_name)
+region=$(terraform -chdir="$TF_DIR" output -raw region)
+umask 077
+mkdir -p "$(dirname "$LOCAL_KUBECONFIG")"
+aws eks update-kubeconfig --region "$region" --name "$cluster" --kubeconfig "$LOCAL_KUBECONFIG"
 chmod 600 "$LOCAL_KUBECONFIG"
-ok "Kubeconfig saved to $LOCAL_KUBECONFIG"
-
-echo ""
-echo "To use this cluster:"
-echo "  export KUBECONFIG=$LOCAL_KUBECONFIG"
-echo ""
+printf 'To use this cluster: export KUBECONFIG=%q\n' "$LOCAL_KUBECONFIG"
 echo "See the PoC2 README for app credentials and make deploy-cloud."

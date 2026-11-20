@@ -9,8 +9,9 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version for the EKS control plane"
-  default     = "1.36"
+  description = "Kubernetes version for the EKS control plane; null uses the EKS default"
+  type        = string
+  default     = null
 }
 
 variable "node_count" {
