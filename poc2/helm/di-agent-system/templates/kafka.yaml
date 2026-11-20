@@ -8,10 +8,6 @@ metadata:
   labels:
     app: kafka
 spec:
-  {{- with .Values.kafka.podSecurityContext }}
-  securityContext:
-    {{- toYaml . | nindent 8 }}
-  {{- end }}
   serviceName: kafka
   replicas: 1
   selector:
@@ -22,6 +18,10 @@ spec:
       labels:
         app: kafka
     spec:
+      {{- with .Values.kafka.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- include "diagent.nodeSelector" (dict "local" .Values.kafka.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
