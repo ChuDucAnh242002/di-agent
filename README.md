@@ -104,6 +104,180 @@ The parquet replay tool (`./dev.sh replay …`) replays the dissertation's Netda
 | [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the five contracts and why, multigraph backbone, coordination, the natural-language layer. |
 | [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, structural initialization, PoC quickstart. |
 
+### di-agent PoC2: Local Lab
+
+```mermaid
+flowchart TB
+    subgraph LAB["di-agent PoC2 | local lab"]
+        Host["Linux host"]
+        LibvirtTF["Terraform<br/>libvirt / QEMU"]
+        VMs["Ubuntu VM fleet<br/>control plane + workers"]
+        Kubeadm["kubeadm + Flannel"]
+        Cluster["Kubernetes cluster"]
+        Host --> LibvirtTF --> VMs --> Kubeadm --> Cluster
+
+        subgraph STACK["Helm release: di-agent-system"]
+            Replay["Replay streamer"]
+            DatasetDB[("PostgreSQL<br/>run datasets")]
+            Kafka[("Kafka")]
+            Collector["Dataset collector"]
+            Writer["Telemetry writer"]
+            Influx[("InfluxDB")]
+            Grafana["Grafana"]
+            AgentSet["di-agent DaemonSet<br/>one per eligible worker"]
+            AgentA["Agent pod A"]
+            AgentB["Agent pod B"]
+            Peers["Peer registration"]
+            Coordinator["Trust / routing coordinator"]
+
+            DatasetDB --> Replay -->|"dataset.telemetry"| Kafka
+            Kafka --> Collector
+            AgentB -->|"HTTP poll"| Collector
+            Kafka --> Writer --> Influx --> Grafana
+            AgentSet --> AgentA
+            AgentSet --> AgentB
+            AgentA <-->|"host-IP peer mesh"| AgentB
+            Peers --> AgentA
+            Peers --> AgentB
+            Coordinator -->|"cost / recommend / trust"| AgentA
+        end
+        Cluster --> STACK
+    end
+```
+
+### Terraform Infrastructure: AWS EKS and OCI OKE
+
+```mermaid
+flowchart LR
+    Operator["Operator"]
+    Operator --> AWS_TF
+    Operator --> OCI_TF
+
+    subgraph AWS["AWS | Terraform -> EKS"]
+        AWS_TF["AWS Terraform<br/>VPC + EKS modules"]
+        AWS_VPC["VPC across 3 AZs"]
+        PublicSubnets["Public subnets<br/>ELB tags"]
+        PrivateSubnets["Private subnets"]
+        NAT["Single NAT gateway"]
+        EKS["EKS control plane<br/>public CIDR allowlist + private API"]
+        Nodes["Managed node group<br/>private subnets"]
+        Addons["VPC CNI · kube-proxy · CoreDNS"]
+        IRSA["OIDC / IRSA"]
+        EBS["EBS CSI + IAM role<br/>encrypted gp3 class"]
+        AWS_K8s["Helm workloads<br/>applied separately"]
+
+        AWS_TF --> AWS_VPC
+        AWS_VPC --> PublicSubnets
+        AWS_VPC --> PrivateSubnets
+        PrivateSubnets --> NAT
+        PrivateSubnets --> EKS --> Nodes
+        EKS --> Addons
+        EKS --> IRSA --> EBS
+        Nodes --> AWS_K8s
+    end
+
+    subgraph OCI["Oracle Cloud | Terraform -> OKE"]
+        OCI_TF["OCI Terraform<br/>OCI OKE module"]
+        VCN["VCN<br/>private workers + NAT"]
+        OKE["OKE Basic control plane<br/>public API CIDR allowlist"]
+        Worker["One private E5 Flex worker<br/>2 OCPU · 12 GiB default"]
+        LB["Public load-balancer subnet"]
+        OCI_K8s["Kubernetes workloads<br/>Kustomize applied separately"]
+
+        OCI_TF --> VCN
+        OCI_TF --> OKE
+        VCN --> Worker
+        OKE --> OCI_K8s
+        Worker --> OCI_K8s
+        VCN --> LB
+    end
+```
+
+### OCI Workshop Runtime: Three Applications
+
+```mermaid
+flowchart LR
+    Visitors["Workshop visitors"]
+    PublicIP["OCI public IP<br/>Traefik LoadBalancer"]
+    Visitors --> PublicIP --> Traefik
+
+    subgraph OKE["Single-worker OKE workshop"]
+        Traefik["Traefik + cert-manager<br/>TLS"]
+        SME["SME Cash-Flow<br/>Spring Boot + React"]
+        PG[("PostgreSQL<br/>PVC")]
+        Kafka[("Kafka<br/>PVC")]
+        Life["Life-Pension<br/>Spring Boot + React"]
+        Oracle[("Oracle Free<br/>PVC")]
+        Agent["di-agent DaemonSet<br/>read-only host observations"]
+        AgentSvc["di-agent viewer Service"]
+        MQ["IBM MQ<br/>optional overlay"]
+        Azure["Azure OpenAI<br/>optional overlay"]
+
+        SME --> PG
+        SME --> Kafka
+        Kafka --> SME
+        Life --> Oracle
+        Life -.-> MQ
+        Life -.-> Azure
+        Agent --> AgentSvc
+    end
+
+    Traefik -->|"HTTPS :443"| SME
+    Traefik -->|"HTTPS :9443"| Life
+    Traefik -->|"HTTPS :9444<br/>Basic Auth · GET/HEAD only"| AgentSvc
+```
+
+### CI Pipelines: di-agent, Life-Pension, and SME Cash-Flow
+
+```mermaid
+flowchart TB
+    Trigger["Push / pull request"]
+
+    subgraph DI["di-agent | GitHub Actions"]
+        DIGo["Go build · vet · race tests<br/>collector + SDK checks"]
+        DISys["PoC2 system pytest"]
+        DIPlay["Playground build + Cypress"]
+        DIKind["kind Helm smoke<br/>agents + peers + collector"]
+        DIDemo["Paper-mode demo"]
+        DIGate{"Push to main<br/>and required checks pass"}
+        DIPublish["Build image matrix<br/>publish to GHCR"]
+        DIGo --> DIDemo
+        DIGo --> DIGate
+        DISys --> DIGate
+        DIPlay --> DIGate
+        DIKind --> DIGate
+        DIGate --> DIPublish
+    end
+
+    subgraph LIFE["Life-Pension | GitHub Actions"]
+        LBackend["Java 21 · Maven verify"]
+        LArtifact["Offline evaluation artifact"]
+        LFrontend["Node 22 · lint · test · build"]
+        LCompose["Compose demo + API smoke"]
+        LBrowser["Playwright E2E"]
+        LCleanup["Always: Compose cleanup"]
+        LBackend --> LArtifact --> LFrontend --> LCompose --> LBrowser --> LCleanup
+    end
+
+    subgraph SME["SME Cash-Flow | GitHub Actions"]
+        SBuild["Java + frontend tests/build"]
+        SValidate["Compose · scripts · Kustomize"]
+        SDemo["Demo Compose + smoke + E2E"]
+        SStatement["Statement Compose + E2E"]
+        SRecovery["Demo lifecycle + recovery"]
+        SCleanup["Always: cleanup"]
+        SBuild --> SValidate --> SDemo --> SStatement --> SRecovery --> SCleanup
+        Jenkins["Optional Jenkinsfile<br/>verify + synthetic Compose smoke"]
+    end
+
+    Trigger --> DIGo
+    Trigger --> DISys
+    Trigger --> DIPlay
+    Trigger --> DIKind
+    Trigger --> LBackend
+    Trigger --> SBuild
+```
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE). Copyright © 2026 Tampere University.
