@@ -247,7 +247,8 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 			skippedHTTPError++
 			continue
 		}
-		peerCost, err := r.peerc.Cost(ctx, p.URL, octx.TaskType, octx.SourceNodeID)
+		// An empty node asks the peer for its own cost, not the source's.
+		peerCost, err := r.peerc.Cost(ctx, p.URL, octx.TaskType, "")
 		if err != nil {
 			log.Printf("reasoner.RecommendPeer: peer %s (%s) cost query failed: %v", p.ID, p.URL, err)
 			// Soft trust penalty so persistently-down peers drain out of the
