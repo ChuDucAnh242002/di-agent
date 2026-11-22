@@ -325,6 +325,14 @@ Never commit absolute local paths (`/Users/…`).
 
 ---
 
+### CI dependency caches
+
+CI caches Go dependencies/builds, pip/npm downloads, and Cypress binaries.
+Cypress cache keys include the package-lock hash and runner OS/architecture,
+and both stubbed and live tests restore the binary before `npm ci`.
+Cold/evicted caches still perform normal installs/builds, and tests always run.
+Actual savings and cache hit rates require observing Actions runs after deployment.
+
 ### Optional AI CI triage pilot
 
 The [AI CI triage workflow](.github/workflows/ai-ci-triage.yml) is disabled by
