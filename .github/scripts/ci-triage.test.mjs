@@ -136,7 +136,7 @@ test("default-branch failures update the existing open bot issue", async () => {
   }
 });
 
-test("CLI invocation denies tools and isolates repository credentials and working directory", async () => {
+test("CLI invocation exposes no tools and isolates repository credentials and working directory", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ci-triage-test-"));
   try {
     await writeFile(join(directory, "ci-triage-input.json"), JSON.stringify(report));
@@ -148,8 +148,10 @@ assert.equal(process.env.COPILOT_GITHUB_TOKEN, "synthetic-token");
 assert.equal(process.cwd(), process.env.HOME);
 assert.equal(process.env.HOME, process.env.COPILOT_HOME);
 const args = process.argv.slice(2);
-assert.equal(args[args.indexOf("--deny-tool") + 1], "*");
-assert.equal(args[args.indexOf("--deny-url") + 1], "*");
+assert.ok(args.includes("--available-tools"));
+assert.equal(args[args.indexOf("--available-tools") + 1], "--disable-builtin-mcps");
+assert.ok(!args.includes("--deny-tool"));
+assert.ok(!args.includes("--deny-url"));
 assert.ok(args.includes("--no-auto-update"));
 assert.equal(args[args.indexOf("--model") + 1], "claude-haiku-4.5");
 assert.equal(args[args.indexOf("--max-ai-credits") + 1], "30");

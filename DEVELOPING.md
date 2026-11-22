@@ -352,8 +352,9 @@ The reporter checks out only the default branch, not the failed branch, and does
 not download logs or artifacts. Copilot receives only failed job/step names and
 conclusions. Enable this only if that metadata is approved for processing by
 GitHub Copilot; it is not a generic secret scrubber. Fork runs are excluded.
-The CLI is pinned and invoked in a temporary directory with all tools and URL
-fetches denied; its subprocess does not receive the reporting `GITHUB_TOKEN`.
+The CLI is pinned and invoked in a temporary directory with an empty available-tool
+list and built-in MCP servers disabled, so it cannot execute tools or fetch URLs.
+Its subprocess does not receive the reporting `GITHUB_TOKEN`.
 
 Cost controls: the default model is `claude-haiku-4.5`, a lower-cost model for
 this metadata-only task. Set `AI_CI_MODEL` to another supported model if needed;
