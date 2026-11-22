@@ -39,15 +39,7 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: |
-          devbox run -- sh -eu -c '
-            test "$(go env GOVERSION)" = go1.26.5
-            python -c "import sys; assert sys.version_info[:3] == (3, 11, 18)"
-            node -e "if (process.version !== \"v22.23.5\") process.exit(1)"
-            npm --version
-            (cd semantic-map/go && go test ./pkg/types)
-            (cd semantic-map/sdk/python && python -m unittest -v test_di_collector)
-            node --test .github/scripts/ci-triage.test.mjs
-          '
+          devbox run -- bash .github/scripts/devbox-smoke.sh
           git diff --exit-code -- devbox.json devbox.lock
 
   test:
