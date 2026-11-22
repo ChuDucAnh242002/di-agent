@@ -54,7 +54,15 @@ ${metadata}`;
 }
 
 export function parseDiagnosis(output) {
-  const diagnosis = JSON.parse(output.trim());
+  const trimmed = output.trim();
+  const fenced = trimmed.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i);
+  let diagnosis;
+  try {
+    diagnosis = JSON.parse(fenced ? fenced[1] : trimmed);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new Error("Copilot returned invalid JSON; refusing to publish.");
+  }
   const keys = ["likely_cause", "suggested_next_steps", "confidence"];
   if (!diagnosis || typeof diagnosis !== "object" || Array.isArray(diagnosis) ||
       Object.keys(diagnosis).length !== keys.length ||

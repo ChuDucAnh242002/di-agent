@@ -21,11 +21,17 @@ test("prompt contains only failed-job metadata and output validation rejects uns
   assert.ok(!prompt.includes("must-not-be-sent"));
   assert.ok(!prompt.includes(report.sha));
   assert.deepEqual(parseDiagnosis(JSON.stringify(diagnosis)), diagnosis);
+  assert.deepEqual(parseDiagnosis(`\`\`\`json\n${JSON.stringify(diagnosis)}\n\`\`\``), diagnosis);
+  assert.deepEqual(parseDiagnosis(`\`\`\`\r\n${JSON.stringify(diagnosis)}\r\n\`\`\``), diagnosis);
   for (const bad of [{ ...diagnosis, confidence: "high" }, { ...diagnosis, extra: "field" },
     { ...diagnosis, likely_cause: "" }, { ...diagnosis, likely_cause: "x".repeat(1501) }, null]) {
     assert.throws(() => parseDiagnosis(JSON.stringify(bad)));
   }
   assert.throws(() => parseDiagnosis("not JSON"));
+  assert.throws(() => parseDiagnosis(`prefix\n\`\`\`json\n${JSON.stringify(diagnosis)}\n\`\`\``));
+  assert.throws(() => parseDiagnosis(`\`\`\`json\n${JSON.stringify({ ...diagnosis, confidence: "high" })}\n\`\`\``));
+  assert.throws(() => parseDiagnosis("```json\ninvalid-secret-content\n```"),
+    error => !error.message.includes("invalid-secret-content"));
   assert.throws(() => promptFor({ ...report, failed: [{ name: "x".repeat(12000), steps: [] }] }),
     /12000-character/);
   assert.doesNotThrow(() => promptFor({ ...report, failed: [{ name: "x".repeat(11000), steps: [] }] }));
