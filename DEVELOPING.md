@@ -81,6 +81,11 @@ application's runtime images or existing CI toolchains.
 Docker, Kubernetes, Helm, Terraform, libvirt and their host services are not
 provisioned by this environment; see [PoC2 setup](poc2/README.md).
 
+The Devbox CI smoke job verifies the pinned tools and runs focused Go, Python
+and Node tests. It leaves the full existing suites intact. Devbox uses Nix binary
+caches; CI caches the installer but deliberately does not cache the entire Nix
+store.
+
 ### Optional, by task
 
 | You want to… | Also install |
