@@ -19,6 +19,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  devbox-smoke:
+    name: Devbox toolchain smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install locked Devbox environment
+        uses: jetify-com/devbox-install-action@734088efddca47cf44ff8a09289c6d0e51b73218 # v0.12.0
+        with:
+          devbox-version: 0.22.0
+          enable-cache: 'false'
+          disable-nix-access-token: 'true'
+
+      - name: Verify toolchain and run focused tests
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          devbox run -- bash .github/scripts/devbox-smoke.sh
+          git diff --exit-code -- devbox.json devbox.lock
+
   test:
     name: build + test + vet
     runs-on: ubuntu-latest

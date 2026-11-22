@@ -32,9 +32,11 @@ For *what the system is and why it is shaped this way*, read [`semantic-map/ARCH
 
 | Requirement | Version | Why |
 | ----------- | ------- | --- |
-| Go | 1.22+ | The daemon, CLI, and replay tool. `go.mod` pins 1.22; CI runs 1.22. |
+| Go | 1.26.5 | The daemon, CLI, and replay tool. `go.mod` requires Go 1.26 and specifies toolchain 1.26.5; CI uses that toolchain. |
 
-That is the whole hard requirement. The agent has no runtime dependencies beyond the standard library plus three vendored Go modules (`cobra`, `tablewriter`, `parquet-go`).
+That is the core build requirement; Go modules are resolved from `go.mod` and
+`go.sum`. The agent needs its configuration and any external services used by
+your chosen deployment profile at runtime.
 
 ```bash
 git clone https://github.com/DiyazY/di-agent.git
@@ -44,6 +46,45 @@ go test ./...         # ~230 tests, no external services needed
 ```
 
 If both commands succeed you have a working checkout. Nothing else on this list is needed to build, test, or run the agent.
+
+### Optional Devbox environment
+
+[Devbox](https://www.jetify.com/docs/devbox/) provides a reproducible root-level
+development toolchain without replacing the existing host or container workflows.
+Install Devbox and Nix following its installation guide, then from the repository root:
+
+```bash
+devbox install
+devbox shell
+cd semantic-map/go
+go test ./pkg/types
+exit
+```
+
+Or run a single command without entering a shell:
+
+```bash
+devbox run -- go version
+devbox run -- node --test .github/scripts/ci-triage.test.mjs
+```
+
+`devbox.json` and `devbox.lock` pin Go 1.26.5, Python 3.11.18 and Node 22.23.5;
+commit both files when updating packages with `devbox update` or `devbox add`.
+The Python plugin creates an ignored `.venv`; activate it with
+`. "$VENV_DIR/bin/activate"` inside the Devbox shell before installing Python
+dependencies, and install the relevant project's requirements separately.
+Node dependencies still require `npm ci` in `poc2/playground`.
+Devbox uses Node 22 because Node 20 is end-of-life and rejected by Nix; the
+existing playground CI continues to test Node 20. This does not change the
+application's runtime images or existing CI toolchains.
+
+Docker, Kubernetes, Helm, Terraform, libvirt and their host services are not
+provisioned by this environment; see [PoC2 setup](poc2/README.md).
+
+The Devbox CI smoke job verifies the pinned tools and runs focused Go, Python
+and Node tests. It leaves the full existing suites intact. Devbox uses Nix binary
+caches; CI caches the installer but deliberately does not cache the entire Nix
+store.
 
 ### Optional, by task
 
