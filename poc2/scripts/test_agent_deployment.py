@@ -60,6 +60,42 @@ state_file.write_text(json.dumps(state))
 
 
 class AgentDeploymentTests(unittest.TestCase):
+    def test_live_pontos_render_replaces_replay_and_uses_secret_file(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART),
+             "--set", "pontos.enabled=true", "--set", "agent.datasetNodeName=worker-1"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("name: pontos-bridge", rendered)
+        self.assertIn("secretName: pontos-credentials", rendered)
+        self.assertIn("mountPath: /var/run/secrets/pontos", rendered)
+        self.assertIn('name: COLLECT_INTERVAL\n              value: "5s"', rendered)
+        self.assertNotIn("name: replay-streamer", rendered)
+        self.assertNotIn("name: postgres-ingest", rendered)
+        self.assertNotIn("username_pw_set", rendered)
+
+    def test_live_pontos_uses_configured_agent_interval(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART),
+             "--set", "pontos.enabled=true", "--set", "agent.datasetNodeName=worker-1",
+             "--set", "agent.collectInterval=2s"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn('name: COLLECT_INTERVAL\n              value: "2s"', rendered)
+
+    def test_live_pontos_rejects_invalid_configuration(self):
+        for overrides in [
+            [],
+            ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.enabled=false"],
+            ["--set", "agent.datasetNodeName=worker-1", "--set", "datasetCollector.kafkaTopic=other"],
+        ]:
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(
+                    ["helm", "template", "test", str(CHART), "--set", "pontos.enabled=true", *overrides],
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -354,6 +390,59 @@ sys.exit(1 if count == 1 else 0)
                         module.main()
                 self.assertIn("did not resolve to a SharePoint folder", str(raised.exception))
                 self.assertNotIn("example.test", str(raised.exception))
+
+
+class ChartSecretTests(unittest.TestCase):
+    def render(self, *overrides):
+        return subprocess.run(
+            ["helm", "template", "test", str(CHART), *overrides],
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def test_demo_secrets_are_default_and_match_configured_names_and_keys(self):
+        self.assertEqual(self.render().count("kind: Secret\n"), 3)
+        self.assertNotIn("kind: Secret", self.render("--set", "demoSecrets.enabled=false"))
+        rendered = self.render(
+            "--set", "influxdb.existingSecret=demo-influx",
+            "--set", "grafana.existingSecret=demo-grafana",
+            "--set", "postgres.existingSecret=demo-postgres",
+        )
+        secrets = {
+            document.split("metadata:\n  name: ", 1)[1].splitlines()[0]: document
+            for document in rendered.split("---\n")
+            if "kind: Secret\n" in document
+        }
+        self.assertEqual(set(secrets), {"demo-influx", "demo-grafana", "demo-postgres"})
+        for name, keys in {
+            "demo-influx": ("admin-user", "admin-password", "admin-token"),
+            "demo-grafana": ("admin-user", "admin-password"),
+            "demo-postgres": ("username", "password"),
+        }.items():
+            for key in keys:
+                self.assertIn(f"  {key}: ", secrets[name])
+                self.assertRegex(rendered, rf"name: {name}\n\s+key: {key}\n")
+
+    def test_demo_secrets_skip_disabled_postgres_and_external_credentials(self):
+        rendered = self.render(
+            "--set", "demoSecrets.enabled=true",
+            "--set", "postgres.enabled=false",
+            "--set", "streamer.enabled=false",
+        )
+        self.assertEqual(rendered.count("kind: Secret\n"), 2)
+        self.assertNotIn("name: postgres-credentials\n", rendered)
+        self.assertNotIn("name: data-url\n", rendered)
+        self.assertNotIn("name: eventhub-credentials\n", rendered)
+        self.assertNotIn("name: iothub-credentials\n", rendered)
+
+        cloud = self.render(
+            "--set", "demoSecrets.enabled=true",
+            "--set", "telemetryCloudSync.enabled=true",
+            "--set", "telemetryCloudSync.target=eventhub",
+            "--set", "telemetryWriterCloud.enabled=true",
+        )
+        self.assertEqual(cloud.count("kind: Secret\n"), 3)
+        self.assertRegex(cloud, r"name: eventhub-credentials\n\s+key: connection-string\n")
+        self.assertRegex(cloud, r"name: influxdb-cloud-credentials\n\s+key: admin-token\n")
 
 
 if __name__ == "__main__":

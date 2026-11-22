@@ -1,0 +1,86 @@
+name: AI CI triage
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Failed CI run ID to diagnose
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ai-ci-triage-${{ github.event.workflow_run.head_branch || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: >-
+      vars.AI_CI_TRIAGE_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Collect failed job metadata (no logs or artifacts)
+        id: collect
+        uses: actions/github-script@v7
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        with:
+          script: |
+            const { collect, skipReason } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-triage.mjs`);
+            const report = await collect(github, context.repo, process.env.RUN_ID, process.env.RUNNER_TEMP);
+            const reason = await skipReason(github, context.repo, report);
+            core.setOutput("diagnose", reason ? "false" : "true");
+            if (reason) await core.summary.addHeading("AI CI triage skipped").addRaw(reason).write();
+
+      - name: Cache Copilot CLI package downloads
+        if: steps.collect.outputs.diagnose == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm/_cacache
+          key: copilot-npm-${{ runner.os }}-${{ runner.arch }}-node22-1.0.114
+
+      - name: Install pinned Copilot CLI from cached downloads
+        if: steps.collect.outputs.diagnose == 'true'
+        run: npm install --global @github/copilot@1.0.114
+
+      - name: Diagnose without tools or repository access
+        if: steps.collect.outputs.diagnose == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_CI_TOKEN }}
+          AI_CI_MODEL: ${{ vars.AI_CI_MODEL || 'claude-haiku-4.5' }}
+        run: node .github/scripts/ci-triage.mjs
+
+      - name: Publish summary and review handoff
+        if: steps.collect.outputs.diagnose == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { publish } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-triage.mjs`);
+            await publish(github, context.repo, process.env.RUNNER_TEMP, process.env.GITHUB_STEP_SUMMARY);
+
+      - name: Report triage failure
+        if: failure()
+        run: |
+          echo "## AI CI triage failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "No diagnosis was published. Inspect this workflow's failed step; the original CI result is unchanged." >> "$GITHUB_STEP_SUMMARY"

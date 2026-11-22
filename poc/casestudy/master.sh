@@ -5,6 +5,7 @@
 # Usage: sudo ./master.sh <out-dir>              the whole run, about 3 h 20 min, up to 40 min more
 #                                                 when M7 waits for relief to calm
 #        sudo ./master.sh <out-dir> --phase M3   one phase, against the running agent
+#        sudo PHASES=M6 ./master.sh <out-dir>    M6 alone on a fresh map, about 45 min
 #
 # The agent starts on a fresh map from agent-autonomous.yaml (ledger in <out-dir>); the
 # harness injects the faults the plan names (Netdata outage, wall-clock step, kill -9,
@@ -14,6 +15,7 @@
 # window the journal without trusting the wall clock. Timing runs on mono. SCALE=0.05
 # runs the timetable at a twentieth of its length. capture.sh runs alongside.
 set -uo pipefail
+case "${PHASES:-}" in "" | M6) ;; *) echo "$0: PHASES=${PHASES} is not supported; leave it empty or set M6" >&2; exit 1 ;; esac
 cd "$(dirname "$0")"
 HERE="$PWD"
 OUT="$(realpath -m "${1:?usage: $0 <out-dir> [--phase M0..M9]}")"
@@ -133,6 +135,8 @@ prepare() {
     managed=$(find /sys/fs/cgroup/kubepods -name memory.high -exec sh -c 'v=$(cat "$1"); [ "$v" != max ] && echo "$1 $v"' _ {} \;)
     [ -n "$managed" ] && { mark prep "refused: memory.high is set under kubepods" --arg managed "$managed"; exit 1; }
     [ "$(timedatectl show -p NTPSynchronized --value)" = yes ] || { mark prep "refused: NTP not synchronised"; exit 1; }
+    # From here on the node is changed: any exit (an interrupt, agent_start || exit 1) tears down.
+    trap teardown EXIT; trap 'exit 130' INT TERM
     agent_stop
     remove "${PLANTED[@]}"
     local stamp f
@@ -242,9 +246,7 @@ m6() {
     M6_WALL=$(date +%s)
     apply mem-victim; mark M6 "applied mem-victim" --arg subject "pod:$(uid_of mem-victim)"
     pause 60
-    # ANON_GIB 11, not 6: Ollama held 6-9 GB in the memrelief runs and is stopped here.
-    sed -e "s/__VICTIM_UID__/$(uid_of mem-victim)/" -e 's/name: ANON_GIB, value: "6"/name: ANON_GIB, value: "11"/' \
-        workloads/page-hog.yaml | "${K[@]}" apply -f - >/dev/null
+    sed "s/__VICTIM_UID__/$(uid_of mem-victim)/" workloads/page-hog.yaml | "${K[@]}" apply -f - >/dev/null
     sleep 5; HOG_UID=$(uid_of page-hog)
     mark M6 "applied page-hog" --arg subject "pod:$HOG_UID"
     watch_until 145 M6
@@ -337,6 +339,11 @@ m8() {
 # the in-memory journal has long evicted (from: log).
 m9() {
     at 195; mark M9 start
+    m9_read
+    at 200; mark M9 end --argjson snapshot_bytes "$(stat -c %s "$STATE" 2>/dev/null || echo null)"
+}
+
+m9_read() {
     # Both generations, oldest first, as readout.sh merges them: after a rotation the
     # current file alone starts mid-run.
     local verify first
@@ -348,11 +355,12 @@ m9() {
     fi
     [ -n "$first" ] && get "/state/decisions/$first" >"$OUT/m9-first-decision.json"
     mark M9 "read for the readout" --arg verify "$verify" --arg first "$first"
-    at 200; mark M9 end --argjson snapshot_bytes "$(stat -c %s "$STATE" 2>/dev/null || echo null)"
 }
 
-# teardown: planted pods deleted, faults undone, ollama restored, files copied out.
+# teardown: planted pods deleted, faults undone, ollama restored, files copied out. Runs once
+# (it clears the EXIT trap prepare set) and copes with a prepare that stopped part way.
 teardown() {
+    trap - EXIT
     mark teardown start
     remove "${PLANTED[@]}"
     systemctl is-active --quiet netdata.service || run teardown systemctl start netdata.service
@@ -372,6 +380,17 @@ if [ -n "$ONLY" ]; then
     T0=$(awk -v n="$(awk '{printf "%d", $1}' /proc/uptime)" -v m="${START[$ONLY]:?unknown phase $ONLY}" -v s="$SCALE" 'BEGIN { printf "%d", n - m * 60 * s }')
     "${ONLY,,}"
     exit $?
+fi
+
+# PHASES=M6: M6 alone on a fresh map, about 45 min: prepare, the agent started, M6 at once,
+# M9's reads, teardown. readout.sh's M6 rows apply; the other phases' rows do not.
+if [ "${PHASES:-}" = M6 ]; then
+    prepare
+    agent_start || exit 1
+    T0=$(awk -v n="$(awk '{printf "%d", $1}' /proc/uptime)" -v s="$SCALE" 'BEGIN { printf "%d", n - 100 * 60 * s }')
+    mark M0 start --argjson version "$(get /version)"
+    m6; m9_read; teardown
+    exit 0
 fi
 
 prepare

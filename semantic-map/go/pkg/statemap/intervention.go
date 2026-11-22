@@ -233,7 +233,7 @@ func (m *Map) RecordIntervention(o InterventionOutcome) (id, changed string, err
 		if old != nil {
 			decl.Label = old.Label
 		}
-		if err := m.declareRelationshipLocked(decl, true); err != nil {
+		if err := m.declareRelationshipLocked(decl, true, false); err != nil {
 			return "", "", err
 		}
 		iv.AgreedRun, iv.NullRun = 0, 0

@@ -255,6 +255,8 @@ Then update the endpoint table in README §2 and the header comment at the top o
 go test -race ./...           # what CI runs; use before pushing
 go test -v -run TestScenario ./internal/minimal/tests/    # narrated end-to-end flows
 go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergence stories
+go build -o /tmp/di-agent-peer-e2e ./cmd/agent
+python3 ../tests/peer_e2e.py /tmp/di-agent-peer-e2e  # three real agent processes
 (cd ../sdk/python && python3 -m unittest test_di_collector)  # the Python collector SDK, stdlib only; CI runs it too
 ```
 
@@ -322,6 +324,80 @@ The test: *would an independent researcher need this file to validate or build o
 Never commit absolute local paths (`/Users/…`).
 
 ---
+
+### CI dependency caches
+
+CI caches Go dependencies/builds, pip/npm downloads, and Cypress binaries.
+Cypress cache keys include the package-lock hash and runner OS/architecture,
+and both stubbed and live tests restore the binary before `npm ci`.
+Docker build layers are cached for both published and Kind smoke-test images.
+Smoke-image cache scopes separate services and credential matrix entries;
+Buildx loads the resulting images locally before they are imported into Kind.
+Cold/evicted caches still perform normal installs/builds, and tests always run.
+Actual savings and cache hit rates require observing Actions runs after deployment.
+
+### Optional AI CI triage pilot
+
+The [AI CI triage workflow](.github/workflows/ai-ci-triage.yml) is disabled by
+default. After review and merge to the default branch:
+
+1. Create the Actions secret `COPILOT_CI_TOKEN` with a fine-grained PAT granting
+   **Copilot Requests**, using an account with Copilot access. Do not grant this
+   token repository write access. Organization policies and usage charges apply.
+2. Set the Actions repository variable `AI_CI_TRIAGE_ENABLED` to `true`.
+3. A failed `CI` run from this repository triggers triage. You can also use
+   **Actions > AI CI triage > Run workflow** with a failed CI run ID.
+
+The reporter checks out only the default branch, not the failed branch, and does
+not download logs or artifacts. Copilot receives only failed job/step names and
+conclusions. Enable this only if that metadata is approved for processing by
+GitHub Copilot; it is not a generic secret scrubber. Fork runs are excluded.
+The CLI is pinned and invoked in a temporary directory with all tools and URL
+fetches denied; its subprocess does not receive the reporting `GITHUB_TOKEN`.
+
+Cost controls: the default model is `claude-haiku-4.5`, a lower-cost model for
+this metadata-only task. Set `AI_CI_MODEL` to another supported model if needed;
+that can increase cost. Each CLI session has a **30 AI credit soft limit**
+(the minimum supported by Copilot CLI, currently equivalent to USD 0.30).
+An in-flight response can slightly exceed the limit; this is not a hard billing
+ceiling or a monthly budget. The metadata payload is limited to 12,000 characters,
+the response fields to 1,500 characters each, and the subprocess to three minutes.
+There are no automatic retries. PRs that have advanced/closed and attempts already
+reported in a bot comment or default-branch issue are skipped before installing
+or invoking Copilot. Summary-only runs without a PR/issue can still be diagnosed
+again when manually dispatched.
+
+The triage workflow caches only npm package downloads, never authentication,
+Copilot sessions, prompts, or diagnoses. Actual savings and cache hit rates require
+observing Actions runs after deployment.
+
+Reports appear in the **triage workflow's run summary**, not retroactively in
+the original CI run. An open PR at the failed commit gets one updated bot comment.
+Default-branch failures without a PR create/update one open bot issue. Other
+branches without PRs get only a run summary. Reports link to the original run and
+failed jobs. Older reports do not overwrite newer ones, and PRs that have advanced
+to another commit are not annotated.
+
+Because this pilot deliberately excludes logs and code, causes remain low-confidence
+hypotheses and suggestions are investigation steps, not verified patches. Review
+the job logs and use your GitHub Copilot interface to request an investigation and
+draft fix PR. Delegation depends on your available Copilot plan and policies.
+There is no automatic fix-generation button, edit, push, or merge in this pilot.
+Normal review and required CI checks remain the approval gate.
+
+Authentication, model-output validation, and publication errors fail the triage
+workflow explicitly and leave the original CI result unchanged. Clear the
+enablement variable to disable the pilot. Existing reports are not automatically
+closed or cleared after a successful run.
+
+Validate the report logic locally without Copilot credentials:
+
+```bash
+node --test .github/scripts/ci-triage.test.mjs
+```
+
+Live Copilot authentication and GitHub publication require a configured repository
+and a deployed workflow; local tests use mocked GitHub APIs.
 
 ## 7. Troubleshooting
 

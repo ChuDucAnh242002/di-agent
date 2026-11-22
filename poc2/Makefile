@@ -45,8 +45,11 @@ STREAMER_LOOP ?=
 # Optional worker hostname that alone ingests engine signals.
 DATASET_NODE_NAME ?=
 AGENT_COLLECT_INTERVAL ?= 5s
+PONTOS_TOKEN_FILE ?= secrets/pontos-token
+PONTOS_SECRET ?= pontos-credentials
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
+CLOUD_STORAGE_CLASS ?=
 HELM_STREAMER_SETS = \
 	$(if $(STREAMER_MODE),--set streamer.mode=$(STREAMER_MODE)) \
 	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
@@ -103,12 +106,34 @@ helm-uninstall:
 helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
+pontos-secret:
+	@python3 -c 'from pathlib import Path; import sys; token=Path(sys.argv[1]).read_text().strip(); sys.exit(0 if token and not any(c.isspace() for c in token) else "Fill PONTOS_TOKEN_FILE with one access token before creating the Secret")' "$(PONTOS_TOKEN_FILE)"
+	@bash -o pipefail -c 'kubectl -n "$$1" create secret generic "$$2" --from-file=access-token="$$3" --dry-run=client -o yaml | kubectl -n "$$1" apply -f -' _ "$(HELM_NAMESPACE)" "$(PONTOS_SECRET)" "$(PONTOS_TOKEN_FILE)"
+
 agent: helm-install
 	@kubectl -n "$(HELM_NAMESPACE)" rollout status daemonset/di-agent --timeout=180s
+	@bridge=$$(kubectl -n "$(HELM_NAMESPACE)" get deployment pontos-bridge --ignore-not-found -o name) || exit $$?; \
+	if [ -n "$$bridge" ]; then \
+		kubectl -n "$(HELM_NAMESPACE)" rollout status deployment/pontos-bridge --timeout=180s; \
+	fi
 
 peers:
 	@HELM_NAMESPACE="$(HELM_NAMESPACE)" HELM_RELEASE="$(HELM_RELEASE)" \
 		bash $(SCRIPTS)/04-peers.sh
+
+provision-eks teardown-eks:
+	@bash "$(SCRIPTS)/$@.sh"
+
+deploy-cloud:
+	@test -n "$$KUBECONFIG" || { echo "Set KUBECONFIG to the cloud cluster's kubeconfig." >&2; exit 1; }
+	@test -n "$(CLOUD_STORAGE_CLASS)" || { echo "Set CLOUD_STORAGE_CLASS to an existing CSI StorageClass." >&2; exit 1; }
+	@kubectl get storageclass "$(CLOUD_STORAGE_CLASS)" >/dev/null
+	@$(MAKE) agent HELM_ARGS='-f cloud/helm-values.yaml --wait \
+		--set-string kafka.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string influxdb.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string postgres.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string prometheus.persistence.storageClass=$(CLOUD_STORAGE_CLASS) $(HELM_ARGS)'
+	@$(MAKE) peers
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -181,8 +206,9 @@ get-ip-%:
 		exit 1; \
 	fi
 
-.PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
+.PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template pontos-secret \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
+	provision-eks teardown-eks deploy-cloud \
 	workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target
@@ -195,10 +221,14 @@ help:
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
-	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
+	@echo "  helm-install - helm upgrade --install the di-agent-system chart"
+	@echo "                 Demo credentials are enabled by default; disable for external credentials"
 	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID"
 	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
+	@echo "  provision-eks - Create an EKS cluster and fetch kubeconfig"
+	@echo "  deploy-cloud - Deploy via Helm and register peers (requires KUBECONFIG and CLOUD_STORAGE_CLASS)"
+	@echo "  teardown-eks - Destroy the EKS Terraform resources"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"
@@ -206,6 +236,7 @@ help:
 	@echo "  agent        - Install/upgrade Helm and wait for one agent per worker"
 	@echo "                 Optional dataset worker: DATASET_NODE_NAME; poll interval: AGENT_COLLECT_INTERVAL"
 	@echo "  peers        - Register the ready Helm worker agents using kubectl"
+	@echo "  pontos-secret - Create/update PONTOS_SECRET from PONTOS_TOKEN_FILE (never prints the token)"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"
 	@echo "  list-vms     - Show all VMs with their IPs"

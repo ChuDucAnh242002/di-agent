@@ -50,7 +50,7 @@ working share link changes. Never commit or print private share links.
 The deployment consists of two separate layers:
 
 1. Infrastructure and cluster layer
-   - VM creation via Terraform in `main.tf`
+   - VM creation via Terraform in [infra/libvirt/](infra/libvirt/)
    - Kubernetes bootstrap via `scripts/02-k8s.sh`
    - one cluster for the VM fleet
 
@@ -64,9 +64,60 @@ The default `make all` workflow deploys the entire stack through Helm, including
 
 When migrating, remove the old Helm Deployment `di-agent`, if present, and the script-created Deployments named `di-agent-<worker>` before installing the DaemonSet. List them with `kubectl get deployments -l app=di-agent`, then delete only those legacy Deployments by name. Do not run the old deployment script alongside the DaemonSet: both would claim the same node identity and host port.
 
+### Moving an existing libvirt lab to `infra/libvirt/`
+
+The libvirt Terraform root moved from `poc2/` to `poc2/infra/libvirt/`.
+Fresh labs need no migration. For an existing lab, stop any Terraform runs,
+back up the local state securely, and move `terraform.tfstate` and
+`terraform.tfstate.backup` (if present) to the new root. Move
+`terraform.tfstate.d/` if you use named workspaces, along with any local
+`.tfvars` files and `.terraform.lock.hcl`. Do not overwrite state already
+present at the destination, commit state, or reuse old saved plans.
+
+From `poc2/`, verify the migration before applying:
+
+```bash
+terraform -chdir=infra/libvirt init
+terraform -chdir=infra/libvirt state list
+terraform -chdir=infra/libvirt plan
+```
+
+Make sure Terraform sees the existing lab and does not propose unexpected
+creations or replacements. `make provision` and `make teardown` use the new
+root automatically.
+
 ## Required secrets and configuration
 
-Before the chart is installed, the chart expects a namespace and credentials for the telemetry services.
+By default, the chart creates demo credentials for InfluxDB, Grafana and
+PostgreSQL. These credentials are public and fixed; **do not use them outside a
+disposable demo**. Install with:
+
+```bash
+helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+  --namespace default --create-namespace \
+  --wait --timeout 30m
+```
+
+From `poc2/`, use `make helm-install` or `make all`.
+The demo Secrets use the names configured by `influxdb.existingSecret`,
+`grafana.existingSecret` and `postgres.existingSecret`; PostgreSQL's is created
+only when PostgreSQL is enabled. The credentials are listed in
+`helm/di-agent-system/templates/secrets.yaml`.
+
+The default PostgreSQL ingestion job still requires the separate `data-url`
+Secret described below. Create it after the cluster is available and before
+installing the chart. Cloud connection strings and tokens also remain external.
+
+Demo Secrets are Helm-managed and are removed when the release is uninstalled
+or the option is disabled. Do not use the default setting over existing
+externally managed Secrets with the same names: Helm will reject ownership
+conflicts. Set `demoSecrets.enabled=false` when installing or upgrading an
+existing deployment that uses external Secrets.
+Existing PostgreSQL and InfluxDB persistent data retain their initialized
+credentials; switching Secrets does not change those database credentials.
+
+Alternatively, set `demoSecrets.enabled=false` and pre-create your own
+credentials in the release namespace:
 
 ```bash
 kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
@@ -77,12 +128,16 @@ kubectl -n default create secret generic influxdb-credentials \
 kubectl -n default create secret generic grafana-credentials \
   --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
   --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+kubectl -n default create secret generic postgres-credentials \
+  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 ```
 
-This is required because `helm/di-agent-system/values.yaml` references:
+For example, add `--set demoSecrets.enabled=false` to the Helm command above,
+or run `make helm-install HELM_ARGS="--set demoSecrets.enabled=false"` from
+`poc2/`.
 
-- `influxdb.existingSecret: influxdb-credentials`
-- `grafana.existingSecret: grafana-credentials`
+Kubernetes Secrets are not encrypted merely by being base64-encoded. Follow
+your cluster's secret-management and encryption practices for real credentials.
 
 ### PostgreSQL engine dataset
 
@@ -110,13 +165,124 @@ remain unchanged; no changes to `semantic-map/` are required.
 The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
 
 ```bash
-kubectl -n default create secret generic postgres-credentials \
-  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 kubectl -n default create secret generic data-url --from-literal=data-url="$DATA_URL"
-helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeout 30m
 ```
 
-Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
+Create this Secret before running the Helm command above. Connect in-cluster at
+`postgres:5432`, database `engine`. Set `postgres.ingest.enabled=false` to skip
+the ingestion job and its `data-url` requirement, or `postgres.enabled=false`
+and `streamer.enabled=false` to skip PostgreSQL and the dependent streamer.
+
+### Continuous PONTOS vessel data (live MQTT)
+
+PONTOS-HUB provides near-real-time ship telemetry, not a fixed-rate dataset.
+Sampling intervals depend on the vessel and sensor. The optional `pontos-bridge`
+subscribes over TLS WebSockets and forwards new measurements to
+`dataset.telemetry`, reusing the existing dataset collector and telemetry writer:
+
+```text
+PONTOS MQTT -> pontos-bridge -> Kafka -> dataset-collector -> designated di-agent
+                                    -> telemetry-writer -> InfluxDB
+```
+
+1. Generate a one-month access token at https://pontos.ri.se/get_started after
+   accepting the ODbL/DbCL terms.
+2. Paste only the token into `poc2/secrets/pontos-token` (created locally, git-ignored).
+   Keep permissions private (`chmod 600 poc2/secrets/pontos-token`).
+   Do not paste the token into Helm values, shell arguments, images or commits.
+3. From `poc2/`, create the Secret, build/push the changed services and deploy:
+
+   ```bash
+   make pontos-secret
+   # Use the same writable registry and immutable tag for building and deployment.
+   make images REGISTRY=ghcr.io/your-org TAG=pontos-v1 \
+     IMAGES="di-agent pontos-bridge dataset-collector telemetry-writer"
+   make agent REGISTRY=ghcr.io/your-org TAG=pontos-v1 \
+     DATASET_NODE_NAME=ubuntu-vm2 HELM_ARGS="--set pontos.enabled=true"
+   make peers
+   ```
+
+   Keep your existing `REGISTRY`, `TAG`, namespace and other deployment overrides.
+   If reusing the same image tag, restart `deployment/dataset-collector` and
+   `deployment/telemetry-writer` to pull rebuilt images. The new bridge is deployed
+   automatically. The default registry is `ghcr.io/diyazy`, not your GitHub account;
+   a local build does not make an image available there. Use a registry you can
+   publish to and ensure workers can pull it (private packages need
+   `global.imagePullSecrets`). Build the agent too so its binary matches this
+   checkout. A fresh checkout may need `mkdir -p secrets; touch secrets/pontos-token`
+   first; the ignored token file is deliberately not shipped in Git.
+   `make pontos-secret PONTOS_TOKEN_FILE=/private/path/token` supports another
+   local path; `PONTOS_SECRET` must match `pontos.existingSecret` if overridden.
+
+Enabling PONTOS suppresses engine replay and the engine CSV ingestion hook, without
+deleting PostgreSQL data or PVCs. The chart requires one designated ready dataset
+worker; do not configure multiple agents to poll the draining collector. Previously
+queued engine events may drain during a switch; PONTOS metric names and subjects
+are separate from engine names. To return to engine replay, disable `pontos.enabled`.
+
+All worker agents use `agent.collectInterval` (default `5s`), whether or not
+PONTOS is enabled. The collector averages only new arrivals per
+vessel/sensor in that window. A faster source contributes several values; a slower
+or silent source is omitted until its next arrival. Polling does not change PONTOS's
+publisher rate or manufacture readings. To poll faster, set
+`--set agent.collectInterval=1s`; this also affects every agent's other collectors.
+
+To inspect availability:
+
+```bash
+kubectl port-forward svc/pontos-bridge 8001:8000
+curl -s http://localhost:8001/status
+```
+
+`/status` reports connection/subscription errors, received/published/dropped counts,
+queue depth, and tracked series count. `/ready` returns 503
+until MQTT subscriptions and Kafka are ready, but a connected feed may legitimately
+have no measurements. View the designated agent pod's `/ui/` and `/state` rather than
+the load-balanced agent Service.
+
+The default curated selection is main-engine RPM, power and fuel consumption,
+speed over ground, battery power and battery SOC. `pontos.vessels=[]` selects all
+vessels for these tags; no coverage is assumed. Narrow it with
+`--set 'pontos.vessels[0]=imo_9007128'`. Override `pontos.signals` with an explicit
+tag-to-`{unit, range?}` mapping to select other numeric signals. Do not include
+angles without a separate circular-aggregation implementation.
+
+Subjects are `vessel:<vessel_id>`. Vessel IDs and sensor indices that cannot be
+represented by the collector's subject and metric-name character sets are logged
+and dropped.
+Metric names include both tag and sensor index, e.g.
+`pontos.enginemain_power_kw.i_1`; multiple engines are never merged into one sensor.
+Live events carry `origin=live`, physical units, original source timestamps and
+ODbL/DbCL attribution. InfluxDB stores vessel/parameter tags and license/provider
+fields. Battery SOC declares `[0,100]`; unbounded powers/rates have no invented
+normalization range. Add fixed, justified ranges through `pontos.signals` if you
+need normalized association discovery. Keep units/ranges stable across vessels
+and restarts; incompatible declarations require new metric names or an explicit
+state migration, not just restarting the agent.
+
+These vessel properties remain **unrouted**: they do not automatically affect
+RC/PS, `/cost`, `/recommend`, or the legacy simulator controls. Associations are
+not proof of causality. Use actual processing workloads and host cgroup readings
+to evaluate orchestration benefits.
+
+PONTOS supports MQTT QoS 0 only. The bridge reconnects with backoff, bounds its
+queue/series count, and visibly drops malformed, stale,
+duplicate/out-of-order or overflow records. Source age above
+`pontos.maxSourceAgeSeconds` (default 300) is rejected, including old Kafka backlog
+and collector aggregates that expire while waiting for an agent poll.
+Inactive series are removed from the duplicate-tracking cache when space is needed.
+Kafka's producer retries deliveries, but the bridge does not re-send a record after
+a failed delivery: an error can leave its delivery outcome unknown.
+There is no exactly-once guarantee or historical backfill; restarts may lose
+pending observations. Retained old readings are not treated as fresh measurements.
+After renewing the token, run `make pontos-secret` and
+`kubectl rollout restart deployment/pontos-bridge`.
+
+API/tag reference: https://pontos.ri.se/docs and
+https://github.com/MO-RISE/pontos-data-format/blob/main/tags.md.
+Retain attribution and review [ODbL obligations](https://opendatacommons.org/licenses/odbl/1-0/)
+before publishing adapted datasets or derived public outputs; MIT covers this
+repository's code, not the PONTOS data.
 
 ### PostgreSQL replay and simulation modes
 
@@ -124,7 +290,7 @@ The streamer defaults to `synthetic` mode, generating bounded, correlated sample
 
 The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. Set `agent.datasetNodeName` to one worker's Kubernetes node name (or use `make agent DATASET_NODE_NAME=ubuntu-vm2`) to designate the only agent that polls it. Empty means engine ingestion is disabled. Every agent still monitors its own host cgroups. Do not point multiple agents at the shared collector: each HTTP poll drains the pending aggregates, so they would split the data rather than receive copies. `make peers` rejects a configured dataset node that is absent from the ready agent fleet.
 
-The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` in Make, or `agent.collectInterval` in Helm): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
+The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` in Make, or `agent.collectInterval` in Helm): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each replay event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>` unless an explicit valid `metadata.subject` is supplied. Live physical rates may omit ranges, as described above. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
 
 On startup, only the designated dataset worker waits in an init container for the
 collector's `/ready` endpoint before starting the agent's collector handshake.
@@ -181,6 +347,48 @@ curl localhost:8000/status
 
 API changes are in memory only: a pod restart or a new `make helm-install` returns to the Helm/`STREAMER_*` values. Use those for permanent settings.
 
+#### Engine dataset playground
+
+The optional playground includes an Engine Dataset panel for the configured
+run. It can switch between synthetic generation and **recorded real-data
+replay**, adjust pacing and looping, and set a synthetic seed. It does not
+control a physical engine, provide pause/seek, or switch run IDs. Each apply
+restarts the shared stream from the beginning, and switching modes can mix
+origins in an agent collection window. The panel displays streamer and
+collector status separately; collector readiness does not prove that the agent
+is ingesting data.
+
+Enable the panel with `playground.enabled=true` and
+`playground.dataset.enabled=true`. For example:
+
+```bash
+# Build and push the updated playground to the registry/tag used by your chart.
+make -C poc2 images IMAGES=playground REGISTRY=<your-registry> TAG=<your-tag>
+helm upgrade --install di-agent-system poc2/helm/di-agent-system --reuse-values \
+  --set playground.image.tag=<your-tag> \
+  --set playground.enabled=true \
+  --set playground.dataset.enabled=true
+kubectl port-forward svc/playground 8080:80
+kubectl port-forward svc/grafana 3000:3000
+```
+
+Open `http://localhost:8080` through the port-forward. With dataset controls
+enabled, the playground Service is ClusterIP instead of NodePort. Dataset
+writes are not authenticated and affect the shared stream: limit in-cluster
+access to trusted workloads, and do not expose the Service outside the cluster
+without authentication. The local Vite development proxy is also
+unauthenticated and must not be exposed to untrusted networks.
+
+Grafana provisions an **Engine dataset telemetry** dashboard at
+`http://localhost:3000/d/engine-dataset` when port-forwarded as above. It
+filters by run, signal, source and origin and plots raw pipeline values
+aggregated into display windows against emission time. Set
+`playground.dataset.grafanaDashboardUrl` to a browser-accessible dashboard URL
+to show a link in the panel. The agent's collection-window means are separate
+from Grafana's display aggregation. Configure `agent.datasetNodeName` to enable
+ingestion by one agent, and inspect that agent's UI to verify its properties.
+See [playground/README.md](playground/README.md) for local development and tests.
+
 `streamer.runId` selects the dataset (default `1000rpm_150kW_0001`). All of the run's sources (`short` and every `long_*` file) are streamed together: they share the same time grid (`t` steps of 7200 from 0), so each tick emits the next `pointsPerInterval` time steps for every signal, and shorter sources simply end before the longer ones (the run then loops if `loop=true`).
 
 At ingest, each multi-signal CSV is split into one file per signal next to it in `data/` (`<run>_timeseries_<source>_<signal>.csv`, containing only `Data1_<signal>` and `Data1_time_<signal>`); the split files are what is loaded into PostgreSQL. Files that are already split can be placed in `data/` (or the `DATA_URL` share) as-is and are loaded directly. Run `DATA_DIR=poc2/data python3 poc2/data-ingest/ingest.py --split-only` to produce them locally without a database. To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
@@ -206,6 +414,51 @@ make helm-install REGISTRY=ghcr.io/your-org TAG=v1
 ```
 
 The chart also expects the enabled service build contexts under `system/` and `playground/` to exist and to be buildable with Docker.
+
+## Manual deployment on EKS
+
+EKS is an alternative to the libvirt lab. Run these commands from `poc2/`.
+You need Terraform, Helm, kubectl and the AWS CLI. Provisioning creates
+billable resources. Authenticate with the AWS CLI and set `TF_VAR_api_access_cidrs`
+to a JSON list of the public IPv4 CIDRs your operators or VPN use:
+
+```bash
+# Example only: replace with your reachable operator/VPN CIDR.
+export TF_VAR_api_access_cidrs='["203.0.113.42/32"]'
+make provision-eks
+export KUBECONFIG="$HOME/.kube/config-poc2-eks"
+kubectl apply -f cloud/eks/storage-class.yaml
+export CLOUD_STORAGE_CLASS=di-agent-gp3
+```
+
+The provisioning script accepts Terraform overrides through `TF_VAR_*` (for
+example, `TF_VAR_node_count`), and `LOCAL_KUBECONFIG` to change the output path.
+EKS selects its default Kubernetes version unless `TF_VAR_kubernetes_version`
+is set to a version supported in your region. Terraform uses local state in
+`cloud/eks/`. Keep that state safe: teardown needs it. Do not commit it.
+
+Confirm the selected cluster with `kubectl config current-context`. In the
+release namespace, create the external InfluxDB, Grafana and PostgreSQL
+Secrets from [Required secrets and configuration](#required-secrets-and-configuration),
+plus `data-url` if ingestion is enabled. The cloud deployment disables demo
+credentials by default. For private images, pre-create a registry pull Secret
+and pass its name via `global.imagePullSecrets` in `HELM_ARGS`.
+
+```bash
+# Use the registry and tag of your published images. Run make images first if needed.
+make deploy-cloud REGISTRY=ghcr.io/your-org TAG=v1
+```
+
+This uses the current Helm chart, waits for the worker DaemonSet, and registers
+peers with the same script as the local lab. Use the same target for upgrades
+so the CSI storage settings stay applied. Use a fresh release for the cloud
+storage profile; existing PVC storage classes cannot be changed in place.
+
+To clean up, uninstall the chart with `make helm-uninstall` and remove its
+PVCs only after backing up any data you want to keep. Then run
+`make teardown-eks` with the same local state and Terraform variables used
+to provision the cluster. Review the destroy plan
+before approving it.
 
 ## End-to-end workflow
 
@@ -284,8 +537,8 @@ of the node's disk. Fresh evidence resumes only within `map.stale_after` and und
 matching discovery settings; stale checkpoints start a new evidence run. An unclean
 exit loses at most the last snapshot interval of progress. Existing state held only
 inside an old container is not automatically migrated by adding the host mount.
-Snapshot format 5 is readable by this version (and imports format 4), but not by older
-agent binaries; back up existing state before upgrading if rollback is required.
+Snapshot compatibility depends on the agent version; back up existing state before
+upgrading if rollback is required.
 
 To view a particular agent, find its pod with `kubectl get pods -l app=di-agent -o wide`, then run `kubectl port-forward pod/<pod-name> 9090:9090`. Open `http://localhost:9090/ui/` (the chart sets `agent.ui: true`; the agent is headless without it). Select the designated dataset worker's pod to see `engine:<run_id>` properties. The shared `di-agent` Service load-balances agents and is not an individual peer identity. To remove a stale peer reported by registration, use that agent's `DELETE /peers/<id>` endpoint, then re-run `make peers`.
 
@@ -310,7 +563,7 @@ The demo is the proof-of-value. It does the following:
 
 The files that matter for understanding or running the PoC are:
 
-- `main.tf`: libvirt VM definition and disk layout
+- [infra/libvirt/main.tf](infra/libvirt/main.tf): libvirt VM definition and disk layout
 - `variables.tf`: VM and image configuration
 - `providers.tf`: libvirt provider setup
 - `scripts/01-provision.sh`: creates the VM fleet
