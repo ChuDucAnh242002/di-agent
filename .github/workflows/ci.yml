@@ -47,6 +47,10 @@ jobs:
             exit 1
           fi
 
+      - name: Test AI CI triage reporting
+        working-directory: .
+        run: node --test .github/scripts/ci-triage.test.mjs
+
       - name: Build
         run: go build ./...
 
