@@ -330,6 +330,9 @@ Never commit absolute local paths (`/Users/…`).
 CI caches Go dependencies/builds, pip/npm downloads, and Cypress binaries.
 Cypress cache keys include the package-lock hash and runner OS/architecture,
 and both stubbed and live tests restore the binary before `npm ci`.
+Docker build layers are cached for both published and Kind smoke-test images.
+Smoke-image cache scopes separate services and credential matrix entries;
+Buildx loads the resulting images locally before they are imported into Kind.
 Cold/evicted caches still perform normal installs/builds, and tests always run.
 Actual savings and cache hit rates require observing Actions runs after deployment.
 
