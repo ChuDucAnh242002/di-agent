@@ -315,6 +315,15 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
+The infrastructure job also checks Terraform formatting and runs
+`terraform init -backend=false` and `terraform validate` for the EKS and
+libvirt roots. It lints and renders the PoC2 Helm chart with both default and
+cloud values. These static checks do not use cloud credentials or replace a
+target-specific plan or deployment test. The separate kind job exercises the
+chart in a temporary Kubernetes cluster. CI runs these checks on every PR and
+push to `main`; repository branch protection determines whether they are
+required for merge.
+
 ### Public/private boundary
 
 This repository is **public**. The `mega-research` repository is **private**. Implementation code, compliance suites, and artifacts a reader needs to reproduce or extend published work belong here. Raw experimental data, analysis scripts, manuscript drafts, reviewer correspondence, and intermediate results stay private.
@@ -335,6 +344,21 @@ Smoke-image cache scopes separate services and credential matrix entries;
 Buildx loads the resulting images locally before they are imported into Kind.
 Cold/evicted caches still perform normal installs/builds, and tests always run.
 Actual savings and cache hit rates require observing Actions runs after deployment.
+
+### On-demand AI infrastructure review
+
+For changes to Terraform, Kubernetes, Helm, Devbox, or related deployment
+scripts, ask a local AI coding assistant to follow the
+[infrastructure review guide](docs/infrastructure-review.md). Supply the base
+ref, change intent, and target environment; the guide requests advisory
+findings and a human validation checklist. Review the output and perform the
+checks yourself. It does not approve changes, deploy them, or replace CI.
+
+Only review material approved for your AI service. Do not provide Terraform
+state, saved plans, credentials, or other sensitive material; inspect
+environment-specific plans through your normal secure process instead.
+This local review is separate from the optional CI triage pilot below and does
+not add an AI step to CI.
 
 ### Optional AI CI triage pilot
 
