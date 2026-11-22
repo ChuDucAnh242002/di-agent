@@ -184,7 +184,7 @@ async function diagnose() {
   try {
     const { stdout } = await execute("copilot", [
       "-p", promptFor(report), "-s", "--no-ask-user", "--no-auto-update",
-      "--deny-tool", "*", "--deny-url", "*",
+      "--available-tools", "--disable-builtin-mcps",
       "--model", process.env.AI_CI_MODEL || "claude-haiku-4.5",
       "--max-ai-credits", "30",
     ], {
