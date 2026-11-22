@@ -3,10 +3,10 @@ name: CI
 # Runs on every push to main and every PR targeting main.
 # Validates that the semantic-map Go module builds, vets clean, and that
 # the full test suite (compliance + scenarios + evolution + integration)
-# passes with race detection on. Also runs the poc2/system pytest suite, the
-# stubbed playground Cypress suite, and kind-based deployment and telemetry
-# E2E tests against an ephemeral in-runner cluster. Terraform and Helm are
-# checked separately without deploying infrastructure.
+# passes with race detection on. Also smoke-tests the locked Devbox toolchain,
+# checks Terraform and Helm without deploying infrastructure, runs the
+# poc2/system pytest suite and stubbed playground Cypress suite, and exercises
+# kind-based deployment and telemetry E2E tests against an ephemeral cluster.
 
 on:
   push:
@@ -60,6 +60,29 @@ jobs:
           helm lint "$chart" -f poc2/cloud/helm-values.yaml
           helm template di-agent-system "$chart" > /dev/null
           helm template di-agent-system "$chart" -f poc2/cloud/helm-values.yaml > /dev/null
+
+  devbox-smoke:
+    name: Devbox toolchain smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install locked Devbox environment
+        uses: jetify-com/devbox-install-action@734088efddca47cf44ff8a09289c6d0e51b73218 # v0.12.0
+        with:
+          devbox-version: 0.22.0
+          enable-cache: 'false'
+          disable-nix-access-token: 'true'
+
+      - name: Verify toolchain and run focused tests
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          devbox run -- bash .github/scripts/devbox-smoke.sh
+          git diff --exit-code -- devbox.json devbox.lock
 
   test:
     name: build + test + vet

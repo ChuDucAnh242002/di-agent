@@ -1,4 +1,6 @@
 # Build artifacts
+.devbox/
+/.venv/
 semantic-map/go/agent
 semantic-map/go/cmd/agent/tmp/
 
