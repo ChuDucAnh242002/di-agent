@@ -64,7 +64,8 @@ exit
 Or run a single command without entering a shell:
 
 ```bash
-devbox run -- go version
+devbox run doctor  # print tool versions
+devbox run test    # run the same focused smoke tests as CI
 devbox run -- node --test .github/scripts/ci-triage.test.mjs
 ```
 
