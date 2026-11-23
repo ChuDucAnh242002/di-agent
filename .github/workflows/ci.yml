@@ -81,7 +81,8 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: |
-          devbox run -- bash .github/scripts/devbox-smoke.sh
+          devbox run doctor
+          devbox run test
           git diff --exit-code -- devbox.json devbox.lock
 
   test:
