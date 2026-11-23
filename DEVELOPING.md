@@ -75,9 +75,8 @@ The Python plugin creates an ignored `.venv`; activate it with
 `. "$VENV_DIR/bin/activate"` inside the Devbox shell before installing Python
 dependencies, and install the relevant project's requirements separately.
 Node dependencies still require `npm ci` in `poc2/playground`.
-Devbox uses Node 22 because Node 20 is end-of-life and rejected by Nix; the
-existing playground CI continues to test Node 20. This does not change the
-application's runtime images or existing CI toolchains.
+Devbox uses Node 22; the playground build image and CI test jobs use Node 24.
+The playground's final runtime image is nginx, not Node.
 
 Docker, Kubernetes, Helm, Terraform, libvirt and their host services are not
 provisioned by this environment; see [PoC2 setup](poc2/README.md).
