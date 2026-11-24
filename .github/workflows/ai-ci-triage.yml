@@ -10,6 +10,10 @@ on:
         description: Failed CI run ID to diagnose
         required: true
         type: string
+      publish_report:
+        description: Publish to matching PRs or the default-branch issue (off for historical exercises)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,10 +49,12 @@ jobs:
         uses: actions/github-script@v7
         env:
           RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          PREVIEW_ONLY: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish_report }}
         with:
           script: |
             const { collect, skipReason } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-triage.mjs`);
-            const report = await collect(github, context.repo, process.env.RUN_ID, process.env.RUNNER_TEMP);
+            const report = await collect(github, context.repo, process.env.RUN_ID, process.env.RUNNER_TEMP,
+              { previewOnly: process.env.PREVIEW_ONLY === "true" });
             const reason = await skipReason(github, context.repo, report);
             core.setOutput("diagnose", reason ? "false" : "true");
             if (reason) await core.summary.addHeading("AI CI triage skipped").addRaw(reason).write();
