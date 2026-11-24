@@ -23,7 +23,7 @@ The runner:
 1. Builds the agent image and tags it with its Docker content ID, not `latest`.
 2. Creates a uniquely named kind cluster with its own temporary kubeconfig.
 3. Bootstraps its namespace and prints `kubectl diff` before applying workloads.
-4. Waits for readiness and verifies live availability, health-check latency,
+4. Waits for application-level HTTP readiness and verifies live availability, health-check latency,
    HTTP status samples and the provisioned four-panel Grafana dashboard.
 5. Scales down only the lab agent, verifies **AgentUnavailable** actually reaches
    the Alertmanager webhook, restores the agent and verifies a resolved event.
@@ -52,6 +52,11 @@ to a lab-only webhook receiver. The runner asserts delivery; receiver logs inclu
 the alert's suggested action. This sink is not an email, pager or GitHub issue
 integration. Use the cross-repo dashboard for GitHub CI incident issues.
 No external notification credentials are placed in Kubernetes.
+
+Grafana update checks, reporting and automatic plugin preinstallation are
+disabled in this lab. Dashboard provisioning is checked with a bounded wait;
+transient startup HTTP failures/timeouts are printed and retried, not treated
+as a healthy or provisioned dashboard.
 
 All data is ephemeral. Grafana permits anonymous **Viewer** access only for this
 private disposable lab; never reuse these settings on a public endpoint.

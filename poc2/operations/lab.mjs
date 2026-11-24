@@ -24,19 +24,32 @@ let forwarding;
 let forwardExit;
 let stoppingForward = false;
 
+class HttpError extends Error {
+  constructor(status, url) {
+    super(`HTTP ${status}: ${url}`);
+    this.status = status;
+  }
+}
+
 async function until(description, check, seconds = 120) {
   const deadline = Date.now() + seconds * 1000;
   while (Date.now() < deadline) {
     if (forwardExit && !stoppingForward) throw new Error(`Port forwarding exited: ${forwardExit}`);
-    if (await check()) { console.log(`PASS: ${description}`); return; }
+    try {
+      if (await check()) { console.log(`PASS: ${description}`); return; }
+    } catch (error) {
+      if (error.name !== 'TimeoutError' &&
+          !(error instanceof HttpError && [404, 502, 503, 504].includes(error.status))) throw error;
+      console.warn(`Waiting for ${description}: ${error.message}`);
+    }
     await sleep(2000);
   }
   throw new Error(`Timed out: ${description}`);
 }
 
 async function json(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
+  const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new HttpError(response.status, url);
   return response.json();
 }
 
@@ -97,8 +110,11 @@ try {
   for (const metric of ['probe_duration_seconds', 'probe_http_status_code']) {
     assert.equal((await query(`${metric}{job="agent-health"}`)).length, 1);
   }
-  const dashboard = await json(service('grafana', 3000, '/api/dashboards/uid/platform-ops'));
-  assert.equal(dashboard.dashboard.panels.length, 4);
+  await until('Grafana dashboard provisioning complete', async () => {
+    const dashboard = await json(service('grafana', 3000, '/api/dashboards/uid/platform-ops'));
+    assert.equal(dashboard.dashboard.panels.length, 4);
+    return true;
+  });
   console.log('PASS: Grafana dashboard provisioned; health latency and HTTP status have real samples.');
 
   kubectl('scale', 'deployment/agent', '--replicas=0');

@@ -18,7 +18,13 @@ export function resources(agentImage) {
             containers: [{
               name, image, args, imagePullPolicy: name === 'agent' ? 'Never' : 'IfNotPresent',
               ports: [{ containerPort: port }],
-              readinessProbe: { tcpSocket: { port }, periodSeconds: 2 },
+              readinessProbe: {
+                httpGet: { port, path: {
+                  agent: '/healthz', blackbox: '/', prometheus: '/-/ready',
+                  alertmanager: '/-/ready', receiver: '/alerts', grafana: '/api/health',
+                }[name] },
+                periodSeconds: 2, timeoutSeconds: 3,
+              },
               resources: { requests: { cpu: '25m', memory: '32Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
               securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
               volumeMounts: mounts.map(([name, mountPath]) => ({ name, mountPath })),
@@ -154,7 +160,6 @@ http.createServer(async (req, res) => {
       NODE_ID: 'operations-lab', NETDATA_URL: '', PROPOSER: 'false',
       REVIEW_LEVEL: 'rules', DECISION_BACKEND: 'none', REASONING_BACKEND: 'none',
     }).map(([name, value]) => ({ name, value })),
-    readinessProbe: { httpGet: { path: '/healthz', port: 9090 }, periodSeconds: 2 },
   });
   workload('blackbox', 'prom/blackbox-exporter:v0.29.1', 9115,
     ['--config.file=/etc/blackbox/blackbox.yml'], [['blackbox', '/etc/blackbox']]);
@@ -175,6 +180,10 @@ http.createServer(async (req, res) => {
       { name: 'GF_AUTH_BASIC_ENABLED', value: 'false' },
       { name: 'GF_AUTH_DISABLE_LOGIN_FORM', value: 'true' },
       { name: 'GF_PATHS_PROVISIONING', value: '/tmp/provisioning' },
+      { name: 'GF_ANALYTICS_REPORTING_ENABLED', value: 'false' },
+      { name: 'GF_ANALYTICS_CHECK_FOR_UPDATES', value: 'false' },
+      { name: 'GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES', value: 'false' },
+      { name: 'GF_PLUGINS_PREINSTALL_DISABLED', value: 'true' },
     ],
     command: ['/bin/sh', '-ec'],
     args: [
