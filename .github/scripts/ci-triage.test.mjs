@@ -142,6 +142,21 @@ test("default-branch failures update the existing open bot issue", async () => {
   }
 });
 
+test("manual preview diagnoses historical runs without publishing an issue or PR comment", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ci-triage-preview-"));
+  const preview = { ...report, previewOnly: true };
+  try {
+    assert.equal(await skipReason({}, {}, preview), null);
+    await writeFile(join(directory, "ci-triage-input.json"), JSON.stringify(preview));
+    await writeFile(join(directory, "ci-triage-diagnosis.json"), JSON.stringify(diagnosis));
+    const summary = join(directory, "summary");
+    await publish({}, {}, directory, summary);
+    assert.match(await readFile(summary, "utf8"), /AI CI failure triage/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("CLI invocation exposes no tools and isolates repository credentials and working directory", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ci-triage-test-"));
   try {

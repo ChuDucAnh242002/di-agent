@@ -69,3 +69,7 @@ The human is responsible for evaluating the findings, performing the checks,
 and deciding whether to approve or deploy. A clean AI review is not proof of
 safety. For lab and EKS operating details, see [PoC2 setup](../poc2/README.md)
 and [Operating di-agent](../OPERATING.md).
+
+For an observed live metadata-only model run and its independent evidence
+check, see [the AI triage exercise](ai-triage-exercise.md). It distinguishes
+successful model execution from verified diagnosis and human approval.

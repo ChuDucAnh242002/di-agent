@@ -38,6 +38,11 @@ That is the core build requirement; Go modules are resolved from `go.mod` and
 `go.sum`. The agent needs its configuration and any external services used by
 your chosen deployment profile at runtime.
 
+Dependabot proposes weekly Go, playground npm, system Python and Actions
+updates with bounded open-PR counts. Keep dependency changes focused, regenerate
+locks with the relevant package manager, and run the affected tests before
+merging. Advisory counts are not proof of runtime exposure or of a complete fix.
+
 ```bash
 git clone https://github.com/DiyazY/di-agent.git
 cd di-agent/semantic-map/go

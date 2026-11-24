@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 const marker = "<!-- ai-ci-triage -->";
 const execute = promisify(execFile);
 
-export async function collect(github, repo, runId, directory) {
+export async function collect(github, repo, runId, directory, { previewOnly = false } = {}) {
   if (!/^[1-9]\d*$/.test(String(runId))) throw new Error("A positive CI run ID is required.");
   const { data: run } = await github.rest.actions.getWorkflowRun({ ...repo, run_id: runId });
   if (run.name !== "CI" || run.path !== ".github/workflows/ci.yml" ||
@@ -29,7 +29,7 @@ export async function collect(github, repo, runId, directory) {
   if (!failed.length) throw new Error("No failed jobs were available for this run.");
   const report = {
     id: run.id, attempt: run.run_attempt, sha: run.head_sha, branch: run.head_branch,
-    url: run.html_url, pullRequests: run.pull_requests.map(pr => pr.number), failed,
+    url: run.html_url, pullRequests: run.pull_requests.map(pr => pr.number), failed, previewOnly,
   };
   await writeFile(join(directory, "ci-triage-input.json"), JSON.stringify(report));
   return report;
@@ -122,6 +122,7 @@ export function isNewer(body, report) {
 }
 
 export async function skipReason(github, repo, report) {
+  if (report.previewOnly) return null;
   const alreadyReported = body => body?.startsWith(marker) &&
     (body.includes(`<!-- run:${report.id} attempt:${report.attempt} -->`) || isNewer(body, report));
   if (report.pullRequests.length) {
@@ -153,6 +154,7 @@ export async function publish(github, repo, directory, summaryPath) {
   const diagnosis = parseDiagnosis(await readFile(join(directory, "ci-triage-diagnosis.json"), "utf8"));
   const body = render(report, diagnosis);
   await writeFile(summaryPath, body, { flag: "a" });
+  if (report.previewOnly) return;
   for (const number of report.pullRequests) {
     const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number: number });
     if (pr.state !== "open" || pr.head.sha !== report.sha) continue;
