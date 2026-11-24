@@ -503,3 +503,10 @@ curl -s http://$ADDR/graph | jq -r '.edges[] | select(.deprecated == true) | .pr
 | Why state is in-memory, why no auth | [ARCHITECTURE §3](semantic-map/ARCHITECTURE.md#3-deployment-profiles), [§10](semantic-map/ARCHITECTURE.md#10-coordination) |
 | A worked 3-node deployment | [ARCHITECTURE §12](semantic-map/ARCHITECTURE.md#12-poc-deployment-poc) and `poc/` |
 | To change or extend the code | [`DEVELOPING.md`](DEVELOPING.md) |
+
+## Local service-observability and rollback exercise
+
+For an isolated kind deployment with measured health, Prometheus/Grafana,
+Alertmanager firing/recovery verification, a deliberately failed rollout and
+rollback, see [the disposable operations lab](poc2/operations/README.md).
+It creates no cloud resources and never targets your existing kubeconfig.
