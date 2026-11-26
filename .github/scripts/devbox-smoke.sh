@@ -12,3 +12,4 @@ npm --version
 (cd semantic-map/go && go test ./pkg/types)
 (cd semantic-map/sdk/python && python -m unittest -v test_di_collector)
 node --test .github/scripts/ci-triage.test.mjs
+node --test .github/scripts/devbox-workspace.test.mjs
