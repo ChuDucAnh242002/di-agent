@@ -15,7 +15,12 @@
       ],
       "test": [
         "bash .github/scripts/devbox-smoke.sh"
-      ]
+      ],
+      "setup": "node .github/scripts/devbox-workspace.mjs setup",
+      "pull": "node .github/scripts/devbox-workspace.mjs pull",
+      "deploy-all": "node .github/scripts/devbox-workspace.mjs deploy-all",
+      "deploy": "node .github/scripts/devbox-workspace.mjs deploy \"$@\"",
+      "build-agent": "cd semantic-map/go && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o \"$1\" ./cmd/agent/"
     }
   }
 }

@@ -92,6 +92,63 @@ go build ./... && go test ./...     # verify the checkout
 
 The parquet replay tool (`./dev.sh replay …`) replays the dissertation's Netdata dataset. That dataset is **not part of this repository**, so replay needs `--data-dir` pointing at a copy of it. Everything else runs without it.
 
+### Shared Devbox Kubernetes lab
+
+The optional workspace workflow manages synthetic demos for this repository,
+Life-Pension-workspace and SME-Cash-Flow-Copilot. Clone `di-agent` and place the
+other two repositories beside it; `pull` can clone missing repositories there.
+Install Devbox, Docker, kind, kubectl and Helm on the host. Docker access grants
+host-level privileges. The di-agent image build currently requires Linux x86-64.
+See the installation guides for [Devbox](https://www.jetify.com/docs/devbox/),
+[Docker](https://docs.docker.com/engine/install/), [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation),
+[kubectl](https://kubernetes.io/docs/tasks/tools/) and [Helm](https://helm.sh/docs/intro/install/).
+
+```sh
+devbox run setup       # check tools and ask before creating a dedicated kind cluster
+devbox run pull        # clone missing repositories; fast-forward clean main branches
+devbox run deploy-all  # build and deploy all three demos
+devbox run deploy di-agent
+devbox run deploy life-pension
+devbox run deploy sme-cashflow
+devbox run deploy dataset-collector  # or telemetry-writer, after deploying di-agent
+```
+
+These commands are also available from the two finance repositories when
+`di-agent` is a sibling directory. Their existing `setup` also runs `npm ci`.
+`pull` skips dirty, detached, and non-main checkouts and reports an error;
+it never switches branches or discards changes.
+
+Setup creates `devbox-workspace` with one worker and a private kubeconfig under
+`.devbox/workspace`, without changing the current kubectl context. It refuses to
+adopt an existing cluster or a replacement cluster. Deployments use only this
+cluster: the di-agent Helm chart uses disposable telemetry storage and disables
+the dataset replay; the finance demos use their existing Kustomize overlays and
+persistent volumes. Deploying `di-agent` upgrades the whole Helm release;
+`dataset-collector` and `telemetry-writer` update individual chart images.
+Life-Pension demo credentials are generated privately under
+`.devbox/workspace/life-secrets`; do not share them. If its Secret is lost while
+its volume exists, restore the original database credential rather than resetting
+the data. SME uses the public demo credentials in its overlay.
+
+To access a finance demo from the di-agent repository root, forward its service:
+
+```sh
+kubectl --kubeconfig .devbox/workspace/kubeconfig -n life-pension-demo port-forward service/workspace 8089:8080
+# Or, in a separate terminal:
+kubectl --kubeconfig .devbox/workspace/kubeconfig -n sme-cashflow port-forward service/copilot 8083:8080
+```
+
+Open the corresponding localhost port. Life-Pension uses the `adviser` account
+and the private `adviser-password` file above; SME uses `developer` /
+`local-demo-password`. Stop a forward with Ctrl-C.
+
+The lab uses synthetic data, has no production security guarantees, and can
+consume significant CPU, memory, disk space and network traffic. It does not
+deploy cloud, Oracle, MQ or banking integrations. No automatic cleanup deletes
+the cluster or its volumes. Telepresence swap is not included: the finance
+apps are stateful single replicas, and the di-agent worker is host-networked;
+intercepting them safely needs a separately designed development workflow.
+
 ## Documentation
 
 | Document | Read it for |
